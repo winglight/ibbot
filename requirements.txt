@@ -1,0 +1,16 @@
+ib_insync
+fastapi
+uvicorn
+jinja2
+pandas
+numpy
+requests
+apscheduler
+python-telegram-bot
+python-multipart
+aiofiles
+websockets
+pydantic
+python-dotenv
+loguru
+ib_insync

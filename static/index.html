@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IBKR Trading Bot</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/style.css" rel="stylesheet">
+    <style>
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-connected { background-color: #28a745; }
+        .status-disconnected { background-color: #dc3545; }
+        .card-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .profit { color: #28a745; }
+        .loss { color: #dc3545; }
+        .table-responsive {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .alert-dismissible {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1050;
+            min-width: 300px;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">
+                <i class="fas fa-chart-line"></i> IBKR Trading Bot
+            </a>
+            <div class="navbar-nav ms-auto">
+                <button class="btn btn-outline-light btn-sm me-3" id="connectionSettingsBtn" data-bs-toggle="modal" data-bs-target="#connectionModal">
+                    <i class="fas fa-cog"></i> Settings
+                </button>
+                <span class="navbar-text">
+                    <span id="connectionStatus" class="status-indicator status-disconnected"></span>
+                    <span id="connectionText">Disconnected</span>
+                </span>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <!-- Account Information Panel -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-user"></i> Account Information</h5>
+                    </div>
+                    <div class="card-body" id="accountInfo">
+                        <p class="text-muted">Connect to view account information</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Trading Panel -->
+        <div class="row mb-4">
+
+
+        </div>
+
+        <!-- Data Tables -->
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-list"></i> Orders</h5>
+                        <div>
+                            <button class="btn btn-sm btn-primary me-2" id="placeOrderBtn" data-bs-toggle="modal" data-bs-target="#orderModal">
+                                <i class="fas fa-plus"></i> Place Order
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="refreshOrdersBtn">
+                                <i class="fas fa-sync"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-sm" id="ordersTable">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Symbol</th>
+                                        <th>Action</th>
+                                        <th>Qty</th>
+                                        <th>Price</th>
+                            <th>Status</th>
+                            <th>提交者</th>
+                            <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                        <div class="mt-2">
+                            <button class="btn btn-sm btn-danger" id="cancelAllOrdersBtn">
+                                <i class="fas fa-times"></i> Cancel All
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Auto Orders Table -->
+                <div class="card mt-3">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-robot"></i> Auto Orders (Today)</h5>
+                        <div>
+                            <button class="btn btn-sm btn-outline-light" id="refreshAutoOrdersBtn">
+                                <i class="fas fa-sync"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-sm" id="autoOrdersTable">
+                                <thead>
+                                    <tr>
+                                        <th>Order ID</th>
+                                        <th>Symbol</th>
+                                        <th>Action</th>
+                                        <th>Qty</th>
+                                        <th>Type</th>
+                                        <th>Price</th>
+                                        <th>Status</th>
+                                        <th>Source</th>
+                                        <th>Rule ID</th>
+                                        <th>Created</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-briefcase"></i> Portfolio</h5>
+                        <button class="btn btn-sm btn-outline-light" id="refreshPositionsBtn">
+                            <i class="fas fa-sync"></i>
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-sm" id="positionsTable">
+                                <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Position</th>
+                                        <th>Avg Cost</th>
+                                        <th>Current</th>
+                                        <th>P&L</th>
+                                        <th>P&L %</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row mt-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-shield-alt"></i> Risk Rules</h5>
+                        <div>
+                            <button class="btn btn-sm btn-warning me-2" id="addRiskRuleBtn" data-bs-toggle="modal" data-bs-target="#riskRuleModal">
+                                <i class="fas fa-plus"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-light" id="refreshRiskRulesBtn">
+                                <i class="fas fa-sync"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-sm" id="riskRulesTable">
+                                <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Stop Loss</th>
+                                        <th>Take Profit</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Alert Container -->
+    <div id="alertContainer"></div>
+
+    <!-- Connection Settings Modal -->
+    <div class="modal fade" id="connectionModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-plug"></i> Connection Settings</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="connectionForm">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Host</label>
+                                    <input type="text" class="form-control" id="host" value="127.0.0.1">
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Port</label>
+                                    <input type="number" class="form-control" id="port" value="7497">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Client ID</label>
+                                    <input type="number" class="form-control" id="clientId" value="1">
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Account Type</label>
+                                    <select class="form-select" id="paperTrading">
+                                        <option value="true">Paper Trading</option>
+                                        <option value="false">Live Trading</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-success" id="connectBtn">
+                        <i class="fas fa-plug"></i> Connect
+                    </button>
+                    <button type="button" class="btn btn-danger" id="disconnectBtn" disabled>
+                        <i class="fas fa-unlink"></i> Disconnect
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Place Order Modal -->
+    <div class="modal fade" id="orderModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-shopping-cart"></i> Place Order</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="orderForm">
+                        <div class="mb-3">
+                            <label class="form-label">Symbol</label>
+                            <div class="position-relative">
+                                <input type="text" class="form-control" id="orderSymbol" placeholder="Type to search symbols..." autocomplete="off">
+                                <div class="dropdown-menu w-100" id="orderSymbolDropdown" style="max-height: 300px; overflow-y: auto;">
+                                    <!-- Historical symbols will be populated here -->
+                                    <!-- Search results will be populated here -->
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Action</label>
+                                    <select class="form-select" id="orderAction">
+                                        <option value="BUY">BUY</option>
+                                        <option value="SELL">SELL</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Quantity</label>
+                                    <input type="number" class="form-control" id="orderQuantity" value="1">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Order Type</label>
+                                    <select class="form-select" id="orderType">
+                                        <option value="MARKET">Market</option>
+                                        <option value="LIMIT">Limit</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Price</label>
+                                    <input type="number" class="form-control" id="orderPrice" step="0.01" disabled>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" id="submitOrderBtn">
+                        <i class="fas fa-paper-plane"></i> Place Order
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Risk Rule Modal -->
+    <div class="modal fade" id="riskRuleModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-shield-alt"></i> Risk Rule</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="riskRuleForm">
+                        <div class="mb-3">
+                            <label class="form-label">Symbol</label>
+                            <input type="text" class="form-control" id="riskSymbol" placeholder="AAPL">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Stop Loss Price</label>
+                            <input type="number" class="form-control" id="stopLossPrice" step="0.01">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Take Profit Price</label>
+                            <input type="number" class="form-control" id="takeProfitPrice" step="0.01">
+                        </div>
+                        
+                        <!-- PnL Preview Section -->
+                        <div class="mb-3" id="pnlPreviewSection" style="display: none;">
+                            <hr>
+                            <h6 class="text-muted"><i class="fas fa-calculator"></i> Expected PnL</h6>
+                            <div class="row">
+                                <div class="col-6">
+                                    <div class="card border-danger">
+                                        <div class="card-body text-center p-2">
+                                            <small class="text-muted">Stop Loss PnL</small>
+                                            <div class="fw-bold text-danger" id="stopLossPnL">$0.00</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="card border-success">
+                                        <div class="card-body text-center p-2">
+                                            <small class="text-muted">Take Profit PnL</small>
+                                            <div class="fw-bold text-success" id="takeProfitPnL">$0.00</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-warning" id="submitRiskRuleBtn">
+                        <i class="fas fa-plus"></i> Add Risk Rule
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart Modal -->
+    <div class="modal fade" id="chartModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-chart-line"></i> <span id="chartSymbol">Chart</span></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row mb-3">
+                        <div class="col-md-3">
+                            <label class="form-label">Interval</label>
+                            <select class="form-select" id="chartInterval">
+                                <option value="1 min">1 minute</option>
+                                <option value="5 mins">5 minutes</option>
+                                <option value="15 mins">15 minutes</option>
+                                <option value="30 mins">30 minutes</option>
+                                <option value="1 hour" selected>1 hour</option>
+                                <option value="1 day">1 day</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Duration</label>
+                            <select class="form-select" id="chartDuration">
+                                <option value="1 D">1 Day</option>
+                                <option value="5 D">5 Days</option>
+                                <option value="1 W" selected>1 Week</option>
+                                <option value="1 M">1 Month</option>
+                                <option value="3 M">3 Months</option>
+                                <option value="1 Y">1 Year</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <button class="btn btn-primary" id="updateChartBtn" style="margin-top: 32px;">
+                                <i class="fas fa-sync"></i> Update Chart
+                            </button>
+                        </div>
+                        <div class="col-md-3">
+                            <button class="btn btn-info" id="startRealTimeBtn" style="margin-top: 32px;">
+                                <i class="fas fa-play"></i> Real-time
+                            </button>
+                        </div>
+                    </div>
+                    <div id="chartContainer" style="height: 500px; border: 1px solid #ddd;">
+                        <div class="d-flex justify-content-center align-items-center h-100">
+                            <p class="text-muted">Chart will be displayed here</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="static/app.js"></script>
+</body>
+</html>
