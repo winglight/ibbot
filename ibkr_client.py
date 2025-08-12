@@ -214,120 +214,114 @@ class IBKRClient:
     
     def _ensure_backup_directory(self):
         """确保备份目录存在"""
-        os.makedirs(os.path.dirname(self.order_backup_file), exist_ok=True)
+        # 注释掉备份功能
+        # os.makedirs(os.path.dirname(self.order_backup_file), exist_ok=True)
+        pass
     
     def _backup_order(self, symbol: str, quantity: int, action: str, order_type: str, price: float = None, sec_type: str = 'STK', exchange: str = 'SMART'):
-        """备份订单信息到CSV文件"""
-        try:
-            order_data = {
-                'timestamp': datetime.now().isoformat(),
-                'symbol': symbol,
-                'quantity': quantity,
-                'action': action,
-                'order_type': order_type,
-                'price': price if price else '',
-                'sec_type': sec_type,
-                'exchange': exchange,
-                'status': 'PENDING'
-            }
-            
-            # 检查文件是否存在，如果不存在则创建并写入表头
-            file_exists = os.path.exists(self.order_backup_file)
-            
-            with open(self.order_backup_file, 'a', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['timestamp', 'symbol', 'quantity', 'action', 'order_type', 'price', 'sec_type', 'exchange', 'status']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
-                if not file_exists:
-                    writer.writeheader()
-                
-                writer.writerow(order_data)
-            
-            logger.info(f"Order backed up: {action} {quantity} {symbol} ({order_type})")
-        except Exception as e:
-            logger.error(f"Failed to backup order: {e}")
-    
+        """备份订单信息到CSV文件（已禁用）"""
+        # 注释掉备份功能，不再创建备份文件
+        pass
+        # try:
+        #     self._ensure_backup_directory()
+        #     
+        #     file_exists = os.path.exists(self.order_backup_file)
+        #     
+        #     with open(self.order_backup_file, 'a', newline='', encoding='utf-8') as csvfile:
+        #         fieldnames = ['timestamp', 'symbol', 'quantity', 'action', 'order_type', 'price', 'sec_type', 'exchange', 'status']
+        #         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        #         
+        #         if not file_exists:
+        #             writer.writeheader()
+        #         
+        #         writer.writerow({
+        #             'timestamp': datetime.now().isoformat(),
+        #             'symbol': symbol,
+        #             'quantity': quantity,
+        #             'action': action,
+        #             'order_type': order_type,
+        #             'price': price,
+        #             'sec_type': sec_type,
+        #             'exchange': exchange,
+        #             'status': 'PENDING'
+        #         })
+        # except Exception as e:
+        #     logger.error(f"Error backing up order: {e}")
+
     def _update_order_status(self, symbol: str, action: str, quantity: int, status: str):
-        """更新订单状态"""
-        try:
-            if not os.path.exists(self.order_backup_file):
-                return
-            
-            # 读取现有数据
-            rows = []
-            with open(self.order_backup_file, 'r', newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                rows = list(reader)
-            
-            # 更新匹配的订单状态
-            updated = False
-            for row in reversed(rows):  # 从最新的订单开始查找
-                if (row['symbol'] == symbol and 
-                    row['action'] == action and 
-                    int(row['quantity']) == quantity and 
-                    row['status'] == 'PENDING'):
-                    row['status'] = status
-                    updated = True
-                    break
-            
-            if updated:
-                # 重写文件
-                with open(self.order_backup_file, 'w', newline='', encoding='utf-8') as csvfile:
-                    fieldnames = ['timestamp', 'symbol', 'quantity', 'action', 'order_type', 'price', 'sec_type', 'exchange', 'status']
-                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(rows)
-                
-                logger.info(f"Order status updated: {action} {quantity} {symbol} -> {status}")
-        except Exception as e:
-            logger.error(f"Failed to update order status: {e}")
-    
+        """更新备份文件中的订单状态（已禁用）"""
+        # 注释掉备份功能
+        pass
+        # if not os.path.exists(self.order_backup_file):
+        #     return
+        #     
+        # try:
+        #     rows = []
+        #     with open(self.order_backup_file, 'r', newline='', encoding='utf-8') as csvfile:
+        #         reader = csv.DictReader(csvfile)
+        #         for row in reader:
+        #             if (row['symbol'] == symbol and 
+        #                 row['action'] == action and 
+        #                 int(row['quantity']) == quantity and 
+        #                 row['status'] == 'PENDING'):
+        #                 row['status'] = status
+        #             rows.append(row)
+        #     
+        #     with open(self.order_backup_file, 'w', newline='', encoding='utf-8') as csvfile:
+        #         if rows:
+        #             fieldnames = rows[0].keys()
+        #             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        #             writer.writeheader()
+        #             writer.writerows(rows)
+        # except Exception as e:
+        #     logger.error(f"Error updating order status: {e}")
+
     def get_order_backup_history(self, days: int = 7) -> List[Dict]:
-        """获取订单备份历史"""
-        try:
-            if not os.path.exists(self.order_backup_file):
-                return []
-            
-            cutoff_date = datetime.now() - timedelta(days=days)
-            orders = []
-            
-            with open(self.order_backup_file, 'r', newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    order_time = datetime.fromisoformat(row['timestamp'])
-                    if order_time >= cutoff_date:
-                        orders.append(dict(row))
-            
-            return sorted(orders, key=lambda x: x['timestamp'], reverse=True)
-        except Exception as e:
-            logger.error(f"Failed to get order backup history: {e}")
-            return []
-    
+        """获取订单备份历史（已禁用）"""
+        # 注释掉备份功能，返回空列表
+        return []
+        # try:
+        #     if not os.path.exists(self.order_backup_file):
+        #         return []
+        #     
+        #     cutoff_date = datetime.now() - timedelta(days=days)
+        #     orders = []
+        #     
+        #     with open(self.order_backup_file, 'r', newline='', encoding='utf-8') as csvfile:
+        #         reader = csv.DictReader(csvfile)
+        #         for row in reader:
+        #             order_date = datetime.fromisoformat(row['timestamp'])
+        #             if order_date >= cutoff_date:
+        #                 orders.append(row)
+        #     
+        #     return orders
+        # except Exception as e:
+        #     logger.error(f"Error reading backup history: {e}")
+        #     return []
+
     def restore_pending_orders(self) -> List[Dict]:
-        """恢复待处理的订单"""
-        try:
-            if not os.path.exists(self.order_backup_file):
-                return []
-            
-            pending_orders = []
-            
-            with open(self.order_backup_file, 'r', newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    if row['status'] == 'PENDING':
-                        # 检查订单是否超过1小时（可能是系统重启前的订单）
-                        order_time = datetime.fromisoformat(row['timestamp'])
-                        if datetime.now() - order_time > timedelta(hours=1):
-                            # 标记为过期
-                            self._update_order_status(row['symbol'], row['action'], int(row['quantity']), 'EXPIRED')
-                        else:
-                            pending_orders.append(dict(row))
-            
-            return pending_orders
-        except Exception as e:
-            logger.error(f"Failed to restore pending orders: {e}")
-            return []
-    
+        """恢复待处理的订单（已禁用）"""
+        # 注释掉备份功能，返回空列表
+        return []
+        # try:
+        #     if not os.path.exists(self.order_backup_file):
+        #         return []
+        #     
+        #     pending_orders = []
+        #     
+        #     with open(self.order_backup_file, 'r', newline='', encoding='utf-8') as csvfile:
+        #         reader = csv.DictReader(csvfile)
+        #         for row in reader:
+        #             if row['status'] == 'PENDING':
+        #                 pending_orders.append(row)
+        #                 # 标记为过期
+        #                 self._update_order_status(row['symbol'], row['action'], int(row['quantity']), 'EXPIRED')
+        #     
+        #     return pending_orders
+        # except Exception as e:
+        #     logger.error(f"Error restoring pending orders: {e}")
+        #     return []
+
     def save_historical_data(self, df: pd.DataFrame, symbol: str, filename: str = None):
         """保存历史数据到CSV文件"""
         if filename is None:
@@ -389,81 +383,43 @@ class IBKRClient:
     def place_market_order(self, symbol: str, quantity: int,
                                action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:
         """下市价单"""
+        # 下单前备份订单信息
+        # self._backup_order(symbol, quantity, action, 'MARKET', sec_type=sec_type, exchange=exchange)
+        
         try:
-            # 备份订单
-            self._backup_order(symbol, quantity, action, 'MARKET', sec_type=sec_type, exchange=exchange)
+            trade = self._place_order_in_thread(
+                None,  # will use self.ib
+                symbol, quantity, action, exchange, sec_type, 'MARKET'
+            )
             
-            # 确保连接
-            if not self.is_connected():
-                logger.warning(f"Not connected to IBKR, attempting to reconnect...")
-                if not self.connect():
-                    logger.error(f"Failed to reconnect to IBKR for market order")
-                    self._update_order_status(symbol, action, quantity, 'FAILED')
-                    return None
+            if trade:
+                # 更新订单状态
+                self._update_order_status(symbol, action, quantity, 'Submitted')
             
-            # 获取IB实例
-            ib = self.ib
-            if not ib or not ib.isConnected():
-                logger.warning(f"IBKR connection lost, attempting to reconnect...")
-                if not self.connect():
-                    logger.error(f"Failed to reconnect to IBKR for market order")
-                    self._update_order_status(symbol, action, quantity, 'FAILED')
-                    return None
-                ib = self.ib
-            
-            # 在独立线程中执行下单操作
-            result = self._place_order_in_thread(ib, symbol, quantity, action, exchange, sec_type, 'MARKET')
-            
-            # 更新订单状态
-            if result:
-                self._update_order_status(symbol, action, quantity, 'SUBMITTED')
-            else:
-                self._update_order_status(symbol, action, quantity, 'FAILED')
-            
-            return result
+            return trade
         except Exception as e:
             logger.error(f"Failed to place market order: {e}")
-            self._update_order_status(symbol, action, quantity, 'FAILED')
             return None
-    
+
     def place_limit_order(self, symbol: str, quantity: int, price: float,
                               action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:
         """下限价单"""
+        # 下单前备份订单信息
+        # self._backup_order(symbol, quantity, action, 'LIMIT', price, sec_type=sec_type, exchange=exchange)
+        
         try:
-            # 备份订单
-            self._backup_order(symbol, quantity, action, 'LIMIT', price, sec_type=sec_type, exchange=exchange)
+            trade = self._place_order_in_thread(
+                None,  # will use self.ib
+                symbol, quantity, action, exchange, sec_type, 'LIMIT', price
+            )
             
-            # 确保连接
-            if not self.is_connected():
-                logger.warning(f"Not connected to IBKR, attempting to reconnect...")
-                if not self.connect():
-                    logger.error(f"Failed to reconnect to IBKR for limit order: {symbol}")
-                    self._update_order_status(symbol, action, quantity, 'FAILED')
-                    return None
+            if trade:
+                # 更新订单状态
+                self._update_order_status(symbol, action, quantity, 'Submitted')
             
-            # 获取IB实例
-            ib = self.ib
-            if not ib or not ib.isConnected():
-                logger.warning(f"IBKR connection lost, attempting to reconnect...")
-                if not self.connect():
-                    logger.error(f"Failed to reconnect to IBKR for limit order")
-                    self._update_order_status(symbol, action, quantity, 'FAILED')
-                    return None
-                ib = self.ib
-            
-            # 在独立线程中执行下单操作
-            result = self._place_order_in_thread(ib, symbol, quantity, action, exchange, sec_type, 'LIMIT', price)
-            
-            # 更新订单状态
-            if result:
-                self._update_order_status(symbol, action, quantity, 'SUBMITTED')
-            else:
-                self._update_order_status(symbol, action, quantity, 'FAILED')
-            
-            return result
+            return trade
         except Exception as e:
             logger.error(f"Failed to place limit order: {e}")
-            self._update_order_status(symbol, action, quantity, 'FAILED')
             return None
     
     def cancel_order(self, order_id: int) -> tuple[bool, str]:
@@ -592,7 +548,7 @@ class IBKRClient:
             return 0
     
     def get_orders(self, risk_manager=None) -> List[Dict]:
-        """获取订单列表"""
+        """获取订单列表（每次调用都会向IB请求最新订单以避免返回缓存）"""
         try:
             # 确保连接
             if not self.is_connected():
@@ -600,53 +556,120 @@ class IBKRClient:
                     logger.error(f"Cannot connect to IBKR for get orders")
                     return []
             
-            # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
                 logger.error(f"IBKR connection lost for get orders")
                 return []
-            
-            trades = ib.trades()
-            orders = []
-            for trade in trades:
-                # 从risk_manager的auto_orders中获取订单来源信息
-                order_source = "未知"
-                if risk_manager and hasattr(risk_manager, 'auto_orders'):
-                    order_id_str = str(trade.order.orderId)
-                    if order_id_str in risk_manager.auto_orders:
-                        auto_order = risk_manager.auto_orders[order_id_str]
-                        if auto_order.order_source == "manual":
-                            order_source = "人工"
-                        elif auto_order.order_source == "auto":
-                            order_source = "机器人"
+
+            # 在连接管理器的事件循环中强制刷新一次订单数据，然后再读取 trades()
+            loop = getattr(self.connection_manager, '_loop', None)
+            if not loop or loop.is_closed():
+                logger.error("No active event loop for IBKR connection when getting orders")
+                return []
+
+            def fetch_orders_worker():
+                try:
+                    # 将当前线程绑定到连接线程的事件循环
+                    asyncio.set_event_loop(loop)
+                    
+                    # 主动向IB请求最新的未完成订单与已完成订单，确保trades()刷新
+                    try:
+                        ib.reqOpenOrders()
+                        # 请求所有API来源的已完成订单（包含最近状态变化）
+                        if hasattr(ib, 'reqCompletedOrders'):
+                            ib.reqCompletedOrders(apiOnly=False)
+                    except Exception as e:
+                        logger.warning(f"Failed to request order refresh: {e}")
+                    
+                    # 等待片刻让返回的事件更新本地缓存
+                    import time
+                    time.sleep(0.3)
+                    
+                    # 读取最新的 trades 列表
+                    trades = ib.trades()
+                    orders: List[Dict[str, Any]] = []
+                    updated_orders = False  # Track if any orders were updated
+                    
+                    for trade in trades:
+                        # 从risk_manager的auto_orders中获取订单来源信息
+                        order_source = "未知"
+                        order_id_str = str(trade.order.orderId)
+                        
+                        if risk_manager and hasattr(risk_manager, 'auto_orders'):
+                            if order_id_str in risk_manager.auto_orders:
+                                auto_order = risk_manager.auto_orders[order_id_str]
+                                if getattr(auto_order, 'order_source', None) == "manual":
+                                    order_source = "人工"
+                                elif getattr(auto_order, 'order_source', None) == "auto":
+                                    order_source = "机器人"
+                                else:
+                                    order_source = getattr(auto_order, 'order_source', "未知")
+                                
+                                # Synchronize order data back to risk_manager if status or price changed
+                                current_status = trade.orderStatus.status
+                                current_avg_fill_price = trade.orderStatus.avgFillPrice
+                                
+                                if (auto_order.status != current_status or 
+                                    (current_avg_fill_price and current_avg_fill_price > 0 and auto_order.price != current_avg_fill_price)):
+                                    
+                                    # Update the auto_order with latest data from IBKR
+                                    auto_order.status = current_status
+                                    if current_avg_fill_price and current_avg_fill_price > 0:
+                                        auto_order.price = current_avg_fill_price
+                                    
+                                    # Set executed_at if order is filled and not already set
+                                    if current_status == "Filled" and auto_order.executed_at is None:
+                                        from datetime import datetime
+                                        auto_order.executed_at = datetime.now()
+                                    
+                                    updated_orders = True
+                                    logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")
+                                    
+                            else:
+                                # 如果在auto_orders中找不到记录，可能是历史订单，默认为人工
+                                order_source = "人工"
                         else:
-                            order_source = auto_order.order_source
-                    else:
-                        # 如果在auto_orders中找不到记录，可能是历史订单，默认为人工
-                        order_source = "人工"
-                else:
-                    # 如果没有risk_manager，默认为人工
-                    order_source = "人工"
-                
-                orders.append({
-                    'order_id': trade.order.orderId,
-                    'symbol': trade.contract.symbol,
-                    'action': trade.order.action,
-                    'quantity': trade.order.totalQuantity,
-                    'order_type': trade.order.orderType,
-                    'limit_price': getattr(trade.order, 'lmtPrice', None),
-                    'status': trade.orderStatus.status,
-                    'filled': trade.orderStatus.filled,
-                    'remaining': trade.orderStatus.remaining,
-                    'avg_fill_price': trade.orderStatus.avgFillPrice,
-                    'submit_time': trade.log[0].time if trade.log else None,
-                    'order_source': order_source
-                })
-            return orders
+                            # 如果没有risk_manager，默认为人工
+                            order_source = "人工"
+                        
+                        # Add debug logging for order data
+                        logger.info(f"Processing order {trade.order.orderId}: totalQuantity={trade.order.totalQuantity}, action={trade.order.action}, orderType={trade.order.orderType}, status={trade.orderStatus.status}")
+                        
+                        orders.append({
+                            'order_id': trade.order.orderId,
+                            'symbol': getattr(trade.contract, 'localSymbol', None) or trade.contract.symbol,
+                            'action': trade.order.action,
+                            'quantity': trade.order.totalQuantity,
+                            'order_type': trade.order.orderType,
+                            'limit_price': getattr(trade.order, 'lmtPrice', None),
+                            'status': trade.orderStatus.status,
+                            'filled': trade.orderStatus.filled,
+                            'remaining': trade.orderStatus.remaining,
+                            'avg_fill_price': trade.orderStatus.avgFillPrice,
+                            'submit_time': trade.log[0].time if trade.log else None,
+                            'order_source': order_source
+                        })
+                    
+                    # Save updated orders to CSV if any were changed
+                    if updated_orders and risk_manager:
+                        import os
+                        risk_manager.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
+                        logger.info("Updated order data saved to orders.csv")
+                    
+                    return orders
+                except Exception as e:
+                    logger.error(f"Failed to fetch orders in worker: {e}")
+                    return []
+
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(fetch_orders_worker)
+                return future.result(timeout=10)
+
         except Exception as e:
             logger.error(f"Failed to get orders: {e}")
             return []
-    
+
     def get_account_info(self) -> Dict:
         """获取账户信息"""
         try:
@@ -729,18 +752,21 @@ class IBKRClient:
                 logger.info(f"Portfolio data for {item.contract.symbol}: marketPrice={item.marketPrice}, averageCost={item.averageCost}, position={item.position}")
                 logger.info(f"Price for {item.contract.symbol}: {current_price} (source: {price_source})")
                 
-                # Adjust average cost for specific symbols like MNQ
+                # Adjust average cost for futures by contract multiplier to get entry price
                 avg_cost_adjusted = item.averageCost
-                if item.contract.symbol == 'MNQ':
-                    avg_cost_adjusted = item.averageCost / 2
+                futures_multipliers = {
+                    'MNQ': 2,   # Micro E-mini Nasdaq-100
+                    'NQ': 20,   # E-mini Nasdaq-100
+                }
+                sym = item.contract.symbol
+                if sym in futures_multipliers and item.averageCost:
+                    avg_cost_adjusted = item.averageCost / futures_multipliers[sym]
 
                 market_value = item.position * current_price
                 
-                # For futures contracts like MNQ, calculate PnL based on actual cost basis
-                if item.contract.symbol == 'MNQ':
-                    # Use the actual unrealized PnL from IBKR which accounts for leverage
+                # For futures, use IBKR's unrealizedPNL and compute percent vs adjusted cost basis
+                if sym in futures_multipliers:
                     unrealized_pnl = item.unrealizedPNL
-                    # Calculate percentage based on actual cost basis (margin requirement)
                     actual_cost_basis = abs(item.position) * avg_cost_adjusted
                     unrealized_pnl_percent = (unrealized_pnl / actual_cost_basis) * 100 if actual_cost_basis else 0
                 else:

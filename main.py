@@ -34,8 +34,9 @@ from ibkr_client import IBKRClient
 from telegram_notifier import TelegramNotifier
 from risk_manager import RiskManager
 from connection_manager import connection_manager, ConnectionConfig
+from strategy_manager import StrategyManager
 
-# Load environment variables
+# Global variables
 load_dotenv()
 
 # FastAPI app
@@ -54,6 +55,7 @@ app.add_middleware(
 ibkr_client = None
 telegram_notifier = None
 risk_manager = None
+strategy_manager = None
 websocket_connections = []
 
 # Pydantic models
@@ -83,6 +85,40 @@ class ChartDataRequest(BaseModel):
     duration: str = "1 D"
     bar_size: str = "5 mins"
     exchange: str = "SMART"
+
+# Strategy related models
+class StrategyRequest(BaseModel):
+    name: str
+    strategy_type: str  # "external" or "internal"
+    enabled: bool = True
+    api_endpoint: Optional[str] = None
+    file_path: Optional[str] = None
+    description: Optional[str] = None
+
+class StrategySettingsRequest(BaseModel):
+    api_endpoint: str = "/api/strategy"
+    api_method: str = "POST"
+    api_payload_template: Dict[str, Any] = {
+        "strategy": "{{strategy_name}}",
+        "symbol": "{{symbol}}",
+        "action": "{{action}}",
+        "qty": "{{quantity}}",
+        "type": "{{order_type}}",
+        "price": "{{price}}"
+    }
+    strategy_path: str = "project/strategy/"
+    enable_auth: bool = False
+    auth_token: Optional[str] = None
+
+class ExternalStrategyOrderRequest(BaseModel):
+    strategy: str
+    symbol: str
+    action: str  # BUY or SELL
+    qty: int
+    type: str  # MARKET or LIMIT
+    price: Optional[float] = None
+    exchange: str = "SMART"
+    sec_type: str = "STK"
 
 # WebSocket connection manager
 class ConnectionManager:
@@ -131,7 +167,7 @@ def setup_logging():
 
 def create_directories():
     """Create necessary directories"""
-    directories = ['logs', 'data']
+    directories = ['logs', 'data', 'project', 'project/strategy']
     for directory in directories:
         Path(directory).mkdir(exist_ok=True)
     logger.info("Directories created")
@@ -230,12 +266,13 @@ def print_banner():
 # FastAPI event handlers
 @app.on_event("startup")
 async def startup_event():
-    global ibkr_client, telegram_notifier, risk_manager
+    global ibkr_client, telegram_notifier, risk_manager, strategy_manager
     
     # Initialize components
     ibkr_client = IBKRClient()
     telegram_notifier = TelegramNotifier()
     risk_manager = RiskManager(ibkr_client, telegram_notifier)
+    strategy_manager = StrategyManager(data_dir="data", strategy_dir="project/strategy")
     
     # Auto connect if enabled in .env
     auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
@@ -470,7 +507,7 @@ async def place_order(order: OrderRequest):
                 )
                 
                 risk_manager.auto_orders[str(trade.order.orderId)] = auto_order
-                risk_manager.save_auto_orders_to_csv(os.path.join("data", "auto_orders.csv"))
+                risk_manager.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
             
             await manager.broadcast({
                 "type": "order_placed",
@@ -568,13 +605,48 @@ async def cancel_all_orders():
 
 @app.get("/api/orders")
 async def get_orders():
-    """获取订单列表"""
-    if not ibkr_client or not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    """获取订单列表（从CSV文件读取，包含历史订单）"""
+    if not risk_manager:
+        raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
     try:
-        orders = ibkr_client.get_orders(risk_manager)
-        return {"success": True, "orders": orders}
+        # 从 risk_manager 获取所有订单数据（从 orders.csv 加载）
+        orders = risk_manager.get_auto_orders()
+        
+        # 转换字段名以匹配前端期望
+        converted_orders = []
+        for order in orders:
+            raw_type = (order.get('order_type') or '').upper()
+            if raw_type in ('MARKET', 'MKT'):
+                order_type = 'MKT'
+            elif raw_type in ('LIMIT', 'LMT'):
+                order_type = 'LMT'
+            else:
+                order_type = raw_type or 'MKT'
+            
+            price = order.get('price')
+            try:
+                price_val = float(price) if price is not None and price != '' else 0.0
+            except Exception:
+                price_val = 0.0
+            
+            converted_order = {
+                'order_id': order['order_id'],
+                'symbol': order['symbol'],
+                'action': order['action'],
+                'quantity': order['quantity'],
+                'order_type': order_type,
+                'limit_price': price_val if order_type == 'LMT' and price_val > 0 else None,
+                'avg_fill_price': price_val if order_type == 'MKT' and price_val > 0 else 0,
+                'status': order['status'],
+                'filled': order['quantity'] if order['status'] == 'Filled' else 0,
+                'remaining': 0 if order['status'] == 'Filled' else order['quantity'],
+                'submit_time': order.get('created_at'),
+                'order_source': '机器人' if order.get('order_source') == 'auto' else '人工'
+            }
+            converted_orders.append(converted_order)
+        
+        return {"success": True, "orders": converted_orders}
         
     except Exception as e:
         logger.error(f"Get orders error: {e}")
@@ -705,7 +777,7 @@ async def get_risk_config():
 
 @app.get("/api/auto_orders")
 async def get_auto_orders():
-    """获取自动下单记录"""
+    """获取所有订单记录（包含自动和手动订单）"""
     if not risk_manager:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
@@ -714,21 +786,9 @@ async def get_auto_orders():
         return {"success": True, "orders": orders}
         
     except Exception as e:
-        logger.error(f"Get auto orders error: {e}")
+        logger.error(f"Get orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/order_backup_history")
-async def get_order_backup_history(days: int = 7):
-    """获取订单备份历史"""
-    try:
-        if ibkr_client:
-            orders = ibkr_client.get_order_backup_history(days)
-            return {"success": True, "orders": orders}
-        else:
-            return {"success": False, "message": "IBKR client not available", "orders": []}
-    except Exception as e:
-        logger.error(f"Failed to get order backup history: {e}")
-        return {"success": False, "message": str(e), "orders": []}
 
 # WebSocket endpoint
 @app.websocket("/ws")
@@ -745,6 +805,235 @@ async def websocket_endpoint(websocket: WebSocket):
             
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+# Strategy APIs
+@app.get("/api/strategy/settings")
+async def get_strategy_settings():
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    return {"success": True, "settings": strategy_manager.get_settings()}
+
+@app.post("/api/strategy/settings")
+async def update_strategy_settings(settings: StrategySettingsRequest):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    strategy_manager.update_settings(settings.dict())
+    return {"success": True}
+
+@app.get("/api/strategies")
+async def list_strategies():
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    return {"success": True, "strategies": strategy_manager.get_strategies()}
+
+@app.post("/api/strategies")
+async def add_strategy_api(strategy: StrategyRequest):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    success = strategy_manager.add_strategy(strategy.dict())
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to add strategy")
+    return {"success": True}
+
+@app.get("/api/strategies/{name}")
+async def get_strategy_api(name: str):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    strategy = strategy_manager.get_strategy(name)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return {"success": True, "strategy": strategy}
+
+@app.put("/api/strategies/{name}")
+async def update_strategy_api(name: str, updates: Dict[str, Any]):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    success = strategy_manager.update_strategy(name, updates)
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to update strategy")
+    return {"success": True}
+
+@app.delete("/api/strategies/{name}")
+async def delete_strategy_api(name: str):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    success = strategy_manager.delete_strategy(name)
+    if not success:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return {"success": True}
+
+@app.post("/api/strategies/{name}/toggle")
+async def toggle_strategy_api(name: str, enabled: bool):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    success = strategy_manager.update_strategy(name, {"enabled": enabled})
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to toggle strategy")
+    return {"success": True}
+
+@app.get("/api/strategies/{name}/performance")
+async def get_strategy_performance_api(name: str, range: str = "1d", start: Optional[str] = None, end: Optional[str] = None):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    
+    start_date = None
+    end_date = None
+    if start:
+        start_date = datetime.fromisoformat(start)
+    if end:
+        end_date = datetime.fromisoformat(end)
+    
+    # Quick ranges
+    now = datetime.now()
+    if range == "1d":
+        start_date = now - timedelta(days=1)
+    elif range == "1w":
+        start_date = now - timedelta(weeks=1)
+    elif range == "1m":
+        start_date = now - timedelta(days=30)
+    elif range == "wtd":
+        start_date = now - timedelta(days=now.weekday())
+    elif range == "mtd":
+        start_date = now.replace(day=1)
+    elif range == "ytd":
+        start_date = now.replace(month=1, day=1)
+    
+    metrics = strategy_manager.get_strategy_performance(name, start_date, end_date)
+    return {"success": True, "metrics": metrics}
+
+# External trigger endpoint
+@app.post("/api/strategy")
+async def external_strategy_order(request: ExternalStrategyOrderRequest, authorization: Optional[str] = None):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    
+    # Auth check
+    settings = strategy_manager.get_settings()
+    if settings.get('enable_auth', False):
+        token = authorization or ''
+        if not token or not strategy_manager.validate_auth_token(token):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    # Validate strategy exists and enabled
+    strategy = strategy_manager.get_strategy(request.strategy)
+    if not strategy or not strategy.get('enabled', False):
+        raise HTTPException(status_code=400, detail="Strategy disabled or not found")
+    
+    # Map to place_order
+    order_type = request.type.upper()
+    try:
+        order_req = OrderRequest(
+            symbol=request.symbol,
+            quantity=request.qty,
+            action=request.action,
+            order_type=order_type,
+            price=request.price,
+            exchange=request.exchange,
+            sec_type=request.sec_type
+        )
+        result = await place_order(order_req)
+        
+        # Record execution
+        from strategy_manager import StrategyExecution
+        execution = StrategyExecution(
+            strategy_name=request.strategy,
+            execution_time=datetime.now(),
+            order_id=str(result.get('order_id')) if isinstance(result, dict) else None,
+            symbol=request.symbol,
+            action=request.action,
+            quantity=request.qty,
+            price=request.price,
+            status="executed"
+        )
+        strategy_manager.record_execution(execution)
+        
+        return result
+    except Exception as e:
+        logger.error(f"Strategy order error: {e}")
+        raise
+
+
+@app.get("/api/strategies/{name}/performance")
+async def get_strategy_performance_api(name: str, range: str = "1d", start: Optional[str] = None, end: Optional[str] = None):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    
+    start_date = None
+    end_date = None
+    if start:
+        start_date = datetime.fromisoformat(start)
+    if end:
+        end_date = datetime.fromisoformat(end)
+    
+    # Quick ranges
+    now = datetime.now()
+    if range == "1d":
+        start_date = now - timedelta(days=1)
+    elif range == "1w":
+        start_date = now - timedelta(weeks=1)
+    elif range == "1m":
+        start_date = now - timedelta(days=30)
+    elif range == "wtd":
+        start_date = now - timedelta(days=now.weekday())
+    elif range == "mtd":
+        start_date = now.replace(day=1)
+    elif range == "ytd":
+        start_date = now.replace(month=1, day=1)
+    
+    metrics = strategy_manager.get_strategy_performance(name, start_date, end_date)
+    return {"success": True, "metrics": metrics}
+
+# External trigger endpoint
+@app.post("/api/strategy")
+async def external_strategy_order(request: ExternalStrategyOrderRequest, authorization: Optional[str] = None):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    
+    # Auth check
+    settings = strategy_manager.get_settings()
+    if settings.get('enable_auth', False):
+        token = authorization or ''
+        if not token or not strategy_manager.validate_auth_token(token):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    # Validate strategy exists and enabled
+    strategy = strategy_manager.get_strategy(request.strategy)
+    if not strategy or not strategy.get('enabled', False):
+        raise HTTPException(status_code=400, detail="Strategy disabled or not found")
+    
+    # Map to place_order
+    order_type = request.type.upper()
+    try:
+        order_req = OrderRequest(
+            symbol=request.symbol,
+            quantity=request.qty,
+            action=request.action,
+            order_type=order_type,
+            price=request.price,
+            exchange=request.exchange,
+            sec_type=request.sec_type
+        )
+        result = await place_order(order_req)
+        
+        # Record execution
+        from strategy_manager import StrategyExecution
+        execution = StrategyExecution(
+            strategy_name=request.strategy,
+            execution_time=datetime.now(),
+            order_id=str(result.get('order_id')) if isinstance(result, dict) else None,
+            symbol=request.symbol,
+            action=request.action,
+            quantity=request.qty,
+            price=request.price,
+            status="executed"
+        )
+        strategy_manager.record_execution(execution)
+        
+        return result
+    except Exception as e:
+        logger.error(f"Strategy order error: {e}")
+        raise
+
 
 def main():
     """Main application entry point"""

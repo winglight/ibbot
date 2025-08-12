@@ -874,6 +874,11 @@ class TradingApp {
             case 'filled': return 'success';
             case 'cancelled': case 'canceled': return 'danger';
             case 'submitted': case 'presubmitted': return 'primary';
+            case 'pendingsubmit': return 'warning';
+            case 'pendingcancel': return 'info';
+            case 'inactive': return 'secondary';
+            case 'apiwaiting': return 'warning';
+            case 'apipending': return 'warning';
             default: return 'secondary';
         }
     }
@@ -1200,5 +1205,8 @@ setInterval(() => {
     if (app.connected) {
         app.loadAccountInfo();
         app.loadPortfolio();
+        app.loadOrders();
+        app.loadRiskRules();
+        app.loadAutoOrders();
     }
 }, 30000);

@@ -111,9 +111,18 @@ class RiskManager:
         csv_path = os.path.join("data", "risk_rules.csv")
         self.load_risk_rules_from_csv(csv_path)
         
-        # 加载当天的自动下单记录
-        auto_orders_path = os.path.join("data", "auto_orders.csv")
-        self.load_auto_orders_from_csv(auto_orders_path)
+        # 加载当天的自动下单记录（统一到 data/orders.csv，兼容旧版 data/auto_orders.csv）
+        auto_orders_path = os.path.join("data", "orders.csv")
+        legacy_auto_orders_path = os.path.join("data", "auto_orders.csv")
+        if os.path.exists(auto_orders_path):
+            self.load_auto_orders_from_csv(auto_orders_path)
+        elif os.path.exists(legacy_auto_orders_path):
+            # 兼容迁移：先加载旧文件，再立刻写入新文件
+            self.load_auto_orders_from_csv(legacy_auto_orders_path)
+            self.save_auto_orders_to_csv(auto_orders_path)
+            logger.info("Migrated legacy auto_orders.csv to orders.csv")
+        else:
+            logger.info("No existing orders CSV found to load")
         
         logger.info("Risk Manager started")
     
@@ -472,7 +481,7 @@ class RiskManager:
                 )
                 
                 self.auto_orders[str(order_id)] = auto_order
-                self.save_auto_orders_to_csv(os.path.join("data", "auto_orders.csv"))
+                self.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
                 
                 # Send notification based on order type
                 if order_request.order_type == OrderType.STOP_LOSS:
@@ -584,8 +593,8 @@ class RiskManager:
         except Exception as e:
             logger.error(f"Error loading risk rules from CSV: {e}")
     
-    def save_auto_orders_to_csv(self, filename: str = "auto_orders.csv"):
-        """保存自动下单记录到CSV文件"""
+    def save_auto_orders_to_csv(self, filename: str = "orders.csv"):
+        """保存订单记录到CSV文件（包含自动和手动订单）"""
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = ['order_id', 'symbol', 'action', 'quantity', 'order_type', 'price', 'status', 'created_at', 'executed_at', 'rule_id', 'order_source']
@@ -606,12 +615,12 @@ class RiskManager:
                         'rule_id': order.rule_id,
                         'order_source': order.order_source
                     })
-            logger.info(f"Auto orders saved to {filename}")
+            logger.info(f"All orders saved to {filename}")
         except Exception as e:
-            logger.error(f"Error saving auto orders to CSV: {e}")
+            logger.error(f"Error saving orders to CSV: {e}")
     
-    def load_auto_orders_from_csv(self, filename: str = "auto_orders.csv"):
-        """从CSV文件加载自动下单记录"""
+    def load_auto_orders_from_csv(self, filename: str = "orders.csv"):
+        """从CSV文件加载订单记录（包含自动和手动订单）"""
         try:
             if not os.path.exists(filename):
                 logger.warning(f"CSV file {filename} not found")
@@ -640,12 +649,12 @@ class RiskManager:
                     
                     self.auto_orders[row['order_id']] = auto_order
             
-            logger.info(f"Auto orders loaded from {filename}, total orders: {len(self.auto_orders)}")
+            logger.info(f"All orders loaded from {filename}, total orders: {len(self.auto_orders)}")
         except Exception as e:
-            logger.error(f"Error loading auto orders from CSV: {e}")
+            logger.error(f"Error loading orders from CSV: {e}")
     
     def get_auto_orders(self) -> List[Dict]:
-        """获取自动下单记录列表"""
+        """获取所有订单记录列表（包含自动和手动订单）"""
         orders = []
         for order in self.auto_orders.values():
             orders.append({

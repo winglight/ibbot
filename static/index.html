@@ -43,7 +43,7 @@
                 <i class="fas fa-chart-line"></i> IBKR Trading Bot
             </a>
             <div class="navbar-nav ms-auto">
-                <button class="btn btn-outline-light btn-sm me-3" id="connectionSettingsBtn" data-bs-toggle="modal" data-bs-target="#connectionModal">
+                <button class="btn btn-outline-light btn-sm me-3" id="connectionSettingsBtn">
                     <i class="fas fa-cog"></i> Settings
                 </button>
                 <span class="navbar-text">
@@ -82,7 +82,7 @@
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-list"></i> Orders</h5>
                         <div>
-                            <button class="btn btn-sm btn-primary me-2" id="placeOrderBtn" data-bs-toggle="modal" data-bs-target="#orderModal">
+                            <button class="btn btn-sm btn-primary me-2" id="placeOrderBtn">
                                 <i class="fas fa-plus"></i> Place Order
                             </button>
                             <button class="btn btn-sm btn-outline-light" id="refreshOrdersBtn">
@@ -116,38 +116,7 @@
                     </div>
                 </div>
                 
-                <!-- Auto Orders Table -->
-                <div class="card mt-3">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-robot"></i> Auto Orders (Today)</h5>
-                        <div>
-                            <button class="btn btn-sm btn-outline-light" id="refreshAutoOrdersBtn">
-                                <i class="fas fa-sync"></i>
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-sm" id="autoOrdersTable">
-                                <thead>
-                                    <tr>
-                                        <th>Order ID</th>
-                                        <th>Symbol</th>
-                                        <th>Action</th>
-                                        <th>Qty</th>
-                                        <th>Type</th>
-                                        <th>Price</th>
-                                        <th>Status</th>
-                                        <th>Source</th>
-                                        <th>Rule ID</th>
-                                        <th>Created</th>
-                                    </tr>
-                                </thead>
-                                <tbody></tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
+
             </div>
             <div class="col-md-6">
                 <div class="card">
@@ -185,7 +154,7 @@
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-shield-alt"></i> Risk Rules</h5>
                         <div>
-                            <button class="btn btn-sm btn-warning me-2" id="addRiskRuleBtn" data-bs-toggle="modal" data-bs-target="#riskRuleModal">
+                            <button class="btn btn-sm btn-warning me-2" id="addRiskRuleBtn">
                                 <i class="fas fa-plus"></i>
                             </button>
                             <button class="btn btn-sm btn-outline-light" id="refreshRiskRulesBtn">
@@ -211,7 +180,39 @@
                     </div>
                 </div>
             </div>
-
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-robot"></i> Auto Orders (Today)</h5>
+                        <div>
+                            <button class="btn btn-sm btn-outline-light" id="refreshAutoOrdersBtn">
+                                <i class="fas fa-sync"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-sm" id="autoOrdersTable">
+                                <thead>
+                                    <tr>
+                                        <th>Order ID</th>
+                                        <th>Symbol</th>
+                                        <th>Action</th>
+                                        <th>Qty</th>
+                                        <th>Type</th>
+                                        <th>Price</th>
+                                        <th>Status</th>
+                                        <th>Source</th>
+                                        <th>Rule ID</th>
+                                        <th>Created</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -238,7 +239,12 @@
                             <div class="col-md-6">
                                 <div class="mb-3">
                                     <label class="form-label">Port</label>
-                                    <input type="number" class="form-control" id="port" value="7497">
+                                    <select class="form-control" id="port">
+                                        <option value="4002" selected>IB Gateway Paper (4002)</option>
+                                        <option value="4001">IB Gateway Live (4001)</option>
+                                        <option value="7497">TWS Paper (7497)</option>
+                                        <option value="7496">TWS Live (7496)</option>
+                                    </select>
                                 </div>
                             </div>
                         </div>
