@@ -330,22 +330,36 @@ class StrategyManager:
                 self.executions = []
                 
     def _save_executions(self):
-        """Save strategy executions - 现在保存到数据库"""
+        """Save strategy executions - 现在保存到数据库（仅保存新记录）"""
         try:
+            # 获取数据库中已有的记录，避免重复保存
+            existing_executions = self.db_manager.load_strategy_executions(limit=1000)
+            existing_timestamps = {(e.name, e.timestamp, e.order_id or "") for e in existing_executions}
+            
+            saved_count = 0
             for execution in self.executions:
-                db_execution = DatabaseStrategyExecution(
-                    name=execution.strategy_name,
-                    symbol=execution.symbol,
-                    action=execution.action,
-                    quantity=execution.quantity,
-                    price=execution.price,
-                    timestamp=execution.execution_time.isoformat(),
-                    order_id=execution.order_id,
-                    profit=execution.pnl,
-                    status=execution.status
-                )
-                self.db_manager.save_strategy_execution(db_execution)
-            logger.info("Strategy executions saved to database")
+                # 构建唯一标识符来检查是否已存在
+                execution_key = (execution.strategy_name, execution.execution_time.isoformat(), execution.order_id or "")
+                
+                if execution_key not in existing_timestamps:
+                    db_execution = DatabaseStrategyExecution(
+                        name=execution.strategy_name,
+                        symbol=execution.symbol,
+                        action=execution.action,
+                        quantity=execution.quantity,
+                        price=execution.price,
+                        timestamp=execution.execution_time.isoformat(),
+                        order_id=execution.order_id,
+                        profit=execution.pnl,
+                        status=execution.status
+                    )
+                    self.db_manager.save_strategy_execution(db_execution)
+                    saved_count += 1
+            
+            if saved_count > 0:
+                logger.info(f"Strategy executions saved to database: {saved_count} new records")
+            else:
+                logger.debug("No new strategy executions to save")
         except Exception as e:
             logger.error(f"Failed to save executions to database: {e}")
 
@@ -558,8 +572,22 @@ if __name__ == "__main__":
     def record_execution(self, execution: StrategyExecution):
         """Record a strategy execution"""
         try:
+            # 添加到内存缓存
             self.executions.append(execution)
-            self._save_executions()
+            
+            # 直接保存单条新记录到数据库，不触发批量保存
+            db_execution = DatabaseStrategyExecution(
+                name=execution.strategy_name,
+                symbol=execution.symbol,
+                action=execution.action,
+                quantity=execution.quantity,
+                price=execution.price,
+                timestamp=execution.execution_time.isoformat(),
+                order_id=execution.order_id,
+                profit=execution.pnl,
+                status=execution.status
+            )
+            self.db_manager.save_strategy_execution(db_execution)
 
             # Update strategy last triggered time only (trigger_count is derived from executions)
             if execution.strategy_name in self.strategies:
@@ -683,8 +711,21 @@ if __name__ == "__main__":
                 logger.info(f"Updated execution {order_id}: price={fill_price}, PnL=0 (missing data)")
             
             # Save updated executions
-            self._save_executions()
-            logger.info(f"Strategy execution updated and saved for order {order_id}")
+            # 优先根据 order_id 更新数据库中的记录，避免重复插入
+            try:
+                total_profit = None
+                # 如果只更新单条，可以直接更新该条记录
+                if order_id:
+                    # 选取与该order_id对应的exec记录的pnl作为更新值（如果有）
+                    target_exec = next((e for e in strategy_executions if e.order_id == order_id), None)
+                    if target_exec:
+                        total_profit = target_exec.pnl
+                self.db_manager.update_strategy_execution(order_id, price=fill_price, profit=total_profit)
+                logger.info(f"Strategy execution updated in database for order {order_id}")
+            except Exception as db_upd_err:
+                logger.warning(f"Failed to update strategy execution in DB, fallback to batch save: {db_upd_err}")
+                self._save_executions()
+                logger.info(f"Strategy execution updated and saved for order {order_id}")
             
         except Exception as e:
             logger.error(f"Failed to update execution price and PnL: {e}")

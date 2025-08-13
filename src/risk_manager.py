@@ -86,6 +86,20 @@ class RiskManager:
         self.data_dir = "data"
         os.makedirs(self.data_dir, exist_ok=True)
         
+        # 风险阈值配置
+        self.loss_threshold_1 = 0.03  # 3% 损失阈值，触发第一级警告
+        self.loss_threshold_2 = 0.08  # 8% 损失阈值，触发自动平仓
+        
+        # 价格阈值与杠杆配置
+        self.price_threshold = 0.02  # 2% 默认价格阈值
+        self.leverage_mnq = 20  # MNQ杠杆倍数
+        
+        # 待处理的限价订单状态
+        self.pending_limit_orders: Dict[str, Dict[str, bool]] = {}
+        
+        # 警告历史记录
+        self.alert_history: Dict[str, Dict[str, datetime]] = {}
+        
         # 从数据库加载现有数据
         self._load_from_database()
 

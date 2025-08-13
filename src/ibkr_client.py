@@ -585,7 +585,7 @@ class IBKRClient:
             return 0
     
     def get_orders(self, risk_manager=None, strategy_manager=None) -> List[Dict]:
-        """获取订单列表（每次调用都会向IB请求最新订单以避免返回缓存）"""
+        """获取订单列表（支持去抖动，避免重复刷新）"""
         try:
             # 确保连接
             if not self.is_connected():
@@ -598,116 +598,132 @@ class IBKRClient:
                 logger.error(f"IBKR connection lost for get orders")
                 return []
 
-            # 在连接管理器的事件循环中强制刷新一次订单数据，然后再读取 trades()
-            loop = getattr(self.connection_manager, '_loop', None)
-            if not loop or loop.is_closed():
-                logger.error("No active event loop for IBKR connection when getting orders")
-                return []
-
-            def fetch_orders_worker():
-                try:
-                    # 将当前线程绑定到连接线程的事件循环
-                    asyncio.set_event_loop(loop)
-                    
-                    # 主动向IB请求最新的未完成订单与已完成订单，确保trades()刷新
-                    try:
-                        ib.reqOpenOrders()
-                        # 请求所有API来源的已完成订单（包含最近状态变化）
-                        if hasattr(ib, 'reqCompletedOrders'):
-                            ib.reqCompletedOrders(apiOnly=False)
-                    except Exception as e:
-                        logger.warning(f"Failed to request order refresh: {e}")
-                    
-                    # 等待片刻让返回的事件更新本地缓存
-                    import time
-                    time.sleep(0.3)
-                    
-                    # 读取最新的 trades 列表
-                    trades = ib.trades()
-                    orders: List[Dict[str, Any]] = []
-                    updated_orders = False  # Track if any orders were updated
-                    
-                    for trade in trades:
-                        # 从risk_manager的auto_orders中获取订单来源信息
-                        order_source = "未知"
-                        order_id_str = str(trade.order.orderId)
-                        
-                        if risk_manager and hasattr(risk_manager, 'auto_orders'):
-                            if order_id_str in risk_manager.auto_orders:
-                                auto_order = risk_manager.auto_orders[order_id_str]
-                                if getattr(auto_order, 'order_source', None) == "manual":
-                                    order_source = "人工"
-                                elif getattr(auto_order, 'order_source', None) == "auto":
-                                    order_source = "机器人"
-                                else:
-                                    order_source = getattr(auto_order, 'order_source', "未知")
-                                
-                                # Synchronize order data back to risk_manager if status or price changed
-                                current_status = trade.orderStatus.status
-                                current_avg_fill_price = trade.orderStatus.avgFillPrice
-                                
-                                if (auto_order.status != current_status or 
-                                    (current_avg_fill_price and current_avg_fill_price > 0 and auto_order.price != current_avg_fill_price)):
-                                    
-                                    # Update the auto_order with latest data from IBKR
-                                    auto_order.status = current_status
-                                    if current_avg_fill_price and current_avg_fill_price > 0:
-                                        auto_order.price = current_avg_fill_price
-                                    
-                                    # Set executed_at if order is filled and not already set
-                                    if current_status == "Filled" and auto_order.executed_at is None:
-                                        from datetime import datetime
-                                        auto_order.executed_at = datetime.now()
-                                    
-                                    # NEW: update strategy execution price & PnL when we have fill price
-                                    try:
-                                        if strategy_manager and current_avg_fill_price and current_avg_fill_price > 0:
-                                            strategy_manager.update_execution_price_and_pnl(order_id_str, current_avg_fill_price, ibkr_client=self)
-                                    except Exception as sm_err:
-                                        logger.warning(f"Failed to update strategy execution for order {order_id_str}: {sm_err}")
-                                    
-                                    updated_orders = True
-                                    logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")
-                                    
-                            else:
-                                # 如果在auto_orders中找不到记录，可能是历史订单，默认为人工
-                                order_source = "人工"
-                        else:
-                            # 如果没有risk_manager，默认为人工
-                            order_source = "人工"
-                        
-                        # Add debug logging for order data
-                        logger.info(f"Processing order {trade.order.orderId}: totalQuantity={trade.order.totalQuantity}, action={trade.order.action}, orderType={trade.order.orderType}, status={trade.orderStatus.status}")
-                        
-                        orders.append({
-                            'order_id': trade.order.orderId,
-                            'symbol': getattr(trade.contract, 'localSymbol', None) or trade.contract.symbol,
-                            'action': trade.order.action,
-                            'quantity': trade.order.totalQuantity,
-                            'order_type': trade.order.orderType,
-                            'limit_price': getattr(trade.order, 'lmtPrice', None),
-                            'status': trade.orderStatus.status,
-                            'filled': trade.orderStatus.filled,
-                            'remaining': trade.orderStatus.remaining,
-                            'avg_fill_price': trade.orderStatus.avgFillPrice,
-                            'submit_time': trade.log[0].time if trade.log else None,
-                            'order_source': order_source
-                        })
-                    
-                    # Save updated orders to database if any were changed
-                    if updated_orders and risk_manager:
-                        # 直接通过risk_manager的数据库方法更新订单，无需调用CSV保存
-                        logger.info("Updated order data saved to database through RiskManager")
-                    
-                    return orders
-                except Exception as e:
-                    logger.error(f"Failed to fetch orders in worker: {e}")
+            # 添加去抖逻辑 - 避免在短时间内重复刷新
+            current_time = time.time()
+            if not hasattr(self, '_last_order_refresh_time'):
+                self._last_order_refresh_time = 0
+            
+            # 如果距离上次刷新不足2秒，直接返回缓存的trades数据
+            time_since_last_refresh = current_time - self._last_order_refresh_time
+            if time_since_last_refresh < 2.0:
+                logger.debug(f"Skipping order refresh, last refresh was {time_since_last_refresh:.1f}s ago")
+                # 直接使用缓存的trades，不重复请求
+                trades = ib.trades()
+            else:
+                # 在连接管理器的事件循环中强制刷新一次订单数据
+                loop = getattr(self.connection_manager, '_loop', None)
+                if not loop or loop.is_closed():
+                    logger.error("No active event loop for IBKR connection when getting orders")
                     return []
 
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(fetch_orders_worker)
-                return future.result(timeout=10)
+                def fetch_orders_worker():
+                    try:
+                        # 主动向IB请求最新的未完成订单与已完成订单，确保trades()刷新
+                        try:
+                            ib.reqOpenOrders()
+                            # 请求所有API来源的已完成订单（包含最近状态变化）
+                            if hasattr(ib, 'reqCompletedOrders'):
+                                ib.reqCompletedOrders(apiOnly=False)
+                            logger.debug("Requested order refresh from IBKR")
+                        except Exception as e:
+                            logger.warning(f"Failed to request order refresh: {e}")
+                        
+                        # 等待片刻让返回的事件更新本地缓存
+                        time.sleep(0.3)
+                        
+                        # 更新刷新时间
+                        self._last_order_refresh_time = current_time
+                        
+                        # 读取最新的 trades 列表
+                        return ib.trades()
+                    except Exception as e:
+                        logger.error(f"Failed to fetch orders in worker: {e}")
+                        return []
+
+                # 改为简单的直接调用，避免ThreadPoolExecutor在事件循环中使用
+                try:
+                    trades = fetch_orders_worker()
+                except Exception as e:
+                    logger.error(f"Failed to execute fetch_orders_worker: {e}")
+                    trades = ib.trades()  # fallback to existing trades
+            
+            # 处理订单数据
+            orders: List[Dict[str, Any]] = []
+            updated_orders = False  # Track if any orders were updated
+            
+            for trade in trades:
+                # 从risk_manager的auto_orders中获取订单来源信息
+                order_source = "未知"
+                order_id_str = str(trade.order.orderId)
+                
+                if risk_manager and hasattr(risk_manager, 'auto_orders'):
+                    if order_id_str in risk_manager.auto_orders:
+                        auto_order = risk_manager.auto_orders[order_id_str]
+                        if getattr(auto_order, 'order_source', None) == "manual":
+                            order_source = "人工"
+                        elif getattr(auto_order, 'order_source', None) == "auto":
+                            order_source = "机器人"
+                        else:
+                            order_source = getattr(auto_order, 'order_source', "未知")
+                        
+                        # Synchronize order data back to risk_manager if status or price changed
+                        current_status = trade.orderStatus.status
+                        current_avg_fill_price = trade.orderStatus.avgFillPrice
+                        
+                        if (auto_order.status != current_status or 
+                            (current_avg_fill_price and current_avg_fill_price > 0 and auto_order.price != current_avg_fill_price)):
+                            
+                            # Update the auto_order with latest data from IBKR
+                            auto_order.status = current_status
+                            if current_avg_fill_price and current_avg_fill_price > 0:
+                                auto_order.price = current_avg_fill_price
+                            
+                            # Set executed_at if order is filled and not already set
+                            if current_status == "Filled" and auto_order.executed_at is None:
+                                from datetime import datetime
+                                auto_order.executed_at = datetime.now()
+                            
+                            # NEW: update strategy execution price & PnL when we have fill price
+                            try:
+                                if strategy_manager and current_avg_fill_price and current_avg_fill_price > 0:
+                                    strategy_manager.update_execution_price_and_pnl(order_id_str, current_avg_fill_price, ibkr_client=self)
+                            except Exception as sm_err:
+                                logger.warning(f"Failed to update strategy execution for order {order_id_str}: {sm_err}")
+                            
+                            updated_orders = True
+                            logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")
+                            
+                    else:
+                        # 如果在auto_orders中找不到记录，可能是历史订单，默认为人工
+                        order_source = "人工"
+                else:
+                    # 如果没有risk_manager，默认为人工
+                    order_source = "人工"
+                
+                # Add debug logging for order data
+                logger.debug(f"Processing order {trade.order.orderId}: totalQuantity={trade.order.totalQuantity}, action={trade.order.action}, orderType={trade.order.orderType}, status={trade.orderStatus.status}")
+                
+                orders.append({
+                    'order_id': trade.order.orderId,
+                    'symbol': getattr(trade.contract, 'localSymbol', None) or trade.contract.symbol,
+                    'action': trade.order.action,
+                    'quantity': trade.order.totalQuantity,
+                    'order_type': trade.order.orderType,
+                    'limit_price': getattr(trade.order, 'lmtPrice', None),
+                    'status': trade.orderStatus.status,
+                    'filled': trade.orderStatus.filled,
+                    'remaining': trade.orderStatus.remaining,
+                    'avg_fill_price': trade.orderStatus.avgFillPrice,
+                    'submit_time': trade.log[0].time if trade.log else None,
+                    'order_source': order_source
+                })
+            
+            # Save updated orders to database if any were changed
+            if updated_orders and risk_manager:
+                # 直接通过risk_manager的数据库方法更新订单，无需调用CSV保存
+                logger.info("Updated order data saved to database through RiskManager")
+            
+            return orders
 
         except Exception as e:
             logger.error(f"Failed to get orders: {e}")

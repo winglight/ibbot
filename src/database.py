@@ -296,9 +296,44 @@ class DatabaseManager:
     
     # 策略执行相关方法
     def save_strategy_execution(self, execution: StrategyExecution):
-        """保存策略执行记录"""
+        """保存策略执行记录（按 order_id 幂等：存在则更新，不存在则插入）"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+
+            # 如果带有 order_id，先检查是否已存在该记录
+            if execution.order_id:
+                cursor.execute("SELECT 1 FROM strategy_executions WHERE order_id = ?", (execution.order_id,))
+                exists = cursor.fetchone() is not None
+                if exists:
+                    # 按需更新可变字段
+                    update_fields = []
+                    params = []
+                    if execution.price is not None:
+                        update_fields.append("price = ?")
+                        params.append(execution.price)
+                    if execution.profit is not None:
+                        update_fields.append("profit = ?")
+                        params.append(execution.profit)
+                    if execution.status is not None:
+                        update_fields.append("status = ?")
+                        params.append(execution.status)
+
+                    # 如果没有需要更新的字段，则直接返回
+                    if not update_fields:
+                        logger.debug(f"Strategy execution exists (no changes) for: {execution.name}")
+                        return
+
+                    params.append(execution.order_id)
+                    cursor.execute(f"""
+                        UPDATE strategy_executions
+                        SET {', '.join(update_fields)}
+                        WHERE order_id = ?
+                    """, params)
+                    conn.commit()
+                    logger.debug(f"Strategy execution updated for: {execution.name}")
+                    return
+
+            # 默认插入
             cursor.execute("""
                 INSERT INTO strategy_executions 
                 (name, symbol, action, quantity, price, timestamp, order_id, profit, status)
@@ -309,6 +344,53 @@ class DatabaseManager:
             ))
             conn.commit()
             logger.debug(f"Strategy execution saved for: {execution.name}")
+    
+    def update_strategy_execution(self, order_id: str, price: Optional[float] = None, profit: Optional[float] = None, status: Optional[str] = None):
+        """更新策略执行记录"""
+        if not order_id:
+            logger.warning("Cannot update strategy execution without order_id")
+            return False
+            
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 构建动态更新语句
+            update_fields = []
+            params = []
+            
+            if price is not None:
+                update_fields.append("price = ?")
+                params.append(price)
+                
+            if profit is not None:
+                update_fields.append("profit = ?")
+                params.append(profit)
+                
+            if status is not None:
+                update_fields.append("status = ?")
+                params.append(status)
+                
+            if not update_fields:
+                logger.warning("No fields to update for strategy execution")
+                return False
+                
+            params.append(order_id)
+            
+            cursor.execute(f"""
+                UPDATE strategy_executions 
+                SET {', '.join(update_fields)}
+                WHERE order_id = ?
+            """, params)
+            
+            updated_rows = cursor.rowcount
+            conn.commit()
+            
+            if updated_rows > 0:
+                logger.debug(f"Strategy execution updated for order_id: {order_id}")
+                return True
+            else:
+                logger.warning(f"No strategy execution found with order_id: {order_id}")
+                return False
     
     def load_strategy_executions(self, strategy_name: Optional[str] = None, limit: int = 100) -> List[StrategyExecution]:
         """加载策略执行记录"""
