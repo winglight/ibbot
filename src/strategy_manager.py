@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from loguru import logger
 
+from .database import DatabaseManager, get_db_manager, Strategy as DatabaseStrategy, StrategyExecution as DatabaseStrategyExecution
+
 
 @dataclass
 class Strategy:
@@ -60,6 +62,9 @@ class StrategyManager:
     def __init__(self, data_dir: str = "data", strategy_dir: str = "strategy"):
         self.data_dir = Path(data_dir)
         self.strategy_dir = Path(strategy_dir)
+        self.db_manager = get_db_manager()
+        
+        # Legacy file paths for migration
         self.settings_file = self.data_dir / "strategy_settings.json"
         self.strategies_file = self.data_dir / "strategies.csv"
         self.executions_file = self.data_dir / "strategy_executions.csv"
@@ -71,12 +76,140 @@ class StrategyManager:
         self.strategies: Dict[str, Strategy] = {}
         self.executions: List[StrategyExecution] = []
         
+        # 先从数据库加载，如果为空则尝试从文件迁移
+        self._load_from_database()
+        
+    def _load_from_database(self):
+        """从数据库加载策略设置、策略和执行记录"""
+        try:
+            # 加载策略设置
+            self.settings = self.db_manager.load_strategy_settings()
+            
+            # 设置默认值
+            if not self.settings:
+                self.settings = {
+                    "api_endpoint": "/api/strategy",
+                    "api_method": "POST",
+                    "api_payload_template": {
+                        "strategy": "{{strategy_name}}",
+                        "symbol": "{{symbol}}",
+                        "action": "{{action}}",
+                        "qty": "{{quantity}}",
+                        "type": "{{order_type}}",
+                        "price": "{{price}}"
+                    },
+                    "strategy_path": "strategy/",
+                    "enable_auth": False,
+                    "auth_token": None
+                }
+                # 保存默认设置到数据库
+                self.db_manager.save_strategy_settings(self.settings)
+            
+            # 更新实例变量
+            self.api_endpoint = self.settings["api_endpoint"]
+            self.api_method = self.settings["api_method"]
+            self.api_payload_template = self.settings["api_payload_template"]
+            self.strategy_dir = Path(self.settings["strategy_path"]).resolve()
+            self.enable_auth = self.settings.get("enable_auth", False)
+            self.auth_token = self.settings.get("auth_token")
+            
+            # 确保策略目录存在
+            self.strategy_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 加载策略
+            db_strategies = self.db_manager.load_strategies()
+            for strategy_data in db_strategies:
+                # 将数据库的策略数据类转换为本地策略数据类
+                strategy = Strategy(
+                    name=strategy_data.name,
+                    strategy_type=strategy_data.strategy_type,
+                    enabled=strategy_data.enabled,
+                    api_endpoint=strategy_data.api_endpoint,
+                    file_path=strategy_data.file_path,
+                    description=strategy_data.description,
+                    created_at=datetime.fromisoformat(strategy_data.created_at) if strategy_data.created_at else datetime.now(),
+                    trigger_count=0,  # 数据库数据类中没有这个字段，设为默认值
+                    last_triggered=None
+                )
+                self.strategies[strategy.name] = strategy
+            
+            # 加载策略执行记录
+            db_executions = self.db_manager.load_strategy_executions()
+            for execution_data in db_executions:
+                execution = StrategyExecution(
+                    strategy_name=execution_data.name,
+                    execution_time=datetime.fromisoformat(execution_data.timestamp),
+                    order_id=execution_data.order_id,
+                    symbol=execution_data.symbol,
+                    action=execution_data.action,
+                    quantity=execution_data.quantity,
+                    price=execution_data.price,
+                    status=execution_data.status,
+                    pnl=execution_data.profit
+                )
+                self.executions.append(execution)
+            
+            logger.info(f"Loaded {len(self.strategies)} strategies and {len(self.executions)} executions from database")
+            
+        except Exception as e:
+            logger.error(f"Error loading from database: {e}")
+            # 如果数据库加载失败，尝试从文件加载并迁移
+            self._load_from_files_and_migrate()
+    
+    def _load_from_files_and_migrate(self):
+        """从文件加载数据并迁移到数据库（向后兼容）"""
+        logger.info("Loading from legacy files and migrating to database...")
+        
+        # 加载设置
         self._load_settings()
+        
+        # 加载策略
         self._load_strategies()
+        
+        # 加载执行记录
         self._load_executions()
         
+        # 迁移到数据库
+        try:
+            # 保存设置到数据库
+            self.db_manager.save_strategy_settings(self.settings)
+            
+            # 保存策略到数据库
+            for strategy in self.strategies.values():
+                # 保存到数据库
+                db_strategy = DatabaseStrategy(
+                    name=strategy.name,
+                    strategy_type=strategy.strategy_type,
+                    enabled=strategy.enabled,
+                    api_endpoint=strategy.api_endpoint,
+                    file_path=strategy.file_path,
+                    description=strategy.description,
+                    created_at=strategy.created_at.isoformat()
+                )
+                self.db_manager.save_strategy(db_strategy)
+            
+            # 保存执行记录到数据库
+            for execution in self.executions:
+                db_execution = DatabaseStrategyExecution(
+                    name=execution.strategy_name,
+                    symbol=execution.symbol,
+                    action=execution.action,
+                    quantity=execution.quantity,
+                    price=execution.price,
+                    timestamp=execution.execution_time.isoformat(),
+                    order_id=execution.order_id,
+                    profit=execution.pnl,
+                    status=execution.status
+                )
+                self.db_manager.save_strategy_execution(db_execution)
+            
+            logger.info("Successfully migrated data from files to database")
+            
+        except Exception as e:
+            logger.error(f"Error migrating data to database: {e}")
+        
     def _load_settings(self):
-        """Load strategy settings"""
+        """Load strategy settings - 兼容性方法，现在从数据库加载"""
         if self.settings_file.exists():
             try:
                 with open(self.settings_file, 'r') as f:
@@ -118,16 +251,15 @@ class StrategyManager:
         self.strategy_dir.mkdir(parents=True, exist_ok=True)
         
     def _save_settings(self):
-        """Save strategy settings"""
+        """Save strategy settings - 现在保存到数据库"""
         try:
-            with open(self.settings_file, 'w') as f:
-                json.dump(self.settings, f, indent=2)
-            logger.info("Strategy settings saved")
+            self.db_manager.save_strategy_settings(self.settings)
+            logger.info("Strategy settings saved to database")
         except Exception as e:
-            logger.error(f"Failed to save settings: {e}")
+            logger.error(f"Failed to save settings to database: {e}")
             
     def _load_strategies(self):
-        """Load strategies from CSV file"""
+        """Load strategies from CSV file - 兼容性方法"""
         if self.strategies_file.exists():
             try:
                 with open(self.strategies_file, 'r', newline='') as f:
@@ -151,43 +283,31 @@ class StrategyManager:
                         
                         self.strategies[row['name']] = Strategy(**row)
                         
-                logger.info(f"Loaded {len(self.strategies)} strategies")
+                logger.info(f"Loaded {len(self.strategies)} strategies from CSV")
             except Exception as e:
                 logger.error(f"Failed to load strategies: {e}")
                 self.strategies = {}
                 
     def _save_strategies(self):
-        """Save strategies to CSV file"""
+        """Save strategies - 现在保存到数据库"""
         try:
-            with open(self.strategies_file, 'w', newline='') as f:
-                if self.strategies:
-                    fieldnames = list(asdict(list(self.strategies.values())[0]).keys())
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    
-                    for strategy in self.strategies.values():
-                        strategy_dict = asdict(strategy)
-                        # Convert datetime objects to strings
-                        if strategy_dict['created_at']:
-                            strategy_dict['created_at'] = strategy_dict['created_at'].isoformat()
-                        if strategy_dict['last_triggered']:
-                            strategy_dict['last_triggered'] = strategy_dict['last_triggered'].isoformat()
-                        else:
-                            strategy_dict['last_triggered'] = ''
-                        
-                        # Handle None values for CSV
-                        for key in ['api_endpoint', 'file_path', 'description']:
-                            if strategy_dict[key] is None:
-                                strategy_dict[key] = ''
-                                
-                        writer.writerow(strategy_dict)
-                        
-            logger.info("Strategies saved to CSV")
+            for strategy in self.strategies.values():
+                db_strategy = DatabaseStrategy(
+                    name=strategy.name,
+                    strategy_type=strategy.strategy_type,
+                    enabled=strategy.enabled,
+                    api_endpoint=strategy.api_endpoint,
+                    file_path=strategy.file_path,
+                    description=strategy.description,
+                    created_at=strategy.created_at.isoformat() if strategy.created_at else datetime.now().isoformat()
+                )
+                self.db_manager.save_strategy(db_strategy)
+            logger.info("Strategies saved to database")
         except Exception as e:
-            logger.error(f"Failed to save strategies: {e}")
+            logger.error(f"Failed to save strategies to database: {e}")
             
     def _load_executions(self):
-        """Load strategy executions from CSV"""
+        """Load strategy executions from CSV - 兼容性方法"""
         if self.executions_file.exists():
             try:
                 with open(self.executions_file, 'r', newline='') as f:
@@ -204,30 +324,31 @@ class StrategyManager:
                         
                         self.executions.append(StrategyExecution(**row))
                         
-                logger.info(f"Loaded {len(self.executions)} strategy executions")
+                logger.info(f"Loaded {len(self.executions)} strategy executions from CSV")
             except Exception as e:
                 logger.error(f"Failed to load executions: {e}")
                 self.executions = []
                 
     def _save_executions(self):
-        """Save strategy executions to CSV"""
+        """Save strategy executions - 现在保存到数据库"""
         try:
-            with open(self.executions_file, 'w', newline='') as f:
-                if self.executions:
-                    fieldnames = list(asdict(self.executions[0]).keys())
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    
-                    for execution in self.executions:
-                        execution_dict = asdict(execution)
-                        # Convert datetime to string
-                        execution_dict['execution_time'] = execution_dict['execution_time'].isoformat()
-                        writer.writerow(execution_dict)
-                        
-            logger.info("Strategy executions saved")
+            for execution in self.executions:
+                db_execution = DatabaseStrategyExecution(
+                    name=execution.strategy_name,
+                    symbol=execution.symbol,
+                    action=execution.action,
+                    quantity=execution.quantity,
+                    price=execution.price,
+                    timestamp=execution.execution_time.isoformat(),
+                    order_id=execution.order_id,
+                    profit=execution.pnl,
+                    status=execution.status
+                )
+                self.db_manager.save_strategy_execution(db_execution)
+            logger.info("Strategy executions saved to database")
         except Exception as e:
-            logger.error(f"Failed to save executions: {e}")
-            
+            logger.error(f"Failed to save executions to database: {e}")
+
     def get_settings(self) -> Dict[str, Any]:
         """Get current settings"""
         return self.settings.copy()
@@ -237,7 +358,7 @@ class StrategyManager:
         try:
             self.settings.update(new_settings)
             self._save_settings()
-            self._load_settings()  # Reload to update instance variables
+            self._load_from_database()  # 重新加载以更新实例变量
             return True
         except Exception as e:
             logger.error(f"Failed to update settings: {e}")
@@ -251,25 +372,42 @@ class StrategyManager:
                 logger.warning(f"Strategy {name} already exists")
                 return False
                 
-            # Check for use_template parameter
-            use_template = strategy_data.pop('use_template', False)
+            strategy = Strategy(
+                name=name,
+                strategy_type=strategy_data['strategy_type'],
+                enabled=strategy_data.get('enabled', True),
+                api_endpoint=strategy_data.get('api_endpoint'),
+                file_path=strategy_data.get('file_path'),
+                description=strategy_data.get('description'),
+                created_at=datetime.now()
+            )
             
-            strategy = Strategy(**strategy_data)
+            # 保存到数据库
+            db_strategy = DatabaseStrategy(
+                name=strategy.name,
+                strategy_type=strategy.strategy_type,
+                enabled=strategy.enabled,
+                api_endpoint=strategy.api_endpoint,
+                file_path=strategy.file_path,
+                description=strategy.description,
+                created_at=strategy.created_at.isoformat()
+            )
+            self.db_manager.save_strategy(db_strategy)
             
-            # Create strategy template if requested
-            if strategy.strategy_type == 'internal' and use_template:
-                self._create_strategy_template(name)
-                strategy.file_path = str(self.strategy_dir / f"{name}.py")
-                
+            # 更新内存缓存
             self.strategies[name] = strategy
-            self._save_strategies()
             
-            logger.info(f"Added strategy: {name}")
+            # 如果是内部策略，创建模板文件
+            if strategy.strategy_type == "internal" and strategy.file_path:
+                self._create_strategy_template(name)
+                
+            logger.info(f"Strategy {name} added successfully")
             return True
+            
         except Exception as e:
             logger.error(f"Failed to add strategy: {e}")
             return False
-            
+
     def _create_strategy_template(self, strategy_name: str):
         """Create a Python strategy template file"""
         template_content = f'''"""

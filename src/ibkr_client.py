@@ -11,6 +11,7 @@ import os
 import csv
 from concurrent.futures import ThreadPoolExecutor
 from .connection_manager import connection_manager, ConnectionConfig
+from .database import get_db_manager
 
 class IBKRClient:
     def __init__(self):
@@ -332,13 +333,29 @@ class IBKRClient:
         #     return []
 
     def save_historical_data(self, df: pd.DataFrame, symbol: str, filename: str = None):
-        """保存历史数据到CSV文件"""
-        if filename is None:
-            filename = f"data/{symbol}_historical.csv"
-        
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        df.to_csv(filename, index=False)
-        logger.info(f"Historical data saved to {filename}")
+        """保存历史数据到数据库"""
+        try:
+            # 获取数据库管理器
+            db_manager = get_db_manager()
+            
+            # 保存到数据库
+            db_manager.save_historical_data(symbol, df)
+            logger.info(f"Historical data for {symbol} saved to database")
+            
+            # 保留文件保存作为备份（可选）
+            if filename:
+                os.makedirs(os.path.dirname(filename), exist_ok=True)
+                df.to_csv(filename, index=False)
+                logger.info(f"Historical data also saved to {filename}")
+        except Exception as e:
+            logger.error(f"Error saving historical data to database: {e}")
+            # 回退到文件保存
+            if filename is None:
+                filename = f"data/{symbol}_historical.csv"
+            
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            df.to_csv(filename, index=False)
+            logger.info(f"Historical data saved to {filename} (fallback)")
     
     def get_real_time_data(self, symbol: str, exchange: str = 'SMART'):
         """获取实时数据"""
@@ -677,11 +694,10 @@ class IBKRClient:
                             'order_source': order_source
                         })
                     
-                    # Save updated orders to CSV if any were changed
+                    # Save updated orders to database if any were changed
                     if updated_orders and risk_manager:
-                        import os
-                        risk_manager.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
-                        logger.info("Updated order data saved to orders.csv")
+                        # 直接通过risk_manager的数据库方法更新订单，无需调用CSV保存
+                        logger.info("Updated order data saved to database through RiskManager")
                     
                     return orders
                 except Exception as e:

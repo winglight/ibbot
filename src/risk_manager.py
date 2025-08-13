@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 
 from .ibkr_client import IBKRClient
 from .telegram_notifier import TelegramNotifier
+from .database import DatabaseManager, get_db_manager
+from .database import AutoOrder as DatabaseAutoOrder
 
 load_dotenv()
 
@@ -65,131 +67,225 @@ class RiskManager:
     def __init__(self, ibkr_client: IBKRClient, telegram_notifier: TelegramNotifier):
         self.ibkr_client = ibkr_client
         self.telegram_notifier = telegram_notifier
-        self.scheduler = AsyncIOScheduler()
-        self.order_queue = Queue()
+        self.db_manager = get_db_manager()
+        
+        # 内存中的缓存，从数据库加载
         self.risk_rules: Dict[str, RiskRule] = {}
-        self.auto_orders: Dict[str, AutoOrder] = {}  # 自动下单记录
-        self.processing_orders = False
-        self.pending_limit_orders: Dict[str, Dict[str, bool]] = {}  # Track pending limit orders {symbol: {"stop_loss": bool, "take_profit": bool}}
+        self.auto_orders: Dict[str, AutoOrder] = {}
         
-        # Configuration from environment
-        self.loss_threshold_1 = float(os.getenv('LOSS_THRESHOLD_1', '0.05'))  # 5%
-        self.loss_threshold_2 = float(os.getenv('LOSS_THRESHOLD_2', '0.10'))  # 10%
-        self.check_interval = int(os.getenv('CHECK_INTERVAL', '5'))  # 5 minutes
-        self.price_threshold = float(os.getenv('PRICE_THRESHOLD', '0.01'))  # 1% price threshold
-        self.leverage_mnq = float(os.getenv('LEVERAGE_MNQ', '20'))  # MNQ leverage
+        # 订单队列
+        self.order_queue = Queue()
         
-        # Track alerts to avoid spam
-        self.alert_history: Dict[str, Dict[str, datetime]] = {}
+        # 调度器
+        self.scheduler = AsyncIOScheduler()
         
-        logger.info(f"Risk Manager initialized with thresholds: {self.loss_threshold_1*100}%, {self.loss_threshold_2*100}%")
+        # 监控状态
+        self.monitoring_active = False
+        
+        # 数据目录
+        self.data_dir = "data"
+        os.makedirs(self.data_dir, exist_ok=True)
+        
+        # 从数据库加载现有数据
+        self._load_from_database()
+
+    def _load_from_database(self):
+        """从数据库加载风险规则和订单记录到内存缓存"""
+        try:
+            # 加载风险规则
+            db_rules = self.db_manager.load_risk_rules()
+            for rule_db in db_rules:
+                rule = RiskRule(
+                    symbol=rule_db.symbol,
+                    stop_loss_price=rule_db.stop_loss_price,
+                    take_profit_price=rule_db.take_profit_price,
+                    max_loss_percent=rule_db.max_loss_percent,
+                    enabled=True,  # 数据库中暂无enabled字段，默认为True
+                    created_at=datetime.fromisoformat(rule_db.timestamp) if rule_db.timestamp else datetime.now()
+                )
+                self.risk_rules[rule.symbol] = rule
+            
+            # 加载订单记录
+            db_orders = self.db_manager.load_auto_orders()
+            for order_db in db_orders:
+                # 从数据库的AutoOrder转换为RiskManager的AutoOrder
+                order = AutoOrder(
+                    order_id=order_db.order_id,
+                    symbol=order_db.symbol,
+                    action=order_db.action,
+                    quantity=order_db.quantity,
+                    order_type=order_db.order_type,
+                    price=order_db.price,
+                    status="unknown",  # 数据库中暂无status字段，默认为unknown
+                    created_at=datetime.fromisoformat(order_db.timestamp) if order_db.timestamp else datetime.now(),
+                    executed_at=None,  # 数据库中暂无executed_at字段
+                    rule_id=None,  # 数据库中暂无rule_id字段
+                    order_source="auto"  # 数据库中暂无order_source字段，默认为auto
+                )
+                self.auto_orders[order.order_id] = order
+            
+            logger.info(f"Loaded {len(self.risk_rules)} risk rules and {len(self.auto_orders)} orders from database")
+        except Exception as e:
+            logger.error(f"Error loading data from database: {e}")
+            # 如果数据库加载失败，尝试从CSV文件迁移
+            self._load_from_files_and_migrate()
     
+    def _load_from_files_and_migrate(self):
+        """从旧的CSV/JSON文件加载数据并迁移到数据库"""
+        try:
+            # 尝试从CSV文件加载并迁移到数据库
+            logger.info("Attempting to migrate data from CSV files to database")
+            
+            # 迁移风险规则
+            risk_rules_file = os.path.join(self.data_dir, "risk_rules.csv")
+            if os.path.exists(risk_rules_file):
+                self.load_risk_rules_from_csv(risk_rules_file)
+                # 将加载的规则保存到数据库
+                for rule in self.risk_rules.values():
+                    self.db_manager.save_risk_rule(RiskRule(
+                        symbol=rule.symbol,
+                        stop_loss_price=rule.stop_loss_price,
+                        take_profit_price=rule.take_profit_price,
+                        max_loss_percent=rule.max_loss_percent,
+                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    ))
+                logger.info(f"Migrated {len(self.risk_rules)} risk rules to database")
+            
+            # 迁移订单记录
+            orders_file = os.path.join(self.data_dir, "orders.csv")
+            if os.path.exists(orders_file):
+                self.load_auto_orders_from_csv(orders_file)
+                # 将加载的订单保存到数据库
+                for order in self.auto_orders.values():
+                    self.save_auto_order_to_db(order)
+                logger.info(f"Migrated {len(self.auto_orders)} orders to database")
+                
+        except Exception as e:
+            logger.error(f"Error during CSV to database migration: {e}")
+
     def start(self):
         """启动风险管理器"""
-        self.processing_orders = True
-        
-        # Schedule risk monitoring
-        self.scheduler.add_job(
-            self._monitor_positions,
-            'interval',
-            minutes=self.check_interval,
-            id='position_monitor'
-        )
-        
-        # Schedule daily summary
-        self.scheduler.add_job(
-            self._send_daily_summary,
-            'cron',
-            hour=18,  # 6 PM
-            minute=0,
-            id='daily_summary'
-        )
-        
-        self.scheduler.start()
-        
-        # 加载保存的风险规则
-        csv_path = os.path.join("data", "risk_rules.csv")
-        self.load_risk_rules_from_csv(csv_path)
-        
-        # 加载当天的自动下单记录（统一到 data/orders.csv，兼容旧版 data/auto_orders.csv）
-        auto_orders_path = os.path.join("data", "orders.csv")
-        legacy_auto_orders_path = os.path.join("data", "auto_orders.csv")
-        if os.path.exists(auto_orders_path):
-            self.load_auto_orders_from_csv(auto_orders_path)
-        elif os.path.exists(legacy_auto_orders_path):
-            # 兼容迁移：先加载旧文件，再立刻写入新文件
-            self.load_auto_orders_from_csv(legacy_auto_orders_path)
-            self.save_auto_orders_to_csv(auto_orders_path)
-            logger.info("Migrated legacy auto_orders.csv to orders.csv")
-        else:
-            logger.info("No existing orders CSV found to load")
-        
-        logger.info("Risk Manager started")
-    
+        try:
+            # 启动调度器
+            if not self.scheduler.running:
+                self.scheduler.start()
+                logger.info("Risk manager scheduler started")
+            
+            # 添加监控任务
+            self.scheduler.add_job(
+                self._monitor_positions,
+                'interval',
+                seconds=30,
+                id='position_monitor',
+                replace_existing=True
+            )
+            
+            # 添加处理订单队列任务
+            self.scheduler.add_job(
+                self.process_pending_orders,
+                'interval',
+                seconds=5,
+                id='order_processor',
+                replace_existing=True
+            )
+            
+            # 添加每日汇总任务（每天早上9点）
+            self.scheduler.add_job(
+                self._send_daily_summary,
+                'cron',
+                hour=9,
+                minute=0,
+                id='daily_summary',
+                replace_existing=True
+            )
+            
+            self.monitoring_active = True
+            logger.info("Risk monitoring started successfully")
+            
+        except Exception as e:
+            logger.error(f"Error starting risk manager: {e}")
+
     def stop(self):
         """停止风险管理器"""
-        self.processing_orders = False
-        if self.scheduler.running:
-            self.scheduler.shutdown()
-        logger.info("Risk Manager stopped")
-    
+        try:
+            self.monitoring_active = False
+            if self.scheduler.running:
+                self.scheduler.shutdown()
+            logger.info("Risk manager stopped")
+        except Exception as e:
+            logger.error(f"Error stopping risk manager: {e}")
+
     def add_risk_rule(self, symbol: str, stop_loss_price: Optional[float] = None, 
                       take_profit_price: Optional[float] = None, max_loss_percent: Optional[float] = None):
-        """添加风险管理规则"""
-        self.risk_rules[symbol] = RiskRule(
-            symbol=symbol,
-            stop_loss_price=stop_loss_price,
-            take_profit_price=take_profit_price,
-            max_loss_percent=max_loss_percent
-        )
-        
-        # 保存到CSV文件
-        csv_path = os.path.join("data", "risk_rules.csv")
-        self.save_risk_rules_to_csv(csv_path)
-        
-        logger.info(f"Risk rule added for {symbol}")
-    
+        """添加风险规则"""
+        try:
+            rule = RiskRule(
+                symbol=symbol,
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price,
+                max_loss_percent=max_loss_percent,
+                enabled=True,
+                created_at=datetime.now()
+            )
+            
+            # 保存到数据库
+            self.db_manager.save_risk_rule(rule)
+            
+            # 更新内存缓存
+            self.risk_rules[symbol] = rule
+            
+            logger.info(f"Risk rule added for {symbol}")
+            return True
+        except Exception as e:
+            logger.error(f"Error adding risk rule: {e}")
+            return False
+
     def remove_risk_rule(self, symbol: str):
-        """移除风险管理规则"""
-        if symbol in self.risk_rules:
-            del self.risk_rules[symbol]
-            # Clear pending limit orders for this symbol
-            if symbol in self.pending_limit_orders:
-                del self.pending_limit_orders[symbol]
+        """删除风险规则"""
+        try:
+            # 从数据库删除
+            self.db_manager.delete_risk_rule(symbol)
             
-            # 保存到CSV文件
-            csv_path = os.path.join("data", "risk_rules.csv")
-            self.save_risk_rules_to_csv(csv_path)
-            
-            logger.info(f"Risk rule removed for {symbol}")
-    
+            # 从内存删除
+            if symbol in self.risk_rules:
+                del self.risk_rules[symbol]
+                logger.info(f"Risk rule removed for {symbol}")
+                return True
+            else:
+                logger.warning(f"Risk rule for {symbol} not found")
+                return False
+        except Exception as e:
+            logger.error(f"Error removing risk rule: {e}")
+            return False
+
     def update_risk_rule(self, symbol: str, stop_loss_price: float = None, 
                          take_profit_price: float = None, enabled: bool = True) -> bool:
         """更新风险规则"""
-        if symbol in self.risk_rules:
-            rule = self.risk_rules[symbol]
-            if stop_loss_price is not None:
-                rule.stop_loss_price = stop_loss_price
-            if take_profit_price is not None:
-                rule.take_profit_price = take_profit_price
-            rule.enabled = enabled
-            
-            # Reset pending limit orders when rule is updated
-            if symbol in self.pending_limit_orders:
-                self.pending_limit_orders[symbol] = {"stop_loss": False, "take_profit": False}
-            
-            # 保存到CSV文件
-            csv_path = os.path.join("data", "risk_rules.csv")
-            self.save_risk_rules_to_csv(csv_path)
-            
-            logger.info(f"Risk rule updated for {symbol}: SL=${stop_loss_price}, TP=${take_profit_price}")
-            return True
-        return False
-    
+        try:
+            if symbol in self.risk_rules:
+                rule = self.risk_rules[symbol]
+                if stop_loss_price is not None:
+                    rule.stop_loss_price = stop_loss_price
+                if take_profit_price is not None:
+                    rule.take_profit_price = take_profit_price
+                rule.enabled = enabled
+                
+                # 保存到数据库
+                self.db_manager.save_risk_rule(rule)
+                
+                logger.info(f"Risk rule updated for {symbol}")
+                return True
+            else:
+                logger.warning(f"Risk rule for {symbol} not found")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating risk rule for {symbol}: {e}")
+            return False
+
     def get_risk_rules(self) -> Dict[str, RiskRule]:
-        """获取所有风险管理规则"""
+        """获取所有风险规则"""
         return self.risk_rules.copy()
-    
+
     async def _monitor_positions(self):
         """监控持仓风险"""
         try:
@@ -541,8 +637,103 @@ class RiskManager:
                 break
         logger.info("Order queue cleared")
     
+    def save_auto_order_to_db(self, order: AutoOrder):
+        """保存单个订单到数据库并更新内存缓存"""
+        try:
+            # 创建数据库的AutoOrder实例，映射字段
+            db_order = DatabaseAutoOrder(
+                order_id=order.order_id,
+                symbol=order.symbol,
+                quantity=order.quantity,
+                action=order.action,
+                order_type=order.order_type,
+                price=order.price,
+                timestamp=order.created_at.isoformat() if order.created_at else datetime.now().isoformat(),
+                exchange=getattr(order, 'exchange', 'SMART'),
+                sec_type=getattr(order, 'sec_type', 'STK')
+            )
+            
+            # 保存到数据库
+            self.db_manager.save_auto_order(db_order)
+            
+            # 更新内存缓存
+            self.auto_orders[order.order_id] = order
+            
+            logger.info(f"Order {order.order_id} saved to database")
+        except Exception as e:
+            logger.error(f"Error saving order to database: {e}")
+    
+    def get_auto_orders(self) -> List[Dict]:
+        """获取所有订单记录列表（包含自动和手动订单）"""
+        orders = []
+        for order in self.auto_orders.values():
+            orders.append({
+                'order_id': order.order_id,
+                'symbol': order.symbol,
+                'action': order.action,
+                'quantity': order.quantity,
+                'order_type': order.order_type,
+                'price': order.price,
+                'status': order.status,
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'executed_at': order.executed_at.isoformat() if order.executed_at else None,
+                'rule_id': order.rule_id,
+                'order_source': order.order_source
+            })
+        return orders
+
+    def remove_order_record(self, order_id: str):
+        """从记录中删除订单"""
+        try:
+            if order_id in self.auto_orders:
+                # 从数据库删除（如果数据库支持删除操作）
+                # 目前DatabaseManager没有提供删除订单的方法，只能从内存删除
+                del self.auto_orders[order_id]
+                logger.info(f"Order {order_id} removed from records")
+                return True
+            else:
+                logger.warning(f"Order {order_id} not found in records")
+                return False
+        except Exception as e:
+            logger.error(f"Error removing order {order_id}: {e}")
+            return False
+
+    def update_order_status(self, order_id: str, new_status: str):
+        """更新订单状态"""
+        try:
+            if order_id in self.auto_orders:
+                order = self.auto_orders[order_id]
+                order.status = new_status
+                if new_status in ['Filled', 'Cancelled']:
+                    order.executed_at = datetime.now()
+                
+                # 映射为数据库对象并保存
+                db_order = DatabaseAutoOrder(
+                    order_id=order.order_id,
+                    symbol=order.symbol,
+                    quantity=order.quantity,
+                    action=order.action,
+                    order_type=order.order_type,
+                    price=order.price,
+                    timestamp=order.created_at.isoformat() if order.created_at else datetime.now().isoformat(),
+                    exchange=getattr(order, 'exchange', 'SMART'),
+                    sec_type=getattr(order, 'sec_type', 'STK')
+                )
+                self.db_manager.save_auto_order(db_order)
+                
+                logger.info(f"Order {order_id} status updated to {new_status}")
+                return True
+            else:
+                logger.warning(f"Order {order_id} not found in records for status update")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating order {order_id} status: {e}")
+            return False
+
+    # 保留原有的CSV方法作为备份和迁移用途，但标记为弃用
     def save_risk_rules_to_csv(self, filename: str = "risk_rules.csv"):
-        """保存风险规则到CSV文件"""
+        """保存风险规则到CSV文件 - 已弃用，请使用数据库"""
+        logger.warning("save_risk_rules_to_csv is deprecated, data is now stored in database")
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = ['symbol', 'stop_loss_price', 'take_profit_price', 'max_loss_percent', 'enabled', 'created_at']
@@ -563,7 +754,8 @@ class RiskManager:
             logger.error(f"Error saving risk rules to CSV: {e}")
     
     def load_risk_rules_from_csv(self, filename: str = "risk_rules.csv"):
-        """从CSV文件加载风险规则"""
+        """从CSV文件加载风险规则 - 已弃用，请使用数据库"""
+        logger.warning("load_risk_rules_from_csv is deprecated, data is now loaded from database")
         try:
             if not os.path.exists(filename):
                 logger.warning(f"CSV file {filename} not found")
@@ -594,7 +786,8 @@ class RiskManager:
             logger.error(f"Error loading risk rules from CSV: {e}")
     
     def save_auto_orders_to_csv(self, filename: str = "orders.csv"):
-        """保存订单记录到CSV文件（包含自动和手动订单）"""
+        """保存订单记录到CSV文件 - 已弃用，请使用数据库"""
+        logger.warning("save_auto_orders_to_csv is deprecated, data is now stored in database")
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = ['order_id', 'symbol', 'action', 'quantity', 'order_type', 'price', 'status', 'created_at', 'executed_at', 'rule_id', 'order_source']
@@ -620,7 +813,8 @@ class RiskManager:
             logger.error(f"Error saving orders to CSV: {e}")
     
     def load_auto_orders_from_csv(self, filename: str = "orders.csv"):
-        """从CSV文件加载订单记录（包含自动和手动订单）"""
+        """从CSV文件加载订单记录 - 已弃用，请使用数据库"""
+        logger.warning("load_auto_orders_from_csv is deprecated, data is now loaded from database")
         try:
             if not os.path.exists(filename):
                 logger.warning(f"CSV file {filename} not found")
@@ -652,54 +846,3 @@ class RiskManager:
             logger.info(f"All orders loaded from {filename}, total orders: {len(self.auto_orders)}")
         except Exception as e:
             logger.error(f"Error loading orders from CSV: {e}")
-    
-    def get_auto_orders(self) -> List[Dict]:
-        """获取所有订单记录列表（包含自动和手动订单）"""
-        orders = []
-        for order in self.auto_orders.values():
-            orders.append({
-                'order_id': order.order_id,
-                'symbol': order.symbol,
-                'action': order.action,
-                'quantity': order.quantity,
-                'order_type': order.order_type,
-                'price': order.price,
-                'status': order.status,
-                'created_at': order.created_at.isoformat() if order.created_at else None,
-                'executed_at': order.executed_at.isoformat() if order.executed_at else None,
-                'rule_id': order.rule_id,
-                'order_source': order.order_source
-            })
-        return orders
-
-    def remove_order_record(self, order_id: str):
-        """从记录中删除订单"""
-        try:
-            if order_id in self.auto_orders:
-                del self.auto_orders[order_id]
-                self.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
-                logger.info(f"Order {order_id} removed from records")
-                return True
-            else:
-                logger.warning(f"Order {order_id} not found in records")
-                return False
-        except Exception as e:
-            logger.error(f"Error removing order {order_id}: {e}")
-            return False
-
-    def update_order_status(self, order_id: str, new_status: str):
-        """更新订单状态"""
-        try:
-            if order_id in self.auto_orders:
-                self.auto_orders[order_id].status = new_status
-                if new_status in ['Filled', 'Cancelled']:
-                    self.auto_orders[order_id].executed_at = datetime.now()
-                self.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
-                logger.info(f"Order {order_id} status updated to {new_status}")
-                return True
-            else:
-                logger.warning(f"Order {order_id} not found in records for status update")
-                return False
-        except Exception as e:
-            logger.error(f"Error updating order {order_id} status: {e}")
-            return False

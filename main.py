@@ -36,6 +36,7 @@ from src.telegram_notifier import TelegramNotifier
 from src.risk_manager import RiskManager
 from src.connection_manager import connection_manager, ConnectionConfig
 from src.strategy_manager import StrategyManager
+from src.database import get_db_manager
 from src.strategy_manager import StrategyExecution
 
 # Global variables
@@ -389,9 +390,17 @@ async def get_historical_data(request: HistoricalDataRequest):
         if df.empty:
             raise HTTPException(status_code=404, detail="No data found")
         
-        # Save to CSV
+        # 保存到数据库
+        db_manager = get_db_manager()
+        db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
+        
+        # 可选：同时保存CSV作为备份
         filename = f"data/{request.symbol}_historical.csv"
-        ibkr_client.save_historical_data(df, request.symbol, filename)
+        try:
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            df.to_csv(filename, index=False)
+        except Exception as e:
+            logger.warning(f"Failed to write CSV backup for historical data: {e}")
         
         return {
             "success": True,
@@ -851,7 +860,7 @@ async def get_strategy_settings():
 async def update_strategy_settings(settings: StrategySettingsRequest):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    strategy_manager.update_settings(settings.dict())
+    strategy_manager.update_settings(settings.model_dump())
     return {"success": True}
 
 # --- Strategy Auth Token Generation Endpoint ---
@@ -872,7 +881,7 @@ async def list_strategies():
 async def add_strategy_api(strategy: StrategyRequest):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    success = strategy_manager.add_strategy(strategy.dict())
+    success = strategy_manager.add_strategy(strategy.model_dump())
     if not success:
         raise HTTPException(status_code=400, detail="Failed to add strategy")
     return {"success": True}
