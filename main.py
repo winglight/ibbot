@@ -15,10 +15,11 @@ import os
 import sys
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from loguru import logger
 from dotenv import load_dotenv
+from dataclasses import asdict
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -30,11 +31,12 @@ from pydantic import BaseModel
 # Add current directory to Python path
 sys.path.append(str(Path(__file__).parent))
 
-from ibkr_client import IBKRClient
-from telegram_notifier import TelegramNotifier
-from risk_manager import RiskManager
-from connection_manager import connection_manager, ConnectionConfig
-from strategy_manager import StrategyManager
+from src.ibkr_client import IBKRClient
+from src.telegram_notifier import TelegramNotifier
+from src.risk_manager import RiskManager
+from src.connection_manager import connection_manager, ConnectionConfig
+from src.strategy_manager import StrategyManager
+from src.strategy_manager import StrategyExecution
 
 # Global variables
 load_dotenv()
@@ -94,6 +96,7 @@ class StrategyRequest(BaseModel):
     api_endpoint: Optional[str] = None
     file_path: Optional[str] = None
     description: Optional[str] = None
+    use_template: bool = False
 
 class StrategySettingsRequest(BaseModel):
     api_endpoint: str = "/api/strategy"
@@ -106,7 +109,7 @@ class StrategySettingsRequest(BaseModel):
         "type": "{{order_type}}",
         "price": "{{price}}"
     }
-    strategy_path: str = "project/strategy/"
+    strategy_path: str = "strategy/"
     enable_auth: bool = False
     auth_token: Optional[str] = None
 
@@ -166,11 +169,11 @@ def setup_logging():
     logger.info("Logging setup completed")
 
 def create_directories():
-    """Create necessary directories"""
-    directories = ['logs', 'data', 'project', 'project/strategy']
+    """Create necessary directories if they don't exist"""
+    directories = ['logs', 'data', 'strategy']
     for directory in directories:
         Path(directory).mkdir(exist_ok=True)
-    logger.info("Directories created")
+        logger.info(f"Directory '{directory}' ensured")
 
 def check_environment():
     """Check if all required environment variables are set"""
@@ -259,7 +262,7 @@ def print_banner():
     ║  • Historical data export                                   ║
     ║                                                              ║
     ║  Web UI: http://localhost:8000                               ║
-    ╚══════════════════════════════════════════════════════════════╝
+    ╚══════════════════════════════════════════════════════════╝
     """
     print(banner)
 
@@ -272,16 +275,20 @@ async def startup_event():
     ibkr_client = IBKRClient()
     telegram_notifier = TelegramNotifier()
     risk_manager = RiskManager(ibkr_client, telegram_notifier)
-    strategy_manager = StrategyManager(data_dir="data", strategy_dir="project/strategy")
+    # Initialize strategy manager
+    strategy_manager = StrategyManager(data_dir="data", strategy_dir="strategy")
+    if not test_connection():
+        logger.error("Environment setup failed. Please check your configuration.")
+        return
     
     # Auto connect if enabled in .env
     auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
     if auto_connect:
         logger.info("Auto-connect enabled, attempting to connect to IBKR...")
         try:
-            # Use thread pool to avoid event loop conflicts
+            # Use thread pool to avoid event loop conflicts, with proper error handling
             loop = asyncio.get_event_loop()
-            success = await loop.run_in_executor(None, connection_manager.connect)
+            success = await loop.run_in_executor(None, lambda: connection_manager.connect())
             if success:
                 logger.info("Auto-connected to IBKR successfully")
                 # Start risk manager
@@ -325,7 +332,7 @@ async def connect_ibkr(config: ConnectionConfig):
         
         # 在线程池中执行同步连接操作，避免事件循环冲突
         loop = asyncio.get_event_loop()
-        success = await loop.run_in_executor(None, connection_manager.connect)
+        success = await loop.run_in_executor(None, lambda: connection_manager.connect())
         
         if success:
             # Start risk manager
@@ -488,7 +495,7 @@ async def place_order(order: OrderRequest):
         if trade:
             # Record manual order if risk_manager is available
             if risk_manager:
-                from risk_manager import AutoOrder
+                from src.risk_manager import AutoOrder
                 from datetime import datetime
                 import os
                 
@@ -543,9 +550,18 @@ async def cancel_order(order_id: int):
                 "type": "order_cancelled",
                 "order_id": order_id
             })
+            # 同步更新本地记录
+            if risk_manager:
+                risk_manager.update_order_status(str(order_id), "Cancelled")
             
             return {"success": True, "message": message}
         else:
+            # 如果返回“not found or already completed”，则删除本地记录
+            if "not found" in message.lower():
+                if risk_manager:
+                    removed = risk_manager.remove_order_record(str(order_id))
+                    if removed:
+                        return {"success": True, "message": "Order not found on IBKR; removed from local records"}
             raise HTTPException(status_code=404, detail=message)
             
     except Exception as e:
@@ -570,9 +586,18 @@ async def cancel_order_post(request: dict):
                 "type": "order_cancelled",
                 "order_id": order_id
             })
+            # 同步更新本地记录
+            if risk_manager:
+                risk_manager.update_order_status(str(order_id), "Cancelled")
             
             return {"success": True, "message": message}
         else:
+            # 如果返回“not found or already completed”，则删除本地记录
+            if "not found" in message.lower():
+                if risk_manager:
+                    removed = risk_manager.remove_order_record(str(order_id))
+                    if removed:
+                        return {"success": True, "message": "Order not found on IBKR; removed from local records"}
             return {"success": False, "error": message}
             
     except Exception as e:
@@ -610,6 +635,13 @@ async def get_orders():
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
     try:
+        # 先从 IB 同步最新订单状态到本地记录（若已连接）
+        try:
+            if ibkr_client and connection_manager.is_connected():
+                ibkr_client.get_orders(risk_manager, strategy_manager)
+        except Exception as sync_err:
+            logger.debug(f"Order sync skipped: {sync_err}")
+        
         # 从 risk_manager 获取所有订单数据（从 orders.csv 加载）
         orders = risk_manager.get_auto_orders()
         
@@ -777,16 +809,18 @@ async def get_risk_config():
 
 @app.get("/api/auto_orders")
 async def get_auto_orders():
-    """获取所有订单记录（包含自动和手动订单）"""
+    """获取自动订单记录（只返回自动订单，不包含手动订单）"""
     if not risk_manager:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
     try:
-        orders = risk_manager.get_auto_orders()
-        return {"success": True, "orders": orders}
+        all_orders = risk_manager.get_auto_orders()
+        # 只返回自动订单，过滤掉手动订单
+        auto_orders = [order for order in all_orders if order.get('order_source') == 'auto']
+        return {"success": True, "orders": auto_orders}
         
     except Exception as e:
-        logger.error(f"Get orders error: {e}")
+        logger.error(f"Get auto orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -819,6 +853,14 @@ async def update_strategy_settings(settings: StrategySettingsRequest):
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     strategy_manager.update_settings(settings.dict())
     return {"success": True}
+
+# --- Strategy Auth Token Generation Endpoint ---
+from fastapi import Header
+
+@app.post("/api/strategy/settings/generate-token")
+async def generate_strategy_token():
+    token = strategy_manager.generate_auth_token()
+    return {"success": True, "token": token}
 
 @app.get("/api/strategies")
 async def list_strategies():
@@ -903,7 +945,7 @@ async def get_strategy_performance_api(name: str, range: str = "1d", start: Opti
 
 # External trigger endpoint
 @app.post("/api/strategy")
-async def external_strategy_order(request: ExternalStrategyOrderRequest, authorization: Optional[str] = None):
+async def external_strategy_order(request: ExternalStrategyOrderRequest, authorization: Optional[str] = Header(None)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     
@@ -911,6 +953,9 @@ async def external_strategy_order(request: ExternalStrategyOrderRequest, authori
     settings = strategy_manager.get_settings()
     if settings.get('enable_auth', False):
         token = authorization or ''
+        # Strip Bearer prefix if present
+        if token.startswith('Bearer '):
+            token = token[7:]
         if not token or not strategy_manager.validate_auth_token(token):
             raise HTTPException(status_code=401, detail="Unauthorized")
     
@@ -919,120 +964,185 @@ async def external_strategy_order(request: ExternalStrategyOrderRequest, authori
     if not strategy or not strategy.get('enabled', False):
         raise HTTPException(status_code=400, detail="Strategy disabled or not found")
     
-    # Map to place_order
+    # Map to place_order with proper formatting
     order_type = request.type.upper()
+    action = request.action.upper()  # Normalize to uppercase
+    
+    # Auto-detect futures based on symbol
+    sec_type = request.sec_type
+    if request.symbol in ['MNQ', 'NQ', 'ES', 'MES']:
+        sec_type = 'FUT'
+        exchange = 'CME'  # Use proper exchange for futures
+    else:
+        exchange = request.exchange
+    
     try:
-        order_req = OrderRequest(
-            symbol=request.symbol,
-            quantity=request.qty,
-            action=request.action,
-            order_type=order_type,
-            price=request.price,
-            exchange=request.exchange,
-            sec_type=request.sec_type
-        )
-        result = await place_order(order_req)
+        # Direct order placement logic for strategy orders
+        if not ibkr_client or not connection_manager.is_connected():
+            raise HTTPException(status_code=400, detail="Not connected to IBKR")
         
-        # Record execution
-        from strategy_manager import StrategyExecution
-        execution = StrategyExecution(
-            strategy_name=request.strategy,
-            execution_time=datetime.now(),
-            order_id=str(result.get('order_id')) if isinstance(result, dict) else None,
-            symbol=request.symbol,
-            action=request.action,
-            quantity=request.qty,
-            price=request.price,
-            status="executed"
-        )
-        strategy_manager.record_execution(execution)
+        # Get current position to determine if opening or closing
+        positions = ibkr_client.get_positions()
+        current_position = next((p for p in positions if p['symbol'] == request.symbol), None)
+        position_qty = current_position['position'] if current_position else 0
+        avg_cost = current_position['avg_cost'] if current_position else 0
         
-        return result
+        # Place order via IBKRClient
+        if order_type == "MARKET":
+            trade = ibkr_client.place_market_order(
+                symbol=request.symbol,
+                quantity=request.qty,
+                action=action,
+                exchange=exchange,
+                sec_type=sec_type
+            )
+        elif order_type == "LIMIT":
+            if not request.price:
+                raise HTTPException(status_code=400, detail="Price required for limit order")
+            trade = ibkr_client.place_limit_order(
+                symbol=request.symbol,
+                quantity=request.qty,
+                price=request.price,
+                action=action,
+                exchange=exchange,
+                sec_type=sec_type
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Invalid order type")
+        
+        if trade:
+            order_id = str(trade.order.orderId)
+            
+            # Record strategy order as bot order if risk_manager is available
+            if risk_manager:
+                from src.risk_manager import AutoOrder
+                from datetime import datetime
+                import os
+                
+                auto_order = AutoOrder(
+                    order_id=order_id,
+                    symbol=request.symbol,
+                    action=action,
+                    quantity=request.qty,
+                    order_type=order_type,
+                    price=request.price if request.price else 0.0,
+                    status="Submitted",
+                    created_at=datetime.now(),
+                    executed_at=None,
+                    rule_id=request.strategy,  # Use strategy name as rule identifier
+                    order_source="auto"  # Mark as bot order
+                )
+                
+                risk_manager.auto_orders[order_id] = auto_order
+                risk_manager.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
+            
+            # Record strategy execution with proper price
+            from src.strategy_manager import StrategyExecution
+            execution = StrategyExecution(
+                strategy_name=request.strategy,
+                execution_time=datetime.now(),
+                order_id=order_id,
+                symbol=request.symbol,
+                action=request.action,
+                quantity=request.qty,
+                price=request.price if request.price else None,  # Set price from request
+                status="executed"
+            )
+            strategy_manager.record_execution(execution)
+            
+            await manager.broadcast({
+                "type": "order_placed",
+                "order_id": trade.order.orderId,
+                "symbol": request.symbol,
+                "action": action,
+                "quantity": request.qty
+            })
+            
+            return {
+                "success": True,
+                "order_id": trade.order.orderId,
+                "message": "Strategy order placed successfully"
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to place strategy order")
+        
+    except HTTPException as he:
+        # 直接透传原有的HTTP错误（例如下单失败的400）
+        logger.error(f"Strategy order HTTP error: {he.detail}")
+        raise he
     except Exception as e:
-        logger.error(f"Strategy order error: {e}")
-        raise
+        logger.error(f"Strategy order unexpected error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.get("/api/strategies/{name}/performance")
-async def get_strategy_performance_api(name: str, range: str = "1d", start: Optional[str] = None, end: Optional[str] = None):
+# Strategy Executions API
+@app.get("/api/strategies/{name}/executions")
+async def get_strategy_executions(name: str, limit: int = 100):
+    """Get strategy execution logs"""
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     
-    start_date = None
-    end_date = None
-    if start:
-        start_date = datetime.fromisoformat(start)
-    if end:
-        end_date = datetime.fromisoformat(end)
-    
-    # Quick ranges
-    now = datetime.now()
-    if range == "1d":
-        start_date = now - timedelta(days=1)
-    elif range == "1w":
-        start_date = now - timedelta(weeks=1)
-    elif range == "1m":
-        start_date = now - timedelta(days=30)
-    elif range == "wtd":
-        start_date = now - timedelta(days=now.weekday())
-    elif range == "mtd":
-        start_date = now.replace(day=1)
-    elif range == "ytd":
-        start_date = now.replace(month=1, day=1)
-    
-    metrics = strategy_manager.get_strategy_performance(name, start_date, end_date)
-    return {"success": True, "metrics": metrics}
-
-# External trigger endpoint
-@app.post("/api/strategy")
-async def external_strategy_order(request: ExternalStrategyOrderRequest, authorization: Optional[str] = None):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    
-    # Auth check
-    settings = strategy_manager.get_settings()
-    if settings.get('enable_auth', False):
-        token = authorization or ''
-        if not token or not strategy_manager.validate_auth_token(token):
-            raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    # Validate strategy exists and enabled
-    strategy = strategy_manager.get_strategy(request.strategy)
-    if not strategy or not strategy.get('enabled', False):
-        raise HTTPException(status_code=400, detail="Strategy disabled or not found")
-    
-    # Map to place_order
-    order_type = request.type.upper()
     try:
-        order_req = OrderRequest(
-            symbol=request.symbol,
-            quantity=request.qty,
-            action=request.action,
-            order_type=order_type,
-            price=request.price,
-            exchange=request.exchange,
-            sec_type=request.sec_type
-        )
-        result = await place_order(order_req)
+        # Get executions for this strategy
+        executions = [e for e in strategy_manager.executions if e.strategy_name == name]
         
-        # Record execution
-        from strategy_manager import StrategyExecution
-        execution = StrategyExecution(
-            strategy_name=request.strategy,
-            execution_time=datetime.now(),
-            order_id=str(result.get('order_id')) if isinstance(result, dict) else None,
-            symbol=request.symbol,
-            action=request.action,
-            quantity=request.qty,
-            price=request.price,
-            status="executed"
-        )
-        strategy_manager.record_execution(execution)
+        # Sort by execution time (newest first)
+        executions.sort(key=lambda x: x.execution_time, reverse=True)
         
-        return result
+        # Limit results
+        if limit > 0:
+            executions = executions[:limit]
+        
+        # Convert to dict and format datetime
+        execution_list = []
+        for execution in executions:
+            exec_dict = asdict(execution)
+            exec_dict['execution_time'] = execution.execution_time.isoformat()
+            execution_list.append(exec_dict)
+        
+        return {
+            "success": True,
+            "executions": execution_list,
+            "total_count": len([e for e in strategy_manager.executions if e.strategy_name == name])
+        }
     except Exception as e:
-        logger.error(f"Strategy order error: {e}")
-        raise
+        logger.error(f"Get strategy executions error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# System Logs API (kept for general debugging)
+@app.get("/api/logs")
+async def get_logs(lines: int = 100, level: str = "all"):
+    """Get system logs"""
+    try:
+        log_file = Path("logs/trading_bot.log")
+        if not log_file.exists():
+            return {"success": True, "logs": []}
+        
+        # Read log file
+        with open(log_file, 'r', encoding='utf-8') as f:
+            all_lines = f.readlines()
+        
+        # Get last N lines
+        recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        
+        # Filter by level if specified
+        filtered_logs = []
+        for line in recent_lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            if level == "all" or level.upper() in line:
+                filtered_logs.append(line)
+        
+        return {
+            "success": True,
+            "logs": filtered_logs,
+            "total_lines": len(all_lines),
+            "returned_lines": len(filtered_logs)
+        }
+    except Exception as e:
+        logger.error(f"Get logs error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def main():

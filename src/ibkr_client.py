@@ -10,7 +10,7 @@ import asyncio
 import os
 import csv
 from concurrent.futures import ThreadPoolExecutor
-from connection_manager import connection_manager, ConnectionConfig
+from .connection_manager import connection_manager, ConnectionConfig
 
 class IBKRClient:
     def __init__(self):
@@ -43,49 +43,58 @@ class IBKRClient:
     def _place_order_in_thread(self, ib, symbol: str, quantity: int, action: str, 
                               exchange: str, sec_type: str, order_type: str, price: float = None):
         """在连接管理器的事件循环中执行下单操作"""
-        def order_worker():
-            try:
-                # 获取连接管理器的事件循环
-                loop = self.connection_manager._loop
-                if not loop or loop.is_closed():
-                    logger.error("No active event loop for IBKR connection")
-                    return None
-                
-                # 在连接的事件循环中执行下单
-                asyncio.set_event_loop(loop)
-                
-                # 根据证券类型获取正确的合约
-                if sec_type == 'FUT' or symbol in ['MNQ', 'NQ', 'ES', 'MES']:
-                    contract = self.get_future_contract(symbol, exchange)
-                else:
-                    contract = self.get_stock_contract(symbol, exchange)
-
-                # 使用同步方法确认合约和下单
-                qualified_contracts = ib.qualifyContracts(contract)
-                if not qualified_contracts:
-                    logger.error(f"Failed to qualify contract for {symbol}")
-                    return None
-                
-                # 使用确认后的合约
-                qualified_contract = qualified_contracts[0]
-                
-                # 创建订单
-                if order_type == 'MARKET':
-                    order = MarketOrder(action, quantity)
-                else:  # LIMIT
-                    order = LimitOrder(action, quantity, price)
-                
-                trade = ib.placeOrder(contract, order)
-                logger.info(f"{order_type} order placed: {action} {quantity} {symbol} ({sec_type})")
-                return trade
-            except Exception as e:
-                logger.error(f"Failed to place {order_type.lower()} order in thread: {e}")
+        try:
+            # 获取IB实例和事件循环
+            ib_instance = self.connection_manager.get_ib_instance()
+            loop = getattr(self.connection_manager, '_loop', None)
+            
+            if not ib_instance:
+                logger.error("No active IB instance for placing order")
                 return None
-        
-        # 使用线程池执行
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(order_worker)
+                
+            if not loop or loop.is_closed():
+                logger.error("No active event loop for IBKR connection")
+                return None
+            
+            # 在连接管理器的事件循环中异步执行下单
+            async def execute_order_async():
+                try:
+                    # 根据证券类型获取正确的合约
+                    if sec_type == 'FUT' or symbol in ['MNQ', 'NQ', 'ES', 'MES']:
+                        contract = self.get_future_contract(symbol, exchange)
+                    else:
+                        contract = self.get_stock_contract(symbol, exchange)
+
+                    # 使用异步方法确认合约
+                    qualified_contracts = await ib_instance.qualifyContractsAsync(contract)
+                    if not qualified_contracts:
+                        logger.error(f"Failed to qualify contract for {symbol}")
+                        return None
+                    
+                    # 使用确认后的合约
+                    qualified_contract = qualified_contracts[0]
+                    
+                    # 创建订单
+                    if order_type == 'MARKET':
+                        order = MarketOrder(action, quantity)
+                    else:  # LIMIT
+                        order = LimitOrder(action, quantity, price)
+                    
+                    # 使用确认后的合约提交订单
+                    trade = ib_instance.placeOrder(qualified_contract, order)
+                    logger.info(f"{order_type} order placed: {action} {quantity} {symbol} ({sec_type}) on {qualified_contract.exchange}, conId={getattr(qualified_contract, 'conId', 'N/A')}")
+                    return trade
+                except Exception as e:
+                    logger.error(f"Failed to place order in async execution: {e}")
+                    return None
+            
+            # 在连接管理器的事件循环中运行异步下单
+            future = asyncio.run_coroutine_threadsafe(execute_order_async(), loop)
             return future.result(timeout=30)  # 30秒超时
+            
+        except Exception as e:
+            logger.error(f"Failed to place {order_type.lower()} order in thread: {e}")
+            return None
     
     def get_stock_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD') -> Stock:
         """获取股票合约"""
@@ -429,13 +438,23 @@ class IBKRClient:
             if not self.is_connected():
                 if not self.connect():
                     logger.error(f"Cannot connect to IBKR for cancel order: {order_id}")
-                    return False
+                    return False, "Connection failed"
             
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
                 logger.error(f"IBKR connection lost for cancel order")
-                return False
+                return False, "Connection lost"
+            
+            # 首先强制刷新订单数据
+            try:
+                ib.reqOpenOrders()
+                if hasattr(ib, 'reqCompletedOrders'):
+                    ib.reqCompletedOrders(apiOnly=False)
+                import time
+                time.sleep(0.5)  # 等待数据更新
+            except Exception as e:
+                logger.debug(f"Failed to refresh orders: {e}")
             
             trades = ib.trades()
             target_trade = None
@@ -446,7 +465,8 @@ class IBKRClient:
             
             if not target_trade:
                 logger.warning(f"Order {order_id} not found in active trades")
-                return False, "Order not found"
+                # 检查订单是否可能已经完成或取消
+                return False, f"Order {order_id} not found or already completed"
             
             current_status = target_trade.orderStatus.status
             logger.info(f"Order {order_id} current status: {current_status}")
@@ -507,7 +527,7 @@ class IBKRClient:
                     elif final_status == 'PendingCancel':
                         # Paper Trading环境中PendingCancel可能持续很久，但实际上订单已经被标记为取消
                         logger.warning(f"Order {order_id} still in PendingCancel after {max_wait_time}s - this may be normal in Paper Trading")
-                        return False, f"Order cancellation pending (Paper Trading delay), status: {final_status}"
+                        return True, f"Order cancellation initiated (Paper Trading may take longer)"
                     else:
                         logger.warning(f"Order {order_id} cancellation timeout, final status: {final_status}")
                         return False, f"Cancellation timeout, order status: {final_status}"
@@ -547,7 +567,7 @@ class IBKRClient:
             logger.error(f"Failed to cancel all orders: {e}")
             return 0
     
-    def get_orders(self, risk_manager=None) -> List[Dict]:
+    def get_orders(self, risk_manager=None, strategy_manager=None) -> List[Dict]:
         """获取订单列表（每次调用都会向IB请求最新订单以避免返回缓存）"""
         try:
             # 确保连接
@@ -621,6 +641,13 @@ class IBKRClient:
                                     if current_status == "Filled" and auto_order.executed_at is None:
                                         from datetime import datetime
                                         auto_order.executed_at = datetime.now()
+                                    
+                                    # NEW: update strategy execution price & PnL when we have fill price
+                                    try:
+                                        if strategy_manager and current_avg_fill_price and current_avg_fill_price > 0:
+                                            strategy_manager.update_execution_price_and_pnl(order_id_str, current_avg_fill_price, ibkr_client=self)
+                                    except Exception as sm_err:
+                                        logger.warning(f"Failed to update strategy execution for order {order_id_str}: {sm_err}")
                                     
                                     updated_orders = True
                                     logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")

@@ -2,6 +2,13 @@ class TradingApp {
     constructor() {
         this.ws = null;
         this.connected = false;
+        this.charts = {}; // Store chart instances
+        this.executionsPagination = {
+            currentPage: 1,
+            pageSize: 25,
+            totalItems: 0,
+            allExecutions: []
+        };
         this.init();
     }
 
@@ -10,6 +17,7 @@ class TradingApp {
         this.initSymbolCombobox();
         this.connectWebSocket();
         this.checkConnectionStatus();
+        this.loadStrategies();
     }
 
     setupEventListeners() {
@@ -32,14 +40,126 @@ class TradingApp {
             modal.show();
         });
         
+        // Strategy and Logs buttons
+        const strategyBtn = document.getElementById('strategyBtn');
+        if (strategyBtn) {
+            strategyBtn.addEventListener('click', () => {
+                this.loadStrategies();
+                const panel = document.getElementById('strategiesTable');
+                if (panel) {
+                    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            });
+        }
+        const logsBtn = document.getElementById('logsBtn');
+        if (logsBtn) {
+            logsBtn.addEventListener('click', () => {
+                this.loadLogs();
+                const panel = document.getElementById('logsContent');
+                if (panel) {
+                    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            });
+        }
+        const refreshLogsBtn = document.getElementById('refreshLogsBtn');
+        if (refreshLogsBtn) {
+            refreshLogsBtn.addEventListener('click', () => this.loadLogs());
+        }
+        const refreshStrategiesBtn = document.getElementById('refreshStrategiesBtn');
+        if (refreshStrategiesBtn) {
+            refreshStrategiesBtn.addEventListener('click', () => this.loadStrategies());
+        }
+        const addStrategyBtn = document.getElementById('addStrategyBtn');
+        if (addStrategyBtn) {
+            addStrategyBtn.addEventListener('click', async () => {
+                // Open Add Strategy modal instead of prompts
+                const nameInput = document.getElementById('strategyNameInput');
+                const typeSelect = document.getElementById('strategyTypeSelect');
+                const descInput = document.getElementById('strategyDescriptionInput');
+                const useTemplateGroup = document.getElementById('useTemplateGroup');
+                const useTemplateCheckbox = document.getElementById('strategyUseTemplate');
+                if (!nameInput || !typeSelect || !descInput) return;
+                // reset form
+                nameInput.value = '';
+                typeSelect.value = 'external';
+                descInput.value = '';
+                if (useTemplateCheckbox) useTemplateCheckbox.checked = true;
+                if (useTemplateGroup) useTemplateGroup.style.display = 'none';
+                const modal = new bootstrap.Modal(document.getElementById('addStrategyModal'));
+                modal.show();
+            });
+        }
+
+        // Add Strategy type toggle and submit
+        const strategyTypeSelect = document.getElementById('strategyTypeSelect');
+        if (strategyTypeSelect) {
+            strategyTypeSelect.addEventListener('change', (e) => {
+                const useTemplateGroup = document.getElementById('useTemplateGroup');
+                if (useTemplateGroup) {
+                    useTemplateGroup.style.display = e.target.value === 'internal' ? '' : 'none';
+                }
+            });
+        }
+        const createStrategyBtn = document.getElementById('createStrategyBtn');
+        if (createStrategyBtn) {
+            createStrategyBtn.addEventListener('click', async () => {
+                const name = (document.getElementById('strategyNameInput')?.value || '').trim();
+                const strategy_type = document.getElementById('strategyTypeSelect')?.value || 'external';
+                const description = document.getElementById('strategyDescriptionInput')?.value || '';
+                const use_template = strategy_type === 'internal' ? !!document.getElementById('strategyUseTemplate')?.checked : false;
+                if (!name) { this.showAlert('danger', 'Please enter strategy name'); return; }
+                try {
+                    await this.apiCall('/strategies', {
+                        method: 'POST',
+                        body: JSON.stringify({ name, strategy_type, description, use_template })
+                    });
+                    this.showAlert('success', `Strategy ${name} created`);
+                    const modalEl = document.getElementById('addStrategyModal');
+                    const modal = bootstrap.Modal.getInstance(modalEl);
+                    if (modal) modal.hide();
+                    this.loadStrategies();
+                } catch (e) {}
+            });
+        }
+        
+        // Strategy Settings button
+        const strategySettingsBtn = document.getElementById('strategySettingsBtn');
+        if (strategySettingsBtn) {
+            strategySettingsBtn.addEventListener('click', async () => {
+                await this.loadStrategySettings();
+                const modal = new bootstrap.Modal(document.getElementById('strategySettingsModal'));
+                modal.show();
+            });
+        }
+        const saveStrategySettingsBtn = document.getElementById('saveStrategySettingsBtn');
+        if (saveStrategySettingsBtn) {
+            saveStrategySettingsBtn.addEventListener('click', async () => {
+                await this.saveStrategySettings();
+            });
+        }
+        const generateStrategyTokenBtn = document.getElementById('generateStrategyTokenBtn');
+        if (generateStrategyTokenBtn) {
+            generateStrategyTokenBtn.addEventListener('click', async () => {
+                try {
+                    const data = await this.apiCall('/strategy/settings/generate-token', { method: 'POST' });
+                    if (data.success && data.token) {
+                        document.getElementById('strategyAuthToken').value = data.token;
+                        this.showAlert('success', 'Token generated');
+                    } else {
+                        this.showAlert('danger', 'Failed to generate token');
+                    }
+                } catch (err) {
+                    this.showAlert('danger', 'Failed to generate token');
+                }
+            });
+        }
+
         // Place order button
         document.getElementById('placeOrderBtn').addEventListener('click', () => {
-            // Restore last quantity value if available
             const lastQuantity = localStorage.getItem('lastOrderQuantity');
             if (lastQuantity) {
                 document.getElementById('orderQuantity').value = lastQuantity;
             }
-            
             const modal = new bootstrap.Modal(document.getElementById('orderModal'));
             modal.show();
         });
@@ -178,7 +298,7 @@ class TradingApp {
             host: document.getElementById('host').value,
             port: parseInt(document.getElementById('port').value),
             client_id: parseInt(document.getElementById('clientId').value),
-            paper_trading: document.getElementById('paperTrading').value === 'true'
+            paper_trading: (document.getElementById('accountType')?.value || 'paper') === 'paper'
         };
         
         try {
@@ -219,10 +339,11 @@ class TradingApp {
             
             this.loadAccountInfo();
             this.loadOrders();
-        this.loadPortfolio();
-        this.loadRiskRules();
-        this.loadAutoOrders();
-
+            this.loadPortfolio();
+            this.loadRiskRules();
+            this.loadAutoOrders();
+            this.loadStrategies();
+            this.loadLogs();
         } catch (error) {
             console.error('Connection failed:', error);
         }
@@ -248,7 +369,9 @@ class TradingApp {
                 this.loadOrders();
                 this.loadPortfolio();
                 this.loadRiskRules();
-
+                this.loadAutoOrders();
+                this.loadStrategies();
+                this.loadLogs();
             }
         } catch (error) {
             console.error('Failed to check connection status:', error);
@@ -744,7 +867,48 @@ class TradingApp {
 
 
 
-    // cancelOrder method moved to bottom of class to avoid duplication
+    async loadStrategySettings() {
+        try {
+            const data = await this.apiCall('/strategy/settings');
+            const s = data.settings || {};
+            const el1 = document.getElementById('strategyApiEndpoint');
+            if (!el1) return;
+            document.getElementById('strategyApiEndpoint').value = s.api_endpoint || '/api/strategy';
+            document.getElementById('strategyApiMethod').value = s.api_method || 'POST';
+            document.getElementById('strategyApiPayload').value = JSON.stringify(s.api_payload_template || {
+                strategy: '{{strategy_name}}', symbol: '{{symbol}}', action: '{{action}}', qty: '{{quantity}}', type: '{{order_type}}', price: '{{price}}'
+            }, null, 2);
+            document.getElementById('strategyPath').value = s.strategy_path || 'strategy/';
+            document.getElementById('enableStrategyAuth').checked = !!s.enable_auth;
+            document.getElementById('strategyAuthToken').value = s.auth_token || '';
+        } catch (error) {
+            console.error('Failed to load strategy settings:', error);
+        }
+    }
+
+    async saveStrategySettings() {
+        try {
+            const api_endpoint = document.getElementById('strategyApiEndpoint').value.trim() || '/api/strategy';
+            const api_method = document.getElementById('strategyApiMethod').value || 'POST';
+            const payloadText = document.getElementById('strategyApiPayload').value || '{}';
+            let api_payload_template = {};
+            try { api_payload_template = JSON.parse(payloadText); } catch (e) { this.showAlert('danger', 'Invalid JSON for payload template'); return; }
+            const strategy_path = document.getElementById('strategyPath').value.trim() || 'strategy/';
+            const enable_auth = document.getElementById('enableStrategyAuth').checked;
+            const auth_token = document.getElementById('strategyAuthToken').value || null;
+            await this.apiCall('/strategy/settings', {
+                method: 'POST',
+                body: JSON.stringify({ api_endpoint, api_method, api_payload_template, strategy_path, enable_auth, auth_token })
+            });
+            this.showAlert('success', 'Strategy settings saved');
+            const modalEl = document.getElementById('strategySettingsModal');
+            const modal = bootstrap.Modal.getInstance(modalEl);
+            if (modal) modal.hide();
+        } catch (error) {
+            console.error('Failed to save strategy settings:', error);
+            this.showAlert('danger', 'Failed to save strategy settings');
+        }
+    }
 
     async cancelAllOrders() {
         if (!confirm('Are you sure you want to cancel all orders?')) {
@@ -1195,6 +1359,890 @@ class TradingApp {
             this.showAlert('danger', '取消订单时发生错误');
         }
     }
+
+    async loadStrategies() {
+        try {
+            const data = await this.apiCall('/strategies');
+            if (data.success) {
+                this.displayStrategies(data.strategies);
+            }
+        } catch (error) {
+            console.error('Failed to load strategies:', error);
+        }
+    }
+
+    displayStrategies(strategies) {
+        const tbody = document.querySelector('#strategiesTable tbody');
+        if (!tbody) return;
+        
+        tbody.innerHTML = '';
+        strategies.forEach(strategy => {
+            const row = document.createElement('tr');
+            
+            const nameCell = document.createElement('td');
+            nameCell.textContent = strategy.name;
+            
+            const typeCell = document.createElement('td');
+            typeCell.innerHTML = `<span class="badge ${strategy.strategy_type === 'external' ? 'bg-primary' : 'bg-success'}">${strategy.strategy_type}</span>`;
+            
+            const enabledCell = document.createElement('td');
+            const toggleSwitch = document.createElement('div');
+            toggleSwitch.className = 'form-check form-switch';
+            toggleSwitch.innerHTML = `
+                <input class="form-check-input" type="checkbox" ${strategy.enabled ? 'checked' : ''} 
+                       onchange="app.toggleStrategy('${strategy.name}', this.checked)">
+            `;
+            enabledCell.appendChild(toggleSwitch);
+            
+            const triggerCountCell = document.createElement('td');
+            triggerCountCell.textContent = strategy.trigger_count || 0;
+            
+            const lastTriggeredCell = document.createElement('td');
+            if (strategy.last_triggered) {
+                const date = new Date(strategy.last_triggered);
+                lastTriggeredCell.textContent = date.toLocaleString();
+            } else {
+                lastTriggeredCell.textContent = '-';
+            }
+            
+            const descCell = document.createElement('td');
+            descCell.textContent = strategy.description || '-';
+            
+            const actionsCell = document.createElement('td');
+            actionsCell.innerHTML = `
+                <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editStrategy('${strategy.name}')">Edit</button>
+                <button class="btn btn-sm btn-outline-info me-1" onclick="app.openStrategyDetails('${strategy.name}')">Details</button>
+                <button class="btn btn-sm btn-outline-danger" onclick="app.deleteStrategy('${strategy.name}')">Delete</button>
+            `;
+            
+            row.appendChild(nameCell);
+            row.appendChild(typeCell);
+            row.appendChild(enabledCell);
+            row.appendChild(triggerCountCell);
+            row.appendChild(lastTriggeredCell);
+            row.appendChild(descCell);
+            row.appendChild(actionsCell);
+            
+            tbody.appendChild(row);
+        });
+    }
+
+    async toggleStrategy(name, enabled) {
+        try {
+            await this.apiCall(`/strategies/${name}/toggle?enabled=${enabled}`, { method: 'POST' });
+            this.showAlert('success', `Strategy ${name} ${enabled ? 'enabled' : 'disabled'}`);
+        } catch (error) {
+            console.error('Failed to toggle strategy:', error);
+            this.showAlert('danger', 'Failed to toggle strategy');
+            // Reload to revert the switch
+            this.loadStrategies();
+        }
+    }
+
+    async editStrategy(name) {
+        try {
+            const res = await this.apiCall(`/strategies/${name}`);
+            if (!res.success) throw new Error('Failed to load strategy');
+            const s = res.strategy;
+            const nameEl = document.getElementById('editStrategyName');
+            if (nameEl) nameEl.textContent = s.name;
+            const desc = document.getElementById('editStrategyDescriptionInput');
+            const api = document.getElementById('editStrategyApiInput');
+            if (desc) desc.value = s.description || '';
+            if (api) api.value = s.api_endpoint || '';
+            const modal = new bootstrap.Modal(document.getElementById('editStrategyModal'));
+            modal.show();
+
+            const updateBtn = document.getElementById('updateStrategyBtn');
+            if (updateBtn) {
+                const newBtn = updateBtn.cloneNode(true);
+                updateBtn.parentNode.replaceChild(newBtn, updateBtn);
+                newBtn.addEventListener('click', async () => {
+                    const updates = {
+                        description: document.getElementById('editStrategyDescriptionInput')?.value || '',
+                        api_endpoint: document.getElementById('editStrategyApiInput')?.value || undefined,
+                    };
+                    try {
+                        await this.apiCall(`/strategies/${name}`, { method: 'PUT', body: JSON.stringify(updates) });
+                        this.showAlert('success', `Strategy ${name} updated`);
+                        const modalEl = document.getElementById('editStrategyModal');
+                        const inst = bootstrap.Modal.getInstance(modalEl);
+                        if (inst) inst.hide();
+                        this.loadStrategies();
+                    } catch (e) {
+                        console.error(e);
+                        this.showAlert('danger', 'Failed to update strategy');
+                    }
+                });
+            }
+        } catch (e) {
+            console.error('Edit strategy error:', e);
+            this.showAlert('danger', 'Failed to open edit modal');
+        }
+    }
+
+    async openStrategyDetails(name) {
+        try {
+            const nameEl = document.getElementById('detailsStrategyName');
+            if (nameEl) nameEl.textContent = name;
+            let s = null;
+            try {
+                const res = await this.apiCall(`/strategies/${name}`);
+                if (res.success) s = res.strategy;
+            } catch {}
+            const typeEl = document.getElementById('detailsStrategyType');
+            const trigEl = document.getElementById('detailsTriggerCount');
+            const lastEl = document.getElementById('detailsLastTriggered');
+            if (typeEl) typeEl.textContent = s?.strategy_type || '-';
+            if (trigEl) trigEl.textContent = s?.trigger_count ?? 0;
+            if (lastEl) lastEl.textContent = s?.last_triggered ? new Date(s.last_triggered).toLocaleString() : '-';
+
+            // API Examples
+            const container = document.getElementById('apiExampleContent');
+            if (container) {
+                if (s?.strategy_type === 'external') {
+                    const endpoint = s.api_endpoint || '/api/strategy';
+                    const samplePayload = { symbol: 'AAPL', action: 'BUY', quantity: 10, price: 190.12, meta: { note: 'optional' } };
+                    const payloadStr = JSON.stringify(samplePayload).replace(/\"/g, '\\\"');
+                    const curl = `curl -X POST \"${endpoint}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d \"${payloadStr}\"`;
+                    container.innerHTML = `
+                      <div class="mb-2"><span class="badge bg-primary">external</span> endpoint: <code>${endpoint}</code></div>
+                      <pre class="bg-light p-3"><code>${curl}</code></pre>
+                      <p class="text-muted">If authentication is enabled in settings, add header: <code>-H \"Authorization: Bearer &lt;TOKEN&gt;\"</code></p>`;
+                } else {
+                    container.innerHTML = '<p class="text-muted">API examples are only available for external strategies.</p>';
+                }
+            }
+
+            const modal = new bootstrap.Modal(document.getElementById('strategyDetailsModal'));
+            modal.show();
+
+            const rangeSel = document.getElementById('performanceRange');
+            const customSection = document.getElementById('customRangeSection');
+            if (rangeSel && customSection) {
+                rangeSel.value = '1d';
+                rangeSel.onchange = () => {
+                    customSection.style.display = rangeSel.value === 'custom' ? '' : 'none';
+                    if (rangeSel.value !== 'custom') {
+                        this.loadStrategyPerformance(name, { range: rangeSel.value });
+                    }
+                };
+            }
+            const applyBtn = document.getElementById('applyCustomRangeBtn');
+            if (applyBtn) {
+                applyBtn.onclick = () => {
+                    const start = document.getElementById('perfStart').value;
+                    const end = document.getElementById('perfEnd').value;
+                    if (start && end) {
+                        this.loadStrategyPerformance(name, { range: 'custom', start, end });
+                    }
+                };
+            }
+
+            // Pagination controls and export
+            const pageSizeSelect = document.getElementById('executionsPageSize');
+            if (pageSizeSelect) {
+                pageSizeSelect.value = String(this.executionsPagination.pageSize);
+                pageSizeSelect.onchange = () => {
+                    this.executionsPagination.pageSize = parseInt(pageSizeSelect.value, 10) || 25;
+                    this.executionsPagination.currentPage = 1;
+                    this.renderExecutionsTable();
+                    this.renderExecutionsPagination();
+                };
+            }
+            const exportBtn = document.getElementById('exportExecutionsBtn');
+            if (exportBtn) {
+                exportBtn.onclick = () => this.exportExecutionsCsv(name);
+            }
+            
+            const refreshBtn = document.getElementById('refreshExecutionsBtn');
+            if (refreshBtn) {
+                refreshBtn.onclick = () => {
+                    this.loadStrategyExecutions(name);
+                    this.loadStrategyPerformance(name, { range: '1d' });
+                };
+            }
+
+            await Promise.all([
+                this.loadStrategyPerformance(name, { range: '1d' }),
+                this.loadStrategyExecutions(name)
+            ]);
+        } catch (e) {
+            console.error('Open details error:', e);
+            this.showAlert('danger', 'Failed to open strategy details');
+        }
+    }
+
+    async loadStrategyPerformance(name, { range = '1d', start = null, end = null } = {}) {
+        try {
+            const params = new URLSearchParams();
+            if (range) params.set('range', range);
+            if (start) params.set('start', start);
+            if (end) params.set('end', end);
+            const res = await this.apiCall(`/strategies/${name}/performance?${params.toString()}`);
+            if (!res.success) return;
+            const m = res.metrics || {};
+            const el = (id) => document.getElementById(id);
+            el('kpiPnL').textContent = `$${(m.total_pnl ?? 0).toFixed(2)}`;
+            el('kpiWinRate').textContent = `${(m.win_rate ?? 0).toFixed(2)}%`;
+            el('kpiMaxDD').textContent = `$${(m.max_drawdown ?? 0).toFixed(2)}`;
+            el('kpiSharpe').textContent = `${(m.sharpe_ratio ?? 0).toFixed(2)}`;
+            el('kpiTrades').textContent = `${m.total_executions ?? 0}`;
+            el('kpiAvgDur').textContent = `${m.avg_trade_duration ?? 0}`;
+
+            // Charts from executions over selected range
+            const execRes = await this.apiCall(`/strategies/${name}/executions?limit=1000`);
+            const executions = (execRes.success ? (execRes.executions || []) : []).slice().sort((a,b)=> new Date(a.execution_time) - new Date(b.execution_time));
+            const labels = [];
+            const cumData = [];
+            let cum = 0;
+            executions.forEach(ex => {
+                const pnl = Number(ex.pnl || 0);
+                cum += pnl;
+                labels.push(ex.execution_time ? new Date(ex.execution_time).toLocaleString() : '');
+                cumData.push(cum);
+            });
+            this.renderLineChart('cumulativePnLChart', 'Cumulative PnL', labels, cumData, 'rgba(54, 162, 235, 1)');
+            const ddData = [];
+            let peak = -Infinity;
+            cum = 0;
+            executions.forEach(ex => {
+                cum += Number(ex.pnl || 0);
+                peak = Math.max(peak, cum);
+                ddData.push(cum - peak);
+            });
+            this.renderLineChart('drawdownChart', 'Drawdown', labels, ddData, 'rgba(255, 99, 132, 1)');
+            const pnls = executions.map(ex => Number(ex.pnl || 0));
+            const bins = this.makeHistogram(pnls, 20);
+            this.renderBarChart('pnlDistributionChart', 'PnL Distribution', bins.labels, bins.counts, 'rgba(75, 192, 192, 0.7)');
+            const wins = pnls.filter(v => v > 0).length;
+            const losses = pnls.filter(v => v <= 0).length;
+            this.renderPieChart('winLossChart', ['Win','Loss'], [wins, losses], ['#2ecc71', '#e74c3c']);
+        } catch (e) {
+            console.error('Load performance error:', e);
+        }
+    }
+
+    async loadStrategyExecutions(name, limit = 100) {
+        try {
+            const res = await this.apiCall(`/strategies/${name}/executions?limit=${limit}`);
+            if (!res.success) return;
+            const all = res.executions || [];
+            this.executionsPagination.allExecutions = all;
+            this.executionsPagination.totalItems = all.length;
+            this.executionsPagination.currentPage = 1;
+            this.renderExecutionsTable();
+            this.renderExecutionsPagination();
+        } catch (e) {
+            console.error('Load executions error:', e);
+        }
+    }
+
+    renderExecutionsTable() {
+        const tbody = document.querySelector('#executionsTable tbody');
+        if (!tbody) return;
+        tbody.innerHTML = '';
+        const { currentPage, pageSize, allExecutions } = this.executionsPagination;
+        const start = (currentPage - 1) * pageSize;
+        const end = start + pageSize;
+        const pageItems = allExecutions.slice(start, end);
+        pageItems.forEach(exe => {
+            const tr = document.createElement('tr');
+            const t = exe.execution_time ? new Date(exe.execution_time).toLocaleString() : '-';
+            tr.innerHTML = `
+              <td>${t}</td>
+              <td>${exe.symbol ?? '-'}</td>
+              <td>${exe.action ?? '-'}</td>
+              <td>${exe.quantity ?? '-'}</td>
+              <td>${exe.price != null ? exe.price : '-'}</td>
+              <td><span class="badge ${exe.status === 'executed' ? 'bg-success' : 'bg-secondary'}">${exe.status}</span></td>
+              <td>${exe.pnl != null ? Number(exe.pnl).toFixed(2) : '-'}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    renderExecutionsPagination() {
+        const ul = document.getElementById('executionsPagination');
+        if (!ul) return;
+        const { currentPage, pageSize, totalItems } = this.executionsPagination;
+        const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+        const makeLi = (label, page, disabled = false, active = false) => {
+            const li = document.createElement('li');
+            li.className = `page-item ${disabled ? 'disabled' : ''} ${active ? 'active' : ''}`;
+            const a = document.createElement('a');
+            a.className = 'page-link';
+            a.href = '#';
+            a.textContent = label;
+            a.onclick = (e) => {
+                e.preventDefault();
+                if (disabled || page === currentPage) return;
+                this.executionsPagination.currentPage = page;
+                this.renderExecutionsTable();
+                this.renderExecutionsPagination();
+            };
+            li.appendChild(a);
+            return li;
+        };
+
+        ul.innerHTML = '';
+        ul.appendChild(makeLi('«', Math.max(1, currentPage - 1), currentPage === 1));
+
+        const windowSize = 5;
+        const start = Math.max(1, currentPage - Math.floor(windowSize / 2));
+        const end = Math.min(totalPages, start + windowSize - 1);
+        for (let p = start; p <= end; p++) {
+            ul.appendChild(makeLi(String(p), p, false, p === currentPage));
+        }
+
+        ul.appendChild(makeLi('»', Math.min(totalPages, currentPage + 1), currentPage === totalPages));
+    }
+
+    exportExecutionsCsv(name) {
+        const rows = [
+            ['Time','Symbol','Action','Qty','Price','Status','PnL']
+        ];
+        const all = this.executionsPagination.allExecutions || [];
+        all.forEach(exe => {
+            rows.push([
+                exe.execution_time ? new Date(exe.execution_time).toISOString() : '',
+                exe.symbol ?? '',
+                exe.action ?? '',
+                exe.quantity ?? '',
+                exe.price ?? '',
+                exe.status ?? '',
+                exe.pnl ?? ''
+            ]);
+        });
+        const csv = rows.map(r => r.map(v => typeof v === 'string' && v.includes(',') ? `"${v.replace(/"/g,'""')}"` : v).join(',')).join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${(document.getElementById('detailsStrategyName')?.textContent || name)}_executions.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    // Chart helpers
+    ensureChartDestroyed(id) {
+        if (this.charts[id]) {
+            try { this.charts[id].destroy(); } catch {}
+            delete this.charts[id];
+        }
+    }
+
+    renderLineChart(canvasId, label, labels, data, color) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+        this.ensureChartDestroyed(canvasId);
+        this.charts[canvasId] = new Chart(ctx, {
+            type: 'line',
+            data: { labels, datasets: [{ label, data, borderColor: color, backgroundColor: color, fill: false, tension: 0.2, pointRadius: 0 }] },
+            options: { responsive: true, maintainAspectRatio: false, scales: { x: { display: true }, y: { display: true } } }
+        });
+    }
+
+    renderBarChart(canvasId, label, labels, data, color) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+        this.ensureChartDestroyed(canvasId);
+        this.charts[canvasId] = new Chart(ctx, {
+            type: 'bar',
+            data: { labels, datasets: [{ label, data, backgroundColor: color }] },
+            options: { responsive: true, maintainAspectRatio: false }
+        });
+    }
+
+    renderPieChart(canvasId, labels, data, colors) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+        this.ensureChartDestroyed(canvasId);
+        this.charts[canvasId] = new Chart(ctx, {
+            type: 'pie',
+            data: { labels, datasets: [{ data, backgroundColor: colors }] },
+            options: { responsive: true, maintainAspectRatio: false }
+        });
+    }
+
+    makeHistogram(values, bins) {
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const step = (max - min) / bins;
+        const labels = [];
+        const counts = new Array(bins).fill(0);
+        for (let i = 0; i < bins; i++) {
+            labels.push(`${(min + i * step).toFixed(2)}`);
+        }
+        values.forEach(v => {
+            const idx = Math.min(bins - 1, Math.floor((v - min) / step));
+            counts[idx]++;
+        });
+        return { labels, counts };
+    }
+
+    async deleteStrategy(name) {
+        if (!confirm(`Are you sure you want to delete strategy "${name}"?`)) {
+            return;
+        }
+        
+        try {
+            await this.apiCall(`/strategies/${name}`, { method: 'DELETE' });
+            this.showAlert('success', `Strategy ${name} deleted`);
+            this.loadStrategies();
+        } catch (error) {
+            console.error('Failed to delete strategy:', error);
+            this.showAlert('danger', 'Failed to delete strategy');
+        }
+    }
+
+    async loadLogs() {
+        try {
+            const logLevel = document.getElementById('logLevel')?.value || 'all';
+            const logLines = document.getElementById('logLines')?.value || '100';
+            
+            const response = await this.apiCall(`/logs?lines=${logLines}&level=${logLevel}`);
+            
+            if (response.success) {
+                this.displayLogs(response.logs);
+            }
+        } catch (error) {
+            console.error('Failed to load logs:', error);
+            this.showAlert('danger', 'Failed to load logs');
+        }
+    }
+
+    displayLogs(logs) {
+        const logsContent = document.getElementById('logsContent');
+        if (logsContent) {
+            logsContent.textContent = logs.join('\n');
+            // Auto scroll to bottom
+            logsContent.scrollTop = logsContent.scrollHeight;
+        }
+    }
+
+    async executeRiskRule(symbol, currentPrice, stopLossPrice, takeProfitPrice, positionSize) {
+        if (!positionSize || positionSize === 0) {
+            this.showAlert('No position found for ' + symbol, 'warning');
+            return;
+        }
+
+        try {
+            // Determine which rule to execute based on current price
+            let orderType = 'LIMIT';
+            let targetPrice = null;
+            let action = positionSize > 0 ? 'SELL' : 'BUY';
+            let ruleType = '';
+            let slippage = 0;
+
+            // Check stop loss condition
+            if (stopLossPrice && ((positionSize > 0 && currentPrice <= stopLossPrice) || (positionSize < 0 && currentPrice >= stopLossPrice))) {
+                targetPrice = stopLossPrice;
+                ruleType = 'Stop Loss';
+                // If price has already passed stop loss, use market order
+                if ((positionSize > 0 && currentPrice < stopLossPrice) || (positionSize < 0 && currentPrice > stopLossPrice)) {
+                    orderType = 'MARKET';
+                    slippage = Math.abs(currentPrice - stopLossPrice) / stopLossPrice * 100;
+                }
+            }
+            // Check take profit condition
+            else if (takeProfitPrice && ((positionSize > 0 && currentPrice >= takeProfitPrice) || (positionSize < 0 && currentPrice <= takeProfitPrice))) {
+                targetPrice = takeProfitPrice;
+                ruleType = 'Take Profit';
+                // If price has already passed take profit, use market order
+                if ((positionSize > 0 && currentPrice > takeProfitPrice) || (positionSize < 0 && currentPrice < takeProfitPrice)) {
+                    orderType = 'MARKET';
+                    slippage = Math.abs(currentPrice - takeProfitPrice) / takeProfitPrice * 100;
+                }
+            }
+            else {
+                this.showAlert('No rule conditions met for execution', 'info');
+                return;
+            }
+
+            // Confirm execution
+            let confirmMessage = `Execute ${ruleType} for ${symbol}?\n`;
+            confirmMessage += `Current Price: $${currentPrice.toFixed(2)}\n`;
+            confirmMessage += `Target Price: $${targetPrice.toFixed(2)}\n`;
+            confirmMessage += `Order Type: ${orderType}\n`;
+            confirmMessage += `Quantity: ${Math.abs(positionSize)}\n`;
+            if (slippage > 0) {
+                confirmMessage += `Estimated Slippage: ${slippage.toFixed(4)}%\n`;
+            }
+
+            if (!confirm(confirmMessage)) {
+                return;
+            }
+
+            // Prepare order data
+            const orderData = {
+                symbol: symbol,
+                action: action,
+                quantity: Math.abs(positionSize),
+                order_type: orderType
+            };
+
+            if (orderType === 'LIMIT') {
+                orderData.price = targetPrice;
+            }
+
+            // Place the order
+            const response = await this.apiCall('/place_order', 'POST', orderData);
+            
+            let message = `${ruleType} order placed successfully for ${symbol}`;
+            if (slippage > 0) {
+                message += ` (Slippage: ${slippage.toFixed(4)}%)`;
+            }
+            
+            this.showAlert(message, 'success');
+            
+            // Refresh data
+            await Promise.all([
+                this.loadPortfolio(),
+                this.loadRiskRules()
+            ]);
+
+        } catch (error) {
+            this.showAlert('Failed to execute risk rule: ' + error.message, 'danger');
+        }
+    }
+
+    clearData() {
+        document.getElementById('accountInfo').innerHTML = '<p class="text-muted">Connect to view account information</p>';
+        document.querySelector('#ordersTable tbody').innerHTML = '';
+        document.querySelector('#positionsTable tbody').innerHTML = '';
+        document.querySelector('#autoOrdersTable tbody').innerHTML = '';
+        document.querySelector('#riskRulesTable tbody').innerHTML = '';
+
+
+    }
+
+    getStatusColor(status) {
+        switch (status.toLowerCase()) {
+            case 'filled': return 'success';
+            case 'cancelled': case 'canceled': return 'danger';
+            case 'submitted': case 'presubmitted': return 'primary';
+            case 'pendingsubmit': return 'warning';
+            case 'pendingcancel': return 'info';
+            case 'inactive': return 'secondary';
+            case 'apiwaiting': return 'warning';
+            case 'apipending': return 'warning';
+            default: return 'secondary';
+        }
+    }
+
+    formatNumber(num) {
+        if (num === null || num === undefined) return 'N/A';
+        return parseFloat(num).toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+    }
+
+    showAlert(type, message) {
+        const alertContainer = document.getElementById('alertContainer');
+        const alertId = 'alert-' + Date.now();
+        
+        const alertHtml = `
+            <div id="${alertId}" class="alert alert-${type} alert-dismissible fade show" role="alert">
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+        `;
+        
+        alertContainer.insertAdjacentHTML('beforeend', alertHtml);
+        
+        // Auto-dismiss after 5 seconds
+        setTimeout(() => {
+            const alert = document.getElementById(alertId);
+            if (alert) {
+                const bsAlert = new bootstrap.Alert(alert);
+                bsAlert.close();
+            }
+        }, 5000);
+    }
+
+    // Symbol combobox functionality
+    initSymbolCombobox() {
+        this.setupSymbolInput('orderSymbol', 'orderSymbolDropdown');
+    }
+
+    setupSymbolInput(inputId, dropdownId) {
+        const input = document.getElementById(inputId);
+        const dropdown = document.getElementById(dropdownId);
+        let searchTimeout;
+
+        // Load historical symbols on focus
+        input.addEventListener('focus', () => {
+            this.showHistoricalSymbols(dropdownId);
+            dropdown.classList.add('show');
+        });
+
+        // Hide dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!input.contains(e.target) && !dropdown.contains(e.target)) {
+                dropdown.classList.remove('show');
+            }
+        });
+
+        // Search symbols on input
+        input.addEventListener('input', (e) => {
+            const query = e.target.value.trim();
+            
+            clearTimeout(searchTimeout);
+            
+            if (query.length === 0) {
+                this.showHistoricalSymbols(dropdownId);
+                return;
+            }
+
+            if (query.length >= 1) {
+                searchTimeout = setTimeout(() => {
+                    this.searchSymbols(query, dropdownId);
+                }, 300);
+            }
+        });
+
+        // Handle keyboard navigation
+        input.addEventListener('keydown', (e) => {
+            const items = dropdown.querySelectorAll('.dropdown-item');
+            const activeItem = dropdown.querySelector('.dropdown-item.active');
+            let activeIndex = Array.from(items).indexOf(activeItem);
+
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                activeIndex = activeIndex < items.length - 1 ? activeIndex + 1 : 0;
+                this.setActiveDropdownItem(items, activeIndex);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                activeIndex = activeIndex > 0 ? activeIndex - 1 : items.length - 1;
+                this.setActiveDropdownItem(items, activeIndex);
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (activeItem) {
+                    activeItem.click();
+                }
+            } else if (e.key === 'Escape') {
+                dropdown.classList.remove('show');
+                input.blur();
+            }
+        });
+    }
+
+    setActiveDropdownItem(items, activeIndex) {
+        items.forEach((item, index) => {
+            item.classList.toggle('active', index === activeIndex);
+        });
+    }
+
+    showHistoricalSymbols(dropdownId) {
+        const dropdown = document.getElementById(dropdownId);
+        const historicalSymbols = this.getHistoricalSymbols();
+        
+        let html = '';
+        
+        if (historicalSymbols.length > 0) {
+            html += '<h6 class="dropdown-header">Recent Symbols</h6>';
+            historicalSymbols.forEach(symbol => {
+                html += `<a class="dropdown-item" href="#" data-symbol="${symbol}">${symbol}</a>`;
+            });
+            html += '<div class="dropdown-divider"></div>';
+        }
+        
+        html += '<h6 class="dropdown-header">Popular Symbols</h6>';
+        const popularSymbols = ['MNQ', 'NQ', 'ES', 'YM', 'AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN'];
+        popularSymbols.forEach(symbol => {
+            if (!historicalSymbols.includes(symbol)) {
+                html += `<a class="dropdown-item" href="#" data-symbol="${symbol}">${symbol}</a>`;
+            }
+        });
+        
+        dropdown.innerHTML = html;
+        
+        // Add click handlers
+        dropdown.querySelectorAll('.dropdown-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                e.preventDefault();
+                const symbol = e.target.getAttribute('data-symbol');
+                const inputId = dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol';
+                document.getElementById(inputId).value = symbol;
+                dropdown.classList.remove('show');
+                this.addToHistoricalSymbols(symbol);
+            });
+        });
+    }
+
+    async searchSymbols(query, dropdownId) {
+        const dropdown = document.getElementById(dropdownId);
+        
+        try {
+            // Show loading
+            dropdown.innerHTML = '<div class="dropdown-item-text">Searching...</div>';
+            dropdown.classList.add('show');
+            
+            // For now, we'll use a simple client-side filter of common symbols
+            // In a real implementation, this would call an API
+            const allSymbols = [
+                'MNQ', 'NQ', 'ES', 'YM', 'RTY', 'CL', 'GC', 'SI',
+                'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'TSLA', 'NVDA', 'AMZN', 'META',
+                'NFLX', 'AMD', 'INTC', 'CRM', 'ORCL', 'ADBE', 'PYPL', 'UBER',
+                'SPOT', 'ZM', 'DOCU', 'SNOW', 'PLTR', 'COIN', 'RBLX', 'HOOD'
+            ];
+            
+            const filteredSymbols = allSymbols.filter(symbol => 
+                symbol.toLowerCase().includes(query.toLowerCase())
+            );
+            
+            let html = '';
+            
+            if (filteredSymbols.length > 0) {
+                html += '<h6 class="dropdown-header">Search Results</h6>';
+                filteredSymbols.slice(0, 10).forEach(symbol => {
+                    html += `<a class="dropdown-item" href="#" data-symbol="${symbol}">${symbol}</a>`;
+                });
+            } else {
+                html += '<div class="dropdown-item-text text-muted">No symbols found</div>';
+            }
+            
+            dropdown.innerHTML = html;
+            
+            // Add click handlers
+            dropdown.querySelectorAll('.dropdown-item').forEach(item => {
+                item.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const symbol = e.target.getAttribute('data-symbol');
+                    const inputId = dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol';
+                    document.getElementById(inputId).value = symbol;
+                    dropdown.classList.remove('show');
+                    this.addToHistoricalSymbols(symbol);
+                });
+            });
+            
+        } catch (error) {
+            console.error('Error searching symbols:', error);
+            dropdown.innerHTML = '<div class="dropdown-item-text text-danger">Search failed</div>';
+        }
+    }
+
+    getHistoricalSymbols() {
+        const stored = localStorage.getItem('historicalSymbols');
+        return stored ? JSON.parse(stored) : [];
+    }
+
+    addToHistoricalSymbols(symbol) {
+        let historical = this.getHistoricalSymbols();
+        
+        // Remove if already exists
+        historical = historical.filter(s => s !== symbol);
+        
+        // Add to beginning
+        historical.unshift(symbol);
+        
+        // Keep only last 10
+        historical = historical.slice(0, 10);
+        
+        localStorage.setItem('historicalSymbols', JSON.stringify(historical));
+    }
+
+    async loadAutoOrders() {
+        try {
+            const response = await fetch('/api/auto_orders');
+            const data = await response.json();
+            
+            if (data.success) {
+                this.displayAutoOrders(data.orders);
+            } else {
+                console.error('Failed to load auto orders:', data.message);
+            }
+        } catch (error) {
+            console.error('Error loading auto orders:', error);
+        }
+    }
+
+    displayAutoOrders(orders) {
+        const tbody = document.querySelector('#autoOrdersTable tbody');
+        tbody.innerHTML = '';
+        
+        if (!orders || orders.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No auto orders today</td></tr>';
+            return;
+        }
+        
+        orders.forEach(order => {
+            const row = document.createElement('tr');
+            
+            const createdAt = new Date(order.created_at).toLocaleString();
+            const price = order.price > 0 ? order.price.toFixed(2) : 'Market';
+            const sourceClass = order.order_source === 'auto' ? 'badge bg-success' : 'badge bg-primary';
+            
+            row.innerHTML = `
+                <td>${order.order_id}</td>
+                <td>${order.symbol}</td>
+                <td><span class="badge ${order.action === 'BUY' ? 'bg-success' : 'bg-danger'}">${order.action}</span></td>
+                <td>${order.quantity}</td>
+                <td>${order.order_type}</td>
+                <td>${price}</td>
+                <td>${order.status}</td>
+                <td><span class="${sourceClass}">${order.order_source}</span></td>
+                <td>${order.rule_id}</td>
+                <td>${createdAt}</td>
+            `;
+            
+            tbody.appendChild(row);
+        });
+    }
+
+    // 编辑订单
+    editOrder(orderId, symbol, action, quantity, orderType, limitPrice) {
+        // 填充下单表单
+        document.getElementById('orderSymbol').value = symbol;
+        document.getElementById('orderAction').value = action;
+        document.getElementById('orderQuantity').value = quantity;
+        document.getElementById('orderType').value = orderType;
+        
+        const priceInput = document.getElementById('orderPrice');
+        if (orderType === 'LMT' && limitPrice) {
+            priceInput.value = limitPrice;
+            priceInput.disabled = false;
+        } else {
+            priceInput.value = '';
+            priceInput.disabled = true;
+        }
+        
+        // 显示下单模态框
+        const modal = new bootstrap.Modal(document.getElementById('orderModal'));
+        modal.show();
+        
+        // 先取消原订单
+        this.cancelOrder(orderId);
+        
+        this.showAlert('info', `正在编辑订单 ${orderId}，原订单已取消，请重新提交`);
+    }
+
+    // 取消订单
+    async cancelOrder(orderId) {
+        try {
+            const response = await fetch('/api/cancel_order', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ order_id: orderId })
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                this.showAlert('success', `订单 ${orderId} 已成功取消`);
+                this.loadOrders(); // 刷新订单列表
+            } else {
+                this.showAlert('danger', `取消订单失败: ${result.error}`);
+            }
+        } catch (error) {
+            console.error('Cancel order error:', error);
+            this.showAlert('danger', '取消订单时发生错误');
+        }
+    }
 }
 
 // Initialize the app
@@ -1208,5 +2256,7 @@ setInterval(() => {
         app.loadOrders();
         app.loadRiskRules();
         app.loadAutoOrders();
+        app.loadStrategies();
+        app.loadLogs();
     }
 }, 30000);

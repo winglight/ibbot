@@ -11,8 +11,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 from dotenv import load_dotenv
 
-from ibkr_client import IBKRClient
-from telegram_notifier import TelegramNotifier
+from .ibkr_client import IBKRClient
+from .telegram_notifier import TelegramNotifier
 
 load_dotenv()
 
@@ -671,3 +671,35 @@ class RiskManager:
                 'order_source': order.order_source
             })
         return orders
+
+    def remove_order_record(self, order_id: str):
+        """从记录中删除订单"""
+        try:
+            if order_id in self.auto_orders:
+                del self.auto_orders[order_id]
+                self.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
+                logger.info(f"Order {order_id} removed from records")
+                return True
+            else:
+                logger.warning(f"Order {order_id} not found in records")
+                return False
+        except Exception as e:
+            logger.error(f"Error removing order {order_id}: {e}")
+            return False
+
+    def update_order_status(self, order_id: str, new_status: str):
+        """更新订单状态"""
+        try:
+            if order_id in self.auto_orders:
+                self.auto_orders[order_id].status = new_status
+                if new_status in ['Filled', 'Cancelled']:
+                    self.auto_orders[order_id].executed_at = datetime.now()
+                self.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
+                logger.info(f"Order {order_id} status updated to {new_status}")
+                return True
+            else:
+                logger.warning(f"Order {order_id} not found in records for status update")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating order {order_id} status: {e}")
+            return False
