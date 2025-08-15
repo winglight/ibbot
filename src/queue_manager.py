@@ -32,6 +32,13 @@ class QueueManager:
         self.is_running = False
         self._worker_task: Optional[asyncio.Task] = None
         
+        # 依赖注入的对象
+        self.ibkr_client = None
+        self.risk_manager = None
+        self.strategy_manager = None
+        self.connection_manager = None
+        self.websocket_manager = None
+        
         # 确保数据目录存在
         self.data_dir = Path("data")
         self.data_dir.mkdir(exist_ok=True)
@@ -39,6 +46,14 @@ class QueueManager:
         
         # 启动时加载持久化的任务
         self._load_tasks()
+    
+    def set_dependencies(self, ibkr_client, risk_manager, strategy_manager, connection_manager, websocket_manager):
+        """设置依赖对象"""
+        self.ibkr_client = ibkr_client
+        self.risk_manager = risk_manager
+        self.strategy_manager = strategy_manager
+        self.connection_manager = connection_manager
+        self.websocket_manager = websocket_manager
     
     def add_task(self, task_type: str, payload: Dict[str, Any], max_retries: int = 3) -> str:
         """添加任务到队列"""
@@ -94,6 +109,26 @@ class QueueManager:
             "total_tasks": len(self.tasks),
             "max_concurrent_tasks": self.max_concurrent_tasks
         }
+    
+    def get_all_tasks(self) -> List[Dict[str, Any]]:
+        """获取所有任务列表"""
+        tasks_list = []
+        for task in self.tasks.values():
+            tasks_list.append({
+                "task_id": task.task_id,
+                "task_type": task.task_type,
+                "status": task.status,
+                "created_at": task.created_at.isoformat(),
+                "started_at": task.started_at.isoformat() if task.started_at else None,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                "error_message": task.error_message,
+                "retry_count": task.retry_count,
+                "payload": task.payload
+            })
+        
+        # 按创建时间倒序排列
+        tasks_list.sort(key=lambda x: x["created_at"], reverse=True)
+        return tasks_list
     
     async def start_worker(self):
         """启动队列工作器"""
@@ -200,22 +235,19 @@ class QueueManager:
         """处理策略订单任务"""
         from datetime import datetime
         
-        # 获取全局对象
-        import main
-        ibkr_client = main.ibkr_client
-        risk_manager = main.risk_manager
-        strategy_manager = main.strategy_manager
-        connection_manager = main.connection_manager
-        manager = main.manager
+        # 检查依赖对象是否已设置
+        if not all([self.ibkr_client, self.risk_manager, self.strategy_manager, 
+                   self.connection_manager, self.websocket_manager]):
+            raise Exception("Dependencies not properly set")
         
         payload = task.payload
         
         # 检查IBKR连接
-        if not ibkr_client or not connection_manager.is_connected():
+        if not self.ibkr_client or not self.connection_manager.is_connected():
             raise Exception("Not connected to IBKR")
         
         # 验证策略
-        strategy = strategy_manager.get_strategy(payload['strategy'])
+        strategy = self.strategy_manager.get_strategy(payload['strategy'])
         if not strategy or not strategy.get('enabled', False):
             raise Exception("Strategy disabled or not found")
         
@@ -237,7 +269,7 @@ class QueueManager:
         if order_type == "MARKET":
             trade = await loop.run_in_executor(
                 None,
-                lambda: ibkr_client.place_market_order(
+                lambda: self.ibkr_client.place_market_order(
                     symbol=payload['symbol'],
                     quantity=payload['qty'],
                     action=action,
@@ -250,7 +282,7 @@ class QueueManager:
                 raise Exception("Price required for limit order")
             trade = await loop.run_in_executor(
                 None,
-                lambda: ibkr_client.place_limit_order(
+                lambda: self.ibkr_client.place_limit_order(
                     symbol=payload['symbol'],
                     quantity=payload['qty'],
                     price=payload['price'],
@@ -268,7 +300,7 @@ class QueueManager:
         order_id = str(trade.order.orderId)
         
         # 记录风险管理订单
-        if risk_manager:
+        if self.risk_manager:
             from src.risk_manager import AutoOrder
             
             auto_order = AutoOrder(
@@ -285,8 +317,8 @@ class QueueManager:
                 order_source="strategy"
             )
             
-            risk_manager.auto_orders[order_id] = auto_order
-            risk_manager.save_auto_order_to_db(auto_order)
+            self.risk_manager.auto_orders[order_id] = auto_order
+            self.risk_manager.save_auto_order_to_db(auto_order)
         
         # 记录策略执行
         from src.strategy_manager import StrategyExecution
@@ -300,10 +332,10 @@ class QueueManager:
             price=payload.get('price'),
             status="executed"
         )
-        strategy_manager.record_execution(execution)
+        self.strategy_manager.record_execution(execution)
         
         # 广播消息
-        await manager.broadcast({
+        await self.websocket_manager.broadcast({
             "type": "order_placed",
             "order_id": trade.order.orderId,
             "symbol": payload['symbol'],

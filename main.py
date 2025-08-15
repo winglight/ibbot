@@ -321,6 +321,15 @@ async def startup_event():
     risk_manager = RiskManager(ibkr_client, telegram_notifier)
     strategy_manager = StrategyManager(data_dir="data", strategy_dir="strategy")
     
+    # Set dependencies for queue manager
+    queue_manager.set_dependencies(
+        ibkr_client=ibkr_client,
+        risk_manager=risk_manager,
+        strategy_manager=strategy_manager,
+        connection_manager=connection_manager,
+        websocket_manager=manager
+    )
+    
     # Start queue worker
     await queue_manager.start_worker()
     logger.info("Queue worker started")
