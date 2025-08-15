@@ -1314,7 +1314,9 @@ def main():
     if auto_connect:
         logger.info("Auto-connect enabled, attempting to connect to IBKR...")
         try:
-            if not test_connection():
+            # Use the connection manager directly for synchronous connection test
+            success = connection_manager.connect()
+            if not success:
                 logger.warning("IBKR auto-connection failed. Continuing without connection...")
                 logger.info("You can connect later through the web interface.")
             else:
