@@ -18,12 +18,21 @@
 - ✅ **订单队列**: FIFO队列确保订单执行顺序
 - ✅ **资金检查**: 下单前资金充足性验证
 
+### ⚡ 异步队列系统
+- ✅ **FIFO队列管理**: 先进先出的任务队列确保处理顺序
+- ✅ **异步任务处理**: 非阻塞的任务执行机制
+- ✅ **重试机制**: 失败任务自动重试，最多3次
+- ✅ **状态跟踪**: 实时监控任务状态（待处理、处理中、已完成、失败）
+- ✅ **错误处理**: 详细的错误信息记录和处理
+- ✅ **队列监控**: 队列状态统计和任务详情查询
+
 ### 🤖 策略系统
 - ✅ **外部策略**: 支持HTTP API调用外部策略服务
 - ✅ **内部策略**: Python脚本策略执行
 - ✅ **策略管理**: 策略启用/禁用、性能跟踪
 - ✅ **执行记录**: 详细的策略执行历史和P&L分析
 - ✅ **认证机制**: 策略API访问令牌管理
+- ✅ **异步队列**: FIFO队列处理策略订单，支持重试和错误处理
 
 ### 🌐 Web界面
 - ✅ **现代化UI**: 基于Bootstrap的响应式设计
@@ -176,6 +185,7 @@ ibbot/
 │   ├── connection_manager.py # 🔗 连接管理器
 │   ├── risk_manager.py       # 🛡️ 风险管理模块
 │   ├── strategy_manager.py   # 🤖 策略管理模块
+│   ├── queue_manager.py      # ⚡ 异步队列管理器
 │   ├── telegram_notifier.py  # 📱 Telegram通知模块
 │   ├── database.py           # 💾 SQLite数据库管理
 │   └── test.py              # 🧪 测试模块
@@ -254,9 +264,14 @@ ibbot/
 - `DELETE /api/strategies/{name}` - 删除策略
 - `POST /api/strategies/{name}/toggle` - 启用/禁用策略
 - `GET /api/strategies/{name}/performance` - 获取策略性能
-- `POST /api/strategy` - 外部策略订单接口
+- `POST /api/strategy` - 外部策略订单接口（异步队列处理）
 - `GET /api/strategies/{name}/executions` - 获取策略执行记录
 - `DELETE /api/strategies/{name}/executions` - 清除策略执行记录
+
+### ⚡ 队列管理
+- `GET /api/queue/status` - 获取队列状态统计
+- `GET /api/queue/tasks` - 获取所有任务列表
+- `GET /api/queue/task/{task_id}` - 获取指定任务详情
 
 ### 📝 系统管理
 - `GET /api/logs` - 获取系统日志

@@ -111,6 +111,20 @@
           "created_at": {"type": "string", "description": "创建时间"}
         }
       },
+      "QueueTask": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string", "description": "任务ID"},
+          "task_type": {"type": "string", "description": "任务类型"},
+          "status": {"type": "string", "enum": ["pending", "processing", "completed", "failed"], "description": "任务状态"},
+          "created_at": {"type": "string", "description": "创建时间"},
+          "updated_at": {"type": "string", "description": "更新时间"},
+          "completed_at": {"type": "string", "description": "完成时间"},
+          "error_message": {"type": "string", "description": "错误信息"},
+          "retry_count": {"type": "integer", "description": "重试次数"},
+          "payload": {"type": "object", "description": "任务数据"}
+        }
+      },
       "Strategy": {
         "type": "object",
         "properties": {
@@ -1130,6 +1144,88 @@
           }
         }
       }
+    },
+    "/api/queue/status": {
+      "get": {
+        "tags": ["队列管理"],
+        "summary": "获取队列状态",
+        "description": "获取任务队列的状态统计信息",
+        "responses": {
+          "200": {
+            "description": "队列状态统计",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "is_running": {"type": "boolean", "description": "队列是否运行中"},
+                    "pending_tasks": {"type": "integer", "description": "待处理任务数"},
+                    "processing_tasks": {"type": "integer", "description": "处理中任务数"},
+                    "completed_tasks": {"type": "integer", "description": "已完成任务数"},
+                    "failed_tasks": {"type": "integer", "description": "失败任务数"},
+                    "total_tasks": {"type": "integer", "description": "总任务数"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/queue/tasks": {
+      "get": {
+        "tags": ["队列管理"],
+        "summary": "获取所有任务",
+        "description": "获取队列中所有任务的详细信息",
+        "responses": {
+          "200": {
+            "description": "任务列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/QueueTask"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/queue/task/{task_id}": {
+      "get": {
+        "tags": ["队列管理"],
+        "summary": "获取任务详情",
+        "description": "获取指定任务的详细信息",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "任务ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "任务详情",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueTask"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在"
+          }
+        }
+      }
     }
   },
   "tags": [
@@ -1164,6 +1260,10 @@
     {
       "name": "系统管理",
       "description": "系统监控和日志管理接口"
+    },
+    {
+      "name": "队列管理",
+      "description": "异步任务队列管理接口"
     }
   ]
 }

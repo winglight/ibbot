@@ -48,6 +48,13 @@ Web界面,日志查看,Web端系统日志查看,已完成,中,HTML + JavaScript,
 数据管理,风险规则存储,风险规则的数据库存储,已完成,高,SQLite3,src/database.py
 数据管理,策略数据存储,策略配置和执行记录存储,已完成,高,SQLite3,src/database.py
 数据管理,历史数据存储,市场历史数据CSV存储,已完成,中,CSV + pandas,src/ibkr_client.py
+队列系统,FIFO队列管理,先进先出的任务队列管理,已完成,高,Python Queue,src/queue_manager.py
+队列系统,异步任务处理,非阻塞的任务执行机制,已完成,高,AsyncIO + Threading,src/queue_manager.py
+队列系统,任务重试机制,失败任务自动重试最多3次,已完成,高,Python,src/queue_manager.py
+队列系统,任务状态跟踪,实时监控任务状态变化,已完成,高,Python,src/queue_manager.py
+队列系统,错误处理,详细的错误信息记录和处理,已完成,中,Python,src/queue_manager.py
+队列系统,队列状态查询,获取队列统计信息和任务详情,已完成,中,FastAPI,main.py
+队列系统,策略订单队列,策略订单异步队列处理,已完成,高,Python Queue,src/queue_manager.py
 系统管理,日志记录,结构化日志记录和管理,已完成,高,loguru,全局
 系统管理,配置管理,环境变量和配置文件管理,已完成,高,python-dotenv,main.py
 系统管理,错误处理,全局异常处理和错误恢复,已完成,高,Python try-catch,全局
