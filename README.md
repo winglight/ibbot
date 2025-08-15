@@ -1,41 +1,48 @@
 # IBKR Trading Bot
 
-一个基于Interactive Brokers API的全功能交易机器人，支持实时数据获取、自动交易、风险管理和Web界面。
+一个基于Interactive Brokers API的全功能交易机器人，支持实时数据获取、自动交易、风险管理、策略执行和Web界面管理。
 
-## 功能特性
+## 🚀 核心特性
 
-### 核心交易功能
-- ✅ 连接IBKR交易服务器（支持模拟和真实账号）
-- ✅ 获取指定股票历史数据并保存到CSV文件
-- ✅ 实时获取股票数据
-- ✅ 下单功能（支持限价单和市价单）
-- ✅ 取消订单（支持取消指定订单和取消所有订单）
-- ✅ 获取订单列表（包括已下单、已取消、已填充等状态）
-- ✅ 查询账户基础信息（账户ID、可用资金、P&L等）
-- ✅ 获取持仓列表（包括盈亏计算）
-- ✅ 查询交易记录
+### 📈 交易功能
+- ✅ **多市场支持**: 股票(STK)、期货(FUT)等多种证券类型
+- ✅ **智能下单**: 市价单、限价单，支持SMART路由
+- ✅ **订单管理**: 实时订单状态跟踪、批量取消、订单历史
+- ✅ **实时数据**: 实时价格、历史数据、图表数据
+- ✅ **账户管理**: 资金状况、持仓信息、P&L计算
 
-### 风险管理功能
-- ✅ 基于亏损阈值的自动监控和通知
-- ✅ 自动止损平仓功能
-- ✅ 止盈止损价格设置
-- ✅ 单线程FIFO订单队列处理
-- ✅ 资金充足性检查
+### 🛡️ 风险管理
+- ✅ **智能止损止盈**: 基于价格和百分比的自动风险控制
+- ✅ **多级风险阈值**: 3%警告、8%自动平仓等可配置阈值
+- ✅ **实时监控**: 持仓风险实时监控和自动处理
+- ✅ **订单队列**: FIFO队列确保订单执行顺序
+- ✅ **资金检查**: 下单前资金充足性验证
 
-### 通知功能
-- ✅ Telegram消息通知
-- ✅ 亏损警报
-- ✅ 自动平仓通知
-- ✅ 订单状态通知
-- ✅ 每日账户摘要
+### 🤖 策略系统
+- ✅ **外部策略**: 支持HTTP API调用外部策略服务
+- ✅ **内部策略**: Python脚本策略执行
+- ✅ **策略管理**: 策略启用/禁用、性能跟踪
+- ✅ **执行记录**: 详细的策略执行历史和P&L分析
+- ✅ **认证机制**: 策略API访问令牌管理
 
-### Web界面
-- ✅ 现代化响应式Web UI
-- ✅ 实时数据展示
-- ✅ 账户设置和登录
-- ✅ 交易操作界面
-- ✅ 风险管理设置
-- ✅ WebSocket实时更新
+### 🌐 Web界面
+- ✅ **现代化UI**: 基于Bootstrap的响应式设计
+- ✅ **实时更新**: WebSocket实时数据推送
+- ✅ **用户认证**: JWT令牌认证系统
+- ✅ **多功能面板**: 交易、风险、策略、日志管理
+- ✅ **图表展示**: 实时价格图表和历史数据可视化
+
+### 📱 通知系统
+- ✅ **Telegram集成**: 实时交易通知和风险警报
+- ✅ **多级通知**: 信息、警告、错误分级通知
+- ✅ **每日摘要**: 自动生成账户日报
+- ✅ **事件通知**: 订单执行、风险触发等关键事件
+
+### 💾 数据管理
+- ✅ **SQLite数据库**: 统一的数据存储和管理
+- ✅ **数据迁移**: 从CSV/JSON文件自动迁移到数据库
+- ✅ **备份机制**: 订单和配置数据自动备份
+- ✅ **历史数据**: 完整的交易和策略执行历史
 
 ## 安装要求
 
@@ -151,51 +158,111 @@ python main.py
 - 设置止损价格和止盈价格
 - 系统将自动监控并执行风险管理规则
 
-## 项目结构
+## 📁 项目结构
 
 ```
 ibbot/
-├── main.py                 # 主程序入口
-├── ibkr_client.py          # IBKR API客户端
-├── telegram_notifier.py    # Telegram通知模块
-├── risk_manager.py         # 风险管理模块
-├── web_api.py             # Web API服务器
-├── requirements.txt        # Python依赖
-├── .env.example           # 环境变量示例
-├── README.md              # 项目文档
-├── static/                # 静态文件
-│   ├── index.html         # 主页面
-│   └── app.js            # 前端JavaScript
-├── logs/                  # 日志文件
-└── data/                  # 数据文件
+├── main.py                    # 🚀 主程序入口和FastAPI服务器
+├── requirements.txt           # 📦 Python依赖包列表
+├── .env.example              # ⚙️ 环境变量配置示例
+├── .env.gateway              # 🔧 IB Gateway配置
+├── install_ib_gateway.sh     # 📥 IB Gateway安装脚本
+├── start.sh                  # 🏃 启动脚本
+├── README.md                 # 📖 项目文档
+│
+├── src/                      # 📂 核心模块
+│   ├── __init__.py
+│   ├── ibkr_client.py        # 🔌 IBKR API客户端
+│   ├── connection_manager.py # 🔗 连接管理器
+│   ├── risk_manager.py       # 🛡️ 风险管理模块
+│   ├── strategy_manager.py   # 🤖 策略管理模块
+│   ├── telegram_notifier.py  # 📱 Telegram通知模块
+│   ├── database.py           # 💾 SQLite数据库管理
+│   └── test.py              # 🧪 测试模块
+│
+├── static/                   # 🌐 Web前端文件
+│   ├── index.html           # 🏠 主页面
+│   ├── app.js               # ⚡ 前端JavaScript逻辑
+│   └── style.css            # 🎨 样式文件
+│
+├── tunnel/                   # 🌉 网络隧道配置
+│   └── config.yaml
+│
+├── data/                     # 💾 数据存储目录
+│   ├── trading_bot.db       # 🗄️ SQLite数据库
+│   ├── orders_backup.csv    # 📋 订单备份
+│   └── *.csv                # 📊 历史数据文件
+│
+├── strategy/                 # 🤖 策略脚本目录
+│   └── *.py                 # 📝 Python策略文件
+│
+└── logs/                     # 📝 日志文件目录
+    └── *.log                # 📄 应用日志
 ```
 
-## API接口
+### 🏗️ 架构设计
 
-### 连接管理
-- `POST /api/connect` - 连接IBKR
-- `POST /api/disconnect` - 断开连接
+- **main.py**: FastAPI应用主入口，包含所有API端点和WebSocket连接
+- **src/**: 核心业务逻辑模块，采用模块化设计
+- **static/**: 前端单页应用，使用Bootstrap + JavaScript
+- **data/**: SQLite数据库和CSV备份文件存储
+- **strategy/**: 用户自定义策略脚本存放目录
+
+## 🔌 API接口文档
+
+### 🔐 认证
+- `POST /api/login` - 用户登录获取JWT令牌
+
+### 🔗 连接管理
+- `POST /api/connect` - 连接IBKR服务器
+- `POST /api/disconnect` - 断开IBKR连接
 - `GET /api/connection_status` - 获取连接状态
 
-### 市场数据
-- `POST /api/historical_data` - 获取历史数据
-- `GET /api/realtime_data/{symbol}` - 获取实时数据
+### 📊 市场数据
+- `POST /api/historical_data` - 获取历史K线数据
+- `POST /api/chart_data` - 获取图表数据
+- `GET /api/realtime_data/{symbol}` - 获取实时价格数据
 
-### 交易操作
-- `POST /api/place_order` - 下单
-- `DELETE /api/cancel_order/{order_id}` - 取消订单
+### 💼 交易操作
+- `POST /api/place_order` - 提交交易订单
+- `POST /api/cancel_order` - 取消指定订单
+- `DELETE /api/cancel_order/{order_id}` - 取消订单(RESTful)
 - `DELETE /api/cancel_all_orders` - 取消所有订单
 - `GET /api/orders` - 获取订单列表
+- `GET /api/order_queue_status` - 获取订单队列状态
 
-### 账户信息
-- `GET /api/account_info` - 获取账户信息
+### 👤 账户信息
+- `GET /api/account_info` - 获取账户基本信息
 - `GET /api/positions` - 获取持仓列表
 
-
-### 风险管理
+### 🛡️ 风险管理
 - `POST /api/risk_rules` - 添加风险规则
-- `GET /api/risk_rules` - 获取风险规则
+- `GET /api/risk_rules` - 获取风险规则列表
+- `PUT /api/risk_rules/{symbol}` - 更新风险规则
 - `DELETE /api/risk_rules/{symbol}` - 删除风险规则
+- `GET /api/risk-config` - 获取风险配置
+- `GET /api/auto_orders` - 获取自动订单列表
+
+### 🤖 策略管理
+- `GET /api/strategy/settings` - 获取策略设置
+- `POST /api/strategy/settings` - 更新策略设置
+- `POST /api/strategy/settings/generate-token` - 生成策略认证令牌
+- `GET /api/strategies` - 获取策略列表
+- `POST /api/strategies` - 添加新策略
+- `GET /api/strategies/{name}` - 获取指定策略
+- `PUT /api/strategies/{name}` - 更新策略
+- `DELETE /api/strategies/{name}` - 删除策略
+- `POST /api/strategies/{name}/toggle` - 启用/禁用策略
+- `GET /api/strategies/{name}/performance` - 获取策略性能
+- `POST /api/strategy` - 外部策略订单接口
+- `GET /api/strategies/{name}/executions` - 获取策略执行记录
+- `DELETE /api/strategies/{name}/executions` - 清除策略执行记录
+
+### 📝 系统管理
+- `GET /api/logs` - 获取系统日志
+- `WebSocket /ws` - 实时数据推送
+
+> 📋 完整的API文档请参考 `api_doc.json` 文件
 
 ## 安全注意事项
 

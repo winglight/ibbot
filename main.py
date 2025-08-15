@@ -39,6 +39,7 @@ from src.connection_manager import connection_manager, ConnectionConfig
 from src.strategy_manager import StrategyManager
 from src.database import get_db_manager
 from src.strategy_manager import StrategyExecution
+from src.queue_manager import queue_manager
 
 # Global variables
 load_dotenv()
@@ -319,6 +320,11 @@ async def startup_event():
     telegram_notifier = TelegramNotifier()
     risk_manager = RiskManager(ibkr_client, telegram_notifier)
     strategy_manager = StrategyManager(data_dir="data", strategy_dir="strategy")
+    
+    # Start queue worker
+    await queue_manager.start_worker()
+    logger.info("Queue worker started")
+    
     # Use async test to avoid blocking
     ok = await test_connection_async()
     if not ok:
@@ -347,6 +353,10 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     global ibkr_client, risk_manager
+    
+    # Stop queue worker
+    await queue_manager.stop_worker()
+    logger.info("Queue worker stopped")
     
     if risk_manager:
         risk_manager.stop()
@@ -1147,10 +1157,10 @@ async def get_strategy_performance_api(name: str, range: str = "1d", start: Opti
     metrics = strategy_manager.get_strategy_performance(name, start_date, end_date)
     return {"success": True, "metrics": metrics}
 
-# External trigger endpoint
+# External trigger endpoint - Async queue version
 @app.post("/api/strategy")
 async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Request):
-    from datetime import datetime  # ensure available for all paths
+    """策略订单接口 - 立即返回200，异步处理"""
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     
@@ -1176,117 +1186,65 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
     if not strategy or not strategy.get('enabled', False):
         raise HTTPException(status_code=400, detail="Strategy disabled or not found")
     
-    # Check IBKR connection BEFORE any expensive operations
-    if not ibkr_client or not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    # 基本参数验证
+    if payload.type.upper() == "LIMIT" and not payload.price:
+        raise HTTPException(status_code=400, detail="Price required for limit order")
     
-    # Map to place_order with proper formatting
-    order_type = payload.type.upper()
-    action = payload.action.upper()  # Normalize to uppercase
+    if payload.type.upper() not in ["MARKET", "LIMIT"]:
+        raise HTTPException(status_code=400, detail="Invalid order type")
     
-    # Auto-detect futures based on symbol
-    sec_type = payload.sec_type or 'STK'
-    if payload.symbol in ['MNQ', 'NQ', 'ES', 'MES']:
-        sec_type = 'FUT'
-        exchange = 'CME'  # Use proper exchange for futures
-    else:
-        exchange = payload.exchange or 'SMART'
+    # 将任务加入队列
+    task_payload = {
+        "strategy": payload.strategy,
+        "symbol": payload.symbol,
+        "action": payload.action,
+        "qty": payload.qty,
+        "type": payload.type,
+        "price": payload.price,
+        "exchange": payload.exchange,
+        "sec_type": payload.sec_type
+    }
     
-    try:
-        # This is after all validation checks; avoid extra IBKR calls here
-        
-        # Place order via IBKRClient with run_in_executor
-        loop = asyncio.get_event_loop()
-        
-        if order_type == "MARKET":
-            trade = await loop.run_in_executor(
-                None,
-                lambda: ibkr_client.place_market_order(
-                    symbol=payload.symbol,
-                    quantity=payload.qty,
-                    action=action,
-                    exchange=exchange,
-                    sec_type=sec_type
-                )
-            )
-        elif order_type == "LIMIT":
-            if not payload.price:
-                raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = await loop.run_in_executor(
-                None,
-                lambda: ibkr_client.place_limit_order(
-                    symbol=payload.symbol,
-                    quantity=payload.qty,
-                    price=payload.price,
-                    action=action,
-                    exchange=exchange,
-                    sec_type=sec_type
-                )
-            )
-        else:
-            raise HTTPException(status_code=400, detail="Invalid order type")
-        
-        if trade:
-            order_id = str(trade.order.orderId)
-            
-            # Record strategy order as bot order if risk_manager is available
-            if risk_manager:
-                from src.risk_manager import AutoOrder
-                
-                auto_order = AutoOrder(
-                    order_id=order_id,
-                    symbol=payload.symbol,
-                    action=action,
-                    quantity=payload.qty,
-                    order_type=order_type,
-                    price=payload.price if payload.price else 0.0,
-                    status="Submitted",
-                    created_at=datetime.now(),
-                    executed_at=None,
-                    rule_id=payload.strategy,  # Use strategy name as rule identifier
-                    order_source="strategy"  # Mark as strategy order
-                )
-                
-                risk_manager.auto_orders[order_id] = auto_order
-                risk_manager.save_auto_order_to_db(auto_order)
-            
-            # Record strategy execution with proper price
-            from src.strategy_manager import StrategyExecution
-            execution = StrategyExecution(
-                strategy_name=payload.strategy,
-                execution_time=datetime.now(),
-                order_id=order_id,
-                symbol=payload.symbol,
-                action=payload.action,
-                quantity=payload.qty,
-                price=payload.price if payload.price else None,  # Set price from request
-                status="executed"
-            )
-            strategy_manager.record_execution(execution)
-            
-            await manager.broadcast({
-                "type": "order_placed",
-                "order_id": trade.order.orderId,
-                "symbol": payload.symbol,
-                "action": action,
-                "quantity": payload.qty
-            })
-            
-            return {
-                "success": True,
-                "order_id": trade.order.orderId,
-                "message": "Strategy order placed successfully"
-            }
-        else:
-            raise HTTPException(status_code=400, detail="Failed to place strategy order")
-        
-    except HTTPException as he:
-        # 直接透传原有的HTTP错误（例如下单失败的400）
-        logger.error(f"Strategy order HTTP error: {he.detail}")
-        raise he
-    except Exception as e:
-        logger.error(f"Strategy order unexpected error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    task_id = queue_manager.add_task("strategy_order", task_payload)
+    
+    # 立即返回200
+    return {
+        "success": True,
+        "task_id": task_id,
+        "message": "Strategy order queued for processing",
+        "status": "queued"
+    }
+
+# Queue Management APIs
+@app.get("/api/queue/status")
+async def get_queue_status():
+    """获取队列整体状态"""
+    if not queue_manager:
+        raise HTTPException(status_code=500, detail="Queue manager not initialized")
+    
+    status = queue_manager.get_queue_status()
+    return status
+
+@app.get("/api/queue/task/{task_id}")
+async def get_task_status(task_id: str):
+    """获取特定任务状态"""
+    if not queue_manager:
+        raise HTTPException(status_code=500, detail="Queue manager not initialized")
+    
+    task_status = queue_manager.get_task_status(task_id)
+    if not task_status:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    return task_status
+
+@app.get("/api/queue/tasks")
+async def get_all_tasks():
+    """获取所有任务列表"""
+    if not queue_manager:
+        raise HTTPException(status_code=500, detail="Queue manager not initialized")
+    
+    tasks = queue_manager.get_all_tasks()
+    return {"tasks": tasks}
 
 # Strategy Executions API
 @app.get("/api/strategies/{name}/executions")
