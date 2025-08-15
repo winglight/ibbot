@@ -15,6 +15,7 @@ from .ibkr_client import IBKRClient
 from .telegram_notifier import TelegramNotifier
 from .database import DatabaseManager, get_db_manager
 from .database import AutoOrder as DatabaseAutoOrder
+from .database import RiskRule as DatabaseRiskRule
 
 load_dotenv()
 
@@ -91,8 +92,8 @@ class RiskManager:
         self.loss_threshold_2 = 0.08  # 8% 损失阈值，触发自动平仓
         
         # 价格阈值与杠杆配置
-        self.price_threshold = 0.02  # 2% 默认价格阈值
-        self.leverage_mnq = 20  # MNQ杠杆倍数
+        self.price_threshold = float(os.getenv('PRICE_THRESHOLD', 0.02))  # 从环境变量读取，默认2%金额阈值
+        self.leverage_mnq = int(os.getenv('LEVERAGE_MNQ', 20))  # MNQ杠杆倍数，从环境变量读取
         
         # 待处理的限价订单状态
         self.pending_limit_orders: Dict[str, Dict[str, bool]] = {}
@@ -114,7 +115,7 @@ class RiskManager:
                     stop_loss_price=rule_db.stop_loss_price,
                     take_profit_price=rule_db.take_profit_price,
                     max_loss_percent=rule_db.max_loss_percent,
-                    enabled=True,  # 数据库中暂无enabled字段，默认为True
+                    enabled=getattr(rule_db, 'enabled', True),  # 从数据库读取enabled
                     created_at=datetime.fromisoformat(rule_db.timestamp) if rule_db.timestamp else datetime.now()
                 )
                 self.risk_rules[rule.symbol] = rule
@@ -123,6 +124,12 @@ class RiskManager:
             db_orders = self.db_manager.load_auto_orders()
             for order_db in db_orders:
                 # 从数据库的AutoOrder转换为RiskManager的AutoOrder
+                # 正确映射所有字段，处理缺失的status、executed_at等字段
+                executed_dt = None
+                try:
+                    executed_dt = datetime.fromisoformat(order_db.executed_at) if getattr(order_db, 'executed_at', None) else None
+                except Exception:
+                    executed_dt = None
                 order = AutoOrder(
                     order_id=order_db.order_id,
                     symbol=order_db.symbol,
@@ -130,11 +137,11 @@ class RiskManager:
                     quantity=order_db.quantity,
                     order_type=order_db.order_type,
                     price=order_db.price,
-                    status="unknown",  # 数据库中暂无status字段，默认为unknown
+                    status=getattr(order_db, 'status', None) or "pending",
                     created_at=datetime.fromisoformat(order_db.timestamp) if order_db.timestamp else datetime.now(),
-                    executed_at=None,  # 数据库中暂无executed_at字段
-                    rule_id=None,  # 数据库中暂无rule_id字段
-                    order_source="auto"  # 数据库中暂无order_source字段，默认为auto
+                    executed_at=executed_dt,  # 可能为None
+                    rule_id=getattr(order_db, 'rule_id', None),
+                    order_source=getattr(order_db, 'order_source', None) or "auto"
                 )
                 self.auto_orders[order.order_id] = order
             
@@ -156,13 +163,15 @@ class RiskManager:
                 self.load_risk_rules_from_csv(risk_rules_file)
                 # 将加载的规则保存到数据库
                 for rule in self.risk_rules.values():
-                    self.db_manager.save_risk_rule(RiskRule(
+                    db_rule = DatabaseRiskRule(
                         symbol=rule.symbol,
                         stop_loss_price=rule.stop_loss_price,
                         take_profit_price=rule.take_profit_price,
                         max_loss_percent=rule.max_loss_percent,
+                        enabled=rule.enabled,
                         timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
-                    ))
+                    )
+                    self.db_manager.save_risk_rule(db_rule)
                 logger.info(f"Migrated {len(self.risk_rules)} risk rules to database")
             
             # 迁移订单记录
@@ -189,9 +198,12 @@ class RiskManager:
             self.scheduler.add_job(
                 self._monitor_positions,
                 'interval',
-                seconds=30,
+                seconds=15,  # 从30秒改为15秒，提高检查频率
                 id='position_monitor',
-                replace_existing=True
+                replace_existing=True,
+                coalesce=True,
+                misfire_grace_time=10,
+                max_instances=1
             )
             
             # 添加处理订单队列任务
@@ -200,7 +212,10 @@ class RiskManager:
                 'interval',
                 seconds=5,
                 id='order_processor',
-                replace_existing=True
+                replace_existing=True,
+                coalesce=True,
+                misfire_grace_time=10,
+                max_instances=1
             )
             
             # 添加每日汇总任务（每天早上9点）
@@ -210,7 +225,10 @@ class RiskManager:
                 hour=9,
                 minute=0,
                 id='daily_summary',
-                replace_existing=True
+                replace_existing=True,
+                coalesce=True,
+                misfire_grace_time=60,
+                max_instances=1
             )
             
             self.monitoring_active = True
@@ -233,6 +251,7 @@ class RiskManager:
                       take_profit_price: Optional[float] = None, max_loss_percent: Optional[float] = None):
         """添加风险规则"""
         try:
+            logger.info(f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}")
             rule = RiskRule(
                 symbol=symbol,
                 stop_loss_price=stop_loss_price,
@@ -242,8 +261,17 @@ class RiskManager:
                 created_at=datetime.now()
             )
             
-            # 保存到数据库
-            self.db_manager.save_risk_rule(rule)
+            # 转换为数据库层的 RiskRule 并保存到数据库
+            db_rule = DatabaseRiskRule(
+                symbol=rule.symbol,
+                stop_loss_price=rule.stop_loss_price,
+                take_profit_price=rule.take_profit_price,
+                max_loss_percent=rule.max_loss_percent,
+                enabled=rule.enabled,
+                timestamp=rule.created_at.isoformat()
+            )
+            self.db_manager.save_risk_rule(db_rule)
+            logger.debug(f"Risk rule persisted: {db_rule}")
             
             # 更新内存缓存
             self.risk_rules[symbol] = rule
@@ -257,6 +285,7 @@ class RiskManager:
     def remove_risk_rule(self, symbol: str):
         """删除风险规则"""
         try:
+            logger.info(f"remove_risk_rule called: symbol={symbol}")
             # 从数据库删除
             self.db_manager.delete_risk_rule(symbol)
             
@@ -276,16 +305,30 @@ class RiskManager:
                          take_profit_price: float = None, enabled: bool = True) -> bool:
         """更新风险规则"""
         try:
+            logger.info(f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}")
             if symbol in self.risk_rules:
                 rule = self.risk_rules[symbol]
                 if stop_loss_price is not None:
+                    logger.debug(f"Updating SL for {symbol}: {rule.stop_loss_price} -> {stop_loss_price}")
                     rule.stop_loss_price = stop_loss_price
                 if take_profit_price is not None:
+                    logger.debug(f"Updating TP for {symbol}: {rule.take_profit_price} -> {take_profit_price}")
                     rule.take_profit_price = take_profit_price
+                if rule.enabled != enabled:
+                    logger.debug(f"Updating enabled for {symbol}: {rule.enabled} -> {enabled}")
                 rule.enabled = enabled
                 
-                # 保存到数据库
-                self.db_manager.save_risk_rule(rule)
+                # 转换为数据库层的 RiskRule 并保存到数据库
+                db_rule = DatabaseRiskRule(
+                    symbol=rule.symbol,
+                    stop_loss_price=rule.stop_loss_price,
+                    take_profit_price=rule.take_profit_price,
+                    max_loss_percent=rule.max_loss_percent,
+                    enabled=rule.enabled,
+                    timestamp=rule.created_at.isoformat()
+                )
+                self.db_manager.save_risk_rule(db_rule)
+                logger.debug(f"Risk rule persisted after update: {db_rule}")
                 
                 logger.info(f"Risk rule updated for {symbol}")
                 return True
@@ -400,7 +443,16 @@ class RiskManager:
         if position_qty == 0:
             logger.debug(f"No position for {symbol}, disabling rule")
             rule.enabled = False
-            self.save_risk_rules_to_csv(os.path.join("data", "risk_rules.csv"))
+            # 更新数据库中的风险规则状态
+            db_rule = DatabaseRiskRule(
+                symbol=rule.symbol,
+                stop_loss_price=rule.stop_loss_price,
+                take_profit_price=rule.take_profit_price,
+                max_loss_percent=rule.max_loss_percent,
+                enabled=rule.enabled,
+                timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+            )
+            self.db_manager.save_risk_rule(db_rule)
             return
         
         logger.info(f"Checking risk rule for {symbol}: SL=${rule.stop_loss_price}, TP=${rule.take_profit_price}")
@@ -409,74 +461,33 @@ class RiskManager:
         if symbol not in self.pending_limit_orders:
             self.pending_limit_orders[symbol] = {"stop_loss": False, "take_profit": False}
         
-        # Calculate price threshold based on leverage
-        threshold = self.price_threshold
-        if symbol == 'MNQ':
-            threshold *= self.leverage_mnq
+        # 以金额阈值为基础，按杠杆换算成价格差阈值
+        amount_threshold = self.price_threshold
+        threshold_price = amount_threshold * self.leverage_mnq if symbol == 'MNQ' else amount_threshold
         
-        # Check stop loss
-        if rule.stop_loss_price:
-            price_diff = abs(current_price - rule.stop_loss_price) / rule.stop_loss_price
-            logger.info(f"Stop loss check for {symbol}: current=${current_price:.2f}, target=${rule.stop_loss_price:.2f}, diff={price_diff:.4f}, threshold={threshold:.4f}")
-            
-            # If price is very close to stop loss, place limit order
-            if price_diff <= threshold and not self.pending_limit_orders[symbol]["stop_loss"]:
-                logger.info(f"Price close to stop loss for {symbol}, placing limit order")
-                try:
-                    action = 'SELL' if position_qty > 0 else 'BUY'
-                    trade = self.ibkr_client.place_limit_order(
-                        symbol=symbol,
-                        quantity=abs(position_qty),
-                        price=rule.stop_loss_price,
-                        action=action
-                    )
-                    
-                    if trade:
-                        self.pending_limit_orders[symbol]["stop_loss"] = True
-                        logger.info(f"✅ Limit order placed for stop loss: {symbol} at ${rule.stop_loss_price:.2f}")
-                        
-                        # Send notification
-                        await self.telegram_notifier.send_message(
-                            f"🔴 Limit order placed for stop loss\n"
-                            f"Symbol: {symbol}\n"
-                            f"Price: ${rule.stop_loss_price:.2f}\n"
-                            f"Current Price: ${current_price:.2f}\n"
-                            f"Quantity: {abs(position_qty)}"
-                        )
-                    else:
-                        logger.warning(f"Failed to place stop loss limit order for {symbol}")
-                except Exception as e:
-                    logger.error(f"Failed to place stop loss limit order for {symbol}: {e}")
-            elif self.pending_limit_orders[symbol]["stop_loss"]:
-                logger.debug(f"Stop loss limit order already pending for {symbol}")
-            
-            # If price has reached stop loss, execute market order
-            if current_price <= rule.stop_loss_price:
-                logger.warning(f"🚨 Stop loss triggered for {symbol}: ${current_price:.2f} <= ${rule.stop_loss_price:.2f}")
-                
-                # Check position direction before placing order
-                action = 'SELL' if position_qty > 0 else 'BUY'
-                
-                order_request = OrderRequest(
-                    order_type=OrderType.STOP_LOSS,
-                    symbol=symbol,
-                    quantity=abs(position_qty),
-                    reason=f"Stop loss triggered at ${current_price:.2f}"
-                )
-                self.order_queue.put(order_request)
-                
-                # Disable rule after trigger and save
-                rule.enabled = False
-                self.save_risk_rules_to_csv(os.path.join("data", "risk_rules.csv"))
-                logger.info(f"Stop loss order queued for {symbol} at ${current_price:.2f}, rule disabled")
+        # 检查是否已有任何limit order pending，如果有则跳过
+        if self.pending_limit_orders[symbol]["stop_loss"] or self.pending_limit_orders[symbol]["take_profit"]:
+            logger.debug(f"Already have pending limit order for {symbol}, skipping new order placement")
+            return
         
-        # Check take profit
-        if rule.take_profit_price:
-            price_diff = abs(current_price - rule.take_profit_price) / rule.take_profit_price
-            logger.info(f"Take profit check for {symbol}: current=${current_price:.2f}, target=${rule.take_profit_price:.2f}, diff={price_diff:.4f}, threshold={threshold:.4f}")
+        # 标记是否已下单，确保只下一个单
+        order_placed = False
+        
+        # Prefer: Take Profit has higher priority than Stop Loss when both trigger simultaneously
+        # Check take profit first
+        if rule.take_profit_price and not order_placed:
+            # 对于止盈：多头持仓时价格应该上涨到目标价格，空头持仓时价格应该下跌到目标价格
+            if position_qty > 0:  # 多头持仓
+                price_diff = current_price - rule.take_profit_price  # 当前价格 - 止盈价格
+                should_trigger = price_diff >= -threshold_price  # 当前价格接近或超过止盈价格
+            else:  # 空头持仓
+                price_diff = rule.take_profit_price - current_price  # 止盈价格 - 当前价格
+                should_trigger = price_diff >= -threshold_price  # 当前价格接近或低于止盈价格
             
-            # If price is very close to take profit, place limit order
-            if price_diff <= threshold and not self.pending_limit_orders[symbol]["take_profit"]:
+            logger.info(f"Take profit check for {symbol}: current=${current_price:.2f}, target=${rule.take_profit_price:.2f}, price_diff=${price_diff:.4f}, threshold_price=${threshold_price:.4f}, position_qty={position_qty}")
+            
+            # If price reaches take profit level, place limit order
+            if should_trigger:
                 logger.info(f"Price close to take profit for {symbol}, placing limit order")
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
@@ -489,7 +500,40 @@ class RiskManager:
                     
                     if trade:
                         self.pending_limit_orders[symbol]["take_profit"] = True
+                        order_placed = True
+                        
+                        # 保存订单记录到auto_orders内存和数据库
+                        auto_order = AutoOrder(
+                            order_id=str(trade.order.orderId),
+                            symbol=symbol,
+                            action=action,
+                            quantity=abs(position_qty),
+                            order_type="LMT",
+                            price=rule.take_profit_price,
+                            status="Submitted",
+                            created_at=datetime.now(),
+                            executed_at=None,
+                            rule_id=symbol,
+                            order_source="tp"
+                        )
+                        self.auto_orders[str(trade.order.orderId)] = auto_order
+                        # 保存到数据库，保证持久化
+                        self.save_auto_order_to_db(auto_order)
+                        
                         logger.info(f"✅ Limit order placed for take profit: {symbol} at ${rule.take_profit_price:.2f}")
+                        
+                        # 下单后禁用该规则并持久化，避免重复触发
+                        rule.enabled = False
+                        db_rule = DatabaseRiskRule(
+                            symbol=rule.symbol,
+                            stop_loss_price=rule.stop_loss_price,
+                            take_profit_price=rule.take_profit_price,
+                            max_loss_percent=rule.max_loss_percent,
+                            enabled=rule.enabled,
+                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        )
+                        self.db_manager.save_risk_rule(db_rule)
+                        logger.info(f"Take profit limit order queued for {symbol}, rule disabled")
                         
                         # Send notification
                         await self.telegram_notifier.send_message(
@@ -503,8 +547,6 @@ class RiskManager:
                         logger.warning(f"Failed to place take profit limit order for {symbol}")
                 except Exception as e:
                     logger.error(f"Failed to place take profit limit order for {symbol}: {e}")
-            elif self.pending_limit_orders[symbol]["take_profit"]:
-                logger.debug(f"Take profit limit order already pending for {symbol}")
             
             # If price has reached take profit, execute market order
             if current_price >= rule.take_profit_price:
@@ -521,10 +563,121 @@ class RiskManager:
                 )
                 self.order_queue.put(order_request)
                 
-                # Disable rule after trigger and save
+                # Disable rule after trigger and update database
                 rule.enabled = False
-                self.save_risk_rules_to_csv(os.path.join("data", "risk_rules.csv"))
+                db_rule = DatabaseRiskRule(
+                    symbol=rule.symbol,
+                    stop_loss_price=rule.stop_loss_price,
+                    take_profit_price=rule.take_profit_price,
+                    max_loss_percent=rule.max_loss_percent,
+                    enabled=rule.enabled,
+                    timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                )
+                self.db_manager.save_risk_rule(db_rule)
                 logger.info(f"Take profit order queued for {symbol} at ${current_price:.2f}, rule disabled")
+                return  # 当触发止盈市价单时立即返回，不再检查止损
+
+        # Check stop loss
+        if rule.stop_loss_price and not order_placed:
+            # 对于止损：多头持仓时价格应该下跌到目标价格，空头持仓时价格应该上涨到目标价格
+            if position_qty > 0:  # 多头持仓
+                price_diff = rule.stop_loss_price - current_price  # 止损价格 - 当前价格
+                should_trigger = price_diff >= -threshold_price  # 当前价格接近或低于止损价格
+            else:  # 空头持仓
+                price_diff = current_price - rule.stop_loss_price  # 当前价格 - 止损价格
+                should_trigger = price_diff >= -threshold_price  # 当前价格接近或超过止损价格
+            
+            logger.info(f"Stop loss check for {symbol}: current=${current_price:.2f}, target=${rule.stop_loss_price:.2f}, price_diff=${price_diff:.4f}, threshold_price=${threshold_price:.4f}, position_qty={position_qty}")
+            
+            # If price reaches stop loss level, place market order immediately
+            if should_trigger:
+                logger.info(f"Price close to stop loss for {symbol}, placing limit order")
+                try:
+                    action = 'SELL' if position_qty > 0 else 'BUY'
+                    trade = self.ibkr_client.place_limit_order(
+                        symbol=symbol,
+                        quantity=abs(position_qty),
+                        price=rule.stop_loss_price,
+                        action=action
+                    )
+                    
+                    if trade:
+                        self.pending_limit_orders[symbol]["stop_loss"] = True
+                        order_placed = True
+                        
+                        # 保存订单记录到auto_orders内存和数据库
+                        auto_order = AutoOrder(
+                            order_id=str(trade.order.orderId),
+                            symbol=symbol,
+                            action=action,
+                            quantity=abs(position_qty),
+                            order_type="LMT",
+                            price=rule.stop_loss_price,
+                            status="Submitted",
+                            created_at=datetime.now(),
+                            executed_at=None,
+                            rule_id=symbol,
+                            order_source="sl"
+                        )
+                        self.auto_orders[str(trade.order.orderId)] = auto_order
+                        self.save_auto_order_to_db(auto_order)
+                        
+                        logger.info(f"✅ Limit order placed for stop loss: {symbol} at ${rule.stop_loss_price:.2f}")
+                        
+                        # 下单后禁用该规则并持久化，避免重复触发
+                        rule.enabled = False
+                        db_rule = DatabaseRiskRule(
+                            symbol=rule.symbol,
+                            stop_loss_price=rule.stop_loss_price,
+                            take_profit_price=rule.take_profit_price,
+                            max_loss_percent=rule.max_loss_percent,
+                            enabled=rule.enabled,
+                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        )
+                        self.db_manager.save_risk_rule(db_rule)
+                        logger.info(f"Stop loss limit order queued for {symbol}, rule disabled")
+                        
+                        # Send notification
+                        await self.telegram_notifier.send_message(
+                            f"🔴 Limit order placed for stop loss\n"
+                            f"Symbol: {symbol}\n"
+                            f"Price: ${rule.stop_loss_price:.2f}\n"
+                            f"Current Price: ${current_price:.2f}\n"
+                            f"Quantity: {abs(position_qty)}"
+                        )
+                    else:
+                        logger.warning(f"Failed to place stop loss limit order for {symbol}")
+                except Exception as e:
+                    logger.error(f"Failed to place stop loss limit order for {symbol}: {e}")
+            
+            # If price has reached stop loss, execute market order
+            if current_price <= rule.stop_loss_price:
+                logger.warning(f"🚨 Stop loss triggered for {symbol}: ${current_price:.2f} <= ${rule.stop_loss_price:.2f}")
+                
+                # Check position direction before placing order
+                action = 'SELL' if position_qty > 0 else 'BUY'
+                
+                order_request = OrderRequest(
+                    order_type=OrderType.STOP_LOSS,
+                    symbol=symbol,
+                    quantity=abs(position_qty),
+                    reason=f"Stop loss triggered at ${current_price:.2f}"
+                )
+                self.order_queue.put(order_request)
+                
+                # Disable rule after trigger and update database
+                rule.enabled = False
+                db_rule = DatabaseRiskRule(
+                    symbol=rule.symbol,
+                    stop_loss_price=rule.stop_loss_price,
+                    take_profit_price=rule.take_profit_price,
+                    max_loss_percent=rule.max_loss_percent,
+                    enabled=rule.enabled,
+                    timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                )
+                self.db_manager.save_risk_rule(db_rule)
+                logger.info(f"Stop loss order queued for {symbol} at ${current_price:.2f}, rule disabled")
+                return  # 触发市价单后立即返回，不再检查止盈
     
     def _check_sufficient_funds(self, account_info: Dict, position: Dict) -> bool:
         """检查资金是否充足"""
@@ -576,6 +729,14 @@ class RiskManager:
                 order_id = trade.order.orderId
                 
                 # Record auto order
+                # 根据订单类型设置order_source
+                if order_request.order_type == OrderType.STOP_LOSS:
+                    order_source = "sl"
+                elif order_request.order_type == OrderType.TAKE_PROFIT:
+                    order_source = "tp"
+                else:
+                    order_source = "strategy"
+                
                 auto_order = AutoOrder(
                     order_id=str(order_id),
                     symbol=order_request.symbol,
@@ -587,11 +748,11 @@ class RiskManager:
                     created_at=datetime.now(),
                     executed_at=None,
                     rule_id=order_request.symbol,  # Use symbol as rule identifier
-                    order_source="auto"
+                    order_source=order_source
                 )
                 
                 self.auto_orders[str(order_id)] = auto_order
-                self.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
+                self.save_auto_order_to_db(auto_order)
                 
                 # Send notification based on order type
                 if order_request.order_type == OrderType.STOP_LOSS:
@@ -664,7 +825,11 @@ class RiskManager:
                 price=order.price,
                 timestamp=order.created_at.isoformat() if order.created_at else datetime.now().isoformat(),
                 exchange=getattr(order, 'exchange', 'SMART'),
-                sec_type=getattr(order, 'sec_type', 'STK')
+                sec_type=getattr(order, 'sec_type', 'STK'),
+                status=order.status if hasattr(order, 'status') else 'pending',
+                executed_at=order.executed_at.isoformat() if getattr(order, 'executed_at', None) else None,
+                rule_id=getattr(order, 'rule_id', None),
+                order_source=getattr(order, 'order_source', 'auto')
             )
             
             # 保存到数据库
@@ -713,7 +878,7 @@ class RiskManager:
             return False
 
     def update_order_status(self, order_id: str, new_status: str):
-        """更新订单状态"""
+        """更新订单状态（内存与数据库）"""
         try:
             if order_id in self.auto_orders:
                 order = self.auto_orders[order_id]
@@ -721,21 +886,34 @@ class RiskManager:
                 if new_status in ['Filled', 'Cancelled']:
                     order.executed_at = datetime.now()
                 
-                # 映射为数据库对象并保存
-                db_order = DatabaseAutoOrder(
-                    order_id=order.order_id,
-                    symbol=order.symbol,
-                    quantity=order.quantity,
-                    action=order.action,
-                    order_type=order.order_type,
-                    price=order.price,
-                    timestamp=order.created_at.isoformat() if order.created_at else datetime.now().isoformat(),
-                    exchange=getattr(order, 'exchange', 'SMART'),
-                    sec_type=getattr(order, 'sec_type', 'STK')
-                )
-                self.db_manager.save_auto_order(db_order)
+                # 如果订单是由风险规则自动生成且已成交，则禁用对应的风险规则并持久化
+                if new_status == 'Filled' and getattr(order, 'order_source', None) == 'auto' and getattr(order, 'rule_id', None):
+                    symbol = order.rule_id
+                    rule = self.risk_rules.get(symbol)
+                    if rule and rule.enabled:
+                        rule.enabled = False
+                        try:
+                            db_rule = DatabaseRiskRule(
+                                symbol=rule.symbol,
+                                stop_loss_price=rule.stop_loss_price,
+                                take_profit_price=rule.take_profit_price,
+                                max_loss_percent=rule.max_loss_percent,
+                                enabled=rule.enabled,
+                                timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            )
+                            self.db_manager.save_risk_rule(db_rule)
+                            logger.info(f"Risk rule for {symbol} disabled due to filled order {order_id}")
+                        except Exception as db_rule_err:
+                            logger.warning(f"Failed to persist disabled rule for {symbol}: {db_rule_err}")
                 
-                logger.info(f"Order {order_id} status updated to {new_status}")
+                # 同步到数据库：同时持久化状态、均价（若有）、执行时间
+                try:
+                    executed_str = order.executed_at.isoformat() if order.executed_at else None
+                    self.db_manager.update_auto_order(order_id, status=new_status, price=order.price, executed_at=executed_str)
+                    logger.info(f"Order {order_id} status persisted to DB: {new_status}, price={order.price}, executed_at={executed_str}")
+                except Exception as db_err:
+                    logger.warning(f"Failed to persist order {order_id} update to DB: {db_err}")
+                
                 return True
             else:
                 logger.warning(f"Order {order_id} not found in records for status update")

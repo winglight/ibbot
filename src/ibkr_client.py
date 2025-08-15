@@ -9,6 +9,7 @@ import threading
 import asyncio
 import os
 import csv
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from .connection_manager import connection_manager, ConnectionConfig
 from .database import get_db_manager
@@ -18,6 +19,11 @@ class IBKRClient:
         self.connection_manager = connection_manager
         self.order_backup_file = "data/orders_backup.csv"
         self._ensure_backup_directory()
+        # Price cache to track real-time prices
+        self.price_cache = {}
+        self.price_cache_timestamp = {}
+        # Cache TTL seconds (used to decide when to refresh real-time data)
+        self.price_cache_ttl_seconds = 60  # 增加到60秒，减少频繁请求
     
     @property
     def connected(self) -> bool:
@@ -359,9 +365,29 @@ class IBKRClient:
     
     def get_real_time_data(self, symbol: str, exchange: str = 'SMART'):
         """获取实时数据"""
+        import threading
+        current_thread = threading.current_thread()
+        logger.info(f"get_real_time_data called for {symbol} in thread: {current_thread.name}")
+        
+        # 检测是否在ThreadPoolExecutor中运行
+        is_in_thread_pool = 'ThreadPoolExecutor' in current_thread.name
+        logger.info(f"Running in ThreadPoolExecutor: {is_in_thread_pool}")
+        
         try:
+            # 检查当前线程的事件循环状态
+            try:
+                loop = asyncio.get_running_loop()
+                logger.info(f"Found running event loop in thread {current_thread.name}: {loop}")
+            except RuntimeError as e:
+                logger.info(f"No running event loop in thread {current_thread.name}: {e}")
+                # 如果在ThreadPoolExecutor中且没有事件循环，这是正常的
+                if is_in_thread_pool:
+                    logger.info(f"ThreadPoolExecutor without event loop is expected for {symbol}")
+            
             # 确保连接
+            logger.debug(f"Checking IBKR connection for {symbol}")
             if not self.is_connected():
+                logger.warning(f"IBKR not connected, attempting to connect for {symbol}")
                 if not self.connect():
                     logger.error(f"Cannot connect to IBKR for real-time data: {symbol}")
                     return None
@@ -372,36 +398,90 @@ class IBKRClient:
                 logger.error(f"IBKR connection lost for real-time data: {symbol}")
                 return None
             
+            logger.debug(f"IB instance status for {symbol}: connected={ib.isConnected()}")
+            
             # MNQ是期货合约
             if symbol == 'MNQ':
+                logger.debug(f"Creating future contract for {symbol}")
                 contract = self.get_future_contract(symbol, 'CME')
             else:
+                logger.debug(f"Creating stock contract for {symbol}")
                 contract = self.get_stock_contract(symbol, exchange)
             
-            # 直接使用ib_insync的同步调用，它内部会处理异步
-            ticker = ib.reqMktData(contract, '', False, False)
+            logger.debug(f"Contract created for {symbol}: {contract}")
+            
+            # 在ThreadPoolExecutor中运行时，使用特殊的处理方式
+            if is_in_thread_pool:
+                logger.debug(f"Using ThreadPoolExecutor-safe approach for {symbol}")
+                # 在ThreadPoolExecutor中，直接调用但忽略事件循环警告
+                try:
+                    # 临时抑制asyncio相关的警告
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", message=".*no current event loop.*", category=RuntimeWarning)
+                        warnings.filterwarnings("ignore", message=".*There is no current event loop.*", category=RuntimeWarning)
+                        ticker = ib.reqMktData(contract, '', False, False)
+                    logger.debug(f"ThreadPoolExecutor reqMktData successful for {symbol}")
+                except Exception as thread_error:
+                    logger.warning(f"ThreadPoolExecutor reqMktData failed for {symbol}: {thread_error}")
+                    # 如果失败，返回None而不是继续尝试
+                    return None
+            else:
+                logger.debug(f"Using normal approach for {symbol}")
+                ticker = ib.reqMktData(contract, '', False, False)
+            
+            logger.debug(f"Market data request completed for {symbol}, ticker: {ticker}")
             
             if not ticker:
                 logger.warning(f"No ticker returned for {symbol}")
                 return None
             
-            # 等待数据
+            # 等待数据，根据运行环境调整等待时间
             import time
-            time.sleep(2)
+            # 在ThreadPoolExecutor中使用更短的等待时间
+            max_wait = 3 if is_in_thread_pool else 8
+            wait_interval = 0.5
+            waited = 0
+            logger.debug(f"Waiting for market data for {symbol}, max_wait={max_wait}s (ThreadPool: {is_in_thread_pool})")
             
-            if ticker.last and ticker.last > 0:
-                logger.info(f"Retrieved real-time data for {symbol}: last={ticker.last}")
-                return {
-                    'symbol': symbol,
-                    'last': ticker.last,
-                    'bid': ticker.bid if ticker.bid else 0,
-                    'ask': ticker.ask if ticker.ask else 0,
-                    'volume': ticker.volume if ticker.volume else 0,
-                    'timestamp': datetime.now().isoformat()
-                }
-            else:
-                logger.warning(f"No valid price data for {symbol}: last={ticker.last}")
-                return None
+            while waited < max_wait:
+                time.sleep(wait_interval)
+                waited += wait_interval
+                
+                # 检查是否获得有效价格
+                if ticker.last and ticker.last > 0:
+                    logger.info(f"Retrieved real-time data for {symbol}: last={ticker.last} (waited {waited:.1f}s)")
+                    # update cache with longer TTL
+                    self.price_cache[symbol] = ticker.last
+                    self.price_cache_timestamp[symbol] = datetime.now()
+                    return {
+                        'symbol': symbol,
+                        'last': ticker.last,
+                        'bid': ticker.bid if ticker.bid else 0,
+                        'ask': ticker.ask if ticker.ask else 0,
+                        'volume': ticker.volume if ticker.volume else 0,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                
+                # 检查是否有bid/ask数据
+                if ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
+                    mid = (ticker.bid + ticker.ask) / 2
+                    logger.info(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (bid={ticker.bid}, ask={ticker.ask}, waited {waited:.1f}s)")
+                    self.price_cache[symbol] = mid
+                    self.price_cache_timestamp[symbol] = datetime.now()
+                    return {
+                        'symbol': symbol,
+                        'last': mid,
+                        'bid': ticker.bid,
+                        'ask': ticker.ask,
+                        'volume': ticker.volume if ticker.volume else 0,
+                        'timestamp': datetime.now().isoformat()
+                    }
+            
+            # 如果等待后仍无有效数据，记录警告
+            logger.warning(f"No valid price data for {symbol} after {max_wait}s: last={ticker.last}, bid={ticker.bid}, ask={ticker.ask}")
+            return None
+            
         except Exception as e:
             logger.error(f"Failed to get real-time data for {symbol}: {e}")
             return None
@@ -463,13 +543,40 @@ class IBKRClient:
                 logger.error(f"IBKR connection lost for cancel order")
                 return False, "Connection lost"
             
-            # 首先强制刷新订单数据
+            # 首先在连接管理器事件循环中强制刷新订单数据，避免事件循环冲突
             try:
-                ib.reqOpenOrders()
-                if hasattr(ib, 'reqCompletedOrders'):
-                    ib.reqCompletedOrders(apiOnly=False)
-                import time
-                time.sleep(0.5)  # 等待数据更新
+                loop = getattr(self.connection_manager, '_loop', None)
+                if loop and not loop.is_closed():
+                    async def refresh_orders_async():
+                        try:
+                            # 使用 ib_insync 的异步API，这会正确设置内部 _results，并避免 KeyError
+                            if hasattr(ib, 'reqOpenOrdersAsync'):
+                                await ib.reqOpenOrdersAsync()
+                            # 请求所有API来源的已完成订单（包含最近状态变化）
+                            if hasattr(ib, 'reqCompletedOrdersAsync'):
+                                await ib.reqCompletedOrdersAsync(apiOnly=False)
+                            logger.debug("Requested order refresh from IBKR (async)")
+                            # 等待片刻让返回的事件更新本地缓存
+                            await asyncio.sleep(0.2)
+                        except asyncio.CancelledError:
+                            logger.debug("Order refresh task cancelled")
+                            raise
+                        except Exception as e:
+                            logger.warning(f"Failed to request order refresh in async: {e}")
+                    future = asyncio.run_coroutine_threadsafe(refresh_orders_async(), loop)
+                    try:
+                        future.result(timeout=1.0)
+                    except concurrent.futures.TimeoutError:
+                        logger.warning("Order refresh timeout (1.0s). Cancelling the refresh task to avoid pending tasks.")
+                        future.cancel()
+                    except Exception as e:
+                        logger.warning(f"Order refresh failed: {e}")
+                        try:
+                            future.cancel()
+                        except Exception:
+                            pass
+                else:
+                    logger.debug("No active event loop for order refresh, using cached trades")
             except Exception as e:
                 logger.debug(f"Failed to refresh orders: {e}")
             
@@ -603,53 +710,55 @@ class IBKRClient:
             if not hasattr(self, '_last_order_refresh_time'):
                 self._last_order_refresh_time = 0
             
-            # 如果距离上次刷新不足2秒，直接返回缓存的trades数据
+            # 如果距离上次刷新不足1秒，直接返回缓存的trades数据
             time_since_last_refresh = current_time - self._last_order_refresh_time
-            if time_since_last_refresh < 2.0:
+            if time_since_last_refresh < 1.0:
                 logger.debug(f"Skipping order refresh, last refresh was {time_since_last_refresh:.1f}s ago")
                 # 直接使用缓存的trades，不重复请求
                 trades = ib.trades()
             else:
-                # 在连接管理器的事件循环中强制刷新一次订单数据
-                loop = getattr(self.connection_manager, '_loop', None)
-                if not loop or loop.is_closed():
-                    logger.error("No active event loop for IBKR connection when getting orders")
-                    return []
-
-                def fetch_orders_worker():
-                    try:
-                        # 主动向IB请求最新的未完成订单与已完成订单，确保trades()刷新
-                        try:
-                            ib.reqOpenOrders()
-                            # 请求所有API来源的已完成订单（包含最近状态变化）
-                            if hasattr(ib, 'reqCompletedOrders'):
-                                ib.reqCompletedOrders(apiOnly=False)
-                            logger.debug("Requested order refresh from IBKR")
-                        except Exception as e:
-                            logger.warning(f"Failed to request order refresh: {e}")
-                        
-                        # 等待片刻让返回的事件更新本地缓存
-                        time.sleep(0.3)
-                        
-                        # 更新刷新时间
-                        self._last_order_refresh_time = current_time
-                        
-                        # 读取最新的 trades 列表
-                        return ib.trades()
-                    except Exception as e:
-                        logger.error(f"Failed to fetch orders in worker: {e}")
-                        return []
-
-                # 改为简单的直接调用，避免ThreadPoolExecutor在事件循环中使用
+                # 在连接管理器的事件循环中异步执行刷新操作，避免事件循环冲突
                 try:
-                    trades = fetch_orders_worker()
+                    # 获取连接管理器的事件循环
+                    loop = getattr(self.connection_manager, '_loop', None)
+                    
+                    if loop and not loop.is_closed():
+                        # 在连接管理器的事件循环中异步执行刷新
+                        async def refresh_orders_async():
+                            try:
+                                # 使用 ib_insync 的异步API，这会正确设置内部 _results，并避免 KeyError
+                                if hasattr(ib, 'reqOpenOrdersAsync'):
+                                    await ib.reqOpenOrdersAsync()
+                                # 请求所有API来源的已完成订单（包含最近状态变化）
+                                if hasattr(ib, 'reqCompletedOrdersAsync'):
+                                    await ib.reqCompletedOrdersAsync(apiOnly=False)
+                                logger.debug("Requested order refresh from IBKR (async)")
+                                await asyncio.sleep(0.2)
+                            except Exception as e:
+                                logger.warning(f"Failed to request order refresh in async: {e}")
+                        
+                        # 在连接管理器的事件循环中执行异步刷新
+                        future = asyncio.run_coroutine_threadsafe(refresh_orders_async(), loop)
+                        try:
+                            future.result(timeout=1.0)  # 1秒超时
+                        except Exception as e:
+                            logger.warning(f"Order refresh timeout or failed: {e}")
+                    else:
+                        logger.debug("No active event loop for order refresh, using cached data")
+                    
+                    # 更新刷新时间
+                    self._last_order_refresh_time = current_time
+                    
+                    # 读取最新的 trades 列表
+                    trades = ib.trades()
                 except Exception as e:
-                    logger.error(f"Failed to execute fetch_orders_worker: {e}")
+                    logger.warning(f"Failed to request order refresh: {e}")
                     trades = ib.trades()  # fallback to existing trades
             
             # 处理订单数据
             orders: List[Dict[str, Any]] = []
             updated_orders = False  # Track if any orders were updated
+            changed_orders: List[tuple[str, str]] = []  # (order_id_str, new_status)
             
             for trade in trades:
                 # 从risk_manager的auto_orders中获取订单来源信息
@@ -691,6 +800,7 @@ class IBKRClient:
                                 logger.warning(f"Failed to update strategy execution for order {order_id_str}: {sm_err}")
                             
                             updated_orders = True
+                            changed_orders.append((order_id_str, current_status))
                             logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")
                             
                     else:
@@ -720,7 +830,11 @@ class IBKRClient:
             
             # Save updated orders to database if any were changed
             if updated_orders and risk_manager:
-                # 直接通过risk_manager的数据库方法更新订单，无需调用CSV保存
+                for oid, new_status in changed_orders:
+                    try:
+                        risk_manager.update_order_status(oid, new_status)
+                    except Exception as e:
+                        logger.warning(f"Failed to persist updated order {oid}: {e}")
                 logger.info("Updated order data saved to database through RiskManager")
             
             return orders
@@ -803,13 +917,66 @@ class IBKRClient:
             position_list = []
             
             for item in portfolio_items:
-                # Show all portfolio items to match TWS data
-                # Get real-time market price from portfolio item
-                current_price = item.marketPrice if item.marketPrice and item.marketPrice == item.marketPrice else item.averageCost
-                price_source = "marketPrice" if item.marketPrice and item.marketPrice == item.marketPrice else "averageCost"
+                # Filter out zero positions to avoid stale data
+                if item.position == 0:
+                    continue
                 
-                logger.info(f"Portfolio data for {item.contract.symbol}: marketPrice={item.marketPrice}, averageCost={item.averageCost}, position={item.position}")
-                logger.info(f"Price for {item.contract.symbol}: {current_price} (source: {price_source})")
+                sym = item.contract.symbol
+                current_price = None
+                price_source = None
+                
+                # 1) 首先检查缓存是否有效
+                ts = self.price_cache_timestamp.get(sym)
+                if ts and datetime.now() - ts < timedelta(seconds=self.price_cache_ttl_seconds):
+                    cached_price = self.price_cache.get(sym)
+                    if cached_price and cached_price > 0:
+                        current_price = cached_price
+                        price_source = "cache"
+                        logger.debug(f"Using cached price for {sym}: {current_price}")
+                
+                # 2) 如果缓存无效，尝试获取实时价格
+                if current_price is None:
+                    try:
+                        # 检查是否在ThreadPoolExecutor中运行
+                        current_thread = threading.current_thread()
+                        is_in_thread_pool = isinstance(current_thread, threading.Thread) and 'ThreadPoolExecutor' in current_thread.name
+                        
+                        # 即使在ThreadPoolExecutor中也尝试获取实时价格，但使用更短的超时
+                        if not is_in_thread_pool:
+                            data = self.get_real_time_data(sym)
+                            if data and data.get('last'):
+                                current_price = data['last']
+                                price_source = "realtime"
+                        else:
+                            # 在ThreadPoolExecutor中，尝试快速获取实时价格
+                            logger.debug(f"Attempting quick real-time fetch for {sym} in ThreadPoolExecutor")
+                            data = self.get_real_time_data(sym)
+                            if data and data.get('last'):
+                                current_price = data['last']
+                                price_source = "realtime_thread"
+                    except Exception as e:
+                        logger.debug(f"Realtime price fetch error for {sym}: {e}")
+                
+                # 3) 如果实时获取失败，尝试使用 marketPrice
+                if current_price is None:
+                    if item.marketPrice and item.marketPrice == item.marketPrice and item.marketPrice > 0:
+                        current_price = item.marketPrice
+                        price_source = "marketPrice"
+                        logger.debug(f"Using marketPrice for {sym}: {current_price}")
+                
+                # 4) 最后兜底 averageCost
+                if current_price is None:
+                    if item.averageCost and item.averageCost > 0:
+                        current_price = item.averageCost
+                        price_source = "averageCost"
+                        logger.warning(f"Using averageCost as fallback for {sym}: {current_price}")
+                    else:
+                        current_price = 0
+                        price_source = "unknown"
+                        logger.error(f"No valid price source found for {sym}")
+                
+                logger.info(f"Portfolio data for {sym}: marketPrice={item.marketPrice}, averageCost={item.averageCost}, position={item.position}")
+                logger.info(f"Price for {sym}: {current_price} (source: {price_source})")
                 
                 # Adjust average cost for futures by contract multiplier to get entry price
                 avg_cost_adjusted = item.averageCost
@@ -817,32 +984,26 @@ class IBKRClient:
                     'MNQ': 2,   # Micro E-mini Nasdaq-100
                     'NQ': 20,   # E-mini Nasdaq-100
                 }
-                sym = item.contract.symbol
                 if sym in futures_multipliers and item.averageCost:
                     avg_cost_adjusted = item.averageCost / futures_multipliers[sym]
+                    logger.info(f"Futures multiplier adjustment for {sym}: {item.averageCost} / {futures_multipliers[sym]} = {avg_cost_adjusted}")
+                else:
+                    logger.info(f"No futures multiplier adjustment for {sym}, using original averageCost: {avg_cost_adjusted}")
 
                 market_value = item.position * current_price
                 
-                # For futures, use IBKR's unrealizedPNL and compute percent vs adjusted cost basis
-                if sym in futures_multipliers:
-                    unrealized_pnl = item.unrealizedPNL
-                    actual_cost_basis = abs(item.position) * avg_cost_adjusted
-                    unrealized_pnl_percent = (unrealized_pnl / actual_cost_basis) * 100 if actual_cost_basis else 0
-                else:
-                    # For stocks, use traditional calculation
-                    unrealized_pnl = item.position * (current_price - avg_cost_adjusted)
-                    unrealized_pnl_percent = (unrealized_pnl / (abs(item.position) * avg_cost_adjusted)) * 100 if avg_cost_adjusted else 0
-
-                position_list.append({
-                    'symbol': item.contract.symbol,
-                    'exchange': item.contract.exchange,
+                position_info = {
+                    'symbol': sym,
                     'position': item.position,
                     'avg_cost': avg_cost_adjusted,
+                    'market_price': item.marketPrice if item.marketPrice == item.marketPrice else 0,
                     'current_price': current_price,
                     'market_value': market_value,
-                    'unrealized_pnl': unrealized_pnl,
-                    'unrealized_pnl_percent': unrealized_pnl_percent
-                })
+                    'unrealized_pnl': item.unrealizedPNL if hasattr(item, 'unrealizedPNL') else market_value - (item.position * avg_cost_adjusted),
+                    'unrealized_pnl_percent': ((market_value - (item.position * avg_cost_adjusted)) / (item.position * avg_cost_adjusted) * 100) if item.position * avg_cost_adjusted != 0 else 0,
+                    'price_source': price_source,
+                }
+                position_list.append(position_info)
             
             return position_list
         except Exception as e:

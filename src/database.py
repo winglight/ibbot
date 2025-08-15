@@ -25,6 +25,10 @@ class AutoOrder:
     timestamp: str
     exchange: str = "SMART"
     sec_type: str = "STK"
+    status: str = "pending"
+    executed_at: Optional[str] = None
+    rule_id: Optional[str] = None
+    order_source: str = "auto"
 
 
 @dataclass
@@ -34,6 +38,7 @@ class RiskRule:
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
     max_loss_percent: Optional[float] = None
+    enabled: bool = True
     timestamp: str = None
 
 
@@ -90,10 +95,43 @@ class DatabaseManager:
                     price REAL,
                     timestamp TEXT NOT NULL,
                     exchange TEXT DEFAULT 'SMART',
-                    sec_type TEXT DEFAULT 'STK'
+                    sec_type TEXT DEFAULT 'STK',
+                    status TEXT DEFAULT 'pending',
+                    executed_at TEXT,
+                    rule_id TEXT,
+                    order_source TEXT DEFAULT 'auto'
                 )
             """)
             
+            # 检查并添加新字段（用于现有数据库的迁移）
+            try:
+                cursor.execute("SELECT status FROM auto_orders LIMIT 1")
+            except sqlite3.OperationalError:
+                # status字段不存在，添加它
+                cursor.execute("ALTER TABLE auto_orders ADD COLUMN status TEXT DEFAULT 'pending'")
+                logger.info("Added status column to auto_orders table")
+            
+            try:
+                cursor.execute("SELECT executed_at FROM auto_orders LIMIT 1")
+            except sqlite3.OperationalError:
+                # executed_at字段不存在，添加它
+                cursor.execute("ALTER TABLE auto_orders ADD COLUMN executed_at TEXT")
+                logger.info("Added executed_at column to auto_orders table")
+            
+            try:
+                cursor.execute("SELECT rule_id FROM auto_orders LIMIT 1")
+            except sqlite3.OperationalError:
+                # rule_id字段不存在，添加它
+                cursor.execute("ALTER TABLE auto_orders ADD COLUMN rule_id TEXT")
+                logger.info("Added rule_id column to auto_orders table")
+            
+            try:
+                cursor.execute("SELECT order_source FROM auto_orders LIMIT 1")
+            except sqlite3.OperationalError:
+                # order_source字段不存在，添加它
+                cursor.execute("ALTER TABLE auto_orders ADD COLUMN order_source TEXT DEFAULT 'auto'")
+                logger.info("Added order_source column to auto_orders table")
+
             # 创建风险规则表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS risk_rules (
@@ -102,9 +140,16 @@ class DatabaseManager:
                     stop_loss_price REAL,
                     take_profit_price REAL,
                     max_loss_percent REAL,
+                    enabled BOOLEAN DEFAULT 1,
                     timestamp TEXT NOT NULL
                 )
             """)
+            # 迁移：为已有表添加 enabled 列
+            try:
+                cursor.execute("SELECT enabled FROM risk_rules LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute("ALTER TABLE risk_rules ADD COLUMN enabled BOOLEAN DEFAULT 1")
+                logger.info("Added enabled column to risk_rules table")
             
             # 创建策略表
             cursor.execute("""
@@ -172,20 +217,56 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO auto_orders 
-                (order_id, symbol, quantity, action, order_type, price, timestamp, exchange, sec_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (order_id, symbol, quantity, action, order_type, price, timestamp, exchange, sec_type, status, executed_at, rule_id, order_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 order.order_id, order.symbol, order.quantity, order.action,
-                order.order_type, order.price, order.timestamp, order.exchange, order.sec_type
+                order.order_type, order.price, order.timestamp, order.exchange, order.sec_type,
+                order.status, order.executed_at, order.rule_id, order.order_source
             ))
             conn.commit()
             logger.debug(f"Auto order saved: {order.order_id}")
+    
+    def update_auto_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None):
+        """更新自动订单状态和价格"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 构建动态更新语句
+            update_fields = []
+            values = []
+            
+            if status is not None:
+                update_fields.append("status = ?")
+                values.append(status)
+            
+            if price is not None:
+                update_fields.append("price = ?")
+                values.append(price)
+            
+            if executed_at is not None:
+                update_fields.append("executed_at = ?")
+                values.append(executed_at)
+            
+            if update_fields:
+                values.append(order_id)
+                update_sql = f"UPDATE auto_orders SET {', '.join(update_fields)} WHERE order_id = ?"
+                cursor.execute(update_sql, values)
+                conn.commit()
+                logger.debug(f"Auto order {order_id} updated: {dict(zip([f.split(' = ')[0] for f in update_fields], values[:-1]))}")
     
     def load_auto_orders(self) -> List[AutoOrder]:
         """加载所有自动订单"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT order_id, symbol, quantity, action, order_type, price, timestamp, exchange, sec_type FROM auto_orders ORDER BY timestamp DESC")
+            cursor.execute("""
+                SELECT order_id, symbol, quantity, action, order_type, price, timestamp, exchange, sec_type, 
+                       COALESCE(status, 'pending') as status,
+                       executed_at,
+                       rule_id,
+                       COALESCE(order_source, 'auto') as order_source
+                FROM auto_orders ORDER BY timestamp DESC
+            """)
             rows = cursor.fetchall()
             
             orders = []
@@ -206,11 +287,11 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO risk_rules 
-                (symbol, stop_loss_price, take_profit_price, max_loss_percent, timestamp)
-                VALUES (?, ?, ?, ?, ?)
+                (symbol, stop_loss_price, take_profit_price, max_loss_percent, enabled, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 rule.symbol, rule.stop_loss_price, rule.take_profit_price,
-                rule.max_loss_percent, rule.timestamp
+                rule.max_loss_percent, int(rule.enabled), rule.timestamp
             ))
             conn.commit()
             logger.debug(f"Risk rule saved for symbol: {rule.symbol}")
@@ -219,12 +300,20 @@ class DatabaseManager:
         """加载所有风险规则"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT symbol, stop_loss_price, take_profit_price, max_loss_percent, timestamp FROM risk_rules")
+            cursor.execute("SELECT symbol, stop_loss_price, take_profit_price, max_loss_percent, COALESCE(enabled, 1) as enabled, timestamp FROM risk_rules")
             rows = cursor.fetchall()
             
             rules = []
             for row in rows:
-                rule = RiskRule(*row)
+                # row: (symbol, sl, tp, max_loss_percent, enabled, timestamp)
+                rule = RiskRule(
+                    symbol=row[0],
+                    stop_loss_price=row[1],
+                    take_profit_price=row[2],
+                    max_loss_percent=row[3],
+                    enabled=bool(row[4]),
+                    timestamp=row[5]
+                )
                 rules.append(rule)
             
             logger.debug(f"Loaded {len(rules)} risk rules")
@@ -422,6 +511,20 @@ class DatabaseManager:
             
             logger.debug(f"Loaded {len(executions)} strategy executions")
             return executions
+
+    def delete_strategy_executions(self, strategy_name: str) -> int:
+        """按策略名删除所有执行记录，返回删除的行数"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM strategy_executions WHERE name = ?", (strategy_name,))
+                deleted = cursor.rowcount
+                conn.commit()
+                logger.info(f"Deleted {deleted} executions for strategy: {strategy_name}")
+                return deleted or 0
+        except Exception as e:
+            logger.error(f"Failed to delete executions for {strategy_name}: {e}")
+            return 0
     
     # 历史数据相关方法
     def save_historical_data(self, symbol: str, data: pd.DataFrame, bar_size: str = "1 day"):

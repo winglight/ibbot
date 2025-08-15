@@ -12,12 +12,128 @@ class TradingApp {
         this.init();
     }
 
-    init() {
+    async init() {
         this.setupEventListeners();
         this.initSymbolCombobox();
         this.connectWebSocket();
-        this.checkConnectionStatus();
-        this.loadStrategies();
+        this.toggleAuthButtons(!!localStorage.getItem('access_token'));
+        await this.tryAutoLogin();
+        await this.checkConnectionStatus();
+        await this.loadStrategies();
+    }
+
+    // Show login modal
+    showLoginModal() {
+        const modalEl = document.getElementById('loginModal');
+        if (!modalEl) return;
+        const remember = localStorage.getItem('rememberLogin') === '1';
+        const savedUser = localStorage.getItem('loginUsername') || '';
+        const savedPass = localStorage.getItem('loginPassword') || '';
+        if (remember) {
+            const u = document.getElementById('loginUsername');
+            const p = document.getElementById('loginPassword');
+            const r = document.getElementById('rememberLogin');
+            if (u) u.value = savedUser;
+            if (p) p.value = savedPass;
+            if (r) r.checked = true;
+        }
+        const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+        modal.show();
+    }
+
+    async handleLoginSubmit() {
+        try {
+            const username = (document.getElementById('loginUsername')?.value || '').trim();
+            const password = (document.getElementById('loginPassword')?.value || '').trim();
+            const remember = !!document.getElementById('rememberLogin')?.checked;
+            if (remember) {
+                localStorage.setItem('rememberLogin', '1');
+                localStorage.setItem('loginUsername', username);
+                localStorage.setItem('loginPassword', password);
+            } else {
+                localStorage.removeItem('rememberLogin');
+                localStorage.removeItem('loginUsername');
+                localStorage.removeItem('loginPassword');
+            }
+            if (!username || !password) { this.showAlert('danger', '请输入用户名和密码'); return; }
+            const res = await this.apiCall('/login', {
+                method: 'POST',
+                body: JSON.stringify({ username, password })
+            });
+            if (res?.access_token) {
+                localStorage.setItem('access_token', res.access_token);
+                this.toggleAuthButtons(true);
+                const modalEl = document.getElementById('loginModal');
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                if (modal) modal.hide();
+                this.showAlert('success', '登录成功');
+                this.checkConnectionStatus();
+                this.loadStrategies();
+                this.loadOrders();
+                this.loadPortfolio();
+                this.loadRiskRules();
+                this.loadAutoOrders();
+                this.loadLogs();
+            }
+        } catch (e) {}
+    }
+
+    async tryAutoLogin() {
+        const auto = localStorage.getItem('enableAutoLogin') === '1';
+        const savedUser = localStorage.getItem('loginUsername');
+        const savedPass = localStorage.getItem('loginPassword');
+        if (!auto || !savedUser || !savedPass) return;
+        try {
+            const res = await this.apiCall('/login', {
+                method: 'POST',
+                body: JSON.stringify({ username: savedUser, password: savedPass })
+            });
+            if (res?.access_token) {
+                localStorage.setItem('access_token', res.access_token);
+                this.toggleAuthButtons(true);
+                // Auto-connect using saved connection settings if available
+                const host = localStorage.getItem('conn_host');
+                const port = localStorage.getItem('conn_port');
+                const clientId = localStorage.getItem('conn_clientId');
+                const accountType = localStorage.getItem('conn_accountType') || 'paper';
+                if (host && port && clientId) {
+                    try {
+                        await this.apiCall('/connect', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                host,
+                                port: parseInt(port),
+                                client_id: parseInt(clientId),
+                                paper_trading: accountType === 'paper'
+                            })
+                        });
+                        // After successful connect, load data
+                        this.loadAccountInfo();
+                        this.loadOrders();
+                        this.loadPortfolio();
+                        this.loadRiskRules();
+                        this.loadAutoOrders();
+                        this.loadStrategies();
+                        this.loadLogs();
+                    } catch (e) {
+                        console.warn('Auto-connect failed:', e);
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    toggleAuthButtons(isLoggedIn) {
+        const loginBtn = document.getElementById('loginBtn');
+        const logoutBtn = document.getElementById('logoutBtn');
+        if (loginBtn) loginBtn.style.display = isLoggedIn ? 'none' : 'inline-block';
+        if (logoutBtn) logoutBtn.style.display = isLoggedIn ? 'inline-block' : 'none';
+    }
+
+    logout() {
+        localStorage.removeItem('access_token');
+        this.toggleAuthButtons(false);
+        this.showAlert('info', '已退出登录');
     }
 
     setupEventListeners() {
@@ -36,10 +152,52 @@ class TradingApp {
         
         // Settings button
         document.getElementById('connectionSettingsBtn').addEventListener('click', () => {
+            // Prefill fields from localStorage
+            const hostEl = document.getElementById('host');
+            const portEl = document.getElementById('port');
+            const clientIdEl = document.getElementById('clientId');
+            const accountTypeEl = document.getElementById('accountType');
+            const autoEl = document.getElementById('enableAutoLogin');
+            if (hostEl) hostEl.value = localStorage.getItem('conn_host') || hostEl.value || '127.0.0.1';
+            if (portEl) portEl.value = localStorage.getItem('conn_port') || portEl.value || '4002';
+            if (clientIdEl) clientIdEl.value = localStorage.getItem('conn_clientId') || clientIdEl.value || '1';
+            if (accountTypeEl) accountTypeEl.value = localStorage.getItem('conn_accountType') || accountTypeEl.value || 'paper';
+            if (autoEl) autoEl.checked = localStorage.getItem('enableAutoLogin') === '1';
             const modal = new bootstrap.Modal(document.getElementById('connectionModal'));
             modal.show();
         });
         
+        // Login events
+        const loginBtn = document.getElementById('loginBtn');
+        if (loginBtn) loginBtn.addEventListener('click', () => this.showLoginModal());
+        const loginSubmitBtn = document.getElementById('loginSubmitBtn');
+        if (loginSubmitBtn) loginSubmitBtn.addEventListener('click', () => this.handleLoginSubmit());
+        const loginPasswordInput = document.getElementById('loginPassword');
+        if (loginPasswordInput) loginPasswordInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') this.handleLoginSubmit(); });
+        const logoutBtn = document.getElementById('logoutBtn');
+        if (logoutBtn) logoutBtn.addEventListener('click', () => this.logout());
+
+        // Save Connection Settings
+        const saveConnBtn = document.getElementById('saveConnectionSettings');
+        if (saveConnBtn) {
+            saveConnBtn.addEventListener('click', () => {
+                const host = document.getElementById('host')?.value || '';
+                const port = document.getElementById('port')?.value || '';
+                const clientId = document.getElementById('clientId')?.value || '';
+                const accountType = document.getElementById('accountType')?.value || '';
+                const auto = !!document.getElementById('enableAutoLogin')?.checked;
+                if (host) localStorage.setItem('conn_host', host);
+                if (port) localStorage.setItem('conn_port', port);
+                if (clientId) localStorage.setItem('conn_clientId', clientId);
+                if (accountType) localStorage.setItem('conn_accountType', accountType);
+                localStorage.setItem('enableAutoLogin', auto ? '1' : '0');
+                this.showAlert('success', 'Connection settings saved');
+                const modalEl = document.getElementById('connectionModal');
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                if (modal) modal.hide();
+            });
+        }
+
         // Strategy and Logs buttons
         const strategyBtn = document.getElementById('strategyBtn');
         if (strategyBtn) {
@@ -54,16 +212,8 @@ class TradingApp {
         const logsBtn = document.getElementById('logsBtn');
         if (logsBtn) {
             logsBtn.addEventListener('click', () => {
-                this.loadLogs();
-                const panel = document.getElementById('logsContent');
-                if (panel) {
-                    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }
+                // Logs panel removed
             });
-        }
-        const refreshLogsBtn = document.getElementById('refreshLogsBtn');
-        if (refreshLogsBtn) {
-            refreshLogsBtn.addEventListener('click', () => this.loadLogs());
         }
         const refreshStrategiesBtn = document.getElementById('refreshStrategiesBtn');
         if (refreshStrategiesBtn) {
@@ -216,10 +366,7 @@ class TradingApp {
             console.log('Refresh risk rules button clicked');
             this.loadRiskRules();
         });
-        document.getElementById('refreshAutoOrdersBtn').addEventListener('click', () => {
-            console.log('Refresh auto orders button clicked');
-            this.loadAutoOrders();
-        });
+        // Auto Orders panel removed - no longer needed
 
         
         // Cancel all orders
@@ -272,13 +419,29 @@ class TradingApp {
 
     async apiCall(endpoint, options = {}) {
         try {
+            const headers = {
+                'Content-Type': 'application/json',
+                ...options.headers
+            };
+            
+            // Add JWT token to Authorization header if available
+            const token = localStorage.getItem('access_token');
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+            
             const response = await fetch(`/api${endpoint}`, {
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...options.headers
-                },
+                headers,
                 ...options
             });
+            
+            // Handle 401 Unauthorized - redirect to login
+            if (response.status === 401) {
+                localStorage.removeItem('access_token');
+                this.toggleAuthButtons(false);
+                this.showLoginModal();
+                throw new Error('Authentication required');
+            }
             
             const data = await response.json();
             
@@ -288,7 +451,9 @@ class TradingApp {
             
             return data;
         } catch (error) {
-            this.showAlert('danger', error.message);
+            if (error.message !== 'Authentication required') {
+                this.showAlert('danger', error.message);
+            }
             throw error;
         }
     }
@@ -308,6 +473,9 @@ class TradingApp {
             });
             
             this.showAlert('success', 'Connected successfully');
+            // Immediately update UI buttons
+            const accountType = (document.getElementById('accountType')?.value || 'paper');
+            this.updateConnectionStatus(true, accountType);
             
             // Close connection modal
             const modalElement = document.getElementById('connectionModal');
@@ -353,6 +521,7 @@ class TradingApp {
         try {
             await this.apiCall('/disconnect', { method: 'POST' });
             this.showAlert('info', 'Disconnected successfully');
+            this.updateConnectionStatus(false);
             this.clearData();
         } catch (error) {
             console.error('Disconnection failed:', error);
@@ -371,7 +540,6 @@ class TradingApp {
                 this.loadRiskRules();
                 this.loadAutoOrders();
                 this.loadStrategies();
-                this.loadLogs();
             }
         } catch (error) {
             console.error('Failed to check connection status:', error);
@@ -391,11 +559,15 @@ class TradingApp {
             statusText.textContent = `Connected (${accountType})`;
             connectBtn.disabled = true;
             disconnectBtn.disabled = false;
+            if (connectBtn) connectBtn.style.display = 'none';
+            if (disconnectBtn) disconnectBtn.style.display = 'inline-block';
         } else {
             statusIndicator.className = 'status-indicator status-disconnected';
             statusText.textContent = 'Disconnected';
             connectBtn.disabled = false;
             disconnectBtn.disabled = true;
+            if (connectBtn) connectBtn.style.display = 'inline-block';
+            if (disconnectBtn) disconnectBtn.style.display = 'none';
         }
     }
 
@@ -591,19 +763,16 @@ class TradingApp {
     async editPositionRiskRule(symbol, currentPrice, avgCost, position = 0, presetStopLoss = '', presetTakeProfit = '') {
         try {
             // Get risk configuration from API
-            const response = await fetch('/api/risk-config');
-            const config = await response.json();
+            const config = await this.apiCall('/risk-config');
             
             const stopLossRatio = config.stop_loss_ratio || 0.05;
             const takeProfitRatio = config.take_profit_ratio || 0.05;
             
+            // Determine if this is a short position (negative position)
+            const isShortPosition = position < 0;
+            
             // Determine base price for SL/TP calculation
             let basePrice = avgCost; // Default to average cost
-            
-            // If current price has grown (profit), use current price as base
-            if (currentPrice > avgCost) {
-                basePrice = currentPrice;
-            }
             
             // Apply leverage adjustment for leveraged assets
             let adjustedStopLossRatio = stopLossRatio;
@@ -617,16 +786,47 @@ class TradingApp {
                 adjustedTakeProfitRatio = takeProfitRatio / leverageRatio;
             }
             
+            let stopLoss, takeProfit;
+            
             // Use preset values if provided, otherwise calculate suggested values
-            const stopLoss = presetStopLoss || (basePrice * (1 - adjustedStopLossRatio)).toFixed(2);
-            const takeProfit = presetTakeProfit || (basePrice * (1 + adjustedTakeProfitRatio)).toFixed(2);
+            if (presetStopLoss !== '' && presetTakeProfit !== '') {
+                stopLoss = presetStopLoss;
+                takeProfit = presetTakeProfit;
+            } else {
+                // Calculate suggested values based on position direction
+                if (isShortPosition) {
+                    // For short positions: stop loss is above avg cost, take profit is below avg cost
+                    stopLoss = (basePrice * (1 + adjustedStopLossRatio)).toFixed(2);
+                    takeProfit = (basePrice * (1 - adjustedTakeProfitRatio)).toFixed(2);
+                } else {
+                    // For long positions: stop loss is below avg cost, take profit is above avg cost
+                    stopLoss = (basePrice * (1 - adjustedStopLossRatio)).toFixed(2);
+                    takeProfit = (basePrice * (1 + adjustedTakeProfitRatio)).toFixed(2);
+                }
+            }
             
             this.openRiskRuleModal(symbol, stopLoss, takeProfit, position, currentPrice, avgCost, true);
         } catch (error) {
             console.error('Failed to get risk config:', error);
             // Fallback to preset values or default calculated values
-            const stopLoss = presetStopLoss || (currentPrice * 0.95).toFixed(2);
-            const takeProfit = presetTakeProfit || (currentPrice * 1.05).toFixed(2);
+            let stopLoss, takeProfit;
+            const isShortPosition = position < 0;
+            
+            if (presetStopLoss !== '' && presetTakeProfit !== '') {
+                stopLoss = presetStopLoss;
+                takeProfit = presetTakeProfit;
+            } else {
+                if (isShortPosition) {
+                    // For short positions: stop loss above current price, take profit below
+                    stopLoss = presetStopLoss || (currentPrice * 1.05).toFixed(2);
+                    takeProfit = presetTakeProfit || (currentPrice * 0.95).toFixed(2);
+                } else {
+                    // For long positions: stop loss below current price, take profit above
+                    stopLoss = presetStopLoss || (currentPrice * 0.95).toFixed(2);
+                    takeProfit = presetTakeProfit || (currentPrice * 1.05).toFixed(2);
+                }
+            }
+            
             this.openRiskRuleModal(symbol, stopLoss, takeProfit, position, currentPrice, avgCost, true);
         }
     }
@@ -741,6 +941,16 @@ class TradingApp {
             console.log('Fetching orders from API...');
             const data = await this.apiCall('/orders');
             console.log('Orders data received:', data);
+            
+            // 按创建时间反序排列（最新的在前）
+            if (data.orders && Array.isArray(data.orders)) {
+                data.orders.sort((a, b) => {
+                    const timeA = new Date(a.submit_time || 0).getTime();
+                    const timeB = new Date(b.submit_time || 0).getTime();
+                    return timeB - timeA; // 反序排列
+                });
+            }
+            
             const tbody = document.querySelector('#ordersTable tbody');
             
             tbody.innerHTML = data.orders.map(order => {
@@ -759,9 +969,25 @@ class TradingApp {
                 const canEdit = order.status === 'Submitted' || order.status === 'PreSubmitted';
                 const canCancel = order.status === 'Submitted' || order.status === 'PreSubmitted';
                 
-                // 提交者显示逻辑
-                const sourceClass = order.order_source === '机器人' ? 'badge bg-success' : 'badge bg-primary';
-                const sourceText = order.order_source || '人工';
+                // 来源显示逻辑
+                let sourceDisplay = '—';
+                if (order.order_source) {
+                    if (order.order_source === 'manual' || order.order_source.startsWith('manual_') || order.order_source === '人工') {
+                        // 手动单直接显示字段值
+                        sourceDisplay = order.order_source;
+                    } else if (order.order_source === 'sl') {
+                        sourceDisplay = '<span class="badge bg-danger">止损</span>';
+                    } else if (order.order_source === 'tp') {
+                        sourceDisplay = '<span class="badge bg-success">止盈</span>';
+                    } else if (order.order_source === 'strategy') {
+                        sourceDisplay = '<span class="badge bg-info">策略</span>';
+                    } else if (order.order_source === '机器人' || order.order_source === 'auto') {
+                        sourceDisplay = '<span class="badge bg-secondary">自动</span>';
+                    } else {
+                        // 其他情况直接显示字段值
+                        sourceDisplay = order.order_source;
+                    }
+                }
                 
                 return `
                     <tr>
@@ -771,7 +997,7 @@ class TradingApp {
                         <td>${order.quantity}</td>
                         <td>${priceDisplay}</td>
                         <td><span class="badge bg-${this.getStatusColor(order.status)}">${order.status}</span></td>
-                        <td><span class="${sourceClass}">${sourceText}</span></td>
+                        <td>${sourceDisplay}</td>
                         <td>
                             ${canEdit ? 
                                 `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${order.order_id}, '${order.symbol}', '${order.action}', ${order.quantity}, '${order.order_type}', ${order.limit_price || 0})" title="Edit">
@@ -847,11 +1073,14 @@ class TradingApp {
                     <td>${rule.take_profit_price ? '$' + this.formatNumber(rule.take_profit_price) : 'N/A'}</td>
                     <td><span class="badge bg-${rule.enabled ? 'success' : 'secondary'}">${rule.enabled ? 'Active' : 'Disabled'}</span></td>
                     <td>
+                        <button class="btn btn-sm btn-outline-info me-1" onclick="app.showRiskRuleOrders('${rule.symbol}')" title="Details">
+                            <i class="fas fa-list"></i>
+                        </button>
                         <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editPositionRiskRule('${rule.symbol}', ${currentPrice}, ${avgCost}, ${positionSize}, '${rule.stop_loss_price || ''}', '${rule.take_profit_price || ''}')" title="Edit">
                             <i class="fas fa-edit"></i>
                         </button>
-                        <button class="btn btn-sm btn-outline-success me-1" onclick="app.executeRiskRule('${rule.symbol}', ${currentPrice}, ${rule.stop_loss_price || 0}, ${rule.take_profit_price || 0}, ${positionSize})" title="Execute Rule" ${!rule.enabled || !positionSize ? 'disabled' : ''}>
-                            <i class="fas fa-play"></i>
+                        <button class="btn btn-sm btn-outline-${rule.enabled ? 'warning' : 'success'} me-1" onclick="app.toggleRiskRule('${rule.symbol}', ${!rule.enabled})" title="${rule.enabled ? 'Disable Rule' : 'Enable Rule'}">
+                            <i class="fas fa-${rule.enabled ? 'pause' : 'play'}"></i>
                         </button>
                         <button class="btn btn-sm btn-danger" onclick="app.removeRiskRule('${rule.symbol}')" title="Delete">
                             <i class="fas fa-trash"></i>
@@ -934,6 +1163,17 @@ class TradingApp {
             this.loadRiskRules();
         } catch (error) {
             console.error('Failed to remove risk rule:', error);
+        }
+    }
+
+    async toggleRiskRule(symbol, enabled) {
+        try {
+            await this.apiCall(`/risk_rules/${symbol}?enabled=${enabled}`, { method: 'PUT' });
+            this.showAlert('success', `Risk rule for ${symbol} ${enabled ? 'enabled' : 'disabled'} successfully`);
+            await this.loadRiskRules();
+        } catch (error) {
+            console.error('Failed to update risk rule:', error);
+            this.showAlert('danger', `Failed to ${enabled ? 'enable' : 'disable'} risk rule`);
         }
     }
 
@@ -1262,8 +1502,7 @@ class TradingApp {
 
     async loadAutoOrders() {
         try {
-            const response = await fetch('/api/auto_orders');
-            const data = await response.json();
+            const data = await this.apiCall('/auto_orders');
             
             if (data.success) {
                 this.displayAutoOrders(data.orders);
@@ -1276,36 +1515,9 @@ class TradingApp {
     }
 
     displayAutoOrders(orders) {
-        const tbody = document.querySelector('#autoOrdersTable tbody');
-        tbody.innerHTML = '';
-        
-        if (!orders || orders.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No auto orders today</td></tr>';
-            return;
-        }
-        
-        orders.forEach(order => {
-            const row = document.createElement('tr');
-            
-            const createdAt = new Date(order.created_at).toLocaleString();
-            const price = order.price > 0 ? order.price.toFixed(2) : 'Market';
-            const sourceClass = order.order_source === 'auto' ? 'badge bg-success' : 'badge bg-primary';
-            
-            row.innerHTML = `
-                <td>${order.order_id}</td>
-                <td>${order.symbol}</td>
-                <td><span class="badge ${order.action === 'BUY' ? 'bg-success' : 'bg-danger'}">${order.action}</span></td>
-                <td>${order.quantity}</td>
-                <td>${order.order_type}</td>
-                <td>${price}</td>
-                <td>${order.status}</td>
-                <td><span class="${sourceClass}">${order.order_source}</span></td>
-                <td>${order.rule_id}</td>
-                <td>${createdAt}</td>
-            `;
-            
-            tbody.appendChild(row);
-        });
+        // Auto Orders panel removed - method kept for compatibility
+        console.log('Auto orders display skipped - panel removed');
+        return;
     }
 
     // 编辑订单
@@ -1338,15 +1550,10 @@ class TradingApp {
     // 取消订单
     async cancelOrder(orderId) {
         try {
-            const response = await fetch('/api/cancel_order', {
+            const result = await this.apiCall('/cancel_order', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
                 body: JSON.stringify({ order_id: orderId })
             });
-            
-            const result = await response.json();
             
             if (result.success) {
                 this.showAlert('success', `订单 ${orderId} 已成功取消`);
@@ -1508,7 +1715,7 @@ class TradingApp {
                     container.innerHTML = `
                       <div class="mb-2"><span class="badge bg-primary">external</span> endpoint: <code>${endpoint}</code></div>
                       <pre class="bg-light p-3"><code>${curl}</code></pre>
-                      <p class="text-muted">If authentication is enabled in settings, add header: <code>-H \"Authorization: Bearer &lt;TOKEN&gt;\"</code></p>`;
+                      <p class="text-muted">如果在策略设置中开启鉴权，需要在请求体中加入 <code>{ token: &lt;TOKEN&gt; }</code> 字段，其中 TOKEN 来自策略设置</p>`;
                 } else {
                     container.innerHTML = '<p class="text-muted">API examples are only available for external strategies.</p>';
                 }
@@ -1560,6 +1767,29 @@ class TradingApp {
                 refreshBtn.onclick = () => {
                     this.loadStrategyExecutions(name);
                     this.loadStrategyPerformance(name, { range: '1d' });
+                };
+            }
+
+            const clearBtn = document.getElementById('clearExecutionsBtn');
+            if (clearBtn) {
+                clearBtn.onclick = async () => {
+                    try {
+                        const strategy = document.getElementById('detailsStrategyName')?.textContent || name;
+                        if (!strategy) return;
+                        if (!confirm(`确定要清空策略 "${strategy}" 的全部执行记录吗？此操作不可撤销！`)) {
+                            return;
+                        }
+                        await this.apiCall(`/strategies/${strategy}/executions`, { method: 'DELETE' });
+                        this.executionsPagination.allExecutions = [];
+                        this.executionsPagination.totalItems = 0;
+                        this.executionsPagination.currentPage = 1;
+                        this.renderExecutionsTable();
+                        this.renderExecutionsPagination();
+                        this.showAlert('success', '已清空该策略的执行记录');
+                    } catch (e) {
+                        console.error('Clear executions error:', e);
+                        this.showAlert('danger', '清空执行记录失败');
+                    }
                 };
             }
 
@@ -1796,30 +2026,7 @@ class TradingApp {
         }
     }
 
-    async loadLogs() {
-        try {
-            const logLevel = document.getElementById('logLevel')?.value || 'all';
-            const logLines = document.getElementById('logLines')?.value || '100';
-            
-            const response = await this.apiCall(`/logs?lines=${logLines}&level=${logLevel}`);
-            
-            if (response.success) {
-                this.displayLogs(response.logs);
-            }
-        } catch (error) {
-            console.error('Failed to load logs:', error);
-            this.showAlert('danger', 'Failed to load logs');
-        }
-    }
-
-    displayLogs(logs) {
-        const logsContent = document.getElementById('logsContent');
-        if (logsContent) {
-            logsContent.textContent = logs.join('\n');
-            // Auto scroll to bottom
-            logsContent.scrollTop = logsContent.scrollHeight;
-        }
-    }
+    // Logs functionality removed - panel no longer exists
 
     async executeRiskRule(symbol, currentPrice, stopLossPrice, takeProfitPrice, positionSize) {
         if (!positionSize || positionSize === 0) {
@@ -2146,8 +2353,7 @@ class TradingApp {
 
     async loadAutoOrders() {
         try {
-            const response = await fetch('/api/auto_orders');
-            const data = await response.json();
+            const data = await this.apiCall('/auto_orders');
             
             if (data.success) {
                 this.displayAutoOrders(data.orders);
@@ -2161,6 +2367,10 @@ class TradingApp {
 
     displayAutoOrders(orders) {
         const tbody = document.querySelector('#autoOrdersTable tbody');
+        if (!tbody) {
+            console.log('autoOrdersTable not found - panel has been removed');
+            return;
+        }
         tbody.innerHTML = '';
         
         if (!orders || orders.length === 0) {
@@ -2173,7 +2383,26 @@ class TradingApp {
             
             const createdAt = new Date(order.created_at).toLocaleString();
             const price = order.price > 0 ? order.price.toFixed(2) : 'Market';
-            const sourceClass = order.order_source === 'auto' ? 'badge bg-success' : 'badge bg-primary';
+            
+            // 来源显示逻辑
+            let sourceDisplay = '—';
+            if (order.order_source) {
+                if (order.order_source === 'manual' || order.order_source.startsWith('manual_') || order.order_source === '人工') {
+                    // 手动单直接显示字段值
+                    sourceDisplay = order.order_source;
+                } else if (order.order_source === 'sl') {
+                    sourceDisplay = '<span class="badge bg-danger">止损</span>';
+                } else if (order.order_source === 'tp') {
+                    sourceDisplay = '<span class="badge bg-success">止盈</span>';
+                } else if (order.order_source === 'strategy') {
+                    sourceDisplay = '<span class="badge bg-info">策略</span>';
+                } else if (order.order_source === '机器人' || order.order_source === 'auto') {
+                    sourceDisplay = '<span class="badge bg-secondary">自动</span>';
+                } else {
+                    // 其他情况直接显示字段值
+                    sourceDisplay = order.order_source;
+                }
+            }
             
             row.innerHTML = `
                 <td>${order.order_id}</td>
@@ -2183,7 +2412,7 @@ class TradingApp {
                 <td>${order.order_type}</td>
                 <td>${price}</td>
                 <td>${order.status}</td>
-                <td><span class="${sourceClass}">${order.order_source}</span></td>
+                <td>${sourceDisplay}</td>
                 <td>${order.rule_id}</td>
                 <td>${createdAt}</td>
             `;
@@ -2222,15 +2451,10 @@ class TradingApp {
     // 取消订单
     async cancelOrder(orderId) {
         try {
-            const response = await fetch('/api/cancel_order', {
+            const result = await this.apiCall('/cancel_order', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
                 body: JSON.stringify({ order_id: orderId })
             });
-            
-            const result = await response.json();
             
             if (result.success) {
                 this.showAlert('success', `订单 ${orderId} 已成功取消`);
@@ -2241,6 +2465,160 @@ class TradingApp {
         } catch (error) {
             console.error('Cancel order error:', error);
             this.showAlert('danger', '取消订单时发生错误');
+        }
+    }
+
+    async showRiskRuleOrders(symbol) {
+        try {
+            // 获取今天的订单数据和持仓数据
+            const [ordersData, portfolioData] = await Promise.all([
+                this.apiCall('/orders'),
+                this.apiCall('/positions')
+            ]);
+            const today = new Date().toISOString().split('T')[0];
+            
+            // 获取该symbol的持仓信息
+            const position = portfolioData.positions.find(pos => pos.symbol === symbol);
+            const avgCost = position ? position.avg_cost : 0;
+            
+            // 过滤出今天的、由风险规则触发的、指定symbol的订单
+            // 风险规则触发的订单特征：order_source为'sl'或'tp'等风险规则类型 且 symbol匹配
+            const riskRuleOrders = ordersData.orders.filter(order => {
+                const orderDate = new Date(order.submit_time || order.created_at).toISOString().split('T')[0];
+                return orderDate === today && 
+                       order.symbol === symbol && 
+                       (order.order_source === 'sl' || order.order_source === 'tp' || order.trigger_type === 'risk_rule');
+            });
+
+            // 计算统计数据
+            let totalOrders = riskRuleOrders.length;
+            let totalProfit = 0;
+            let totalLoss = 0;
+
+            // 根据成交价和平均成本计算PnL
+            riskRuleOrders.forEach(order => {
+                if (order.status === 'Filled' && order.avg_fill_price && avgCost > 0) {
+                    // 计算每股盈亏：(成交价 - 平均成本) * 数量
+                    // 对于卖出订单，盈亏 = (成交价 - 平均成本) * 数量
+                    // 对于买入订单，盈亏 = (平均成本 - 成交价) * 数量（通常风险规则不会有买入）
+                    let pnlPerShare = 0;
+                    if (order.action === 'SELL') {
+                        pnlPerShare = order.avg_fill_price - avgCost;
+                    } else if (order.action === 'BUY') {
+                        pnlPerShare = avgCost - order.avg_fill_price;
+                    }
+                    
+                    const totalPnl = pnlPerShare * order.quantity;
+                    
+                    if (totalPnl > 0) {
+                        totalProfit += totalPnl;
+                    } else {
+                        totalLoss += Math.abs(totalPnl);
+                    }
+                }
+            });
+
+            // 更新规则信息
+            document.getElementById('ruleInfoText').textContent = `${symbol} 风险规则触发的订单`;
+            
+            // 更新统计卡片
+            document.getElementById('totalOrdersCount').textContent = totalOrders;
+            document.getElementById('totalProfit').textContent = '$' + this.formatNumber(totalProfit);
+            document.getElementById('totalLoss').textContent = '$' + this.formatNumber(totalLoss);
+
+            // 渲染订单表格
+            const tbody = document.querySelector('#riskRuleOrdersTable tbody');
+            tbody.innerHTML = riskRuleOrders.map(order => {
+                // 确定触发类型显示文本
+                let triggerTypeText = '风险规则';
+                let triggerTypeClass = 'bg-warning';
+                
+                // 根据订单来源确定显示文本
+                if (order.order_source === 'sl') {
+                    triggerTypeText = '止损';
+                    triggerTypeClass = 'bg-danger';
+                } else if (order.order_source === 'tp') {
+                    triggerTypeText = '止盈';
+                    triggerTypeClass = 'bg-success';
+                } else if (order.order_source === 'strategy') {
+                    triggerTypeText = '策略';
+                    triggerTypeClass = 'bg-info';
+                } else if (order.order_source === 'auto' || order.order_source === '机器人') {
+                    triggerTypeText = '自动';
+                    triggerTypeClass = 'bg-secondary';
+                } else if (order.trigger_type === 'risk_rule') {
+                    // 兼容旧的trigger_type字段
+                    triggerTypeText = '风险规则';
+                    triggerTypeClass = 'bg-warning';
+                } else {
+                    // 手动订单，显示order_source值或用户名
+                    triggerTypeText = order.order_source || '手动';
+                    triggerTypeClass = 'bg-info';
+                }
+                
+                // 价格显示逻辑
+                let priceDisplay = '';
+                if (order.order_type === 'MKT') {
+                    priceDisplay = order.avg_fill_price && order.avg_fill_price > 0 ? 
+                        this.formatNumber(order.avg_fill_price) : 'Market';
+                } else {
+                    priceDisplay = order.limit_price ? this.formatNumber(order.limit_price) : 'N/A';
+                }
+                
+                // 成交价显示
+                const executionPrice = order.avg_fill_price || 0;
+                
+                // 计算该订单的PnL
+                let orderPnl = 0;
+                if (order.status === 'Filled' && order.avg_fill_price && avgCost > 0) {
+                    let pnlPerShare = 0;
+                    if (order.action === 'SELL') {
+                        pnlPerShare = order.avg_fill_price - avgCost;
+                    } else if (order.action === 'BUY') {
+                        pnlPerShare = avgCost - order.avg_fill_price;
+                    }
+                    orderPnl = pnlPerShare * order.quantity;
+                }
+                
+                // PnL显示样式
+                const pnlClass = orderPnl > 0 ? 'text-success' : orderPnl < 0 ? 'text-danger' : 'text-muted';
+                const pnlText = orderPnl !== 0 ? `$${this.formatNumber(Math.abs(orderPnl))}` : '$0.00';
+                
+                return `
+                <tr>
+                    <td>${order.order_id}</td>
+                    <td>${new Date(order.submit_time || order.created_at).toLocaleString()}</td>
+                    <td>${order.symbol}</td>
+                    <td><span class="badge bg-${order.action === 'BUY' ? 'success' : 'danger'}">${order.action}</span></td>
+                    <td>${order.quantity}</td>
+                    <td>$${priceDisplay}</td>
+                    <td><span class="badge bg-${this.getStatusColor(order.status)}">${order.status}</span></td>
+                    <td>$${this.formatNumber(executionPrice)}</td>
+                    <td class="${pnlClass}">${pnlText}</td>
+                    <td><span class="badge ${triggerTypeClass}">${triggerTypeText}</span></td>
+                </tr>
+                `;
+            }).join('');
+
+            // 如果没有找到订单，显示提示信息
+            if (riskRuleOrders.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="10" class="text-center text-muted">
+                            今日暂无该风险规则触发的订单
+                        </td>
+                    </tr>
+                `;
+            }
+
+            // 显示模态框
+            const modalEl = document.getElementById('riskRuleOrdersModal');
+            const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+            modal.show();
+
+        } catch (error) {
+            console.error('Failed to load risk rule orders:', error);
+            this.showAlert('danger', '加载风险规则订单详情时发生错误');
         }
     }
 }
@@ -2257,6 +2635,5 @@ setInterval(() => {
         app.loadRiskRules();
         app.loadAutoOrders();
         app.loadStrategies();
-        app.loadLogs();
     }
 }, 30000);

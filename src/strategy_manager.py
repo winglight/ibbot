@@ -561,8 +561,18 @@ if __name__ == "__main__":
             if name not in self.strategies:
                 return False
                 
+            # Delete from memory
             del self.strategies[name]
-            self._save_strategies()
+            
+            # Delete from database directly
+            self.db_manager.delete_strategy(name)
+            
+            # Also clean executions for this strategy from database
+            self.db_manager.delete_strategy_executions(name)
+            
+            # Clean from memory executions
+            self.executions = [e for e in self.executions if e.strategy_name != name]
+            
             logger.info(f"Deleted strategy: {name}")
             return True
         except Exception as e:
@@ -609,8 +619,34 @@ if __name__ == "__main__":
                     execution = exec_record
                     break
             
+            # If not found in memory, try to load from database and add to memory
             if not execution:
-                logger.warning(f"No execution record found for order_id: {order_id}")
+                logger.info(f"Execution record not found in memory for order_id: {order_id}, checking database...")
+                try:
+                    # Load all executions from database to find the missing one
+                    db_executions = self.db_manager.load_strategy_executions()
+                    for db_exec in db_executions:
+                        if db_exec.order_id == order_id:
+                            # Create StrategyExecution from database record and add to memory
+                            execution = StrategyExecution(
+                                strategy_name=db_exec.name,
+                                execution_time=datetime.fromisoformat(db_exec.timestamp),
+                                order_id=db_exec.order_id,
+                                symbol=db_exec.symbol,
+                                action=db_exec.action,
+                                quantity=db_exec.quantity,
+                                price=db_exec.price,
+                                status=db_exec.status,
+                                pnl=db_exec.profit
+                            )
+                            self.executions.append(execution)
+                            logger.info(f"Loaded execution record from database and added to memory: {order_id}")
+                            break
+                except Exception as db_err:
+                    logger.error(f"Failed to load execution from database for order_id {order_id}: {db_err}")
+            
+            if not execution:
+                logger.warning(f"No execution record found for order_id: {order_id} in memory or database")
                 return
             
             # Update execution price
@@ -729,6 +765,34 @@ if __name__ == "__main__":
             
         except Exception as e:
             logger.error(f"Failed to update execution price and PnL: {e}")
+            
+    def get_executions(self, strategy_name: str, limit: int = 100) -> List[StrategyExecution]:
+        """Get executions for a specific strategy"""
+        try:
+            # Load from database
+            db_executions = self.db_manager.load_strategy_executions(strategy_name, limit)
+            
+            # Map database execution to StrategyExecution format expected by frontend
+            result = []
+            for db_exec in db_executions:
+                # Map database fields to StrategyExecution fields
+                execution = StrategyExecution(
+                    strategy_name=db_exec.name,
+                    execution_time=datetime.fromisoformat(db_exec.timestamp),
+                    order_id=db_exec.order_id,
+                    symbol=db_exec.symbol,
+                    action=db_exec.action,
+                    quantity=db_exec.quantity,
+                    price=db_exec.price,
+                    status=db_exec.status or "executed",
+                    pnl=db_exec.profit
+                )
+                result.append(execution)
+            
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get executions for {strategy_name}: {e}")
+            return []
             
     def get_strategy_performance(self, strategy_name: str, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> Dict[str, Any]:
         """Get strategy performance metrics"""

@@ -22,11 +22,12 @@ from dotenv import load_dotenv
 from dataclasses import asdict
 
 # FastAPI imports
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from jose import JWTError, jwt
 
 # Add current directory to Python path
 sys.path.append(str(Path(__file__).parent))
@@ -44,6 +45,60 @@ load_dotenv()
 
 # FastAPI app
 app = FastAPI(title="IBKR Trading Bot", version="1.0.0")
+
+# Auth config
+ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change_me')
+JWT_SECRET = os.getenv('JWT_SECRET', 'please_change_me')
+JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256')
+JWT_EXPIRE_DAYS = int(os.getenv('JWT_EXPIRE_DAYS', '1'))
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = 'bearer'
+    expires_in: int
+
+EXEMPT_PATHS = set([
+    '/',
+    '/static/style.css',
+    '/static/app.js',
+    '/static',
+    '/api/login',
+    '/api/strategy',  # external strategies use body token
+])
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(days=JWT_EXPIRE_DAYS))
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return encoded_jwt, int(expires_delta.total_seconds() if expires_delta else timedelta(days=JWT_EXPIRE_DAYS).total_seconds())
+
+async def get_current_user(request: Request):
+    # Strategy endpoint uses body token; allow it via EXEMPT_PATHS
+    if request.url.path in EXEMPT_PATHS:
+        return None
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+    token = auth_header.split(' ', 1)[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get('sub')
+    except JWTError:
+        raise HTTPException(status_code=401, detail='Unauthorized')
+
+@app.post('/api/login')
+async def login(req: LoginRequest):
+    if req.username != ADMIN_USERNAME or req.password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail='Invalid credentials')
+    token, expires_in = create_access_token({"sub": req.username})
+    return {"access_token": token, "token_type": "bearer", "expires_in": expires_in}
+
 
 # CORS middleware
 app.add_middleware(
@@ -123,6 +178,7 @@ class ExternalStrategyOrderRequest(BaseModel):
     price: Optional[float] = None
     exchange: str = "SMART"
     sec_type: str = "STK"
+    token: Optional[str] = None  # Optional auth token for strategy auth
 
 # WebSocket connection manager
 class ConnectionManager:
@@ -213,37 +269,24 @@ def check_environment():
     
     return len(missing_vars) == 0
 
-def test_connection():
-    """Test IBKR connection"""
+async def test_connection_async():
+    """Test IBKR connection without blocking event loop"""
     logger.info("Testing IBKR connection...")
-    
-    ibkr_client = IBKRClient()
-    telegram_notifier = TelegramNotifier()
-    
+    local_client = IBKRClient()
     try:
-        # Test IBKR connection
-        success = ibkr_client.connect()
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, local_client.connect)
         if success:
             logger.info("IBKR connection test successful")
-            
-            # Test basic functionality
-            account_info = ibkr_client.get_account_info()
+            account_info = await loop.run_in_executor(None, local_client.get_account_info)
             if account_info:
                 logger.info(f"Account ID: {account_info.get('account_id', 'N/A')}")
                 logger.info(f"Account Type: {account_info.get('account_type', 'N/A')}")
-            
-            ibkr_client.disconnect()
+            await loop.run_in_executor(None, local_client.disconnect)
+            return True
         else:
             logger.error("IBKR connection test failed")
             return False
-        
-        # Test Telegram notification (if configured)
-        if os.getenv('TELEGRAM_BOT_TOKEN') and os.getenv('TELEGRAM_CHAT_ID'):
-            # telegram_notifier.send_message("🤖 IBKR Trading Bot - Connection Test Successful")  # 暂时注释掉异步调用
-            logger.info("Telegram notification test completed")
-        
-        return True
-        
     except Exception as e:
         logger.error(f"Connection test failed: {e}")
         return False
@@ -263,7 +306,7 @@ def print_banner():
     ║  • Historical data export                                   ║
     ║                                                              ║
     ║  Web UI: http://localhost:8000                               ║
-    ╚══════════════════════════════════════════════════════════╝
+    ╚══════════════════════════════════════════════════════════════╝
     """
     print(banner)
 
@@ -271,14 +314,14 @@ def print_banner():
 @app.on_event("startup")
 async def startup_event():
     global ibkr_client, telegram_notifier, risk_manager, strategy_manager
-    
     # Initialize components
     ibkr_client = IBKRClient()
     telegram_notifier = TelegramNotifier()
     risk_manager = RiskManager(ibkr_client, telegram_notifier)
-    # Initialize strategy manager
     strategy_manager = StrategyManager(data_dir="data", strategy_dir="strategy")
-    if not test_connection():
+    # Use async test to avoid blocking
+    ok = await test_connection_async()
+    if not ok:
         logger.error("Environment setup failed. Please check your configuration.")
         return
     
@@ -323,7 +366,7 @@ async def read_root():
 
 # Connection endpoints
 @app.post("/api/connect")
-async def connect_ibkr(config: ConnectionConfig):
+async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(get_current_user)):
     """连接到IBKR"""
     global ibkr_client
     
@@ -348,7 +391,7 @@ async def connect_ibkr(config: ConnectionConfig):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/disconnect")
-def disconnect_ibkr():
+async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
     """断开IBKR连接"""
     global ibkr_client, risk_manager
     
@@ -365,7 +408,7 @@ def disconnect_ibkr():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/connection_status")
-async def get_connection_status():
+async def get_connection_status(user: Optional[str] = Depends(get_current_user)):
     """获取连接状态"""
     return {
         "connected": connection_manager.is_connected(),
@@ -374,17 +417,22 @@ async def get_connection_status():
 
 # Market data endpoints
 @app.post("/api/historical_data")
-async def get_historical_data(request: HistoricalDataRequest):
+async def get_historical_data(request: HistoricalDataRequest, user: Optional[str] = Depends(get_current_user)):
     """获取历史数据"""
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        df = ibkr_client.get_historical_data(
-            symbol=request.symbol,
-            duration=request.duration,
-            bar_size=request.bar_size,
-            exchange=request.exchange
+        # Run in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        df = await loop.run_in_executor(
+            None, 
+            lambda: ibkr_client.get_historical_data(
+                symbol=request.symbol,
+                duration=request.duration,
+                bar_size=request.bar_size,
+                exchange=request.exchange
+            )
         )
         
         if df.empty:
@@ -414,17 +462,22 @@ async def get_historical_data(request: HistoricalDataRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/chart_data")
-async def get_chart_data(request: ChartDataRequest):
+async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depends(get_current_user)):
     """获取图表数据"""
     if not ibkr_client or not ibkr_client.connected:
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        df = ibkr_client.get_historical_data(
-            symbol=request.symbol,
-            duration=request.duration,
-            bar_size=request.bar_size,
-            exchange=request.exchange
+        # Run in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        df = await loop.run_in_executor(
+            None,
+            lambda: ibkr_client.get_historical_data(
+                symbol=request.symbol,
+                duration=request.duration,
+                bar_size=request.bar_size,
+                exchange=request.exchange
+            )
         )
         
         if df.empty:
@@ -455,16 +508,65 @@ async def get_chart_data(request: ChartDataRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/realtime_data/{symbol}")
-async def get_realtime_data(symbol: str, exchange: str = "SMART"):
+async def get_realtime_data(symbol: str, exchange: str = "SMART", user: Optional[str] = Depends(get_current_user)):
     """获取实时数据"""
     if not ibkr_client or not ibkr_client.connected:
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        data = ibkr_client.get_real_time_data(symbol, exchange)
+        # Run in executor with timeout to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        try:
+            data = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, 
+                    lambda: ibkr_client.get_real_time_data(symbol, exchange)
+                ), 
+                timeout=10.0  # 10-second timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Real-time data request for {symbol} timed out, checking cache")
+            # Try to get cached data as fallback
+            cached_data = None
+            if hasattr(ibkr_client, 'price_cache') and symbol in ibkr_client.price_cache:
+                cached_price = ibkr_client.price_cache.get(symbol)
+                if cached_price:
+                    cached_data = {
+                        'symbol': symbol,
+                        'last': cached_price,
+                        'bid': 0,
+                        'ask': 0,
+                        'volume': 0,
+                        'timestamp': datetime.now().isoformat(),
+                        'is_cached': True
+                    }
+            
+            if cached_data:
+                logger.info(f"Returning cached data for {symbol}: {cached_price}")
+                return {"success": True, "data": cached_data}
+            else:
+                logger.warning(f"No cached data available for {symbol}")
+                return {"success": False, "error": "Real-time data request timed out and no cached data available"}
+        
         if data:
             return {"success": True, "data": data}
         else:
+            # Try cached data as fallback when no data returned
+            if hasattr(ibkr_client, 'price_cache') and symbol in ibkr_client.price_cache:
+                cached_price = ibkr_client.price_cache.get(symbol)
+                if cached_price:
+                    cached_data = {
+                        'symbol': symbol,
+                        'last': cached_price,
+                        'bid': 0,
+                        'ask': 0,
+                        'volume': 0,
+                        'timestamp': datetime.now().isoformat(),
+                        'is_cached': True
+                    }
+                    logger.info(f"No fresh data for {symbol}, returning cached: {cached_price}")
+                    return {"success": True, "data": cached_data}
+            
             raise HTTPException(status_code=404, detail="No data available")
             
     except Exception as e:
@@ -473,30 +575,39 @@ async def get_realtime_data(symbol: str, exchange: str = "SMART"):
 
 # Trading endpoints
 @app.post("/api/place_order")
-async def place_order(order: OrderRequest):
+async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_current_user)):
     """下单"""
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
+        # Run blocking order placement in executor
+        loop = asyncio.get_event_loop()
+        
         if order.order_type.upper() == "MARKET":
-            trade = ibkr_client.place_market_order(
-                symbol=order.symbol,
-                quantity=order.quantity,
-                action=order.action,
-                exchange=order.exchange,
-                sec_type=order.sec_type
+            trade = await loop.run_in_executor(
+                None,
+                lambda: ibkr_client.place_market_order(
+                    symbol=order.symbol,
+                    quantity=order.quantity,
+                    action=order.action,
+                    exchange=order.exchange,
+                    sec_type=order.sec_type
+                )
             )
         elif order.order_type.upper() == "LIMIT":
             if not order.price:
                 raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = ibkr_client.place_limit_order(
-                symbol=order.symbol,
-                quantity=order.quantity,
-                price=order.price,
-                action=order.action,
-                exchange=order.exchange,
-                sec_type=order.sec_type
+            trade = await loop.run_in_executor(
+                None,
+                lambda: ibkr_client.place_limit_order(
+                    symbol=order.symbol,
+                    quantity=order.quantity,
+                    price=order.price,
+                    action=order.action,
+                    exchange=order.exchange,
+                    sec_type=order.sec_type
+                )
             )
         else:
             raise HTTPException(status_code=400, detail="Invalid order type")
@@ -508,51 +619,59 @@ async def place_order(order: OrderRequest):
                 from datetime import datetime
                 import os
                 
+                # Normalize order type to MKT/LMT format
+                normalized_order_type = "MKT" if order.order_type.upper() == "MARKET" else "LMT"
+                
                 auto_order = AutoOrder(
                     order_id=str(trade.order.orderId),
                     symbol=order.symbol,
                     action=order.action,
                     quantity=order.quantity,
-                    order_type=order.order_type.upper(),
+                    order_type=normalized_order_type,
                     price=order.price if order.price else 0.0,
                     status="Submitted",
                     created_at=datetime.now(),
                     executed_at=None,
                     rule_id="manual",
-                    order_source="manual"
+                    order_source=user or "manual"
                 )
                 
                 risk_manager.auto_orders[str(trade.order.orderId)] = auto_order
-                risk_manager.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
-            
-            await manager.broadcast({
-                "type": "order_placed",
-                "order_id": trade.order.orderId,
-                "symbol": order.symbol,
-                "action": order.action,
-                "quantity": order.quantity
-            })
-            
-            return {
-                "success": True,
-                "order_id": trade.order.orderId,
-                "message": "Order placed successfully"
-            }
-        else:
-            raise HTTPException(status_code=400, detail="Failed to place order")
-            
+                # 保存到数据库，保证持久化
+                risk_manager.save_auto_order_to_db(auto_order)
+                
+                await manager.broadcast({
+                    "type": "order_placed",
+                    "order_id": trade.order.orderId,
+                    "symbol": order.symbol,
+                    "action": order.action,
+                    "quantity": order.quantity
+                })
+                
+                return {
+                    "success": True,
+                    "order_id": trade.order.orderId,
+                    "message": "Order placed successfully"
+                }
+            else:
+                raise HTTPException(status_code=400, detail="Failed to place order")
     except Exception as e:
         logger.error(f"Order placement error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/cancel_order/{order_id}")
-async def cancel_order(order_id: int):
+async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_user)):
     """取消订单"""
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        success, message = ibkr_client.cancel_order(order_id)
+        # Run in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        success, message = await loop.run_in_executor(
+            None,
+            lambda: ibkr_client.cancel_order(order_id)
+        )
         
         if success:
             await manager.broadcast({
@@ -565,7 +684,7 @@ async def cancel_order(order_id: int):
             
             return {"success": True, "message": message}
         else:
-            # 如果返回“not found or already completed”，则删除本地记录
+            # 如果返回"not found or already completed"，则删除本地记录
             if "not found" in message.lower():
                 if risk_manager:
                     removed = risk_manager.remove_order_record(str(order_id))
@@ -578,7 +697,7 @@ async def cancel_order(order_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/cancel_order")
-async def cancel_order_post(request: dict):
+async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_current_user)):
     """取消订单 (POST方法)"""
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
@@ -588,7 +707,12 @@ async def cancel_order_post(request: dict):
         if not order_id:
             raise HTTPException(status_code=400, detail="order_id is required")
             
-        success, message = ibkr_client.cancel_order(int(order_id))
+        # Run in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        success, message = await loop.run_in_executor(
+            None,
+            lambda: ibkr_client.cancel_order(int(order_id))
+        )
         
         if success:
             await manager.broadcast({
@@ -601,7 +725,7 @@ async def cancel_order_post(request: dict):
             
             return {"success": True, "message": message}
         else:
-            # 如果返回“not found or already completed”，则删除本地记录
+            # 如果返回"not found or already completed"，则删除本地记录
             if "not found" in message.lower():
                 if risk_manager:
                     removed = risk_manager.remove_order_record(str(order_id))
@@ -614,13 +738,18 @@ async def cancel_order_post(request: dict):
         return {"success": False, "error": str(e)}
 
 @app.delete("/api/cancel_all_orders")
-async def cancel_all_orders():
+async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
     """取消所有订单"""
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        cancelled_count = ibkr_client.cancel_all_orders()
+        # Run in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        cancelled_count = await loop.run_in_executor(
+            None,
+            ibkr_client.cancel_all_orders
+        )
         
         await manager.broadcast({
             "type": "all_orders_cancelled",
@@ -638,8 +767,8 @@ async def cancel_all_orders():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/orders")
-async def get_orders():
-    """获取订单列表（从CSV文件读取，包含历史订单）"""
+async def get_orders(user: Optional[str] = Depends(get_current_user)):
+    """获取订单列表（从数据库读取，包含历史订单）"""
     if not risk_manager:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
@@ -647,12 +776,23 @@ async def get_orders():
         # 先从 IB 同步最新订单状态到本地记录（若已连接）
         try:
             if ibkr_client and connection_manager.is_connected():
-                ibkr_client.get_orders(risk_manager, strategy_manager)
+                # Run in executor to avoid blocking event loop with a short timeout
+                loop = asyncio.get_event_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: ibkr_client.get_orders(risk_manager, strategy_manager)
+                    ),
+                    timeout=3.0
+                )
         except Exception as sync_err:
             logger.debug(f"Order sync skipped: {sync_err}")
         
-        # 从 risk_manager 获取所有订单数据（从 orders.csv 加载）
+        # 从 risk_manager 获取所有订单数据（从数据库加载）
         orders = risk_manager.get_auto_orders()
+        
+        # 按创建时间反序排列（最新的在前）
+        orders.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         
         # 转换字段名以匹配前端期望
         converted_orders = []
@@ -671,6 +811,20 @@ async def get_orders():
             except Exception:
                 price_val = 0.0
             
+            # 计算触发类型：仅对机器人订单（auto）有效
+            trigger_type = None
+            try:
+                if order.get('order_source') == 'auto':
+                    rule_id = order.get('rule_id')
+                    symbol = order.get('symbol')
+                    # 约定：风控触发时 rule_id == symbol；策略触发时 rule_id 为策略名（通常 != symbol）
+                    if rule_id and rule_id != symbol:
+                        trigger_type = 'strategy'
+                    else:
+                        trigger_type = 'risk_rule'
+            except Exception:
+                trigger_type = None
+            
             converted_order = {
                 'order_id': order['order_id'],
                 'symbol': order['symbol'],
@@ -683,7 +837,8 @@ async def get_orders():
                 'filled': order['quantity'] if order['status'] == 'Filled' else 0,
                 'remaining': 0 if order['status'] == 'Filled' else order['quantity'],
                 'submit_time': order.get('created_at'),
-                'order_source': '机器人' if order.get('order_source') == 'auto' else '人工'
+                'order_source': order.get('order_source', 'manual'),
+                'trigger_type': trigger_type
             }
             converted_orders.append(converted_order)
         
@@ -695,13 +850,23 @@ async def get_orders():
 
 # Account endpoints
 @app.get("/api/account_info")
-async def get_account_info():
+async def get_account_info(user: Optional[str] = Depends(get_current_user)):
     """获取账户信息"""
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        info = ibkr_client.get_account_info()
+        # Run in executor with timeout to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        try:
+            info = await asyncio.wait_for(
+                loop.run_in_executor(None, ibkr_client.get_account_info),
+                timeout=10.0  # 10-second timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Account info request timed out")
+            return {"success": False, "error": "Account info request timed out"}
+            
         return {"success": True, "account_info": info}
         
     except Exception as e:
@@ -709,13 +874,23 @@ async def get_account_info():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/positions")
-async def get_positions():
+async def get_positions(user: Optional[str] = Depends(get_current_user)):
     """获取持仓列表"""
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        positions = ibkr_client.get_positions()
+        # Run in executor with timeout to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        try:
+            positions = await asyncio.wait_for(
+                loop.run_in_executor(None, ibkr_client.get_positions),
+                timeout=10.0  # 10-second timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Positions request timed out")
+            return {"success": False, "error": "Positions request timed out"}
+            
         return {"success": True, "positions": positions}
         
     except Exception as e:
@@ -724,12 +899,13 @@ async def get_positions():
 
 # Risk management endpoints
 @app.post("/api/risk_rules")
-async def add_risk_rule(rule: RiskRuleRequest):
+async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get_current_user)):
     """添加风险管理规则"""
     if not risk_manager:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
     try:
+        logger.info(f"API add_risk_rule: symbol={rule.symbol}, SL={rule.stop_loss_price}, TP={rule.take_profit_price}, max_loss%={rule.max_loss_percent}")
         risk_manager.add_risk_rule(
             symbol=rule.symbol,
             stop_loss_price=rule.stop_loss_price,
@@ -744,7 +920,7 @@ async def add_risk_rule(rule: RiskRuleRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/risk_rules")
-async def get_risk_rules():
+async def get_risk_rules(user: Optional[str] = Depends(get_current_user)):
     """获取风险管理规则"""
     if not risk_manager:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
@@ -769,13 +945,32 @@ async def get_risk_rules():
         logger.error(f"Get risk rules error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.put("/api/risk_rules/{symbol}")
+async def update_risk_rule(symbol: str, enabled: bool, user: Optional[str] = Depends(get_current_user)):
+    """更新风险管理规则状态"""
+    if not risk_manager:
+        raise HTTPException(status_code=400, detail="Risk manager not initialized")
+    
+    try:
+        logger.info(f"API update_risk_rule: symbol={symbol}, enabled={enabled}")
+        success = risk_manager.update_risk_rule(symbol, enabled=enabled)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Risk rule for {symbol} not found")
+        
+        return {"success": True, "message": f"Risk rule for {symbol} {'enabled' if enabled else 'disabled'} successfully"}
+        
+    except Exception as e:
+        logger.error(f"Update risk rule error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/api/risk_rules/{symbol}")
-async def remove_risk_rule(symbol: str):
+async def remove_risk_rule(symbol: str, user: Optional[str] = Depends(get_current_user)):
     """移除风险管理规则"""
     if not risk_manager:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
     try:
+        logger.info(f"API remove_risk_rule: symbol={symbol}")
         risk_manager.remove_risk_rule(symbol)
         return {"success": True, "message": "Risk rule removed successfully"}
         
@@ -784,7 +979,7 @@ async def remove_risk_rule(symbol: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/order_queue_status")
-async def get_order_queue_status():
+async def get_order_queue_status(user: Optional[str] = Depends(get_current_user)):
     """获取订单队列状态"""
     if not risk_manager:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
@@ -802,7 +997,7 @@ async def get_order_queue_status():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/risk-config")
-async def get_risk_config():
+async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
     """Get risk management configuration from environment variables"""
     try:
         stop_loss_ratio = float(os.getenv('STOP_LOSS_RATIO', '0.05'))
@@ -817,7 +1012,7 @@ async def get_risk_config():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/auto_orders")
-async def get_auto_orders():
+async def get_auto_orders(user: Optional[str] = Depends(get_current_user)):
     """获取自动订单记录（只返回自动订单，不包含手动订单）"""
     if not risk_manager:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
@@ -851,13 +1046,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # Strategy APIs
 @app.get("/api/strategy/settings")
-async def get_strategy_settings():
+async def get_strategy_settings(user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     return {"success": True, "settings": strategy_manager.get_settings()}
 
 @app.post("/api/strategy/settings")
-async def update_strategy_settings(settings: StrategySettingsRequest):
+async def update_strategy_settings(settings: StrategySettingsRequest, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     strategy_manager.update_settings(settings.model_dump())
@@ -867,18 +1062,18 @@ async def update_strategy_settings(settings: StrategySettingsRequest):
 from fastapi import Header
 
 @app.post("/api/strategy/settings/generate-token")
-async def generate_strategy_token():
+async def generate_strategy_token(user: Optional[str] = Depends(get_current_user)):
     token = strategy_manager.generate_auth_token()
     return {"success": True, "token": token}
 
 @app.get("/api/strategies")
-async def list_strategies():
+async def list_strategies(user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     return {"success": True, "strategies": strategy_manager.get_strategies()}
 
 @app.post("/api/strategies")
-async def add_strategy_api(strategy: StrategyRequest):
+async def add_strategy_api(strategy: StrategyRequest, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     success = strategy_manager.add_strategy(strategy.model_dump())
@@ -887,7 +1082,7 @@ async def add_strategy_api(strategy: StrategyRequest):
     return {"success": True}
 
 @app.get("/api/strategies/{name}")
-async def get_strategy_api(name: str):
+async def get_strategy_api(name: str, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     strategy = strategy_manager.get_strategy(name)
@@ -896,7 +1091,7 @@ async def get_strategy_api(name: str):
     return {"success": True, "strategy": strategy}
 
 @app.put("/api/strategies/{name}")
-async def update_strategy_api(name: str, updates: Dict[str, Any]):
+async def update_strategy_api(name: str, updates: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     success = strategy_manager.update_strategy(name, updates)
@@ -905,7 +1100,7 @@ async def update_strategy_api(name: str, updates: Dict[str, Any]):
     return {"success": True}
 
 @app.delete("/api/strategies/{name}")
-async def delete_strategy_api(name: str):
+async def delete_strategy_api(name: str, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     success = strategy_manager.delete_strategy(name)
@@ -914,7 +1109,7 @@ async def delete_strategy_api(name: str):
     return {"success": True}
 
 @app.post("/api/strategies/{name}/toggle")
-async def toggle_strategy_api(name: str, enabled: bool):
+async def toggle_strategy_api(name: str, enabled: bool, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     success = strategy_manager.update_strategy(name, {"enabled": enabled})
@@ -923,7 +1118,7 @@ async def toggle_strategy_api(name: str, enabled: bool):
     return {"success": True}
 
 @app.get("/api/strategies/{name}/performance")
-async def get_strategy_performance_api(name: str, range: str = "1d", start: Optional[str] = None, end: Optional[str] = None):
+async def get_strategy_performance_api(name: str, range: str = "1d", start: Optional[str] = None, end: Optional[str] = None, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     
@@ -954,67 +1149,79 @@ async def get_strategy_performance_api(name: str, range: str = "1d", start: Opti
 
 # External trigger endpoint
 @app.post("/api/strategy")
-async def external_strategy_order(request: ExternalStrategyOrderRequest, authorization: Optional[str] = Header(None)):
+async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Request):
+    from datetime import datetime  # ensure available for all paths
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     
-    # Auth check
+    # Auth check - strategy interface uses token in body or headers when enabled
+    # Do this check FIRST to avoid any IBKR calls for unauthorized requests
     settings = strategy_manager.get_settings()
     if settings.get('enable_auth', False):
-        token = authorization or ''
-        # Strip Bearer prefix if present
-        if token.startswith('Bearer '):
-            token = token[7:]
+        # 1) Prefer body token
+        token = payload.token
+        # 2) Fallback to Authorization: Bearer <token>
+        if not token:
+            auth_header = req.headers.get('Authorization')
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header.split(' ', 1)[1]
+        # 3) Fallback to X-Strategy-Token header
+        if not token:
+            token = req.headers.get('X-Strategy-Token')
         if not token or not strategy_manager.validate_auth_token(token):
             raise HTTPException(status_code=401, detail="Unauthorized")
     
-    # Validate strategy exists and enabled
-    strategy = strategy_manager.get_strategy(request.strategy)
+    # Validate strategy exists and enabled - also before IBKR calls
+    strategy = strategy_manager.get_strategy(payload.strategy)
     if not strategy or not strategy.get('enabled', False):
         raise HTTPException(status_code=400, detail="Strategy disabled or not found")
     
+    # Check IBKR connection BEFORE any expensive operations
+    if not ibkr_client or not connection_manager.is_connected():
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    
     # Map to place_order with proper formatting
-    order_type = request.type.upper()
-    action = request.action.upper()  # Normalize to uppercase
+    order_type = payload.type.upper()
+    action = payload.action.upper()  # Normalize to uppercase
     
     # Auto-detect futures based on symbol
-    sec_type = request.sec_type
-    if request.symbol in ['MNQ', 'NQ', 'ES', 'MES']:
+    sec_type = payload.sec_type or 'STK'
+    if payload.symbol in ['MNQ', 'NQ', 'ES', 'MES']:
         sec_type = 'FUT'
         exchange = 'CME'  # Use proper exchange for futures
     else:
-        exchange = request.exchange
+        exchange = payload.exchange or 'SMART'
     
     try:
-        # Direct order placement logic for strategy orders
-        if not ibkr_client or not connection_manager.is_connected():
-            raise HTTPException(status_code=400, detail="Not connected to IBKR")
+        # This is after all validation checks; avoid extra IBKR calls here
         
-        # Get current position to determine if opening or closing
-        positions = ibkr_client.get_positions()
-        current_position = next((p for p in positions if p['symbol'] == request.symbol), None)
-        position_qty = current_position['position'] if current_position else 0
-        avg_cost = current_position['avg_cost'] if current_position else 0
+        # Place order via IBKRClient with run_in_executor
+        loop = asyncio.get_event_loop()
         
-        # Place order via IBKRClient
         if order_type == "MARKET":
-            trade = ibkr_client.place_market_order(
-                symbol=request.symbol,
-                quantity=request.qty,
-                action=action,
-                exchange=exchange,
-                sec_type=sec_type
+            trade = await loop.run_in_executor(
+                None,
+                lambda: ibkr_client.place_market_order(
+                    symbol=payload.symbol,
+                    quantity=payload.qty,
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type
+                )
             )
         elif order_type == "LIMIT":
-            if not request.price:
+            if not payload.price:
                 raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = ibkr_client.place_limit_order(
-                symbol=request.symbol,
-                quantity=request.qty,
-                price=request.price,
-                action=action,
-                exchange=exchange,
-                sec_type=sec_type
+            trade = await loop.run_in_executor(
+                None,
+                lambda: ibkr_client.place_limit_order(
+                    symbol=payload.symbol,
+                    quantity=payload.qty,
+                    price=payload.price,
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type
+                )
             )
         else:
             raise HTTPException(status_code=400, detail="Invalid order type")
@@ -1025,36 +1232,34 @@ async def external_strategy_order(request: ExternalStrategyOrderRequest, authori
             # Record strategy order as bot order if risk_manager is available
             if risk_manager:
                 from src.risk_manager import AutoOrder
-                from datetime import datetime
-                import os
                 
                 auto_order = AutoOrder(
                     order_id=order_id,
-                    symbol=request.symbol,
+                    symbol=payload.symbol,
                     action=action,
-                    quantity=request.qty,
+                    quantity=payload.qty,
                     order_type=order_type,
-                    price=request.price if request.price else 0.0,
+                    price=payload.price if payload.price else 0.0,
                     status="Submitted",
                     created_at=datetime.now(),
                     executed_at=None,
-                    rule_id=request.strategy,  # Use strategy name as rule identifier
-                    order_source="auto"  # Mark as bot order
+                    rule_id=payload.strategy,  # Use strategy name as rule identifier
+                    order_source="strategy"  # Mark as strategy order
                 )
                 
                 risk_manager.auto_orders[order_id] = auto_order
-                risk_manager.save_auto_orders_to_csv(os.path.join("data", "orders.csv"))
+                risk_manager.save_auto_order_to_db(auto_order)
             
             # Record strategy execution with proper price
             from src.strategy_manager import StrategyExecution
             execution = StrategyExecution(
-                strategy_name=request.strategy,
+                strategy_name=payload.strategy,
                 execution_time=datetime.now(),
                 order_id=order_id,
-                symbol=request.symbol,
-                action=request.action,
-                quantity=request.qty,
-                price=request.price if request.price else None,  # Set price from request
+                symbol=payload.symbol,
+                action=payload.action,
+                quantity=payload.qty,
+                price=payload.price if payload.price else None,  # Set price from request
                 status="executed"
             )
             strategy_manager.record_execution(execution)
@@ -1062,9 +1267,9 @@ async def external_strategy_order(request: ExternalStrategyOrderRequest, authori
             await manager.broadcast({
                 "type": "order_placed",
                 "order_id": trade.order.orderId,
-                "symbol": request.symbol,
+                "symbol": payload.symbol,
                 "action": action,
-                "quantity": request.qty
+                "quantity": payload.qty
             })
             
             return {
@@ -1085,70 +1290,47 @@ async def external_strategy_order(request: ExternalStrategyOrderRequest, authori
 
 # Strategy Executions API
 @app.get("/api/strategies/{name}/executions")
-async def get_strategy_executions(name: str, limit: int = 100):
+async def get_strategy_executions(name: str, limit: int = 100, user: Optional[str] = Depends(get_current_user)):
     """Get strategy execution logs"""
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    
     try:
-        # Get executions for this strategy
-        executions = [e for e in strategy_manager.executions if e.strategy_name == name]
-        
-        # Sort by execution time (newest first)
-        executions.sort(key=lambda x: x.execution_time, reverse=True)
-        
-        # Limit results
-        if limit > 0:
-            executions = executions[:limit]
-        
-        # Convert to dict and format datetime
-        execution_list = []
-        for execution in executions:
-            exec_dict = asdict(execution)
-            exec_dict['execution_time'] = execution.execution_time.isoformat()
-            execution_list.append(exec_dict)
-        
-        return {
-            "success": True,
-            "executions": execution_list,
-            "total_count": len([e for e in strategy_manager.executions if e.strategy_name == name])
-        }
+        executions = strategy_manager.get_executions(name, limit)
+        return {"success": True, "executions": [asdict(exec) if hasattr(exec, '__dict__') else exec for exec in executions]}
     except Exception as e:
         logger.error(f"Get strategy executions error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Clear all executions for a strategy
+@app.delete("/api/strategies/{name}/executions")
+async def clear_strategy_executions(name: str, user: Optional[str] = Depends(get_current_user)):
+    """Clear all executions for a strategy"""
+    try:
+        db = get_db_manager()
+        deleted = db.delete_strategy_executions(name)
+        # 同步清理内存中的 executions
+        if strategy_manager:
+            before = len(strategy_manager.executions)
+            strategy_manager.executions = [e for e in strategy_manager.executions if e.strategy_name != name]
+            after = len(strategy_manager.executions)
+            logger.info(f"Cleared in-memory executions for {name}: {before - after} removed")
+        return {"success": True, "deleted": int(deleted)}
+    except Exception as e:
+        logger.error(f"Clear strategy executions error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # System Logs API (kept for general debugging)
 @app.get("/api/logs")
-async def get_logs(lines: int = 100, level: str = "all"):
-    """Get system logs"""
+async def get_logs(lines: int = 100, level: str = "all", user: Optional[str] = Depends(get_current_user)):
     try:
-        log_file = Path("logs/trading_bot.log")
-        if not log_file.exists():
+        log_file = "logs/trading_bot.log"
+        if not os.path.exists(log_file):
             return {"success": True, "logs": []}
-        
-        # Read log file
-        with open(log_file, 'r', encoding='utf-8') as f:
-            all_lines = f.readlines()
-        
-        # Get last N lines
-        recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
-        
-        # Filter by level if specified
-        filtered_logs = []
-        for line in recent_lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            if level == "all" or level.upper() in line:
-                filtered_logs.append(line)
-        
-        return {
-            "success": True,
-            "logs": filtered_logs,
-            "total_lines": len(all_lines),
-            "returned_lines": len(filtered_logs)
-        }
+        with open(log_file, 'r') as f:
+            content = f.readlines()
+        if level.lower() != "all":
+            content = [line for line in content if f"| {level.upper()} |" in line]
+        return {"success": True, "logs": content[-lines:]}
     except Exception as e:
         logger.error(f"Get logs error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

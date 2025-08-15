@@ -14,3 +14,5 @@ pydantic
 python-dotenv
 loguru
 ib_insync
+PyJWT
+python-jose[cryptography]

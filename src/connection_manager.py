@@ -8,6 +8,7 @@ import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
+import types
 
 
 load_dotenv()
@@ -82,6 +83,44 @@ class ConnectionManager:
                     port=self.config.port,
                     clientId=self.config.client_id
                 )
+                
+                # 连接后设置默认市场数据类型，避免无权限时报 10197
+                try:
+                    default_mkt_data_type = int(os.getenv('IBKR_MARKET_DATA_TYPE', '3'))  # 1=实时,2=冻结,3=延迟,4=延迟冻结
+                    self.ib.reqMarketDataType(default_mkt_data_type)
+                    logger.info(f"Set default IBKR market data type to {default_mkt_data_type}")
+                except Exception as e:
+                    logger.debug(f"Failed to set default market data type: {e}")
+                
+                # 在连接建立后为 completedOrder 事件做安全防护，避免 KeyError: 'completedOrders'
+                try:
+                    w = self.ib.wrapper
+                    orig_completedOrder = w.completedOrder
+                    def safe_completedOrder(self_wrapped, c, o, st):
+                        try:
+                            # 确保结果字典中有 completedOrders 键
+                            try:
+                                _ = self_wrapped._results['completedOrders']
+                            except KeyError:
+                                self_wrapped._results['completedOrders'] = []
+                        except Exception:
+                            # 某些实现 _results 可能不是普通 dict，尽力处理
+                            try:
+                                if hasattr(self_wrapped._results, 'get') and self_wrapped._results.get('completedOrders') is None:
+                                    self_wrapped._results['completedOrders'] = []
+                            except Exception:
+                                pass
+                        return orig_completedOrder(c, o, st)
+                    # 绑定成实例方法
+                    w.completedOrder = types.MethodType(safe_completedOrder, w)
+                    # 预置一次键，进一步降低风险
+                    try:
+                        w._results['completedOrders'] = []
+                    except Exception:
+                        pass
+                    logger.debug("Patched ib_insync wrapper.completedOrder to guard 'completedOrders' key")
+                except Exception as e:
+                    logger.debug(f"Failed to patch wrapper.completedOrder: {e}")
                 
                 self.connected = True
                 account_type = "Paper" if self.config.paper_trading else "Live"
