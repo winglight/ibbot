@@ -40,12 +40,27 @@ from src.strategy_manager import StrategyManager
 from src.database import get_db_manager
 from src.strategy_manager import StrategyExecution
 from src.queue_manager import queue_manager
+from src.order_manager import OrderManager
+from src.models import HistoricalDataRequest, ChartDataRequest, OrderRequest, ExternalStrategyOrderRequest, StrategySettingsRequest, StrategyRequest, RiskRuleRequest
+from src.websocket_manager import websocket_manager  # 新增导入
 
 # Global variables
 load_dotenv()
 
 # FastAPI app
 app = FastAPI(title="IBKR Trading Bot", version="1.0.0")
+
+# 挂载静态资源目录
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
+
+# 根路由返回前端页面
+@app.get("/")
+async def index_page():
+    index_path = Path(__file__).parent / "static" / "index.html"
+    if not index_path.exists():
+        # 若前端文件缺失，返回简单提示
+        return HTMLResponse("<h3>Front-end index.html not found under /static</h3>", status_code=500)
+    return FileResponse(str(index_path))
 
 # Auth config
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
@@ -54,6 +69,94 @@ JWT_SECRET = os.getenv('JWT_SECRET', 'please_change_me')
 JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256')
 JWT_EXPIRE_DAYS = int(os.getenv('JWT_EXPIRE_DAYS', '1'))
 
+# Utility helpers
+
+def print_banner():
+    banner = (
+        "\n"
+        "==============================================\n"
+        "   IBKR Trading Bot - FastAPI Service\n"
+        "==============================================\n"
+    )
+    # 使用 print，因为此时日志可能尚未初始化
+    print(banner)
+
+
+def setup_logging():
+    """Configure loguru to log to console and file.
+    确保 logs/trading_bot.log 存在，并设置合理的滚动与保留策略。
+    """
+    try:
+        os.makedirs("logs", exist_ok=True)
+    except Exception:
+        # 即便创建失败也不要崩溃
+        pass
+
+    # 重置默认 handler，添加控制台和文件输出
+    try:
+        logger.remove()
+    except Exception:
+        pass
+
+    # 统一格式，便于 /api/logs 按等级过滤：会匹配 "| LEVEL |"
+    log_format = "| {time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{function}:{line} - {message}"
+
+    # 控制台
+    logger.add(sys.stderr, level="INFO", format=log_format, enqueue=True, backtrace=False, diagnose=False)
+
+    # 文件
+    logger.add(
+        "logs/trading_bot.log",
+        rotation="10 MB",
+        retention="14 days",
+        encoding="utf-8",
+        enqueue=True,
+        level="INFO",
+        format=log_format,
+        backtrace=False,
+        diagnose=False,
+    )
+
+
+def create_directories():
+    """Create required directories used by the app."""
+    for d in ["logs", "data", "strategy"]:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception as e:
+            # 不阻断启动，仅记录警告
+            try:
+                logger.warning(f"Create directory failed for {d}: {e}")
+            except Exception:
+                # 如果 logger 未初始化，静默忽略
+                pass
+
+
+def check_environment() -> bool:
+    """Basic environment checks. Returns True if ok.
+    仅做基础校验：.env 可选；若关键变量使用默认值，给出警告但不阻断启动。
+    """
+    ok = True
+    defaults_used = []
+
+    if os.getenv('JWT_SECRET', 'please_change_me') == 'please_change_me':
+        defaults_used.append('JWT_SECRET')
+    if os.getenv('ADMIN_PASSWORD', 'change_me') == 'change_me':
+        defaults_used.append('ADMIN_PASSWORD')
+    if os.getenv('ADMIN_USERNAME', 'admin') == 'admin':
+        defaults_used.append('ADMIN_USERNAME')
+
+    if defaults_used:
+        logger.warning(f"Using default values for: {', '.join(defaults_used)}. Please set them in your .env file.")
+
+    # 端口与主机合法性（基础校验）
+    try:
+        int(os.getenv('WEB_PORT', '8000'))
+    except ValueError:
+        logger.error("Invalid WEB_PORT. It must be an integer.")
+        ok = False
+
+    return ok
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -112,299 +215,73 @@ app.add_middleware(
 
 # Global instances
 ibkr_client = None
-telegram_notifier = None
-risk_manager = None
-strategy_manager = None
+telegram_notifier = TelegramNotifier()  # 初始化
+risk_manager = RiskManager(ibkr_client=None, telegram_notifier=telegram_notifier)  # 先用None占位，连接成功后依赖连接管理器
+strategy_manager = StrategyManager()  # 初始化
 websocket_connections = []
+order_manager = OrderManager()
 
-# Pydantic models
-class OrderRequest(BaseModel):
-    symbol: str
-    quantity: int
-    action: str  # BUY or SELL
-    order_type: str  # MARKET or LIMIT
-    price: Optional[float] = None
-    exchange: str = "SMART"
-    sec_type: str = "STK"  # STK for stocks, FUT for futures
-
-class RiskRuleRequest(BaseModel):
-    symbol: str
-    stop_loss_price: Optional[float] = None
-    take_profit_price: Optional[float] = None
-    max_loss_percent: Optional[float] = None
-
-class HistoricalDataRequest(BaseModel):
-    symbol: str
-    duration: str = "1 Y"
-    bar_size: str = "1 day"
-    exchange: str = "SMART"
-
-class ChartDataRequest(BaseModel):
-    symbol: str
-    duration: str = "1 D"
-    bar_size: str = "5 mins"
-    exchange: str = "SMART"
-
-# Strategy related models
-class StrategyRequest(BaseModel):
-    name: str
-    strategy_type: str  # "external" or "internal"
-    enabled: bool = True
-    api_endpoint: Optional[str] = None
-    file_path: Optional[str] = None
-    description: Optional[str] = None
-    use_template: bool = False
-
-class StrategySettingsRequest(BaseModel):
-    api_endpoint: str = "/api/strategy"
-    api_method: str = "POST"
-    api_payload_template: Dict[str, Any] = {
-        "strategy": "{{strategy_name}}",
-        "symbol": "{{symbol}}",
-        "action": "{{action}}",
-        "qty": "{{quantity}}",
-        "type": "{{order_type}}",
-        "price": "{{price}}"
-    }
-    strategy_path: str = "strategy/"
-    enable_auth: bool = False
-    auth_token: Optional[str] = None
-
-class ExternalStrategyOrderRequest(BaseModel):
-    strategy: str
-    symbol: str
-    action: str  # BUY or SELL
-    qty: int
-    type: str  # MARKET or LIMIT
-    price: Optional[float] = None
-    exchange: str = "SMART"
-    sec_type: str = "STK"
-    token: Optional[str] = None  # Optional auth token for strategy auth
-
-# WebSocket connection manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-    
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-    
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-    
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(json.dumps(message))
-            except:
-                pass
-
-manager = ConnectionManager()
-
-def setup_logging():
-    """Setup logging configuration"""
-    # Remove default logger
-    logger.remove()
-    
-    # Add console logger
-    logger.add(
-        sys.stdout,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level="INFO"
-    )
-    
-    # Add file logger
-    logger.add(
-        "logs/trading_bot.log",
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-        level="DEBUG",
-        rotation="1 day",
-        retention="30 days",
-        compression="zip"
-    )
-    
-    logger.info("Logging setup completed")
-
-def create_directories():
-    """Create necessary directories if they don't exist"""
-    directories = ['logs', 'data', 'strategy']
-    for directory in directories:
-        Path(directory).mkdir(exist_ok=True)
-        logger.info(f"Directory '{directory}' ensured")
-
-def check_environment():
-    """Check if all required environment variables are set"""
-    required_vars = [
-        'IBKR_HOST',
-        'IBKR_PORT',
-        'IBKR_CLIENT_ID'
-    ]
-    
-    optional_vars = [
-        'TELEGRAM_BOT_TOKEN',
-        'TELEGRAM_CHAT_ID',
-        'LOSS_THRESHOLD_1',
-        'LOSS_THRESHOLD_2',
-        'CHECK_INTERVAL'
-    ]
-    
-    missing_vars = []
-    for var in required_vars:
-        if not os.getenv(var):
-            missing_vars.append(var)
-    
-    if missing_vars:
-        logger.warning(f"Missing required environment variables: {missing_vars}")
-        logger.info("Please copy .env.example to .env and configure the settings")
-    
-    # Check optional variables
-    missing_optional = []
-    for var in optional_vars:
-        if not os.getenv(var):
-            missing_optional.append(var)
-    
-    if missing_optional:
-        logger.info(f"Optional environment variables not set: {missing_optional}")
-        logger.info("Some features may not be available")
-    
-    return len(missing_vars) == 0
-
-async def test_connection_async():
-    """Test IBKR connection without blocking event loop"""
-    logger.info("Testing IBKR connection...")
-    local_client = IBKRClient()
-    try:
-        loop = asyncio.get_event_loop()
-        success = await loop.run_in_executor(None, local_client.connect)
-        if success:
-            logger.info("IBKR connection test successful")
-            account_info = await loop.run_in_executor(None, local_client.get_account_info)
-            if account_info:
-                logger.info(f"Account ID: {account_info.get('account_id', 'N/A')}")
-                logger.info(f"Account Type: {account_info.get('account_type', 'N/A')}")
-            await loop.run_in_executor(None, local_client.disconnect)
-            return True
-        else:
-            logger.error("IBKR connection test failed")
-            return False
-    except Exception as e:
-        logger.error(f"Connection test failed: {e}")
-        return False
-
-def print_banner():
-    """Print application banner"""
-    banner = """
-    ╔══════════════════════════════════════════════════════════════╗
-    ║                    IBKR Trading Bot v1.0                    ║
-    ║                                                              ║
-    ║  Features:                                                   ║
-    ║  • Real-time market data                                     ║
-    ║  • Automated trading (Market & Limit orders)                ║
-    ║  • Risk management with stop-loss/take-profit               ║
-    ║  • Telegram notifications                                    ║
-    ║  • Web-based user interface                                 ║
-    ║  • Historical data export                                   ║
-    ║                                                              ║
-    ║  Web UI: http://localhost:8000                               ║
-    ╚══════════════════════════════════════════════════════════════╝
-    """
-    print(banner)
-
-# FastAPI event handlers
-@app.on_event("startup")
-async def startup_event():
-    global ibkr_client, telegram_notifier, risk_manager, strategy_manager
-    # Initialize components
-    ibkr_client = IBKRClient()
-    telegram_notifier = TelegramNotifier()
-    risk_manager = RiskManager(ibkr_client, telegram_notifier)
-    strategy_manager = StrategyManager(data_dir="data", strategy_dir="strategy")
-    
-    # Set dependencies for queue manager
+# 在应用启动时注入依赖（即使部分为None，也可在连接后更新）
+try:
     queue_manager.set_dependencies(
-        ibkr_client=ibkr_client,
+        ibkr_client=None,
         risk_manager=risk_manager,
         strategy_manager=strategy_manager,
         connection_manager=connection_manager,
-        websocket_manager=manager
+        websocket_manager=websocket_manager,
+        order_manager=order_manager
     )
-    
-    # Start queue worker
-    await queue_manager.start_worker()
-    logger.info("Queue worker started")
-    
-    # Use async test to avoid blocking
-    ok = await test_connection_async()
-    if not ok:
-        logger.error("Environment setup failed. Please check your configuration.")
-        return
-    
-    # Auto connect if enabled in .env
-    auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
-    if auto_connect:
-        logger.info("Auto-connect enabled, attempting to connect to IBKR...")
-        try:
-            # Use thread pool to avoid event loop conflicts, with proper error handling
-            loop = asyncio.get_event_loop()
-            success = await loop.run_in_executor(None, lambda: connection_manager.connect())
-            if success:
-                logger.info("Auto-connected to IBKR successfully")
-                # Start risk manager
-                risk_manager.start()
-            else:
-                logger.warning("Failed to auto-connect to IBKR")
-        except Exception as e:
-            logger.error(f"Auto-connection error: {e}")
-    
-    logger.info("Web API started")
+except Exception as _dep_err:
+    logger.warning(f"QueueManager set_dependencies at startup failed: {_dep_err}")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    global ibkr_client, risk_manager
-    
-    # Stop queue worker
-    await queue_manager.stop_worker()
-    logger.info("Queue worker stopped")
-    
-    if risk_manager:
-        risk_manager.stop()
-    
-    if ibkr_client and connection_manager.is_connected():
-        ibkr_client.disconnect()
-    
-    logger.info("Web API shutdown")
-
-# Static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/", response_class=HTMLResponse)
-async def read_root():
-    """返回主页面"""
-    return FileResponse("static/index.html")
-
-# Connection endpoints
 @app.post("/api/connect")
 async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(get_current_user)):
     """连接到IBKR"""
     global ibkr_client
     
     try:
-        # 使用连接管理器更新配置并连接
-        connection_manager.update_config(config)
-        
-        # 在线程池中执行同步连接操作，避免事件循环冲突
         loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: connection_manager.disconnect())
+        connection_manager.update_config(config)
         success = await loop.run_in_executor(None, lambda: connection_manager.connect())
         
         if success:
-            # Start risk manager
-            risk_manager.start()
+            # 建立/更新 ibkr_client 引用
+            if ibkr_client is None:
+                ibkr_client_local = IBKRClient(connection_manager)
+            else:
+                ibkr_client_local = ibkr_client
+            
+            # 更新 risk_manager 的 ibkr_client（RiskManager 依赖 ibkr_client）
+            try:
+                risk_manager.ibkr_client = ibkr_client_local
+                # 风险管理启动
+                risk_manager.start()
+            except Exception as re_err:
+                logger.warning(f"RiskManager start warning: {re_err}")
+            
+            # 将 ibkr_client 注入到队列管理器
+            try:
+                queue_manager.set_dependencies(
+                    ibkr_client=ibkr_client_local,
+                    risk_manager=risk_manager,
+                    strategy_manager=strategy_manager,
+                    connection_manager=connection_manager,
+                    websocket_manager=websocket_manager,
+                    order_manager=order_manager
+                )
+            except Exception as dep_err:
+                logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
+            
+            # 赋值全局 ibkr_client
+            ibkr_client = ibkr_client_local
             
             return {"success": True, "message": "Connected successfully"}
         else:
             raise HTTPException(status_code=400, detail="Failed to connect to IBKR")
             
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Connection error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -632,48 +509,45 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
             raise HTTPException(status_code=400, detail="Invalid order type")
         
         if trade:
-            # Record manual order if risk_manager is available
-            if risk_manager:
-                from src.risk_manager import AutoOrder
-                from datetime import datetime
-                import os
-                
-                # Normalize order type to MKT/LMT format
-                normalized_order_type = "MKT" if order.order_type.upper() == "MARKET" else "LMT"
-                
-                auto_order = AutoOrder(
-                    order_id=str(trade.order.orderId),
-                    symbol=order.symbol,
-                    action=order.action,
-                    quantity=order.quantity,
-                    order_type=normalized_order_type,
-                    price=order.price if order.price else 0.0,
-                    status="Submitted",
-                    created_at=datetime.now(),
-                    executed_at=None,
-                    rule_id="manual",
-                    order_source=user or "manual"
-                )
-                
-                risk_manager.auto_orders[str(trade.order.orderId)] = auto_order
-                # 保存到数据库，保证持久化
-                risk_manager.save_auto_order_to_db(auto_order)
-                
-                await manager.broadcast({
-                    "type": "order_placed",
-                    "order_id": trade.order.orderId,
-                    "symbol": order.symbol,
-                    "action": order.action,
-                    "quantity": order.quantity
-                })
-                
-                return {
-                    "success": True,
-                    "order_id": trade.order.orderId,
-                    "message": "Order placed successfully"
-                }
-            else:
-                raise HTTPException(status_code=400, detail="Failed to place order")
+            # 使用 OrderManager 记录订单
+            try:
+                if 'order_manager' in globals() and order_manager:
+                    normalized_order_type = "MKT" if order.order_type.upper() == "MARKET" else "LMT"
+                    order_manager.create_order(
+                        order_id=str(trade.order.orderId),
+                        symbol=order.symbol,
+                        action=order.action,
+                        quantity=order.quantity,
+                        order_type=normalized_order_type,
+                        price=order.price if order.price else None,
+                        order_source="manual",
+                        strategy_name=None,
+                        rule_id="manual",
+                        parent_order_id=None,
+                        exchange=order.exchange,
+                        sec_type=order.sec_type,
+                        notes=(f"submitted_by={user}" if user else None)
+                    )
+                else:
+                    logger.warning("OrderManager is not initialized; order will not be recorded in OrderManager")
+            except Exception as rec_err:
+                logger.warning(f"Failed to record order in OrderManager: {rec_err}")
+            
+            await websocket_manager.broadcast({  # 替换 manager
+                "type": "order_placed",
+                "order_id": trade.order.orderId,
+                "symbol": order.symbol,
+                "action": order.action,
+                "quantity": order.quantity
+            })
+            
+            return {
+                "success": True,
+                "order_id": trade.order.orderId,
+                "message": "Order placed successfully"
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to place order")
     except Exception as e:
         logger.error(f"Order placement error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -693,22 +567,25 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
         )
         
         if success:
-            await manager.broadcast({
+            # 更新 OrderManager 本地状态
+            try:
+                if 'order_manager' in globals() and order_manager:
+                    updated = order_manager.cancel_order(str(order_id), reason="Cancelled via API")
+                    if not updated:
+                        logger.warning(f"OrderManager could not update order {order_id} to Cancelled")
+                else:
+                    logger.warning("OrderManager is not initialized; local order state not updated")
+            except Exception as rec_err:
+                logger.warning(f"Failed to update OrderManager on cancel: {rec_err}")
+            
+            await websocket_manager.broadcast({  # 替换 manager
                 "type": "order_cancelled",
                 "order_id": order_id
             })
-            # 同步更新本地记录
-            if risk_manager:
-                risk_manager.update_order_status(str(order_id), "Cancelled")
             
             return {"success": True, "message": message}
         else:
-            # 如果返回"not found or already completed"，则删除本地记录
-            if "not found" in message.lower():
-                if risk_manager:
-                    removed = risk_manager.remove_order_record(str(order_id))
-                    if removed:
-                        return {"success": True, "message": "Order not found on IBKR; removed from local records"}
+            # 订单未找到或状态不可取消
             raise HTTPException(status_code=404, detail=message)
             
     except Exception as e:
@@ -734,22 +611,24 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
         )
         
         if success:
-            await manager.broadcast({
+            # 更新 OrderManager 本地状态
+            try:
+                if 'order_manager' in globals() and order_manager:
+                    updated = order_manager.cancel_order(str(order_id), reason="Cancelled via API")
+                    if not updated:
+                        logger.warning(f"OrderManager could not update order {order_id} to Cancelled")
+                else:
+                    logger.warning("OrderManager is not initialized; local order state not updated")
+            except Exception as rec_err:
+                logger.warning(f"Failed to update OrderManager on cancel: {rec_err}")
+            
+            await websocket_manager.broadcast({  # 替换 manager
                 "type": "order_cancelled",
                 "order_id": order_id
             })
-            # 同步更新本地记录
-            if risk_manager:
-                risk_manager.update_order_status(str(order_id), "Cancelled")
             
             return {"success": True, "message": message}
         else:
-            # 如果返回"not found or already completed"，则删除本地记录
-            if "not found" in message.lower():
-                if risk_manager:
-                    removed = risk_manager.remove_order_record(str(order_id))
-                    if removed:
-                        return {"success": True, "message": "Order not found on IBKR; removed from local records"}
             return {"success": False, "error": message}
             
     except Exception as e:
@@ -770,7 +649,7 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
             ibkr_client.cancel_all_orders
         )
         
-        await manager.broadcast({
+        await websocket_manager.broadcast({  # 替换 manager
             "type": "all_orders_cancelled",
             "count": cancelled_count
         })
@@ -788,9 +667,6 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
 @app.get("/api/orders")
 async def get_orders(user: Optional[str] = Depends(get_current_user)):
     """获取订单列表（从数据库读取，包含历史订单）"""
-    if not risk_manager:
-        raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    
     try:
         # 先从 IB 同步最新订单状态到本地记录（若已连接）
         try:
@@ -800,23 +676,24 @@ async def get_orders(user: Optional[str] = Depends(get_current_user)):
                 await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
-                        lambda: ibkr_client.get_orders(risk_manager, strategy_manager)
+                        # 调用 ibkr_client.get_orders 刷新 IBKR 侧状态并同步到 OrderManager
+                        lambda: ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
                     ),
                     timeout=3.0
                 )
         except Exception as sync_err:
             logger.debug(f"Order sync skipped: {sync_err}")
+
+        if 'order_manager' not in globals() or not order_manager:
+            raise HTTPException(status_code=500, detail="Order manager not initialized")
         
-        # 从 risk_manager 获取所有订单数据（从数据库加载）
-        orders = risk_manager.get_auto_orders()
-        
-        # 按创建时间反序排列（最新的在前）
-        orders.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        # 从 OrderManager 获取所有订单数据（已按创建时间降序排列）
+        orders = order_manager.get_orders()
         
         # 转换字段名以匹配前端期望
         converted_orders = []
-        for order in orders:
-            raw_type = (order.get('order_type') or '').upper()
+        for o in orders:
+            raw_type = (o.order_type or '').upper()
             if raw_type in ('MARKET', 'MKT'):
                 order_type = 'MKT'
             elif raw_type in ('LIMIT', 'LMT'):
@@ -824,19 +701,19 @@ async def get_orders(user: Optional[str] = Depends(get_current_user)):
             else:
                 order_type = raw_type or 'MKT'
             
-            price = order.get('price')
+            price_val = 0.0
             try:
-                price_val = float(price) if price is not None and price != '' else 0.0
+                if o.price is not None:
+                    price_val = float(o.price)
             except Exception:
                 price_val = 0.0
             
             # 计算触发类型：仅对机器人订单（auto）有效
             trigger_type = None
             try:
-                if order.get('order_source') == 'auto':
-                    rule_id = order.get('rule_id')
-                    symbol = order.get('symbol')
-                    # 约定：风控触发时 rule_id == symbol；策略触发时 rule_id 为策略名（通常 != symbol）
+                if getattr(o, 'order_source', 'manual') == 'auto':
+                    rule_id = getattr(o, 'rule_id', None)
+                    symbol = getattr(o, 'symbol', None)
                     if rule_id and rule_id != symbol:
                         trigger_type = 'strategy'
                     else:
@@ -845,24 +722,26 @@ async def get_orders(user: Optional[str] = Depends(get_current_user)):
                 trigger_type = None
             
             converted_order = {
-                'order_id': order['order_id'],
-                'symbol': order['symbol'],
-                'action': order['action'],
-                'quantity': order['quantity'],
+                'order_id': o.order_id,
+                'symbol': o.symbol,
+                'action': o.action,
+                'quantity': o.quantity,
                 'order_type': order_type,
                 'limit_price': price_val if order_type == 'LMT' and price_val > 0 else None,
-                'avg_fill_price': price_val if order_type == 'MKT' and price_val > 0 else 0,
-                'status': order['status'],
-                'filled': order['quantity'] if order['status'] == 'Filled' else 0,
-                'remaining': 0 if order['status'] == 'Filled' else order['quantity'],
-                'submit_time': order.get('created_at'),
-                'order_source': order.get('order_source', 'manual'),
+                'avg_fill_price': (o.fill_price if o.fill_price is not None else (price_val if order_type == 'MKT' and price_val > 0 else 0)),
+                'status': o.status,
+                'filled': o.quantity if o.status == 'Filled' else 0,
+                'remaining': 0 if o.status == 'Filled' else o.quantity,
+                'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
+                'order_source': getattr(o, 'order_source', 'manual'),
                 'trigger_type': trigger_type
             }
             converted_orders.append(converted_order)
         
         return {"success": True, "orders": converted_orders}
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Get orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -974,10 +853,14 @@ async def update_risk_rule(symbol: str, enabled: bool, user: Optional[str] = Dep
         logger.info(f"API update_risk_rule: symbol={symbol}, enabled={enabled}")
         success = risk_manager.update_risk_rule(symbol, enabled=enabled)
         if not success:
+            # 让404错误向外传播
             raise HTTPException(status_code=404, detail=f"Risk rule for {symbol} not found")
         
         return {"success": True, "message": f"Risk rule for {symbol} {'enabled' if enabled else 'disabled'} successfully"}
         
+    except HTTPException as he:
+        # 直接抛出由业务逻辑产生的HTTP错误（如404）
+        raise he
     except Exception as e:
         logger.error(f"Update risk rule error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1008,7 +891,7 @@ async def get_order_queue_status(user: Optional[str] = Depends(get_current_user)
         return {
             "success": True,
             "queue_size": queue_size,
-            "processing": risk_manager.processing_orders
+            "processing": getattr(risk_manager, "processing_orders", False)
         }
         
     except Exception as e:
@@ -1050,7 +933,7 @@ async def get_auto_orders(user: Optional[str] = Depends(get_current_user)):
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    await websocket_manager.connect(websocket)
     try:
         while True:
             data = await websocket.receive_text()
@@ -1061,7 +944,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text(json.dumps({"type": "pong"}))
             
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        websocket_manager.disconnect(websocket)
 
 # Strategy APIs
 @app.get("/api/strategy/settings")
@@ -1347,7 +1230,7 @@ def main():
             app,
             host=os.getenv('WEB_HOST', '0.0.0.0'),
             port=int(os.getenv('WEB_PORT', '8000')),
-            log_level="info"
+            log_level="warning"  # 减少HTTP请求日志显示
         )
         
     except KeyboardInterrupt:

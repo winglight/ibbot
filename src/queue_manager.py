@@ -47,13 +47,15 @@ class QueueManager:
         # 启动时加载持久化的任务
         self._load_tasks()
     
-    def set_dependencies(self, ibkr_client, risk_manager, strategy_manager, connection_manager, websocket_manager):
+    def set_dependencies(self, ibkr_client, risk_manager, strategy_manager, connection_manager, websocket_manager, order_manager=None):
         """设置依赖对象"""
         self.ibkr_client = ibkr_client
         self.risk_manager = risk_manager
         self.strategy_manager = strategy_manager
         self.connection_manager = connection_manager
         self.websocket_manager = websocket_manager
+        self.order_manager = order_manager
+        logger.info("Dependencies set for QueueManager")
     
     def add_task(self, task_type: str, payload: Dict[str, Any], max_retries: int = 3) -> str:
         """添加任务到队列"""
@@ -299,16 +301,50 @@ class QueueManager:
         
         order_id = str(trade.order.orderId)
         
-        # 记录风险管理订单
-        if self.risk_manager:
+        # 记录订单（优先使用 OrderManager）
+        order_type_for_record = "MKT" if order_type == "MARKET" else "LMT"
+        if getattr(self, 'order_manager', None):
+            try:
+                self.order_manager.create_order(
+                    order_id=order_id,
+                    symbol=payload['symbol'],
+                    action=action,
+                    quantity=payload['qty'],
+                    order_type=order_type_for_record,
+                    price=payload.get('price', 0.0),
+                    order_source="strategy",
+                    strategy_name=payload['strategy'],
+                    rule_id=payload['strategy'],
+                    exchange=exchange,
+                    sec_type=sec_type
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create order via OrderManager: {e}, falling back to RiskManager")
+                if self.risk_manager:
+                    from src.risk_manager import AutoOrder
+                    auto_order = AutoOrder(
+                        order_id=order_id,
+                        symbol=payload['symbol'],
+                        action=action,
+                        quantity=payload['qty'],
+                        order_type=order_type_for_record,
+                        price=payload.get('price', 0.0),
+                        status="Submitted",
+                        created_at=datetime.now(),
+                        executed_at=None,
+                        rule_id=payload['strategy'],
+                        order_source="strategy"
+                    )
+                    self.risk_manager.auto_orders[order_id] = auto_order
+                    self.risk_manager.save_auto_order_to_db(auto_order)
+        elif self.risk_manager:
             from src.risk_manager import AutoOrder
-            
             auto_order = AutoOrder(
                 order_id=order_id,
                 symbol=payload['symbol'],
                 action=action,
                 quantity=payload['qty'],
-                order_type=order_type,
+                order_type=order_type_for_record,
                 price=payload.get('price', 0.0),
                 status="Submitted",
                 created_at=datetime.now(),
@@ -316,7 +352,6 @@ class QueueManager:
                 rule_id=payload['strategy'],
                 order_source="strategy"
             )
-            
             self.risk_manager.auto_orders[order_id] = auto_order
             self.risk_manager.save_auto_order_to_db(auto_order)
         
@@ -335,13 +370,16 @@ class QueueManager:
         self.strategy_manager.record_execution(execution)
         
         # 广播消息
-        await self.websocket_manager.broadcast({
-            "type": "order_placed",
-            "order_id": trade.order.orderId,
-            "symbol": payload['symbol'],
-            "action": action,
-            "quantity": payload['qty']
-        })
+        if self.websocket_manager:
+            await self.websocket_manager.broadcast({
+                "type": "order_placed",
+                "order_id": trade.order.orderId,
+                "symbol": payload['symbol'],
+                "action": action,
+                "quantity": payload['qty']
+            })
+        else:
+            logger.debug("websocket_manager 未注入，跳过广播")
         
         logger.info(f"Strategy order placed successfully: {order_id}")
     

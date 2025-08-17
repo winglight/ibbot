@@ -50,6 +50,8 @@ class ConnectionManager:
         self._connection_thread_alive: bool = False
         self._connection_thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # 最近一次连接错误（用于快速失败）
+        self._last_connect_error: Optional[str] = None
         
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
@@ -77,12 +79,49 @@ class ConnectionManager:
                 # 创建新的IB实例
                 self.ib = IB()
                 
-                # 在独立线程的事件循环中连接（使用异步API避免事件循环冲突）
-                await self.ib.connectAsync(
-                    host=self.config.host,
-                    port=self.config.port,
-                    clientId=self.config.client_id
-                )
+                # 尝试连接，如果客户端ID冲突则自动尝试其他ID
+                original_client_id = self.config.client_id
+                connected = False
+                
+                for attempt in range(5):  # 最多尝试5次
+                    try_client_id = original_client_id + attempt
+                    if try_client_id > 32:  # IBKR客户端ID范围是1-32
+                        try_client_id = try_client_id - 32
+                    
+                    try:
+                        logger.info(f"尝试连接IBKR，客户端ID: {try_client_id}")
+                        await self.ib.connectAsync(
+                            host=self.config.host,
+                            port=self.config.port,
+                            clientId=try_client_id,
+                            timeout=10
+                        )
+                        # 连接成功，更新配置中的客户端ID
+                        self.config.client_id = try_client_id
+                        connected = True
+                        self._last_connect_error = None
+                        logger.info(f"成功连接IBKR，使用客户端ID: {try_client_id}")
+                        break
+                    except Exception as conn_error:
+                        error_msg = str(conn_error)
+                        if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():
+                            logger.warning(f"客户端ID {try_client_id} 已被使用，尝试下一个ID")
+                            continue
+                        elif "TimeoutError" in error_msg or "timeout" in error_msg.lower():
+                            self._last_connect_error = f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
+                            raise Exception(self._last_connect_error)
+                        elif "ConnectionRefusedError" in error_msg or "refused" in error_msg.lower():
+                            self._last_connect_error = f"连接被拒绝 - TWS/Gateway可能未运行或端口错误 (端口: {self.config.port})"
+                            raise Exception(self._last_connect_error)
+                        else:
+                            if attempt == 4:  # 最后一次尝试
+                                self._last_connect_error = f"连接失败: {error_msg}"
+                                raise Exception(self._last_connect_error)
+                            logger.warning(f"客户端ID {try_client_id} 连接失败: {error_msg}，尝试下一个ID")
+                
+                if not connected:
+                    self._last_connect_error = f"无法找到可用的客户端ID (尝试了 {original_client_id} 到 {original_client_id + 4})"
+                    raise Exception(self._last_connect_error)
                 
                 # 连接后设置默认市场数据类型，避免无权限时报 10197
                 try:
@@ -151,6 +190,11 @@ class ConnectionManager:
             except Exception as e:
                 logger.error(f"Failed to connect to IBKR: {e}")
                 self.connected = False
+                # 标记错误以便主线程快速返回
+                try:
+                    self._last_connect_error = str(e)
+                except Exception:
+                    self._last_connect_error = "Unknown connection error"
         
         def run_worker():
             # 在新线程中创建新的事件循环
@@ -184,19 +228,27 @@ class ConnectionManager:
                     except Exception as e:
                         logger.debug(f"Error closing loop: {e}")
         
+        # 重置最近错误
+        self._last_connect_error = None
+        
         # 使用守护线程而不是线程池，确保线程能够持续运行
         self._connection_thread = threading.Thread(target=run_worker, daemon=True)
         self._connection_thread.start()
         
-        # 等待连接建立
-        max_wait = 30  # 最大等待30秒
+        # 等待连接建立或快速失败
+        max_wait = 12  # 将最大等待缩短，避免API超时
         wait_time = 0
         while wait_time < max_wait:
-            time.sleep(0.5)
-            wait_time += 0.5
+            time.sleep(0.2)
+            wait_time += 0.2
+            # 若连接成功
             if self.connected:
                 logger.info("IBKR connection established successfully")
                 return True
+            # 若出现错误则立即失败返回
+            if self._last_connect_error:
+                logger.error(f"IBKR connection failed fast: {self._last_connect_error}")
+                return False
         
         logger.error("IBKR connection timeout")
         return False
@@ -306,6 +358,64 @@ class ConnectionManager:
     def get_config(self) -> ConnectionConfig:
         """获取当前配置"""
         return self.config
+    
+    def run_in_connection_thread(self, func, *args, **kwargs):
+        """在连接线程的事件循环中执行函数，避免ThreadPoolExecutor事件循环警告"""
+        try:
+            loop = self._loop
+            if not loop or loop.is_closed():
+                logger.warning("Connection event loop not available")
+                return None
+            
+            if not self.ib or not self.ib.isConnected():
+                logger.warning("IBKR connection not available")
+                return None
+            
+            # 如果已经在连接线程中，直接调用
+            if threading.current_thread() == self._connection_thread:
+                # 确保该线程具备当前事件循环
+                try:
+                    asyncio.get_event_loop()
+                except RuntimeError:
+                    try:
+                        asyncio.set_event_loop(loop)
+                    except Exception:
+                        pass
+                return func(*args, **kwargs)
+            
+            # 否则将任务投递到连接线程的事件循环中执行
+            result_holder = {'result': None, 'exc': None}
+            done = threading.Event()
+            
+            def _runner():
+                try:
+                    # 在连接线程中确保设置当前事件循环，避免 ib_insync 内部使用 get_event_loop 报错
+                    try:
+                        asyncio.get_event_loop()
+                    except RuntimeError:
+                        try:
+                            asyncio.set_event_loop(loop)
+                        except Exception:
+                            pass
+                    result_holder['result'] = func(*args, **kwargs)
+                except Exception as e:
+                    result_holder['exc'] = e
+                finally:
+                    done.set()
+            
+            loop.call_soon_threadsafe(_runner)
+            
+            # 等待最多30秒
+            if not done.wait(timeout=30):
+                logger.error("Execution in connection thread timed out")
+                return None
+            
+            if result_holder['exc']:
+                raise result_holder['exc']
+            return result_holder['result']
+        except Exception as e:
+            logger.error(f"Failed to execute function in connection thread: {e}")
+            return None
 
-# 全局实例
+
 connection_manager = ConnectionManager()

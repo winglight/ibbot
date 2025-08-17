@@ -23,7 +23,7 @@
 风险管理,实时监控,持仓风险实时监控和处理,已完成,高,AsyncIO + APScheduler,src/risk_manager.py
 风险管理,订单队列,FIFO订单队列确保执行顺序,已完成,中,Python Queue,src/risk_manager.py
 风险管理,风险规则管理,添加、删除、修改风险规则,已完成,高,SQLite,src/risk_manager.py
-策略系统,外部策略,HTTP API调用外部策略服务,已完成,高,FastAPI + HTTP,src/strategy_manager.py
+策略系统,外部策略,HTTP API调用外部策略服务（/api/strategy 异步入队，支持令牌认证）,已完成,高,FastAPI + HTTP,main.py; src/strategy_manager.py; src/queue_manager.py
 策略系统,内部策略,Python脚本策略执行,已完成,中,Python importlib,src/strategy_manager.py
 策略系统,策略管理,策略的增删改查和启用禁用,已完成,高,SQLite,src/strategy_manager.py
 策略系统,执行记录,策略执行历史和P&L跟踪,已完成,高,SQLite,src/strategy_manager.py
@@ -53,7 +53,7 @@ Web界面,日志查看,Web端系统日志查看,已完成,中,HTML + JavaScript,
 队列系统,任务重试机制,失败任务自动重试最多3次,已完成,高,Python,src/queue_manager.py
 队列系统,任务状态跟踪,实时监控任务状态变化,已完成,高,Python,src/queue_manager.py
 队列系统,错误处理,详细的错误信息记录和处理,已完成,中,Python,src/queue_manager.py
-队列系统,队列状态查询,获取队列统计信息和任务详情,已完成,中,FastAPI,main.py
+队列系统,队列状态查询,获取队列统计信息和任务详情（字段：is_running、pending_count、processing_count、completed_count、failed_count、total_tasks、max_concurrent_tasks）,已完成,中,FastAPI,main.py
 队列系统,策略订单队列,策略订单异步队列处理,已完成,高,Python Queue,src/queue_manager.py
 系统管理,日志记录,结构化日志记录和管理,已完成,高,loguru,全局
 系统管理,配置管理,环境变量和配置文件管理,已完成,高,python-dotenv,main.py

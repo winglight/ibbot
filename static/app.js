@@ -1145,10 +1145,21 @@ class TradingApp {
         }
         
         try {
-            await this.apiCall('/cancel_all_orders', { method: 'DELETE' });
-            this.showAlert('success', 'All orders cancelled successfully');
+            const result = await this.apiCall('/cancel_all_orders', { method: 'DELETE' });
+            if (result.success) {
+                const cancelledCount = result.cancelled_count || 0;
+                if (cancelledCount > 0) {
+                    this.showAlert('success', `Successfully cancelled ${cancelledCount} orders`);
+                } else {
+                    this.showAlert('info', 'No cancellable orders found');
+                }
+                this.loadOrders(); // 刷新订单列表
+            } else {
+                this.showAlert('danger', `Failed to cancel orders: ${result.error || 'Unknown error'}`);
+            }
         } catch (error) {
             console.error('Failed to cancel all orders:', error);
+            this.showAlert('danger', 'Error occurred while cancelling orders');
         }
     }
 

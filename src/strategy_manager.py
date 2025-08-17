@@ -370,7 +370,9 @@ class StrategyManager:
     def update_settings(self, new_settings: Dict[str, Any]) -> bool:
         """Update settings"""
         try:
-            self.settings.update(new_settings)
+            # 过滤掉值为 None 的字段，避免覆盖已有设置
+            cleaned = {k: v for k, v in new_settings.items() if v is not None}
+            self.settings.update(cleaned)
             self._save_settings()
             self._load_from_database()  # 重新加载以更新实例变量
             return True

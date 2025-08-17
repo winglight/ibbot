@@ -51,20 +51,25 @@ class IBKRClient:
                               exchange: str, sec_type: str, order_type: str, price: float = None):
         """在连接管理器的事件循环中执行下单操作"""
         try:
-            # 获取IB实例和事件循环
+            # 获取IB实例
             ib_instance = self.connection_manager.get_ib_instance()
-            loop = getattr(self.connection_manager, '_loop', None)
-            
             if not ib_instance:
                 logger.error("No active IB instance for placing order")
                 return None
-                
+            
+            # 检查连接状态
+            if not self.connection_manager.is_connected():
+                logger.error("IBKR connection is not active")
+                return None
+            
+            # 获取事件循环，添加安全检查
+            loop = getattr(self.connection_manager, '_loop', None)
             if not loop or loop.is_closed():
                 logger.error("No active event loop for IBKR connection")
                 return None
             
-            # 在连接管理器的事件循环中异步执行下单
-            async def execute_order_async():
+            # 使用连接管理器的线程安全执行方法
+            def execute_order_sync():
                 try:
                     # 根据证券类型获取正确的合约
                     if sec_type == 'FUT' or symbol in ['MNQ', 'NQ', 'ES', 'MES']:
@@ -72,8 +77,8 @@ class IBKRClient:
                     else:
                         contract = self.get_stock_contract(symbol, exchange)
 
-                    # 使用异步方法确认合约
-                    qualified_contracts = await ib_instance.qualifyContractsAsync(contract)
+                    # 确认合约
+                    qualified_contracts = ib_instance.qualifyContracts(contract)
                     if not qualified_contracts:
                         logger.error(f"Failed to qualify contract for {symbol}")
                         return None
@@ -92,12 +97,11 @@ class IBKRClient:
                     logger.info(f"{order_type} order placed: {action} {quantity} {symbol} ({sec_type}) on {qualified_contract.exchange}, conId={getattr(qualified_contract, 'conId', 'N/A')}")
                     return trade
                 except Exception as e:
-                    logger.error(f"Failed to place order in async execution: {e}")
+                    logger.error(f"Failed to place order in sync execution: {e}")
                     return None
             
-            # 在连接管理器的事件循环中运行异步下单
-            future = asyncio.run_coroutine_threadsafe(execute_order_async(), loop)
-            return future.result(timeout=30)  # 30秒超时
+            # 在连接线程中执行下单操作
+            return self.connection_manager.run_in_connection_thread(execute_order_sync)
             
         except Exception as e:
             logger.error(f"Failed to place {order_type.lower()} order in thread: {e}")
@@ -410,25 +414,14 @@ class IBKRClient:
             
             logger.debug(f"Contract created for {symbol}: {contract}")
             
-            # 在ThreadPoolExecutor中运行时，使用特殊的处理方式
-            if is_in_thread_pool:
-                logger.debug(f"Using ThreadPoolExecutor-safe approach for {symbol}")
-                # 在ThreadPoolExecutor中，直接调用但忽略事件循环警告
-                try:
-                    # 临时抑制asyncio相关的警告
-                    import warnings
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", message=".*no current event loop.*", category=RuntimeWarning)
-                        warnings.filterwarnings("ignore", message=".*There is no current event loop.*", category=RuntimeWarning)
-                        ticker = ib.reqMktData(contract, '', False, False)
-                    logger.debug(f"ThreadPoolExecutor reqMktData successful for {symbol}")
-                except Exception as thread_error:
-                    logger.warning(f"ThreadPoolExecutor reqMktData failed for {symbol}: {thread_error}")
-                    # 如果失败，返回None而不是继续尝试
-                    return None
-            else:
-                logger.debug(f"Using normal approach for {symbol}")
-                ticker = ib.reqMktData(contract, '', False, False)
+            # 无论是否在线程池中，统一通过连接线程执行IB调用，避免事件循环告警
+            logger.debug(f"Requesting market data via connection thread for {symbol}")
+            def _req_mkt_data():
+                return ib.reqMktData(contract, '', False, False)
+            ticker = self.connection_manager.run_in_connection_thread(_req_mkt_data)
+            if ticker is None:
+                logger.error(f"Failed to request market data for {symbol} via connection thread")
+                return None
             
             logger.debug(f"Market data request completed for {symbol}, ticker: {ticker}")
             
@@ -543,43 +536,24 @@ class IBKRClient:
                 logger.error(f"IBKR connection lost for cancel order")
                 return False, "Connection lost"
             
-            # 首先在连接管理器事件循环中强制刷新订单数据，避免事件循环冲突
+            # 使用同步方式刷新订单数据，避免事件循环冲突
             try:
-                loop = getattr(self.connection_manager, '_loop', None)
-                if loop and not loop.is_closed():
-                    async def refresh_orders_async():
-                        try:
-                            # 使用 ib_insync 的异步API，这会正确设置内部 _results，并避免 KeyError
-                            if hasattr(ib, 'reqOpenOrdersAsync'):
-                                await ib.reqOpenOrdersAsync()
-                            # 请求所有API来源的已完成订单（包含最近状态变化）
-                            if hasattr(ib, 'reqCompletedOrdersAsync'):
-                                await ib.reqCompletedOrdersAsync(apiOnly=False)
-                            logger.debug("Requested order refresh from IBKR (async)")
-                            # 等待片刻让返回的事件更新本地缓存
-                            await asyncio.sleep(0.2)
-                        except asyncio.CancelledError:
-                            logger.debug("Order refresh task cancelled")
-                            raise
-                        except Exception as e:
-                            logger.warning(f"Failed to request order refresh in async: {e}")
-                    future = asyncio.run_coroutine_threadsafe(refresh_orders_async(), loop)
+                # 在连接线程刷新一次订单状态
+                def _refresh_orders():
+                    ib.reqOpenOrders()
+                    ib.reqAllOpenOrders()
+                    return True
+                if self.connection_manager is not None:
                     try:
-                        future.result(timeout=1.0)
-                    except concurrent.futures.TimeoutError:
-                        logger.warning("Order refresh timeout (1.0s). Cancelling the refresh task to avoid pending tasks.")
-                        future.cancel()
+                        self.connection_manager.run_in_connection_thread(_refresh_orders)
                     except Exception as e:
-                        logger.warning(f"Order refresh failed: {e}")
-                        try:
-                            future.cancel()
-                        except Exception:
-                            pass
+                        logger.debug(f"run_in_connection_thread failed during refresh: {e}, falling back to direct refresh")
+                        _refresh_orders()
                 else:
-                    logger.debug("No active event loop for order refresh, using cached trades")
+                    _refresh_orders()
             except Exception as e:
-                logger.debug(f"Failed to refresh orders: {e}")
-            
+                logger.warning(f"Failed to refresh orders: {e}")
+                
             trades = ib.trades()
             target_trade = None
             for trade in trades:
@@ -666,6 +640,143 @@ class IBKRClient:
     
     def cancel_all_orders(self) -> int:
         """取消所有订单"""
+        def _cancel_orders_operation():
+            """在连接线程中执行取消订单操作，避免事件循环警告"""
+            try:
+                # 获取IB实例
+                ib = self.ib
+                if not ib or not ib.isConnected():
+                    logger.error(f"IBKR connection lost for cancel all orders")
+                    return 0
+                
+                # 使用同步方式刷新订单数据
+                try:
+                    ib.reqOpenOrders()
+                    ib.reqAllOpenOrders()
+                    time.sleep(0.5)
+                    logger.debug("Requested order refresh from IBKR (sync)")
+                except Exception as e:
+                    logger.warning(f"Failed to refresh orders: {e}")
+                
+                # 优先使用openTrades()获取活跃订单，降级到trades()
+                trades = ib.openTrades() or ib.trades()
+                cancellable_orders = []
+                
+                # 过滤出可取消的订单，包括更多状态以确保捕获所有活跃订单
+                cancellable_statuses = [
+                    'Submitted', 'PreSubmitted', 'PendingSubmit', 
+                    'ApiPending', 'ApiCancelled', 'PreSubmitted'
+                ]
+                
+                # 仅取消当前连接(clientId)创建的订单，避免误取消其他会话的订单
+                my_client_id = getattr(getattr(ib, 'client', None), 'clientId', None)
+                
+                for trade in trades:
+                    order_status = trade.orderStatus.status
+                    order_id = trade.order.orderId
+                    
+                    # 按clientId过滤，避免误取消其他会话的订单
+                    if my_client_id is not None:
+                        order_client_id = getattr(trade.order, 'clientId', None)
+                        if order_client_id != my_client_id:
+                            logger.info(f"Skip order {order_id} due to clientId mismatch (order_client_id={order_client_id}, my_client_id={my_client_id})")
+                            continue
+                    
+                    # 记录所有活跃订单的状态以便调试
+                    logger.debug(f"Order {order_id} status: {order_status}")
+                    
+                    # 检查订单是否可取消
+                    if order_status in cancellable_statuses:
+                        cancellable_orders.append(trade)
+                        logger.info(f"Order {order_id} marked for cancellation (status: {order_status})")
+                    elif order_status not in ['Filled', 'Cancelled', 'Inactive']:
+                        # 处理未知状态，保守地尝试取消
+                        logger.warning(f"Order {order_id} has unknown status '{order_status}', attempting to cancel")
+                        cancellable_orders.append(trade)
+                
+                if not cancellable_orders:
+                    logger.info("No cancellable orders found")
+                    return 0
+                
+                logger.info(f"Found {len(cancellable_orders)} orders to cancel")
+                
+                # 发送取消请求
+                for trade in cancellable_orders:
+                    try:
+                        order_id = trade.order.orderId
+                        ib.cancelOrder(trade.order)
+                        logger.info(f"Sent cancel request for order {order_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to send cancel request for order {trade.order.orderId}: {e}")
+                
+                # 等待取消确认
+                max_wait_time = 20
+                start_time = time.time()
+                check_interval = 0.5
+                cancelled_count = 0
+                
+                while time.time() - start_time < max_wait_time:
+                    time.sleep(check_interval)
+                    
+                    # 重新获取订单状态
+                    updated_trades = ib.trades()
+                    current_cancelled = 0
+                    
+                    for original_trade in cancellable_orders:
+                        order_id = original_trade.order.orderId
+                        found = False
+                        
+                        for updated_trade in updated_trades:
+                            if updated_trade.order.orderId == order_id:
+                                found = True
+                                status = updated_trade.orderStatus.status
+                                if status in ['Cancelled', 'Inactive']:
+                                    current_cancelled += 1
+                                break
+                        
+                        # 订单不在列表中，在Paper Trading中通常意味着已取消
+                        if not found:
+                            current_cancelled += 1
+                    
+                    # 如果所有订单都已取消，提前退出
+                    if current_cancelled >= len(cancellable_orders):
+                        cancelled_count = current_cancelled
+                        break
+                    
+                    # 更新已取消数量
+                    if current_cancelled > cancelled_count:
+                        cancelled_count = current_cancelled
+                        logger.info(f"Progress: {cancelled_count}/{len(cancellable_orders)} orders cancelled")
+                
+                # 最终检查
+                if cancelled_count < len(cancellable_orders):
+                    final_trades = ib.trades()
+                    final_cancelled = 0
+                    
+                    for original_trade in cancellable_orders:
+                        order_id = original_trade.order.orderId
+                        found = False
+                        
+                        for final_trade in final_trades:
+                            if final_trade.order.orderId == order_id:
+                                found = True
+                                status = final_trade.orderStatus.status
+                                if status in ['Cancelled', 'Inactive', 'PendingCancel']:
+                                    final_cancelled += 1
+                                break
+                        
+                        if not found:
+                            final_cancelled += 1
+                    
+                    cancelled_count = final_cancelled
+                
+                logger.info(f"Successfully cancelled {cancelled_count}/{len(cancellable_orders)} orders")
+                return cancelled_count
+                
+            except Exception as e:
+                logger.error(f"Error in cancel orders operation: {e}")
+                return 0
+        
         try:
             # 确保连接
             if not self.is_connected():
@@ -673,26 +784,22 @@ class IBKRClient:
                     logger.error(f"Cannot connect to IBKR for cancel all orders")
                     return 0
             
-            # 获取IB实例
-            ib = self.ib
-            if not ib or not ib.isConnected():
-                logger.error(f"IBKR connection lost for cancel all orders")
-                return 0
+            # 尝试使用连接管理器在正确的线程中执行操作
+            result = self.connection_manager.run_in_connection_thread(_cancel_orders_operation)
             
-            trades = ib.trades()
-            cancelled_count = 0
-            for trade in trades:
-                if trade.orderStatus.status in ['Submitted', 'PreSubmitted']:
-                    ib.cancelOrder(trade.order)
-                    cancelled_count += 1
-            logger.info(f"Cancelled {cancelled_count} orders")
-            return cancelled_count
+            if result is not None:
+                return result
+            else:
+                # 回退到直接执行
+                logger.warning("Failed to use connection thread, falling back to direct execution")
+                return _cancel_orders_operation()
+                
         except Exception as e:
             logger.error(f"Failed to cancel all orders: {e}")
             return 0
     
-    def get_orders(self, risk_manager=None, strategy_manager=None) -> List[Dict]:
-        """获取订单列表（支持去抖动，避免重复刷新）"""
+    def get_orders(self, risk_manager=None, strategy_manager=None, order_manager=None) -> List[Dict]:
+        """获取订单列表（支持去抖动，避免重复刷新，并同步到 OrderManager）"""
         try:
             # 确保连接
             if not self.is_connected():
@@ -717,43 +824,28 @@ class IBKRClient:
                 # 直接使用缓存的trades，不重复请求
                 trades = ib.trades()
             else:
-                # 在连接管理器的事件循环中异步执行刷新操作，避免事件循环冲突
+                # 使用连接线程执行订单刷新，避免事件循环冲突
                 try:
-                    # 获取连接管理器的事件循环
-                    loop = getattr(self.connection_manager, '_loop', None)
-                    
-                    if loop and not loop.is_closed():
-                        # 在连接管理器的事件循环中异步执行刷新
-                        async def refresh_orders_async():
-                            try:
-                                # 使用 ib_insync 的异步API，这会正确设置内部 _results，并避免 KeyError
-                                if hasattr(ib, 'reqOpenOrdersAsync'):
-                                    await ib.reqOpenOrdersAsync()
-                                # 请求所有API来源的已完成订单（包含最近状态变化）
-                                if hasattr(ib, 'reqCompletedOrdersAsync'):
-                                    await ib.reqCompletedOrdersAsync(apiOnly=False)
-                                logger.debug("Requested order refresh from IBKR (async)")
-                                await asyncio.sleep(0.2)
-                            except Exception as e:
-                                logger.warning(f"Failed to request order refresh in async: {e}")
-                        
-                        # 在连接管理器的事件循环中执行异步刷新
-                        future = asyncio.run_coroutine_threadsafe(refresh_orders_async(), loop)
+                    def _refresh_orders():
+                        ib.reqOpenOrders()
+                        ib.reqAllOpenOrders()
+                        return True
+                    if self.connection_manager is not None:
                         try:
-                            future.result(timeout=1.0)  # 1秒超时
+                            self.connection_manager.run_in_connection_thread(_refresh_orders)
                         except Exception as e:
-                            logger.warning(f"Order refresh timeout or failed: {e}")
+                            logger.debug(f"run_in_connection_thread failed during refresh: {e}, falling back to direct refresh")
+                            _refresh_orders()
                     else:
-                        logger.debug("No active event loop for order refresh, using cached data")
-                    
-                    # 更新刷新时间
-                    self._last_order_refresh_time = current_time
-                    
-                    # 读取最新的 trades 列表
-                    trades = ib.trades()
+                        _refresh_orders()
                 except Exception as e:
-                    logger.warning(f"Failed to request order refresh: {e}")
-                    trades = ib.trades()  # fallback to existing trades
+                    logger.warning(f"Failed to refresh orders: {e}")
+                
+                # 更新刷新时间
+                self._last_order_refresh_time = current_time
+                
+                # 读取最新的 trades 列表，优先使用openTrades()
+                trades = ib.openTrades() or ib.trades()
             
             # 处理订单数据
             orders: List[Dict[str, Any]] = []
@@ -764,6 +856,11 @@ class IBKRClient:
                 # 从risk_manager的auto_orders中获取订单来源信息
                 order_source = "未知"
                 order_id_str = str(trade.order.orderId)
+                
+                # 先尝试从 OrderManager 中获取订单
+                existing_order = None
+                if order_manager:
+                    existing_order = order_manager.get_order(order_id_str)
                 
                 if risk_manager and hasattr(risk_manager, 'auto_orders'):
                     if order_id_str in risk_manager.auto_orders:
@@ -809,6 +906,80 @@ class IBKRClient:
                 else:
                     # 如果没有risk_manager，默认为人工
                     order_source = "人工"
+                
+                # 同步订单到 OrderManager
+                if order_manager:
+                    current_status = trade.orderStatus.status
+                    current_avg_fill_price = trade.orderStatus.avgFillPrice
+                    
+                    if existing_order:
+                        # 更新现有订单状态
+                        if (existing_order.status != current_status or 
+                            (current_avg_fill_price and current_avg_fill_price > 0 and existing_order.fill_price != current_avg_fill_price)):
+                            
+                            try:
+                                from datetime import datetime
+                                executed_at = None
+                                if current_status == "Filled" and existing_order.executed_at is None:
+                                    executed_at = datetime.now()
+                                
+                                order_manager.update_order_status(
+                                    order_id=order_id_str,
+                                    status=current_status,
+                                    fill_price=current_avg_fill_price if current_avg_fill_price and current_avg_fill_price > 0 else None,
+                                    executed_at=executed_at
+                                )
+                                logger.debug(f"OrderManager: Updated order {order_id_str} status to {current_status}")
+                            except Exception as om_err:
+                                logger.warning(f"Failed to update order {order_id_str} in OrderManager: {om_err}")
+                    else:
+                        # 为从 IBKR 获取的历史订单创建记录（如果不存在）
+                        try:
+                            # 尝试根据 IBKR 的订单信息推断订单类型
+                            order_type = "MKT" if trade.order.orderType.upper() in ('MKT', 'MARKET') else "LMT"
+                            price = getattr(trade.order, 'lmtPrice', None) or current_avg_fill_price
+                            
+                            # 获取订单来源信息
+                            detected_source = "manual"  # 默认为手动
+                            if existing_order and existing_order.order_source:
+                                detected_source = existing_order.order_source
+                            elif order_source == "机器人":
+                                detected_source = "auto"
+                            
+                            # 创建新的订单记录
+                            order_manager.create_order(
+                                order_id=order_id_str,
+                                symbol=getattr(trade.contract, 'localSymbol', None) or trade.contract.symbol,
+                                action=trade.order.action,
+                                quantity=trade.order.totalQuantity,
+                                order_type=order_type,
+                                price=price,
+                                order_source=detected_source,
+                                strategy_name=None,  # 暂无法从 IBKR 推断
+                                rule_id=None,
+                                parent_order_id=None,
+                                exchange=getattr(trade.contract, 'exchange', 'SMART'),
+                                sec_type=getattr(trade.contract, 'secType', 'STK'),
+                                notes=f"从 IBKR 同步的历史订单"
+                            )
+                            
+                            # 立即更新状态和成交价
+                            if current_status != "Submitted":
+                                from datetime import datetime
+                                executed_at = None
+                                if current_status == "Filled":
+                                    executed_at = datetime.now()
+                                
+                                order_manager.update_order_status(
+                                    order_id=order_id_str,
+                                    status=current_status,
+                                    fill_price=current_avg_fill_price if current_avg_fill_price and current_avg_fill_price > 0 else None,
+                                    executed_at=executed_at
+                                )
+                            
+                            logger.info(f"OrderManager: Created historical order {order_id_str} from IBKR sync")
+                        except Exception as create_err:
+                            logger.warning(f"Failed to create historical order {order_id_str} in OrderManager: {create_err}")
                 
                 # Add debug logging for order data
                 logger.debug(f"Processing order {trade.order.orderId}: totalQuantity={trade.order.totalQuantity}, action={trade.order.action}, orderType={trade.order.orderType}, status={trade.orderStatus.status}")
