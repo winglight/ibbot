@@ -32,6 +32,23 @@ EXPOSE 8000 18080
 RUN echo '#!/bin/bash\n\
 set -e\n\
 \n\
+# Ensure .env exists (fallback to .env.example if provided)\n\
+if [ ! -f ".env" ]; then\n\
+    if [ -f ".env.example" ]; then\n\
+        echo "No .env found, generating from .env.example..."\n\
+        cp .env.example .env\n\
+    else\n\
+        echo "No .env or .env.example found. Continuing with environment defaults."\n\
+    fi\n\
+fi\n\
+\
+# Export variables from .env so they are available to all modes (main/mock/runner/test)\n\
+if [ -f ".env" ]; then\n\
+    set -a\n\
+    . ./.env\n\
+    set +a\n\
+fi\n\
+\
 # Default to main app if no command specified\n\
 if [ "$#" -eq 0 ]; then\n\
     echo "Starting IBKR Trading Bot main application..."\n\

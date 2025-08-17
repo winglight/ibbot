@@ -38,7 +38,6 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
       - ./strategy:/app/strategy
-      - ./.env:/app/.env:ro
     depends_on:
       - mock-gateway
     networks:

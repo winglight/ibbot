@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  ibbot:
+    image: ghcr.io/<owner>/ibbot:v1.0.0  # 生产推荐固定版本；可改为 :latest（如仓库提供）
+    container_name: ibbot
+    environment:
+      # Web 服务
+      - WEB_HOST=0.0.0.0
+      - WEB_PORT=8000
+
+      # IBKR 实盘/纸交易连接（视环境修改）
+      - IBKR_HOST=host.docker.internal
+      - IBKR_PORT=4002
+
+      # 认证与安全（务必覆盖默认值）
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_ALGORITHM=HS256
+      - JWT_EXPIRE_DAYS=1
+
+      # 功能开关
+      - AUTO_CONNECT=false
+      - ENABLE_WEBSOCKET=true
+
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./strategy:/app/strategy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  ibbot-network:
+    driver: bridge

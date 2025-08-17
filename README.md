@@ -169,6 +169,99 @@ python main.py
 
 ## 🐳 Docker使用
 
+### 使用 GitHub Container Registry 镜像安装（推荐）
+
+无需本地构建，直接拉取已发布的版本化镜像（与 GitHub Releases 同步的 vX.Y.Z 标签）：
+
+```bash
+# 拉取发布版镜像（将 <owner> 替换为你的 GitHub 用户名或组织名，例如 winglight）
+docker pull ghcr.io/<owner>/ibbot:v1.0.0
+```
+
+- 可用版本：请在本仓库的 GitHub Releases 页面查看版本号（tag），选择所需的 vX.Y.Z 标签。
+- 如镜像仓库为私有，可先登录 GHCR（公共镜像无需）：
+  ```bash
+  echo $CR_PAT | docker login ghcr.io -u <github_username> --password-stdin
+  ```
+  其中 CR_PAT 为具有 packages:read 权限的 GitHub Personal Access Token。
+
+#### 使用 latest 标签（可选）
+
+- latest 标签通常指向最新发布的镜像，用于快速体验或自动化环境；生产环境推荐固定到明确的版本号（如 v1.0.0）以获得可重复部署和可追溯性。
+- 如果当前仓库未提供 latest 标签，请使用具体的版本标签（vX.Y.Z）。
+
+```bash
+# 拉取最新版本（如仓库提供 latest 标签）
+docker pull ghcr.io/<owner>/ibbot:latest
+
+# 快速运行（等价于使用最新版本）
+docker run -d \
+  --name ibbot-main \
+  -p 8000:8000 \
+  ghcr.io/<owner>/ibbot:latest
+```
+
+#### 直接运行镜像（无需 .env 文件）
+
+**基础运行（开箱即用，用于快速测试）：**
+
+```bash
+# 运行主应用（自动生成基础配置）
+docker run -d \
+  --name ibbot-main \
+  -p 8000:8000 \
+  ghcr.io/<owner>/ibbot:v1.0.0
+
+# 运行内置 Mock 网关进行测试
+docker run -d \
+  --name ibbot-mock \
+  -p 18080:18080 \
+  ghcr.io/<owner>/ibbot:v1.0.0 mock
+```
+
+**生产环境运行（推荐覆盖关键安全配置）：**
+
+```bash
+# 运行主应用并覆盖关键配置
+docker run -d \
+  --name ibbot-main \
+  -p 8000:8000 \
+  -e ADMIN_PASSWORD=your_secure_password \
+  -e JWT_SECRET=your_production_jwt_secret \
+  -e IBKR_HOST=host.docker.internal \
+  -e IBKR_PORT=4002 \
+  -e AUTO_CONNECT=false \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/strategy:/app/strategy \
+  ghcr.io/<owner>/ibbot:v1.0.0
+
+# 查看日志
+docker logs -f ibbot-main
+```
+
+**运行策略运行器：**
+
+```bash
+# 独立运行策略运行器
+docker run -it --rm \
+  -e RUNNER_API_BASE=http://host.docker.internal:8000 \
+  -e RUNNER_STRATEGY_TOKEN=your_strategy_token \
+  ghcr.io/<owner>/ibbot:v1.0.0 runner --file "Buy down and Sell open.py" --symbols AAPL
+
+# 并行运行主应用和策略运行器
+docker run -d \
+  --name ibbot-parallel \
+  -p 8000:8000 \
+  -e ADMIN_PASSWORD=your_secure_password \
+  -e JWT_SECRET=your_production_jwt_secret \
+  ghcr.io/<owner>/ibbot:v1.0.0 parallel --file "Buy down and Sell open.py" --symbols AAPL
+```
+
+> **安全提示**：生产环境务必覆盖 `ADMIN_PASSWORD` 和 `JWT_SECRET`，不要使用默认值。
+
+> **配置说明**：容器启动时会自动从 `.env.example` 生成基础 `.env` 配置，无需外挂 `.env` 文件。如需使用自定义 `.env` 文件，可通过 `-v $(pwd)/.env:/app/.env:ro` 挂载。
+
 ### 1. 快速开始
 
 使用Docker Compose一键启动整个应用栈（包含Mock IB Gateway）：
@@ -199,7 +292,7 @@ docker build -t ibbot:latest .
 #### 运行主应用
 
 ```bash
-# 运行主应用（连接外部IB Gateway）
+# 运行主应用（连接外部IB Gateway，无需 .env 文件）
 docker run -d \
   --name ibbot-main \
   -p 8000:8000 \
@@ -264,8 +357,8 @@ MOCK_PORT=18080           # Mock网关端口
 #### 认证配置
 ```bash
 ADMIN_USERNAME=admin               # 管理员用户名
-ADMIN_PASSWORD=change_me           # 管理员密码
-JWT_SECRET=please_change_me        # JWT密钥
+ADMIN_PASSWORD=change_me           # 管理员密码（生产环境务必修改）
+JWT_SECRET=please_change_me        # JWT密钥（生产环境务必修改）
 JWT_ALGORITHM=HS256               # JWT算法
 JWT_EXPIRE_DAYS=1                 # JWT过期天数
 ```
@@ -285,317 +378,158 @@ ENABLE_WEBSOCKET=true     # 启用WebSocket
 # 创建数据目录
 mkdir -p logs data strategy
 
-# 运行时挂载数据卷
+# 运行时挂载数据卷（推荐：不再需要挂载 .env）
 docker run -d \
   --name ibbot \
   -p 8000:8000 \
+  -e ADMIN_PASSWORD=your_secure_password \
+  -e JWT_SECRET=your_production_secret \
   -v $(pwd)/logs:/app/logs \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/strategy:/app/strategy \
-  -v $(pwd)/.env:/app/.env:ro \
   ibbot:latest
 ```
 
-### 5. 生产环境部署
+**可选：使用外部 .env 文件**
 
-#### 使用外部IB Gateway
+如果你仍希望使用外部 `.env` 文件管理配置：
 
-```yaml
-# docker-compose.prod.yml
+```bash
+# 方式1：直接挂载 .env 文件
+docker run -d \
+  --name ibbot \
+  -p 8000:8000 \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/strategy:/app/strategy \
+  ibbot:latest
+
+# 方式2：使用 docker-compose 的 env_file（完整示例）
+# 新建或编辑 docker-compose.yml，添加如下内容：
+```
 version: '3.8'
+
 services:
   ibbot:
-    image: ibbot:latest
+    image: ghcr.io/<owner>/ibbot:v1.0.0  # 亦可使用 :latest（如仓库提供）
+    container_name: ibbot-main
+    env_file:
+      - .env
+    environment:
+      - WEB_HOST=0.0.0.0
+      - WEB_PORT=8000
+      # 如需额外覆盖敏感配置，建议在环境变量中注入（优先级高于 env_file）
+      # - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      # - JWT_SECRET=${JWT_SECRET}
     ports:
       - "8000:8000"
-    environment:
-      - IBKR_HOST=192.168.1.100  # IB Gateway主机IP
-      - IBKR_PORT=4001           # 生产端口
-      - IBKR_PAPER_TRADING=False # 真实交易
-      - AUTO_CONNECT=true
-      - JWT_SECRET=your_production_secret
-      - ADMIN_PASSWORD=your_secure_password
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
       - ./strategy:/app/strategy
+    depends_on:
+      - mock-gateway
+    networks:
+      - ibbot-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  mock-gateway:
+    image: ghcr.io/<owner>/ibbot:v1.0.0
+    container_name: ibbot-mock
+    command: ["mock"]
+    ports:
+      - "18080:18080"
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18080/api/connection_status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  ibbot-network:
+    driver: bridge
 ```
 
-#### 健康检查
+### 生产部署示例：docker-compose.prod.yml
 
-Docker容器内置健康检查：
+以下是一个生产环境的 Compose 样例，包含健康检查和重启策略的最佳实践。建议固定镜像版本号（vX.Y.Z），避免使用 moving tag 导致的不可控变更；若需要快速跟随最新版本，可改用 :latest（如仓库提供）。
+
+```yaml
+version: '3.8'
+
+services:
+  ibbot:
+    image: ghcr.io/<owner>/ibbot:v1.0.0  # 生产推荐固定版本；可改为 :latest（如仓库提供）
+    container_name: ibbot
+    environment:
+      # Web 服务
+      - WEB_HOST=0.0.0.0
+      - WEB_PORT=8000
+
+      # IBKR 实盘/纸交易连接（视环境修改）
+      - IBKR_HOST=host.docker.internal
+      - IBKR_PORT=4002
+
+      # 认证与安全（务必覆盖默认值）
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_ALGORITHM=HS256
+      - JWT_EXPIRE_DAYS=1
+
+      # 功能开关
+      - AUTO_CONNECT=false
+      - ENABLE_WEBSOCKET=true
+
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./strategy:/app/strategy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  ibbot-network:
+    driver: bridge
+```
+
+部署与运维：
 
 ```bash
-# 检查容器健康状态
-docker ps --format "table {{.Names}}\t{{.Status}}"
+# 使用生产配置启动（确保已设置环境变量 ADMIN_PASSWORD / JWT_SECRET）
+export ADMIN_PASSWORD=your_secure_password
+export JWT_SECRET=your_production_jwt_secret
 
-# 查看健康检查日志
-docker inspect ibbot-main | grep -A 20 Health
+docker compose -f docker-compose.prod.yml up -d
+
+# 查看服务与健康状态
+docker compose -f docker-compose.prod.yml ps
+
+# 查看日志
+docker compose -f docker-compose.prod.yml logs -f
 ```
 
-### 6. 故障排除
-
-#### 查看容器日志
-```bash
-# 查看实时日志
-docker logs -f ibbot-main
-
-# 查看最近100行日志
-docker logs --tail=100 ibbot-main
-```
-
-#### 进入容器调试
-```bash
-# 进入运行中的容器
-docker exec -it ibbot-main bash
-
-# 检查网络连接
-docker exec ibbot-main curl -f http://localhost:8000/
-```
-
-#### 重启服务
-```bash
-# 重启单个服务
-docker-compose restart ibbot
-
-# 重启所有服务
-docker-compose restart
-```
-
-#### 清理资源
-```bash
-# 停止并删除容器
-docker-compose down
-
-# 删除镜像
-docker rmi ibbot:latest
-
-# 清理未使用的资源
-docker system prune -f
-```
-
-### 7. 开发模式
-
-#### 开发时热重载
-
-```bash
-# 挂载源代码进行开发
-docker run -it --rm \
-  -p 8000:8000 \
-  -v $(pwd):/app \
-  -e PYTHONPATH=/app \
-  python:3.11-slim \
-  bash -c "cd /app && pip install -r requirements.txt && python main.py"
-```
-
-#### 调试模式
-
-```bash
-# 启用调试模式
-docker run -it --rm \
-  -p 8000:8000 \
-  -e DEBUG=true \
-  -e LOG_LEVEL=DEBUG \
-  ibbot:latest
-```
-
-## 📁 项目结构
-
-```
-ibbot/
-├── main.py                    # 🚀 主程序入口和FastAPI服务器
-├── requirements.txt           # 📦 Python依赖包列表
-├── .env.example              # ⚙️ 环境变量配置示例
-├── .env.gateway              # 🔧 IB Gateway配置
-├── install_ib_gateway.sh     # 📥 IB Gateway安装脚本
-├── start.sh                  # 🏃 启动脚本
-├── README.md                 # 📖 项目文档
-│
-├── src/                      # 📂 核心模块
-│   ├── __init__.py
-│   ├── ibkr_client.py        # 🔌 IBKR API客户端
-│   ├── connection_manager.py # 🔗 连接管理器
-│   ├── risk_manager.py       # 🛡️ 风险管理模块
-│   ├── strategy_manager.py   # 🤖 策略管理模块
-│   ├── queue_manager.py      # ⚡ 异步队列管理器
-│   ├── telegram_notifier.py  # 📱 Telegram通知模块
-│   ├── database.py           # 💾 SQLite数据库管理
-│   └── test.py              # 🧪 测试模块
-│
-├── static/                   # 🌐 Web前端文件
-│   ├── index.html           # 🏠 主页面
-│   ├── app.js               # ⚡ 前端JavaScript逻辑
-│   └── style.css            # 🎨 样式文件
-│
-├── tunnel/                   # 🌉 网络隧道配置
-│   └── config.yaml
-│
-├── data/                     # 💾 数据存储目录
-│   ├── trading_bot.db       # 🗄️ SQLite数据库
-│   ├── orders_backup.csv    # 📋 订单备份
-│   └── *.csv                # 📊 历史数据文件
-│
-├── strategy/                 # 🤖 策略脚本目录
-│   └── *.py                 # 📝 Python策略文件
-│
-└── logs/                     # 📝 日志文件目录
-    └── *.log                # 📄 应用日志
-```
-
-### 🏗️ 架构设计
-
-- **main.py**: FastAPI应用主入口，包含所有API端点和WebSocket连接
-- **src/**: 核心业务逻辑模块，采用模块化设计
-- **static/**: 前端单页应用，使用Bootstrap + JavaScript
-- **data/**: SQLite数据库和CSV备份文件存储
-- **strategy/**: 用户自定义策略脚本存放目录
-
-## 🔌 API接口文档
-
-### 🔐 认证
-- `POST /api/login` - 用户登录获取JWT令牌
-
-### 🔗 连接管理
-- `POST /api/connect` - 连接IBKR服务器
-- `POST /api/disconnect` - 断开IBKR连接
-- `GET /api/connection_status` - 获取连接状态
-
-### 📊 市场数据
-- `POST /api/historical_data` - 获取历史K线数据
-- `POST /api/chart_data` - 获取图表数据
-- `GET /api/realtime_data/{symbol}` - 获取实时价格数据
-
-### 💼 交易操作
-- `POST /api/place_order` - 提交交易订单
-- `POST /api/cancel_order` - 取消指定订单
-- `DELETE /api/cancel_order/{order_id}` - 取消订单(RESTful)
-- `DELETE /api/cancel_all_orders` - 取消所有订单
-- `GET /api/orders` - 获取订单列表
-- `GET /api/order_queue_status` - 获取订单队列状态
-
-### 👤 账户信息
-- `GET /api/account_info` - 获取账户基本信息
-- `GET /api/positions` - 获取持仓列表
-
-### 🛡️ 风险管理
-- `POST /api/risk_rules` - 添加风险规则
-- `GET /api/risk_rules` - 获取风险规则列表
-- `PUT /api/risk_rules/{symbol}` - 更新风险规则
-- `DELETE /api/risk_rules/{symbol}` - 删除风险规则
-- `GET /api/risk-config` - 获取风险配置
-- `GET /api/auto_orders` - 获取自动订单列表
-
-### 🤖 策略管理
-- `GET /api/strategy/settings` - 获取策略设置
-- `POST /api/strategy/settings` - 更新策略设置
-- `POST /api/strategy/settings/generate-token` - 生成策略认证令牌
-- `GET /api/strategies` - 获取策略列表
-- `POST /api/strategies` - 添加新策略
-- `GET /api/strategies/{name}` - 获取指定策略
-- `PUT /api/strategies/{name}` - 更新策略
-- `DELETE /api/strategies/{name}` - 删除策略
-- `POST /api/strategies/{name}/toggle` - 启用/禁用策略
-- `GET /api/strategies/{name}/performance` - 获取策略性能
-- `POST /api/strategy` - 外部策略订单接口（异步队列处理）
-- `GET /api/strategies/{name}/executions` - 获取策略执行记录
-- `DELETE /api/strategies/{name}/executions` - 清除策略执行记录
-
-### ⚡ 队列管理
-- `GET /api/queue/status` - 获取队列状态统计
-- `GET /api/queue/tasks` - 获取所有任务列表
-- `GET /api/queue/task/{task_id}` - 获取指定任务详情
-
-### 📝 系统管理
-- `GET /api/logs` - 获取系统日志
-- `WebSocket /ws` - 实时数据推送
-
-> 📋 完整的API文档请参考 `api_doc.json` 文件
-
-## 安全注意事项
-
-1. **账户安全**
-   - 建议先在模拟账户中测试
-   - 设置合理的风险阈值
-   - 定期检查交易记录
-
-2. **API安全**
-   - 限制API访问IP地址
-   - 使用强密码保护账户
-   - 定期更新软件版本
-
-3. **风险管理**
-   - 设置止损限制
-   - 监控账户余额
-   - 避免过度杠杆
-
-## 故障排除
-
-### 常见问题
-
-1. **连接失败**
-   - 检查TWS/Gateway是否运行
-   - 确认API设置已启用
-   - 检查端口号是否正确
-   - 验证IP地址白名单
-
-2. **订单失败**
-   - 检查账户余额
-   - 确认股票代码正确
-   - 验证交易时间
-   - 检查订单参数
-
-3. **数据获取失败**
-   - 确认市场开放时间
-   - 检查股票代码格式
-   - 验证数据权限
-
-### 日志查看
-
-日志文件位置：`logs/trading_bot.log`
-
-```bash
-# 查看实时日志
-tail -f logs/trading_bot.log
-
-# 查看错误日志
-grep ERROR logs/trading_bot.log
-```
-
-## 开发说明
-
-### 扩展功能
-
-1. **添加新的交易策略**
-   - 在 `risk_manager.py` 中添加新的规则类型
-   - 实现相应的监控逻辑
-
-2. **集成其他通知方式**
-   - 参考 `telegram_notifier.py`
-   - 实现新的通知类
-
-3. **添加新的数据源**
-   - 扩展 `ibkr_client.py`
-   - 添加新的API接口
-
-### 测试
-
-```bash
-# 运行连接测试
-python -c "import asyncio; from main import test_connection; asyncio.run(test_connection())"
-```
-
-## 许可证
-
-本项目仅供学习和研究使用。使用本软件进行实际交易的风险由用户自行承担。
-
-## 免责声明
-
-- 本软件不构成投资建议
-- 交易有风险，投资需谨慎
-- 作者不对任何交易损失负责
-- 请在充分了解风险的情况下使用
-
-## 支持
-
-如有问题或建议，请提交Issue或Pull Request。
+> 提示：
+> - 建议将服务置于反向代理（如 Nginx、Traefik）之后，并开启 TLS。
+> - 可配合进程/节点级监控（如 Prometheus + Grafana）观测健康状态与日志。
+> - 生产环境优先使用明确版本号；如需使用 :latest，请建立回滚策略。
