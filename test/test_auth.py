@@ -52,51 +52,36 @@ def get_with_auth(endpoint: str, token: str | None, timeout: int = 10):
     return requests.get(f"{BASE_URL}{endpoint}", headers=headers, timeout=timeout)
 
 
-def test_login_success() -> bool:
+def test_login_success():
     logger.info("测试: 登录成功应返回access_token")
     resp = login(ADMIN_USERNAME, ADMIN_PASSWORD)
-    if not resp:
-        return False
-    if resp.status_code != 200:
-        logger.error(f"期望200, 实际{resp.status_code}, body={resp.text}")
-        return False
+    assert resp is not None, "登录请求失败"
+    assert resp.status_code == 200, f"期望200, 实际{resp.status_code}, body={resp.text}"
     data = resp.json()
     token = data.get('access_token')
-    ok = bool(token)
-    logger.info(f"登录成功: {ok}")
-    return ok
+    assert token, "登录响应未包含access_token"
 
 
-def test_login_failure() -> bool:
+def test_login_failure():
     logger.info("测试: 登录失败应返回401")
     resp = login(ADMIN_USERNAME, "wrong_password")
-    if not resp:
-        return False
-    ok = (resp.status_code == 401)
-    if not ok:
-        logger.error(f"期望401, 实际{resp.status_code}, body={resp.text}")
-    return ok
+    assert resp is not None, "登录请求失败"
+    assert resp.status_code == 401, f"期望401, 实际{resp.status_code}, body={resp.text}"
 
 
-def test_protected_without_token() -> bool:
+def test_protected_without_token():
     logger.info("测试: 受保护接口无令牌应返回401")
     resp = get_with_auth("/api/connection_status", None)
-    ok = (resp.status_code == 401)
-    if not ok:
-        logger.error(f"期望401, 实际{resp.status_code}, body={resp.text}")
-    return ok
+    assert resp.status_code == 401, f"期望401, 实际{resp.status_code}, body={resp.text}"
 
 
-def test_protected_with_invalid_token() -> bool:
+def test_protected_with_invalid_token():
     logger.info("测试: 受保护接口使用无效令牌应返回401")
     resp = get_with_auth("/api/connection_status", "invalid.token.value")
-    ok = (resp.status_code == 401)
-    if not ok:
-        logger.error(f"期望401, 实际{resp.status_code}, body={resp.text}")
-    return ok
+    assert resp.status_code == 401, f"期望401, 实际{resp.status_code}, body={resp.text}"
 
 
-def test_protected_with_expired_token() -> bool:
+def test_protected_with_expired_token():
     logger.info("测试: 受保护接口使用过期令牌应返回401")
     expired_payload = {
         "sub": ADMIN_USERNAME,
@@ -104,33 +89,22 @@ def test_protected_with_expired_token() -> bool:
     }
     token = jwt.encode(expired_payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     resp = get_with_auth("/api/connection_status", token)
-    ok = (resp.status_code == 401)
-    if not ok:
-        logger.error(f"期望401, 实际{resp.status_code}, body={resp.text}")
-    return ok
+    assert resp.status_code == 401, f"期望401, 实际{resp.status_code}, body={resp.text}"
 
 
-def test_protected_with_valid_token() -> bool:
+def test_protected_with_valid_token():
     logger.info("测试: 使用有效令牌访问受保护接口应成功")
     # 先登录获取token
     resp = login(ADMIN_USERNAME, ADMIN_PASSWORD)
-    if not resp or resp.status_code != 200:
-        logger.error(f"登录失败，无法继续: {None if not resp else resp.text}")
-        return False
+    assert resp is not None and resp.status_code == 200, f"登录失败，无法继续: {None if not resp else resp.text}"
     token = resp.json().get('access_token')
-    if not token:
-        logger.error("登录响应未包含access_token")
-        return False
+    assert token, "登录响应未包含access_token"
 
     # 使用token访问受保护接口
     resp2 = get_with_auth("/api/connection_status", token)
-    if resp2.status_code != 200:
-        logger.error(f"期望200, 实际{resp2.status_code}, body={resp2.text}")
-        return False
+    assert resp2.status_code == 200, f"期望200, 实际{resp2.status_code}, body={resp2.text}"
     data = resp2.json()
-    ok = ('connected' in data and 'account_type' in data)
-    logger.info(f"访问受保护接口成功: {ok}, 响应: {data}")
-    return ok
+    assert 'connected' in data and 'account_type' in data, f"响应缺少必要字段: {data}"
 
 
 def main():
@@ -147,12 +121,8 @@ def main():
     all_passed = True
     for name, func in tests:
         try:
-            result = func()
-            if result:
-                logger.info(f"✅ {name} - 通过")
-            else:
-                logger.error(f"❌ {name} - 失败")
-                all_passed = False
+            func()
+            logger.info(f"✅ {name} - 通过")
         except Exception as e:
             logger.exception(f"❌ {name} - 异常: {e}")
             all_passed = False

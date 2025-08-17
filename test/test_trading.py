@@ -30,6 +30,7 @@ from typing import Optional
 import requests
 from dotenv import load_dotenv
 from loguru import logger
+import pytest
 
 load_dotenv()
 
@@ -37,6 +38,12 @@ BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000')
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change_me')
 DEFAULT_SYMBOL = os.getenv('TEST_SYMBOL', 'AAPL')
+
+
+@pytest.fixture
+def token():
+    """提供认证token的fixture"""
+    return login(ADMIN_USERNAME, ADMIN_PASSWORD)
 
 
 def login(username: str, password: str) -> Optional[str]:
@@ -89,11 +96,10 @@ def is_connected(token: str) -> Optional[bool]:
         return None
 
 
-def test_place_order_market(token: str) -> bool:
+def test_place_order_market(token: str):
     logger.info("测试: /api/place_order 市价单")
     connected = is_connected(token)
-    if connected is None:
-        return False
+    assert connected is not None, "无法获取连接状态"
 
     payload = {
         "symbol": DEFAULT_SYMBOL,
@@ -106,23 +112,14 @@ def test_place_order_market(token: str) -> bool:
     resp = api_post('/api/place_order', token, json=payload, timeout=40)
 
     if not connected:
-        ok = (resp.status_code == 400 and 'Not connected' in resp.text)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 400 and 'Not connected' in resp.text, f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
     else:
-        if resp.status_code == 200:
-            try:
-                data = resp.json()
-            except Exception:
-                data = {}
-            ok = (data.get('success') is True and 'order_id' in data)
-            if not ok:
-                logger.error(f"下单响应结构不符合预期: {data}")
-            return ok
-        else:
-            logger.error(f"已连接时期望200, 实际{resp.status_code}, body={resp.text}")
-            return False
+        assert resp.status_code == 200, f"已连接时期望200, 实际{resp.status_code}, body={resp.text}"
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        assert data.get('success') is True and 'order_id' in data, f"下单响应结构不符合预期: {data}"
 
 
 def test_place_order_limit(token: str) -> Optional[int]:
@@ -131,8 +128,7 @@ def test_place_order_limit(token: str) -> Optional[int]:
     """
     logger.info("测试: /api/place_order 限价单")
     connected = is_connected(token)
-    if connected is None:
-        return None
+    assert connected is not None, "无法获取连接状态"
 
     payload = {
         "symbol": DEFAULT_SYMBOL,
@@ -146,105 +142,77 @@ def test_place_order_limit(token: str) -> Optional[int]:
     resp = api_post('/api/place_order', token, json=payload, timeout=40)
 
     if not connected:
-        ok = (resp.status_code == 400 and 'Not connected' in resp.text)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
+        assert resp.status_code == 400 and 'Not connected' in resp.text, f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
         return None
     else:
-        if resp.status_code == 200:
-            data = {}
-            try:
-                data = resp.json()
-            except Exception:
-                pass
-            if data.get('success') and data.get('order_id'):
-                order_id = data.get('order_id')
-                logger.info(f"限价单已提交，order_id={order_id}")
-                return int(order_id)
-            logger.error(f"下单响应结构不符合预期: {data}")
-            return None
-        else:
-            logger.error(f"已连接时期望200, 实际{resp.status_code}, body={resp.text}")
-            return None
+        assert resp.status_code == 200, f"已连接时期望200, 实际{resp.status_code}, body={resp.text}"
+        data = {}
+        try:
+            data = resp.json()
+        except Exception:
+            pass
+        if data.get('success') and data.get('order_id'):
+            order_id = data.get('order_id')
+            logger.info(f"限价单已提交，order_id={order_id}")
+            return int(order_id)
+        logger.error(f"下单响应结构不符合预期: {data}")
+        return None
 
 
-def test_cancel_order_delete(token: str, order_id: Optional[int]) -> bool:
+def test_cancel_order_delete(token: str):
     logger.info("测试: DELETE /api/cancel_order/{order_id}")
     connected = is_connected(token)
-    if connected is None:
-        return False
+    assert connected is not None, "无法获取连接状态"
 
-    target_id = order_id if (connected and order_id is not None) else 999999999
+    # 使用一个不存在的订单ID进行测试
+    target_id = 999999999
     resp = api_delete(f"/api/cancel_order/{target_id}", token, timeout=30)
 
     if not connected:
-        ok = (resp.status_code == 400 and 'Not connected' in resp.text)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 400 and 'Not connected' in resp.text, f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
     else:
-        ok = (resp.status_code in (200, 404))
-        if not ok:
-            logger.error(f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code in (200, 404), f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}"
 
 
-def test_cancel_order_post(token: str, order_id: Optional[int]) -> bool:
+def test_cancel_order_post(token: str):
     logger.info("测试: POST /api/cancel_order")
     connected = is_connected(token)
-    if connected is None:
-        return False
+    assert connected is not None, "无法获取连接状态"
 
-    payload = {"order_id": order_id if (connected and order_id is not None) else 999999999}
+    # 使用一个不存在的订单ID进行测试
+    payload = {"order_id": 999999999}
     resp = api_post('/api/cancel_order', token, json=payload, timeout=30)
 
     if not connected:
-        ok = (resp.status_code == 400 and 'Not connected' in resp.text)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 400 and 'Not connected' in resp.text, f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
     else:
-        ok = (resp.status_code in (200, 404)) or (resp.status_code == 200 and resp.json().get('success') in (True, False))
-        if not ok:
-            logger.error(f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code in (200, 404) or (resp.status_code == 200 and resp.json().get('success') in (True, False)), f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}"
 
 
-def test_cancel_all_orders(token: str) -> bool:
+def test_cancel_all_orders(token: str):
     logger.info("测试: DELETE /api/cancel_all_orders")
     connected = is_connected(token)
-    if connected is None:
-        return False
+    assert connected is not None, "无法获取连接状态"
 
     resp = api_delete('/api/cancel_all_orders', token, timeout=60)
 
     if not connected:
-        ok = (resp.status_code == 400 and 'Not connected' in resp.text)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 400 and 'Not connected' in resp.text, f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
     else:
-        ok = (resp.status_code == 200)
-        if not ok:
-            logger.error(f"已连接时应返回200, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 200, f"已连接时应返回200, 实际{resp.status_code}, body={resp.text}"
 
 
-def test_get_orders(token: str) -> bool:
+def test_get_orders(token: str):
     logger.info("测试: GET /api/orders")
     resp = api_get('/api/orders', token, timeout=25)
-    if resp.status_code != 200:
-        logger.error(f"期望200, 实际{resp.status_code}, body={resp.text}")
-        return False
+    assert resp.status_code == 200, f"期望200, 实际{resp.status_code}, body={resp.text}"
+    
     try:
         data = resp.json()
     except Exception:
-        logger.error("响应非JSON格式")
-        return False
-    ok = (data.get('success') is True and isinstance(data.get('orders'), list))
-    if not ok:
-        logger.error(f"响应结构不符合预期: {data}")
-    return ok
+        assert False, "响应非JSON格式"
+    
+    assert data.get('success') is True and isinstance(data.get('orders'), list), f"响应结构不符合预期: {data}"
 
 
 def main():
@@ -255,29 +223,35 @@ def main():
         return
 
     # 逐项测试
-    results = []
-    results.append(("市价单下单", test_place_order_market(token)))
-
     limit_order_id: Optional[int] = None
+    
+    tests = [
+        ("市价单下单", lambda: test_place_order_market(token)),
+        ("查询订单列表", lambda: test_get_orders(token)),
+        ("批量取消订单", lambda: test_cancel_all_orders(token)),
+    ]
+
+    # 限价单测试特殊处理
     try:
         limit_order_id = test_place_order_limit(token)
-        results.append(("限价单下单", limit_order_id is not None or is_connected(token) is False))
+        logger.info("✅ 限价单下单 - 通过")
     except Exception as e:
-        logger.exception(f"限价单下单异常: {e}")
-        results.append(("限价单下单", False))
+        logger.exception(f"❌ 限价单下单 - 异常: {e}")
 
-    results.append(("DELETE取消订单", test_cancel_order_delete(token, limit_order_id)))
-    results.append(("POST取消订单", test_cancel_order_post(token, limit_order_id)))
-    results.append(("批量取消订单", test_cancel_all_orders(token)))
-    results.append(("查询订单列表", test_get_orders(token)))
+    # 取消订单测试
+    if limit_order_id is not None or is_connected(token) is False:
+        tests.extend([
+            ("DELETE取消订单", lambda: test_cancel_order_delete(token, limit_order_id)),
+            ("POST取消订单", lambda: test_cancel_order_post(token, limit_order_id)),
+        ])
 
-    # 汇总
     all_passed = True
-    for name, ok in results:
-        if ok:
+    for name, func in tests:
+        try:
+            func()
             logger.info(f"✅ {name} - 通过")
-        else:
-            logger.error(f"❌ {name} - 失败")
+        except Exception as e:
+            logger.exception(f"❌ {name} - 异常: {e}")
             all_passed = False
         time.sleep(0.2)
 

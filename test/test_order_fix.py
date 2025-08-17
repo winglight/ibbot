@@ -15,6 +15,7 @@ import threading
 import time
 from loguru import logger
 
+
 class TestIBApp(EWrapper, EClient):
     def __init__(self):
         EClient.__init__(self, self)
@@ -63,9 +64,7 @@ class TestIBApp(EWrapper, EClient):
         
     def place_test_order(self):
         """下测试订单"""
-        if not self.connected or self.next_order_id is None:
-            logger.error("未连接或没有有效的订单ID")
-            return False
+        assert self.connected and self.next_order_id is not None, "未连接或没有有效的订单ID"
             
         try:
             # 创建AAPL股票合约
@@ -80,19 +79,18 @@ class TestIBApp(EWrapper, EClient):
             self.placeOrder(self.order_id, contract, order)
             self.order_placed = True
             
-            return True
-            
         except Exception as e:
             logger.error(f"下单时发生错误: {e}")
-            return False
+            raise
             
     def cancel_test_order(self):
         """取消测试订单"""
         if self.order_id is not None:
             logger.info(f"取消订单: {self.order_id}")
             self.cancelOrder(self.order_id, "")
-            return True
-        return False
+        else:
+            logger.warning("没有可取消的订单")
+
 
 def run_test():
     """运行测试"""
@@ -116,14 +114,9 @@ def run_test():
         while not app.connected and not app.error_occurred and (time.time() - start_time) < timeout:
             time.sleep(0.1)
             
-        if app.error_occurred:
-            logger.error("连接时发生错误")
-            return False
-            
-        if not app.connected:
-            logger.error("连接超时")
-            return False
-            
+        assert not app.error_occurred, "连接时发生错误"
+        assert app.connected, "连接超时"
+        
         logger.info("✅ 连接成功")
         
         # 等待一下确保连接稳定
@@ -131,30 +124,22 @@ def run_test():
         
         # 测试下单
         logger.info("测试下单功能...")
-        if app.place_test_order():
-            logger.info("✅ 下单成功")
-            
-            # 等待一下然后取消订单
-            time.sleep(3)
-            
-            if app.cancel_test_order():
-                logger.info("✅ 取消订单成功")
-            else:
-                logger.warning("⚠️ 取消订单失败")
-                
-            # 等待一下让取消操作完成
-            time.sleep(2)
-            
-            return True
-        else:
-            logger.error("❌ 下单失败")
-            return False
-            
+        app.place_test_order()
+        logger.info("✅ 下单成功")
+        
+        # 等待一下然后取消订单
+        time.sleep(3)
+        app.cancel_test_order()
+        logger.info("✅ 取消订单请求已发送")
+        
+        # 等待一下让取消操作完成
+        time.sleep(2)
+        
     except Exception as e:
         logger.error(f"测试过程中发生错误: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise
         
     finally:
         # 断开连接
@@ -163,12 +148,13 @@ def run_test():
             app.disconnect()
             time.sleep(1)
 
+
 if __name__ == "__main__":
-    success = run_test()
-    
-    if success:
+    try:
+        run_test()
         logger.info("✅ 独立下单功能测试通过")
-    else:
+    except Exception:
         logger.error("❌ 独立下单功能测试失败")
-    
-    logger.info("测试完成")
+        raise
+    finally:
+        logger.info("测试完成")

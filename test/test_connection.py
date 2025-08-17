@@ -19,6 +19,7 @@
 import os
 import time
 from typing import Optional
+import pytest
 
 import requests
 from dotenv import load_dotenv
@@ -61,20 +62,28 @@ def api_post(path: str, token: Optional[str], json: dict, timeout: int = 15):
     return requests.post(f"{BASE_URL}{path}", headers=headers, json=json, timeout=timeout)
 
 
-def test_connection_status(token: str) -> bool:
+@pytest.fixture
+def token():
+    """获取认证令牌"""
+    token = login(ADMIN_USERNAME, ADMIN_PASSWORD)
+    assert token is not None, "无法获取认证令牌"
+    return token
+
+
+def test_connection_status(token: str):
+    """测试: /api/connection_status 应返回连接状态和账户类型"""
     logger.info("测试: /api/connection_status 应返回连接状态和账户类型")
     resp = api_get('/api/connection_status', token)
-    if resp.status_code != 200:
-        logger.error(f"期望200, 实际{resp.status_code}, body={resp.text}")
-        return False
+    assert resp.status_code == 200, f"期望200, 实际{resp.status_code}, body={resp.text}"
+    
     data = resp.json()
-    ok = ("connected" in data and "account_type" in data and data["account_type"] in ("Paper", "Live"))
-    if not ok:
-        logger.error(f"响应缺少字段或值不在预期范围: {data}")
-    return ok
+    assert "connected" in data, f"响应缺少connected字段: {data}"
+    assert "account_type" in data, f"响应缺少account_type字段: {data}"
+    assert data["account_type"] in ("Paper", "Live"), f"account_type值不在预期范围: {data}"
 
 
-def test_connect_fail_and_update_account_type(token: str) -> bool:
+def test_connect_fail_and_update_account_type(token: str):
+    """测试: /api/connect 使用不可达端口，期望返回400，并更新account_type为Live"""
     logger.info("测试: /api/connect 使用不可达端口，期望返回400，并更新account_type为Live")
     # 使用明显不可达端口，触发连接失败
     payload = {
@@ -84,36 +93,28 @@ def test_connect_fail_and_update_account_type(token: str) -> bool:
         "paper_trading": False,  # 期望切换为 Live
     }
     resp = api_post('/api/connect', token, json=payload, timeout=25)
-    if resp.status_code != 400:
-        logger.error(f"期望400, 实际{resp.status_code}, body={resp.text}")
-        return False
+    assert resp.status_code == 400, f"期望400, 实际{resp.status_code}, body={resp.text}"
 
     # 连接失败后验证配置已更新，account_type 应为 Live
     resp2 = api_get('/api/connection_status', token)
-    if resp2.status_code != 200:
-        logger.error(f"期望200, 实际{resp2.status_code}, body={resp2.text}")
-        return False
+    assert resp2.status_code == 200, f"期望200, 实际{resp2.status_code}, body={resp2.text}"
+    
     data = resp2.json()
-    ok = (data.get('account_type') == 'Live')
-    if not ok:
-        logger.error(f"期望account_type=Live, 实际: {data}")
-    return ok
+    assert data.get('account_type') == 'Live', f"期望account_type=Live, 实际: {data}"
 
 
-def test_disconnect_ok(token: str) -> bool:
+def test_disconnect_ok(token: str):
+    """测试: /api/disconnect 应返回成功，即使当前未连接"""
     logger.info("测试: /api/disconnect 应返回成功，即使当前未连接")
     resp = api_post('/api/disconnect', token, json={})
-    if resp.status_code != 200:
-        logger.error(f"期望200, 实际{resp.status_code}, body={resp.text}")
-        return False
+    assert resp.status_code == 200, f"期望200, 实际{resp.status_code}, body={resp.text}"
+    
     data = resp.json()
-    ok = (data.get('success') is True)
-    if not ok:
-        logger.error(f"期望success=True, 实际: {data}")
-    return ok
+    assert data.get('success') is True, f"期望success=True, 实际: {data}"
 
 
 def main():
+    """主函数，用于直接运行测试"""
     logger.info("=== 连接管理相关测试开始 ===")
     token = login(ADMIN_USERNAME, ADMIN_PASSWORD)
     if not token:
@@ -129,12 +130,8 @@ def main():
     all_passed = True
     for name, func in tests:
         try:
-            result = func()
-            if result:
-                logger.info(f"✅ {name} - 通过")
-            else:
-                logger.error(f"❌ {name} - 失败")
-                all_passed = False
+            func()
+            logger.info(f"✅ {name} - 通过")
         except Exception as e:
             logger.exception(f"❌ {name} - 异常: {e}")
             all_passed = False

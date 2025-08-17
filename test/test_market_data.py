@@ -16,6 +16,7 @@
 import os
 import time
 from typing import Optional
+import pytest
 
 import requests
 from dotenv import load_dotenv
@@ -73,29 +74,28 @@ def is_connected(token: str) -> Optional[bool]:
         return None
 
 
-def test_realtime_data(token: str) -> bool:
+@pytest.fixture
+def token():
+    t = login(ADMIN_USERNAME, ADMIN_PASSWORD)
+    assert t is not None, "无法获取令牌，终止测试"
+    return t
+
+
+def test_realtime_data(token: str):
     logger.info("测试: /api/realtime_data/{symbol}")
     connected = is_connected(token)
-    if connected is None:
-        return False
+    assert connected is not None, "无法获取连接状态"
     resp = api_get(f"/api/realtime_data/{DEFAULT_SYMBOL}", token, timeout=15)
     if not connected:
-        ok = (resp.status_code == 400)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 400, f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
     else:
-        ok = (resp.status_code in (200, 404))
-        if not ok:
-            logger.error(f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code in (200, 404), f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}"
 
 
-def test_historical_data(token: str) -> bool:
+def test_historical_data(token: str):
     logger.info("测试: /api/historical_data")
     connected = is_connected(token)
-    if connected is None:
-        return False
+    assert connected is not None, "无法获取连接状态"
     payload = {
         "symbol": DEFAULT_SYMBOL,
         "duration": "1 D",
@@ -104,22 +104,15 @@ def test_historical_data(token: str) -> bool:
     }
     resp = api_post('/api/historical_data', token, json=payload, timeout=40)
     if not connected:
-        ok = (resp.status_code == 400)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 400, f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
     else:
-        ok = (resp.status_code in (200, 404))
-        if not ok:
-            logger.error(f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code in (200, 404), f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}"
 
 
-def test_chart_data(token: str) -> bool:
+def test_chart_data(token: str):
     logger.info("测试: /api/chart_data")
     connected = is_connected(token)
-    if connected is None:
-        return False
+    assert connected is not None, "无法获取连接状态"
     payload = {
         "symbol": DEFAULT_SYMBOL,
         "duration": "1 D",
@@ -128,39 +121,29 @@ def test_chart_data(token: str) -> bool:
     }
     resp = api_post('/api/chart_data', token, json=payload, timeout=40)
     if not connected:
-        ok = (resp.status_code == 400)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 400, f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
     else:
-        ok = (resp.status_code in (200, 404))
-        if not ok:
-            logger.error(f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code in (200, 404), f"已连接时应返回200或404, 实际{resp.status_code}, body={resp.text}"
 
 
 def main():
     logger.info("=== 市场数据相关测试开始 ===")
-    token = login(ADMIN_USERNAME, ADMIN_PASSWORD)
-    if not token:
+    t = login(ADMIN_USERNAME, ADMIN_PASSWORD)
+    if not t:
         logger.error("无法获取令牌，终止测试")
         return
 
     tests = [
-        ("实时数据", lambda: test_realtime_data(token)),
-        ("历史数据", lambda: test_historical_data(token)),
-        ("图表数据", lambda: test_chart_data(token)),
+        ("实时数据", lambda: test_realtime_data(t)),
+        ("历史数据", lambda: test_historical_data(t)),
+        ("图表数据", lambda: test_chart_data(t)),
     ]
 
     all_passed = True
     for name, func in tests:
         try:
-            result = func()
-            if result:
-                logger.info(f"✅ {name} - 通过")
-            else:
-                logger.error(f"❌ {name} - 失败")
-                all_passed = False
+            func()
+            logger.info(f"✅ {name} - 通过")
         except Exception as e:
             logger.exception(f"❌ {name} - 异常: {e}")
             all_passed = False

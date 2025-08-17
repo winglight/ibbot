@@ -248,7 +248,7 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
         if success:
             # 建立/更新 ibkr_client 引用
             if ibkr_client is None:
-                ibkr_client_local = IBKRClient(connection_manager)
+                ibkr_client_local = IBKRClient()
             else:
                 ibkr_client_local = ibkr_client
             

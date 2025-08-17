@@ -21,6 +21,7 @@
 import os
 import time
 from typing import Optional
+import pytest
 
 import requests
 from dotenv import load_dotenv
@@ -69,91 +70,86 @@ def is_connected(token: str) -> Optional[bool]:
         return None
 
 
-def test_account_info(token: str) -> bool:
+@pytest.fixture
+def token():
+    t = login(ADMIN_USERNAME, ADMIN_PASSWORD)
+    assert t is not None, "无法获取令牌，终止测试"
+    return t
+
+
+def test_account_info(token: str):
     logger.info("测试: GET /api/account_info")
     connected = is_connected(token)
-    if connected is None:
-        return False
+    assert connected is not None, "无法获取连接状态"
 
     resp = api_get('/api/account_info', token, timeout=20)
 
     if not connected:
-        ok = (resp.status_code == 400 and 'Not connected' in resp.text)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 400 and 'Not connected' in resp.text, \
+            f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
     else:
-        if resp.status_code != 200:
-            logger.error(f"已连接时期望200, 实际{resp.status_code}, body={resp.text}")
-            return False
+        assert resp.status_code == 200, \
+            f"已连接时期望200, 实际{resp.status_code}, body={resp.text}"
+        
         # 已连接时，允许 success=True（含account_info）或 success=False（如超时）。
         try:
             data = resp.json()
         except Exception:
-            logger.error("响应非JSON格式")
-            return False
-        ok = (data.get('success') in (True, False))
-        if data.get('success') is True and 'account_info' not in data:
-            logger.error(f"缺少account_info字段: {data}")
-            ok = False
-        if not ok:
-            logger.error(f"响应结构不符合预期: {data}")
-        return ok
+            raise AssertionError("响应非JSON格式")
+        
+        assert data.get('success') in (True, False), \
+            f"响应结构不符合预期: {data}"
+        
+        if data.get('success') is True:
+            assert 'account_info' in data, \
+                f"缺少account_info字段: {data}"
 
 
-def test_positions(token: str) -> bool:
+def test_positions(token: str):
     logger.info("测试: GET /api/positions")
     connected = is_connected(token)
-    if connected is None:
-        return False
+    assert connected is not None, "无法获取连接状态"
 
     resp = api_get('/api/positions', token, timeout=20)
 
     if not connected:
-        ok = (resp.status_code == 400 and 'Not connected' in resp.text)
-        if not ok:
-            logger.error(f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}")
-        return ok
+        assert resp.status_code == 400 and 'Not connected' in resp.text, \
+            f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
     else:
-        if resp.status_code != 200:
-            logger.error(f"已连接时期望200, 实际{resp.status_code}, body={resp.text}")
-            return False
+        assert resp.status_code == 200, \
+            f"已连接时期望200, 实际{resp.status_code}, body={resp.text}"
+        
         # 已连接时，允许 success=True（含positions）或 success=False（如超时）。
         try:
             data = resp.json()
         except Exception:
-            logger.error("响应非JSON格式")
-            return False
-        ok = (data.get('success') in (True, False))
-        if data.get('success') is True and 'positions' not in data:
-            logger.error(f"缺少positions字段: {data}")
-            ok = False
-        if not ok:
-            logger.error(f"响应结构不符合预期: {data}")
-        return ok
+            raise AssertionError("响应非JSON格式")
+        
+        assert data.get('success') in (True, False), \
+            f"响应结构不符合预期: {data}"
+        
+        if data.get('success') is True:
+            assert 'positions' in data, \
+                f"缺少positions字段: {data}"
 
 
 def main():
     logger.info("=== 账户信息与持仓测试开始 ===")
-    token = login(ADMIN_USERNAME, ADMIN_PASSWORD)
-    if not token:
+    t = login(ADMIN_USERNAME, ADMIN_PASSWORD)
+    if not t:
         logger.error("无法获取令牌，终止测试")
         return
 
     tests = [
-        ("账户信息", lambda: test_account_info(token)),
-        ("持仓列表", lambda: test_positions(token)),
+        ("账户信息", lambda: test_account_info(t)),
+        ("持仓列表", lambda: test_positions(t)),
     ]
 
     all_passed = True
     for name, func in tests:
         try:
-            result = func()
-            if result:
-                logger.info(f"✅ {name} - 通过")
-            else:
-                logger.error(f"❌ {name} - 失败")
-                all_passed = False
+            func()
+            logger.info(f"✅ {name} - 通过")
         except Exception as e:
             logger.exception(f"❌ {name} - 异常: {e}")
             all_passed = False

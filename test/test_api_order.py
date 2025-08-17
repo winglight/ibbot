@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 # 加载.env文件
 load_dotenv()
 
+
 def get_auth_token():
     """获取认证token"""
     base_url = "http://localhost:8000"
@@ -36,6 +37,22 @@ def get_auth_token():
         logger.error(f"登录时发生错误: {e}")
         return None
 
+
+def is_connected(token: str):
+    """检查连接状态"""
+    try:
+        base_url = "http://localhost:8000"
+        headers = {"Authorization": f"Bearer {token}"}
+        response = requests.get(f"{base_url}/api/connection_status", headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('connected', False)
+        return False
+    except Exception as e:
+        logger.error(f"检查连接状态异常: {e}")
+        return False
+
+
 def test_order_via_api():
     """通过API测试下单功能"""
     base_url = "http://localhost:8000"
@@ -44,9 +61,10 @@ def test_order_via_api():
     
     # 获取认证token
     token = get_auth_token()
-    if not token:
-        logger.error("无法获取认证token，测试终止")
-        return False
+    assert token, "无法获取认证token"
+    
+    # 检查连接状态
+    connected = is_connected(token)
     
     headers = {
         "Authorization": f"Bearer {token}",
@@ -69,14 +87,23 @@ def test_order_via_api():
         logger.info(f"响应状态码: {response.status_code}")
         logger.info(f"响应内容: {response.text}")
         
-        if response.status_code == 200:
+        if not connected:
+            # 未连接时应返回400
+            assert response.status_code == 400 and 'Not connected' in response.text, \
+                f"未连接时应返回400, 实际{response.status_code}, body={response.text}"
+        else:
+            # 已连接时应返回200
+            assert response.status_code == 200, f"已连接时期望200, 实际{response.status_code}, body={response.text}"
+            
+            result = {}
             try:
                 result = response.json() if response.text.strip() else {}
-            except:
+            except Exception:
+                # 即使非JSON，也要求状态码为200
                 result = {}
                 
-            if result and result.get("success"):
-                logger.info("✅ API下单测试成功")
+            if result:
+                assert result.get("success"), f"API下单失败: {result}"
                 order_id = result.get("order_id")
                 if order_id:
                     logger.info(f"订单ID: {order_id}")
@@ -85,32 +112,22 @@ def test_order_via_api():
                     time.sleep(2)
                     cancel_response = requests.post(f"{base_url}/api/cancel_order", json={"order_id": order_id}, headers=headers)
                     logger.info(f"取消订单响应: {cancel_response.status_code} - {cancel_response.text}")
-                
-                return True
             else:
-                # 如果响应为空或没有success字段，但状态码是200，可能表示成功但没有返回详细信息
-                if not result:
-                    logger.info("✅ API下单请求成功（无详细响应）")
-                    return True
-                else:
-                    logger.error(f"API下单失败: {result.get('message', '未知错误')}")
-                    return False
-        else:
-            logger.error(f"API请求失败: {response.status_code} - {response.text}")
-            return False
+                # 无详细响应也视为成功
+                logger.info("✅ API下单请求成功（无详细响应）")
             
     except Exception as e:
         logger.error(f"API测试时发生错误: {e}")
-        return False
+        raise
+
 
 if __name__ == "__main__":
     logger.info("=== API下单功能修复测试 ===")
-    
-    success = test_order_via_api()
-    
-    if success:
+    try:
+        test_order_via_api()
         logger.info("✅ API下单功能测试通过")
-    else:
+    except Exception:
         logger.error("❌ API下单功能测试失败")
-    
-    logger.info("测试完成")
+        raise
+    finally:
+        logger.info("测试完成")
