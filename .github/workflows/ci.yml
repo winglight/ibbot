@@ -58,14 +58,20 @@ jobs:
       - name: Wait for server to be ready
         run: |
           for i in {1..30}; do
-            if curl -sSf http://localhost:8000/ > /dev/null; then
+            if curl -sSf ${API_BASE_URL:-http://127.0.0.1:8000}/ > /dev/null; then
               echo "Server is up"; break; fi; sleep 2; done
-          curl -sS http://localhost:8000/ || (echo "Server failed to start" && tail -n 200 server.log && exit 1)
+        shell: bash
+      - name: Show homepage for debugging
+        env:
+          API_BASE_URL: 'http://127.0.0.1:8000'
+        run: |
           sleep 1
+          curl -sS "$API_BASE_URL/" || (echo "Server failed to start" && tail -n 200 server.log && exit 1)
+        shell: bash
 
       - name: Run tests
         env:
-          API_BASE_URL: 'http://localhost:8000'
+          API_BASE_URL: 'http://127.0.0.1:8000'
         run: |
           pytest -v -k "not order_fix"
 
@@ -81,7 +87,7 @@ jobs:
     name: Build and push Docker image
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
 
     steps:
       - name: Checkout repository
@@ -108,7 +114,6 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/ibbot
           tags: |
             type=ref,event=branch
-            type=ref,event=tag
             type=sha
 
       - name: Build and push

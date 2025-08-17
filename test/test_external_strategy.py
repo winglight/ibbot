@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 测试配置
-BASE_URL = "http://localhost:8000"
+BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000')
 TEST_ADMIN_USER = os.getenv("ADMIN_USERNAME", "admin")
 TEST_ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change_me")
 
@@ -106,7 +106,7 @@ class TestExternalStrategyAPI:
     def test_update_strategy_settings(self):
         """测试策略设置更新"""
         settings_data = {
-            "api_endpoint": "http://localhost:8000/webhook",
+            "api_endpoint": f"{BASE_URL}/webhook",
             "api_method": "POST",
             "api_payload_template": '{"symbol": "{{symbol}}", "action": "{{action}}"}',
             "enable_auth": True

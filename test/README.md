@@ -43,7 +43,7 @@ python test.py
 ## 环境要求
 
 1. **后台接口测试**：
-   - 主应用程序必须运行在`http://localhost:8000`
+   - 主应用程序必须运行在`http://localhost:8000`（可通过`API_BASE_URL`环境变量修改）
    - `.env`文件中必须配置正确的`ADMIN_USERNAME`和`ADMIN_PASSWORD`
 
 2. **独立功能测试**：

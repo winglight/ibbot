@@ -34,7 +34,7 @@ import pytest
 
 load_dotenv()
 
-BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000')
+BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000')  # 可通过环境变量API_BASE_URL覆盖
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change_me')
 DEFAULT_SYMBOL = os.getenv('TEST_SYMBOL', 'AAPL')

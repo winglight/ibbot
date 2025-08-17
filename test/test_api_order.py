@@ -16,7 +16,7 @@ load_dotenv()
 
 def get_auth_token():
     """获取认证token"""
-    base_url = "http://localhost:8000"
+    base_url = os.getenv('API_BASE_URL', 'http://localhost:8000')
     username = os.getenv('ADMIN_USERNAME', 'admin')
     password = os.getenv('ADMIN_PASSWORD', 'change_me')
     
@@ -41,7 +41,7 @@ def get_auth_token():
 def is_connected(token: str):
     """检查连接状态"""
     try:
-        base_url = "http://localhost:8000"
+        base_url = os.getenv('API_BASE_URL', 'http://localhost:8000')
         headers = {"Authorization": f"Bearer {token}"}
         response = requests.get(f"{base_url}/api/connection_status", headers=headers, timeout=10)
         if response.status_code == 200:
@@ -55,7 +55,7 @@ def is_connected(token: str):
 
 def test_order_via_api():
     """通过API测试下单功能"""
-    base_url = "http://localhost:8000"
+    base_url = os.getenv('API_BASE_URL', 'http://localhost:8000')
     
     logger.info("开始通过API测试下单功能...")
     

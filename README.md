@@ -143,7 +143,7 @@ python main.py
 
 ### 2. 访问Web界面
 
-打开浏览器访问：`http://localhost:8000`
+打开浏览器访问：默认 `http://localhost:8000`（可通过环境变量 `WEB_HOST` 和 `WEB_PORT` 修改）
 
 ### 3. 连接IBKR
 
@@ -166,6 +166,239 @@ python main.py
 #### 风险管理
 - 设置止损价格和止盈价格
 - 系统将自动监控并执行风险管理规则
+
+## 🐳 Docker使用
+
+### 1. 快速开始
+
+使用Docker Compose一键启动整个应用栈（包含Mock IB Gateway）：
+
+```bash
+# 构建并启动所有服务
+docker-compose up -d
+
+# 查看服务状态
+docker-compose ps
+
+# 查看日志
+docker-compose logs ibbot
+docker-compose logs mock-gateway
+```
+
+访问Web界面：`http://localhost:8000`
+
+### 2. Docker 单独使用
+
+#### 构建镜像
+
+```bash
+# 构建主应用镜像
+docker build -t ibbot:latest .
+```
+
+#### 运行主应用
+
+```bash
+# 运行主应用（连接外部IB Gateway）
+docker run -d \
+  --name ibbot-main \
+  -p 8000:8000 \
+  -e IBKR_HOST=host.docker.internal \
+  -e IBKR_PORT=4002 \
+  -e AUTO_CONNECT=false \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/strategy:/app/strategy \
+  ibbot:latest
+
+# 查看日志
+docker logs -f ibbot-main
+```
+
+#### 运行Mock IB Gateway
+
+```bash
+# 运行Mock网关（用于测试）
+docker run -d \
+  --name ibbot-mock \
+  -p 18080:18080 \
+  ibbot:latest mock
+
+# 验证Mock网关
+curl http://localhost:18080/api/connection_status
+```
+
+#### 运行测试
+
+```bash
+# 运行测试套件
+docker run --rm \
+  -e API_BASE_URL=http://host.docker.internal:8000 \
+  ibbot:latest test
+```
+
+### 3. 环境变量配置
+
+Docker容器支持以下环境变量：
+
+#### 服务器配置
+```bash
+WEB_HOST=0.0.0.0          # Web服务绑定地址
+WEB_PORT=8000             # Web服务端口
+```
+
+#### IBKR连接配置
+```bash
+IBKR_HOST=127.0.0.1       # IB Gateway主机
+IBKR_PORT=4002            # IB Gateway端口
+IBKR_CLIENT_ID=1          # 客户端ID
+IBKR_PAPER_TRADING=True   # 模拟交易模式
+```
+
+#### Mock模式配置
+```bash
+MOCK_HOST=mock-gateway    # Mock网关主机
+MOCK_PORT=18080           # Mock网关端口
+```
+
+#### 认证配置
+```bash
+ADMIN_USERNAME=admin               # 管理员用户名
+ADMIN_PASSWORD=change_me           # 管理员密码
+JWT_SECRET=please_change_me        # JWT密钥
+JWT_ALGORITHM=HS256               # JWT算法
+JWT_EXPIRE_DAYS=1                 # JWT过期天数
+```
+
+#### 功能开关
+```bash
+AUTO_CONNECT=false        # 自动连接IBKR
+ENABLE_TELEGRAM=false     # 启用Telegram通知
+ENABLE_WEBSOCKET=true     # 启用WebSocket
+```
+
+### 4. 数据持久化
+
+使用Docker卷持久化重要数据：
+
+```bash
+# 创建数据目录
+mkdir -p logs data strategy
+
+# 运行时挂载数据卷
+docker run -d \
+  --name ibbot \
+  -p 8000:8000 \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/strategy:/app/strategy \
+  -v $(pwd)/.env:/app/.env:ro \
+  ibbot:latest
+```
+
+### 5. 生产环境部署
+
+#### 使用外部IB Gateway
+
+```yaml
+# docker-compose.prod.yml
+version: '3.8'
+services:
+  ibbot:
+    image: ibbot:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - IBKR_HOST=192.168.1.100  # IB Gateway主机IP
+      - IBKR_PORT=4001           # 生产端口
+      - IBKR_PAPER_TRADING=False # 真实交易
+      - AUTO_CONNECT=true
+      - JWT_SECRET=your_production_secret
+      - ADMIN_PASSWORD=your_secure_password
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./strategy:/app/strategy
+    restart: unless-stopped
+```
+
+#### 健康检查
+
+Docker容器内置健康检查：
+
+```bash
+# 检查容器健康状态
+docker ps --format "table {{.Names}}\t{{.Status}}"
+
+# 查看健康检查日志
+docker inspect ibbot-main | grep -A 20 Health
+```
+
+### 6. 故障排除
+
+#### 查看容器日志
+```bash
+# 查看实时日志
+docker logs -f ibbot-main
+
+# 查看最近100行日志
+docker logs --tail=100 ibbot-main
+```
+
+#### 进入容器调试
+```bash
+# 进入运行中的容器
+docker exec -it ibbot-main bash
+
+# 检查网络连接
+docker exec ibbot-main curl -f http://localhost:8000/
+```
+
+#### 重启服务
+```bash
+# 重启单个服务
+docker-compose restart ibbot
+
+# 重启所有服务
+docker-compose restart
+```
+
+#### 清理资源
+```bash
+# 停止并删除容器
+docker-compose down
+
+# 删除镜像
+docker rmi ibbot:latest
+
+# 清理未使用的资源
+docker system prune -f
+```
+
+### 7. 开发模式
+
+#### 开发时热重载
+
+```bash
+# 挂载源代码进行开发
+docker run -it --rm \
+  -p 8000:8000 \
+  -v $(pwd):/app \
+  -e PYTHONPATH=/app \
+  python:3.11-slim \
+  bash -c "cd /app && pip install -r requirements.txt && python main.py"
+```
+
+#### 调试模式
+
+```bash
+# 启用调试模式
+docker run -it --rm \
+  -p 8000:8000 \
+  -e DEBUG=true \
+  -e LOG_LEVEL=DEBUG \
+  ibbot:latest
+```
 
 ## 📁 项目结构
 

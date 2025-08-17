@@ -1502,7 +1502,10 @@ def main():
     
     # Start web server
     logger.info("Starting web server...")
-    logger.info("Web UI available at: http://localhost:8000")
+    web_host = os.getenv('WEB_HOST', '0.0.0.0')
+    web_port = int(os.getenv('WEB_PORT', '8000'))
+    display_host = 'localhost' if web_host in ('0.0.0.0', '::') else web_host
+    logger.info(f"Web UI available at: http://{display_host}:{web_port}")
     logger.info("Press Ctrl+C to stop the application")
     
     try:

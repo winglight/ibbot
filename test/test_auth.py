@@ -26,6 +26,7 @@ from jose import jwt
 load_dotenv()
 
 BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000')
+WS_URL = os.getenv('WS_BASE_URL', 'ws://localhost:8000/ws')
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change_me')
 JWT_SECRET = os.getenv('JWT_SECRET', 'please_change_me')

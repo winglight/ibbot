@@ -7,7 +7,7 @@ from typing import Optional
 # Ensure environment variables from .env are loaded for tests
 load_dotenv()
 
-BASE_URL = os.getenv("TEST_BASE_URL", "http://localhost:8000")
+BASE_URL = os.getenv("API_BASE_URL", os.getenv("TEST_BASE_URL", "http://localhost:8000"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change_me")
 DEFAULT_SYMBOL = os.getenv("TEST_SYMBOL", "AAPL")

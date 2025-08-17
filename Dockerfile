@@ -42,6 +42,28 @@ elif [ "$1" = "mock" ]; then\n\
 elif [ "$1" = "test" ]; then\n\
     echo "Running tests..."\n\
     exec pytest test/ -v\n\
+elif [ "$1" = "runner" ]; then\n\
+    echo "Starting Strategy Runner..."\n\
+    shift  # Remove "runner" from arguments\n\
+    exec python -m strategy.strategy_runner "$@"\n\
+elif [ "$1" = "parallel" ]; then\n\
+    echo "Starting main app in background..."\n\
+    python main.py &\n\
+    MAIN_PID=$!\n\
+    echo "Main app started with PID: $MAIN_PID"\n\
+    \n\
+    echo "Starting Strategy Runner..."\n\
+    shift  # Remove "parallel" from arguments\n\
+    python -m strategy.strategy_runner "$@" &\n\
+    RUNNER_PID=$!\n\
+    echo "Strategy Runner started with PID: $RUNNER_PID"\n\
+    \n\
+    # Wait for either process to exit\n\
+    wait -n $MAIN_PID $RUNNER_PID\n\
+    EXIT_CODE=$?\n\
+    echo "One process exited with code $EXIT_CODE, terminating all..."\n\
+    kill $MAIN_PID $RUNNER_PID 2>/dev/null || true\n\
+    exit $EXIT_CODE\n\
 else\n\
     echo "Executing command: $@"\n\
     exec "$@"\n\
