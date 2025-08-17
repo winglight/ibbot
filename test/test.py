@@ -1,6 +1,10 @@
-from ibapi.client import EClient
-from ibapi.wrapper import EWrapper
-from ibapi.contract import Contract
+try:
+    from ibapi.client import EClient
+    from ibapi.wrapper import EWrapper
+    from ibapi.contract import Contract
+except ModuleNotFoundError:
+    import pytest
+    pytest.skip("ibapi 未安装，跳过示例模块", allow_module_level=True)
 import threading
 import time
 import datetime

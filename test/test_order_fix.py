@@ -7,10 +7,14 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ibapi.client import EClient
-from ibapi.wrapper import EWrapper
-from ibapi.contract import Contract
-from ibapi.order import Order
+try:
+    from ibapi.client import EClient
+    from ibapi.wrapper import EWrapper
+    from ibapi.contract import Contract
+    from ibapi.order import Order
+except ModuleNotFoundError:
+    import pytest
+    pytest.skip("ibapi 未安装，跳过 test_order_fix 模块", allow_module_level=True)
 import threading
 import time
 from loguru import logger
