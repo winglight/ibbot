@@ -5,6 +5,7 @@ jinja2
 pandas
 numpy
 requests
+httpx
 apscheduler
 python-telegram-bot
 python-multipart

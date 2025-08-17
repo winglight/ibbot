@@ -62,23 +62,35 @@ class StrategyManager:
     def __init__(self, data_dir: str = "data", strategy_dir: str = "strategy"):
         self.data_dir = Path(data_dir)
         self.strategy_dir = Path(strategy_dir)
+        self.data_dir.mkdir(exist_ok=True)
+        self.strategy_dir.mkdir(exist_ok=True)
+        
+        # External and internal API clients
+        self.external_clients = {}
+        
+        # Database manager
         self.db_manager = get_db_manager()
         
-        # Legacy file paths for migration
-        self.settings_file = self.data_dir / "strategy_settings.json"
-        self.strategies_file = self.data_dir / "strategies.csv"
-        self.executions_file = self.data_dir / "strategy_executions.csv"
+        # Dependencies - will be injected
+        self.risk_manager = None
         
-        # Ensure directories exist
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.strategy_dir.mkdir(parents=True, exist_ok=True)
-        
+        # 内存缓存，从数据库加载
         self.strategies: Dict[str, Strategy] = {}
         self.executions: List[StrategyExecution] = []
+        self.settings: Dict[str, Any] = {}
         
-        # 先从数据库加载，如果为空则尝试从文件迁移
+        # 认证token（用于外部策略访问）
+        self.auth_token = None
+        
+        # 加载数据
         self._load_from_database()
         
+    def set_dependencies(self, risk_manager=None):
+        """Set dependency objects for strategy manager"""
+        self.risk_manager = risk_manager
+        logger.info(f"Dependencies set for StrategyManager: risk_manager={'initialized' if risk_manager else 'None'}")
+
+
     def _load_from_database(self):
         """从数据库加载策略设置、策略和执行记录"""
         try:
@@ -387,13 +399,35 @@ class StrategyManager:
             if name in self.strategies:
                 logger.warning(f"Strategy {name} already exists")
                 return False
+            
+            # 处理内部策略的文件选择逻辑
+            final_file_path = strategy_data.get('file_path')
+            if strategy_data['strategy_type'] == "internal":
+                selected_file = strategy_data.get('selected_file')
+                use_template = strategy_data.get('use_template', False)
+                
+                if selected_file and selected_file != "new":
+                    # 选择了现有文件
+                    final_file_path = selected_file
+                    # 如果名称为空或使用默认名称，自动从文件名生成
+                    if not name or name == selected_file:
+                        name = Path(selected_file).stem  # 去掉.py扩展名
+                        # 检查生成的名称是否已存在
+                        counter = 1
+                        original_name = name
+                        while name in self.strategies:
+                            name = f"{original_name}_{counter}"
+                            counter += 1
+                elif use_template or selected_file == "new":
+                    # 创建新文件或使用模板
+                    final_file_path = f"{name}.py"
                 
             strategy = Strategy(
                 name=name,
                 strategy_type=strategy_data['strategy_type'],
                 enabled=strategy_data.get('enabled', True),
                 api_endpoint=strategy_data.get('api_endpoint'),
-                file_path=strategy_data.get('file_path'),
+                file_path=final_file_path,
                 description=strategy_data.get('description'),
                 created_at=datetime.now()
             )
@@ -413,9 +447,31 @@ class StrategyManager:
             # 更新内存缓存
             self.strategies[name] = strategy
             
-            # 如果是内部策略，创建模板文件
-            if strategy.strategy_type == "internal" and strategy.file_path:
-                self._create_strategy_template(name)
+            # 如果是内部策略，处理文件创建（仅在新建文件时创建模板）
+            if strategy.strategy_type == "internal":
+                selected_file = strategy_data.get('selected_file')
+                use_template = strategy_data.get('use_template', False)
+                
+                # 仅当用户选择“新建文件”时才创建模板，选择现有文件一律不写入
+                if selected_file == "new" and strategy.file_path:
+                    self._create_strategy_template(name, strategy.file_path)
+            
+            # 保存SL/TP配置到策略设置
+            sl_tp_settings = {}
+            if strategy_data.get('sl_enabled'):
+                sl_tp_settings[f"{name}_sl_enabled"] = True
+                sl_tp_settings[f"{name}_sl_price"] = strategy_data.get('sl_price')
+                sl_tp_settings[f"{name}_sl_type"] = strategy_data.get('sl_type', 'amount')
+            if strategy_data.get('tp_enabled'):
+                sl_tp_settings[f"{name}_tp_enabled"] = True
+                sl_tp_settings[f"{name}_tp_price"] = strategy_data.get('tp_price')
+                sl_tp_settings[f"{name}_tp_type"] = strategy_data.get('tp_type', 'amount')
+                
+            if sl_tp_settings:
+                self.db_manager.save_strategy_settings(sl_tp_settings)
+                # 同步到内存中的 settings，确保后续 get_strategy 能直接读取
+                self.settings.update(sl_tp_settings)
+                logger.info(f"Saved SL/TP settings for strategy {name}")
                 
             logger.info(f"Strategy {name} added successfully")
             return True
@@ -424,7 +480,77 @@ class StrategyManager:
             logger.error(f"Failed to add strategy: {e}")
             return False
 
-    def _create_strategy_template(self, strategy_name: str):
+    def get_strategy(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get a strategy by name"""
+        if name in self.strategies:
+            strategy = self.strategies[name]
+            strategy_dict = asdict(strategy)
+            # Compute trigger_count from executions to avoid stale persisted values
+            computed_count = sum(1 for e in self.executions if e.strategy_name == strategy.name)
+            strategy_dict['trigger_count'] = computed_count
+            # Compute last_triggered from executions if available
+            times = [e.execution_time for e in self.executions if e.strategy_name == strategy.name]
+            if times:
+                strategy_dict['last_triggered'] = max(times)
+            # Convert datetime objects to strings for JSON serialization
+            if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
+                strategy_dict['created_at'] = strategy_dict['created_at'].isoformat()
+            if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
+                strategy_dict['last_triggered'] = strategy_dict['last_triggered'].isoformat()
+            # 合并SL/TP设置
+            try:
+                settings = self.db_manager.load_strategy_settings()
+            except Exception:
+                settings = getattr(self, 'settings', {}) or {}
+            sl_enabled = settings.get(f"{name}_sl_enabled", False)
+            tp_enabled = settings.get(f"{name}_tp_enabled", False)
+            strategy_dict['sl_enabled'] = sl_enabled
+            strategy_dict['tp_enabled'] = tp_enabled
+            strategy_dict['sl_price'] = settings.get(f"{name}_sl_price") if sl_enabled else None
+            strategy_dict['tp_price'] = settings.get(f"{name}_tp_price") if tp_enabled else None
+            strategy_dict['sl_type'] = settings.get(f"{name}_sl_type", 'amount')
+            strategy_dict['tp_type'] = settings.get(f"{name}_tp_type", 'amount')
+            return strategy_dict
+        return None
+
+    def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
+        """Update a strategy"""
+        try:
+            if name not in self.strategies:
+                return False
+                
+            strategy = self.strategies[name]
+            # 将SL/TP更新与常规字段分离
+            sl_tp_keys = {"sl_enabled", "sl_price", "sl_type", "tp_enabled", "tp_price", "tp_type"}
+            settings_to_save: Dict[str, Any] = {}
+            for key, value in updates.items():
+                if key in sl_tp_keys:
+                    # 构造持久化键
+                    if key.startswith('sl_'):
+                        settings_key = f"{name}_{key}"
+                        settings_to_save[settings_key] = value
+                    elif key.startswith('tp_'):
+                        settings_key = f"{name}_{key}"
+                        settings_to_save[settings_key] = value
+                elif hasattr(strategy, key):
+                    setattr(strategy, key, value)
+            
+            # 先保存策略实体（常规字段）
+            self._save_strategies()
+            
+            # 持久化SL/TP设置
+            if settings_to_save:
+                self.db_manager.save_strategy_settings(settings_to_save)
+                # 更新内存
+                self.settings.update(settings_to_save)
+            
+            logger.info(f"Updated strategy: {name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update strategy {name}: {e}")
+            return False
+
+    def _create_strategy_template(self, strategy_name: str, file_path: Optional[str] = None):
         """Create a Python strategy template file"""
         template_content = f'''"""
 Strategy: {strategy_name}
@@ -460,22 +586,15 @@ class {strategy_name.replace(' ', '').replace('-', '').replace('_', '')}Strategy
         
     def generate_signal(self, symbol: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Generate trading signal
-        
-        Args:
-            symbol: Stock symbol
-            data: Market data
-            
+        Generate trading signal based on market data
         Returns:
-            Trading signal dictionary or None
-            Example: {{'action': 'BUY', 'quantity': 100, 'price': 150.0}}
+            A dict with signal details: { '{' }"action": "BUY"/"SELL", "quantity": int, "price": float, "order_type": "MARKET"/"LIMIT"{ '}' } or None if no signal
         """
-        # TODO: Implement your strategy logic here
         return None
         
-    def on_order_filled(self, order_id: str, symbol: str, quantity: int, price: float):
+    def on_order_filled(self, order_id: str, price: float, quantity: int):
         """Handle order filled events"""
-        print(f"Order filled: {{order_id}} - {{symbol}} {{quantity}}@{{price}}")
+        print(f"Order filled: id={{order_id}}, price={{price}}, qty={{quantity}}")
         
     def on_error(self, error: str):
         """Handle errors"""
@@ -491,7 +610,7 @@ if __name__ == "__main__":
     print(f"Strategy {{strategy.name}} is ready")
 '''
         
-        strategy_file = self.strategy_dir / f"{strategy_name}.py"
+        strategy_file = self.strategy_dir / (file_path if file_path else f"{strategy_name}.py")
         try:
             with open(strategy_file, 'w') as f:
                 f.write(template_content)
@@ -499,25 +618,7 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Failed to create strategy template: {e}")
             
-    def get_strategy(self, name: str) -> Optional[Dict[str, Any]]:
-        """Get a strategy by name"""
-        if name in self.strategies:
-            strategy = self.strategies[name]
-            strategy_dict = asdict(strategy)
-            # Compute trigger_count from executions to avoid stale persisted values
-            computed_count = sum(1 for e in self.executions if e.strategy_name == strategy.name)
-            strategy_dict['trigger_count'] = computed_count
-            # Compute last_triggered from executions if available
-            times = [e.execution_time for e in self.executions if e.strategy_name == strategy.name]
-            if times:
-                strategy_dict['last_triggered'] = max(times)
-            # Convert datetime objects to strings for JSON serialization
-            if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
-                strategy_dict['created_at'] = strategy_dict['created_at'].isoformat()
-            if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
-                strategy_dict['last_triggered'] = strategy_dict['last_triggered'].isoformat()
-            return strategy_dict
-        return None
+
 
     def get_strategies(self) -> List[Dict[str, Any]]:
         """Get all strategies"""
@@ -539,23 +640,7 @@ if __name__ == "__main__":
             result.append(strategy_dict)
         return result
         
-    def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
-        """Update a strategy"""
-        try:
-            if name not in self.strategies:
-                return False
-                
-            strategy = self.strategies[name]
-            for key, value in updates.items():
-                if hasattr(strategy, key):
-                    setattr(strategy, key, value)
-                    
-            self._save_strategies()
-            logger.info(f"Updated strategy: {name}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to update strategy {name}: {e}")
-            return False
+
             
     def delete_strategy(self, name: str) -> bool:
         """Delete a strategy"""
@@ -653,6 +738,9 @@ if __name__ == "__main__":
             
             # Update execution price
             execution.price = fill_price
+            
+            # Check if this is an opening position for an internal strategy with SL/TP enabled
+            self._check_and_create_auto_risk_rules(execution, fill_price)
             
             # Recalculate PnL for all executions of the same strategy and symbol
             if execution.symbol and execution.action and execution.quantity:
@@ -767,6 +855,140 @@ if __name__ == "__main__":
             
         except Exception as e:
             logger.error(f"Failed to update execution price and PnL: {e}")
+            
+    def _check_and_create_auto_risk_rules(self, execution: StrategyExecution, fill_price: float):
+        """Check if this is an opening position and create auto risk rules for internal strategies"""
+        try:
+            if not self.risk_manager:
+                logger.debug("RiskManager not available, skipping auto risk rule creation")
+                return
+            
+            if not execution.strategy_name or not execution.symbol or not execution.action:
+                logger.debug("Missing execution data for auto risk rule creation")
+                return
+            
+            # Check if this strategy exists and is internal
+            strategy = self.strategies.get(execution.strategy_name)
+            if not strategy:
+                logger.debug(f"Strategy {execution.strategy_name} not found in local strategies")
+                return
+            
+            if strategy.strategy_type != "internal":
+                logger.debug(f"Strategy {execution.strategy_name} is not internal, skipping auto risk rules")
+                return
+            
+            # Get strategy SL/TP settings from settings cache
+            settings = self.get_settings()
+            sl_enabled = settings.get(f"{execution.strategy_name}_sl_enabled", False)
+            tp_enabled = settings.get(f"{execution.strategy_name}_tp_enabled", False)
+            
+            if not sl_enabled and not tp_enabled:
+                logger.debug(f"No SL/TP enabled for strategy {execution.strategy_name}")
+                return
+            
+            # Check if this is an opening position by calculating net position
+            strategy_executions = [e for e in self.executions 
+                                 if e.strategy_name == execution.strategy_name 
+                                 and e.symbol == execution.symbol 
+                                 and e.price is not None]
+            
+            # Calculate net position after this execution
+            net_position = 0
+            for exec_rec in strategy_executions:
+                if exec_rec.action and exec_rec.quantity:
+                    if exec_rec.action.upper() == 'BUY':
+                        net_position += exec_rec.quantity
+                    elif exec_rec.action.upper() == 'SELL':
+                        net_position -= exec_rec.quantity
+            
+            # Check if we just opened a position (went from 0 to non-zero)
+            previous_executions = [e for e in strategy_executions if e.execution_time < execution.execution_time]
+            previous_net_position = 0
+            for exec_rec in previous_executions:
+                if exec_rec.action and exec_rec.quantity:
+                    if exec_rec.action.upper() == 'BUY':
+                        previous_net_position += exec_rec.quantity
+                    elif exec_rec.action.upper() == 'SELL':
+                        previous_net_position -= exec_rec.quantity
+            
+            # Only create risk rules when opening a new position (previous position was 0)
+            if previous_net_position != 0:
+                logger.debug(f"Not an opening position for {execution.strategy_name}/{execution.symbol}, previous position: {previous_net_position}")
+                return
+            
+            if net_position == 0:
+                logger.debug(f"Net position is 0 after execution for {execution.strategy_name}/{execution.symbol}")
+                return
+            
+            logger.info(f"Opening position detected for {execution.strategy_name}/{execution.symbol}, creating auto risk rules")
+            
+            # Calculate SL/TP prices
+            sl_price = None
+            tp_price = None
+            
+            if sl_enabled:
+                sl_value = settings.get(f"{execution.strategy_name}_sl_price")
+                sl_type = settings.get(f"{execution.strategy_name}_sl_type", "amount")
+                
+                if sl_value:
+                    if sl_type == "percent":
+                        # For long positions: SL = fill_price * (1 - sl_percent/100)
+                        # For short positions: SL = fill_price * (1 + sl_percent/100)
+                        sl_percent = float(sl_value) / 100.0
+                        if net_position > 0:  # Long position
+                            sl_price = fill_price * (1 - sl_percent)
+                        else:  # Short position
+                            sl_price = fill_price * (1 + sl_percent)
+                    else:  # amount
+                        # For long positions: SL = fill_price - sl_amount
+                        # For short positions: SL = fill_price + sl_amount
+                        sl_amount = float(sl_value)
+                        if net_position > 0:  # Long position
+                            sl_price = fill_price - sl_amount
+                        else:  # Short position
+                            sl_price = fill_price + sl_amount
+            
+            if tp_enabled:
+                tp_value = settings.get(f"{execution.strategy_name}_tp_price")
+                tp_type = settings.get(f"{execution.strategy_name}_tp_type", "amount")
+                
+                if tp_value:
+                    if tp_type == "percent":
+                        # For long positions: TP = fill_price * (1 + tp_percent/100)
+                        # For short positions: TP = fill_price * (1 - tp_percent/100)
+                        tp_percent = float(tp_value) / 100.0
+                        if net_position > 0:  # Long position
+                            tp_price = fill_price * (1 + tp_percent)
+                        else:  # Short position
+                            tp_price = fill_price * (1 - tp_percent)
+                    else:  # amount
+                        # For long positions: TP = fill_price + tp_amount
+                        # For short positions: TP = fill_price - tp_amount
+                        tp_amount = float(tp_value)
+                        if net_position > 0:  # Long position
+                            tp_price = fill_price + tp_amount
+                        else:  # Short position
+                            tp_price = fill_price - tp_amount
+            
+            # Create risk rule if we have at least one price
+            if sl_price is not None or tp_price is not None:
+                success = self.risk_manager.add_risk_rule(
+                    symbol=execution.symbol,
+                    stop_loss_price=sl_price,
+                    take_profit_price=tp_price,
+                    max_loss_percent=None
+                )
+                
+                if success:
+                    logger.info(f"Auto risk rule created for {execution.strategy_name}/{execution.symbol}: SL=${sl_price}, TP=${tp_price}")
+                else:
+                    logger.warning(f"Failed to create auto risk rule for {execution.strategy_name}/{execution.symbol}")
+            else:
+                logger.debug(f"No valid SL/TP prices calculated for {execution.strategy_name}/{execution.symbol}")
+            
+        except Exception as e:
+            logger.error(f"Error creating auto risk rules: {e}")
+
             
     def get_executions(self, strategy_name: str, limit: int = 100) -> List[StrategyExecution]:
         """Get executions for a specific strategy"""

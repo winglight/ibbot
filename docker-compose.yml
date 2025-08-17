@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # Main IBKR Trading Bot Application
+  ibbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ibbot-main
+    ports:
+      - "8000:8000"
+    environment:
+      # Server Configuration
+      - WEB_HOST=0.0.0.0
+      - WEB_PORT=8000
+      
+      # IBKR Configuration  
+      - IBKR_HOST=host.docker.internal
+      - IBKR_PORT=18080
+      
+      # Mock Configuration
+      - MOCK_HOST=mock-gateway
+      - MOCK_PORT=18080
+      
+      # Authentication
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=change_me
+      - JWT_SECRET=please_change_me_in_production
+      - JWT_ALGORITHM=HS256
+      - JWT_EXPIRE_DAYS=1
+      
+      # Features
+      - AUTO_CONNECT=false
+      - ENABLE_TELEGRAM=false
+      - ENABLE_WEBSOCKET=true
+      
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./strategy:/app/strategy
+      - ./.env:/app/.env:ro
+    depends_on:
+      - mock-gateway
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Mock IB Gateway
+  mock-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ibbot-mock
+    command: ["mock"]
+    ports:
+      - "18080:18080"
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18080/api/connection_status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  ibbot-network:
+    driver: bridge
+
+volumes:
+  ibbot-logs:
+  ibbot-data:
+  ibbot-strategy:

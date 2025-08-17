@@ -17,6 +17,7 @@ class TradingApp {
         this.initSymbolCombobox();
         this.connectWebSocket();
         this.toggleAuthButtons(!!localStorage.getItem('access_token'));
+        await this.ensureDefaultConnectionConfig();
         await this.tryAutoLogin();
         await this.checkConnectionStatus();
         await this.loadStrategies();
@@ -72,8 +73,8 @@ class TradingApp {
                 this.loadOrders();
                 this.loadPortfolio();
                 this.loadRiskRules();
-                this.loadAutoOrders();
-                this.loadLogs();
+                // this.loadAutoOrders();
+                // this.loadLogs();
             }
         } catch (e) {}
     }
@@ -91,6 +92,7 @@ class TradingApp {
             if (res?.access_token) {
                 localStorage.setItem('access_token', res.access_token);
                 this.toggleAuthButtons(true);
+                await this.ensureDefaultConnectionConfig();
                 // Auto-connect using saved connection settings if available
                 const host = localStorage.getItem('conn_host');
                 const port = localStorage.getItem('conn_port');
@@ -112,9 +114,9 @@ class TradingApp {
                         this.loadOrders();
                         this.loadPortfolio();
                         this.loadRiskRules();
-                        this.loadAutoOrders();
+                        // this.loadAutoOrders();
                         this.loadStrategies();
-                        this.loadLogs();
+                        // this.loadLogs();
                     } catch (e) {
                         console.warn('Auto-connect failed:', e);
                     }
@@ -151,7 +153,8 @@ class TradingApp {
         document.getElementById('disconnectBtn').addEventListener('click', () => this.disconnect());
         
         // Settings button
-        document.getElementById('connectionSettingsBtn').addEventListener('click', () => {
+        document.getElementById('connectionSettingsBtn').addEventListener('click', async () => {
+            await this.ensureDefaultConnectionConfig();
             // Prefill fields from localStorage
             const hostEl = document.getElementById('host');
             const portEl = document.getElementById('port');
@@ -228,6 +231,9 @@ class TradingApp {
                 const descInput = document.getElementById('strategyDescriptionInput');
                 const useTemplateGroup = document.getElementById('useTemplateGroup');
                 const useTemplateCheckbox = document.getElementById('strategyUseTemplate');
+                const fileGroup = document.getElementById('strategyFileGroup');
+                const fileSelect = document.getElementById('strategyFileSelect');
+                const slTpGroup = document.getElementById('slTpGroup');
                 if (!nameInput || !typeSelect || !descInput) return;
                 // reset form
                 nameInput.value = '';
@@ -235,6 +241,9 @@ class TradingApp {
                 descInput.value = '';
                 if (useTemplateCheckbox) useTemplateCheckbox.checked = true;
                 if (useTemplateGroup) useTemplateGroup.style.display = 'none';
+                if (fileGroup) fileGroup.style.display = 'none';
+                if (slTpGroup) slTpGroup.style.display = 'none';
+                if (fileSelect) fileSelect.innerHTML = '';
                 const modal = new bootstrap.Modal(document.getElementById('addStrategyModal'));
                 modal.show();
             });
@@ -243,26 +252,60 @@ class TradingApp {
         // Add Strategy type toggle and submit
         const strategyTypeSelect = document.getElementById('strategyTypeSelect');
         if (strategyTypeSelect) {
-            strategyTypeSelect.addEventListener('change', (e) => {
+            strategyTypeSelect.addEventListener('change', async (e) => {
                 const useTemplateGroup = document.getElementById('useTemplateGroup');
-                if (useTemplateGroup) {
-                    useTemplateGroup.style.display = e.target.value === 'internal' ? '' : 'none';
+                const fileGroup = document.getElementById('strategyFileGroup');
+                const fileSelect = document.getElementById('strategyFileSelect');
+                const slTpGroup = document.getElementById('slTpGroup');
+                const isInternal = e.target.value === 'internal';
+                if (useTemplateGroup) useTemplateGroup.style.display = isInternal ? '' : 'none';
+                if (fileGroup) fileGroup.style.display = isInternal ? '' : 'none';
+                if (slTpGroup) slTpGroup.style.display = isInternal ? '' : 'none';
+                if (isInternal && fileSelect) {
+                    try {
+                        const data = await this.apiCall('/strategy/files');
+                        if (data && data.success) {
+                            const files = data.files || [];
+                            let html = '<option value="new">[New File]</option>';
+                            for (const f of files) { html += `<option value="${f}">${f}</option>`; }
+                            fileSelect.innerHTML = html;
+                        }
+                    } catch (err) { console.warn('Failed to load strategy files', err); }
                 }
             });
         }
         const createStrategyBtn = document.getElementById('createStrategyBtn');
         if (createStrategyBtn) {
             createStrategyBtn.addEventListener('click', async () => {
-                const name = (document.getElementById('strategyNameInput')?.value || '').trim();
+                const nameInput = document.getElementById('strategyNameInput');
+                const nameRaw = (nameInput?.value || '').trim();
                 const strategy_type = document.getElementById('strategyTypeSelect')?.value || 'external';
                 const description = document.getElementById('strategyDescriptionInput')?.value || '';
                 const use_template = strategy_type === 'internal' ? !!document.getElementById('strategyUseTemplate')?.checked : false;
+                const selected_file = strategy_type === 'internal' ? (document.getElementById('strategyFileSelect')?.value || 'new') : undefined;
+                const sl_enabled = strategy_type === 'internal' ? !!document.getElementById('slEnabledSwitch')?.checked : false;
+                const tp_enabled = strategy_type === 'internal' ? !!document.getElementById('tpEnabledSwitch')?.checked : false;
+                const sl_price_val = document.getElementById('slPriceInput')?.value;
+                const tp_price_val = document.getElementById('tpPriceInput')?.value;
+                const sl_price = sl_enabled && sl_price_val !== '' ? parseFloat(sl_price_val) : undefined;
+                const tp_price = tp_enabled && tp_price_val !== '' ? parseFloat(tp_price_val) : undefined;
+                const sl_type = document.getElementById('slTypeSelect')?.value || 'amount';
+                const tp_type = document.getElementById('tpTypeSelect')?.value || 'amount';
+                let name = nameRaw;
+                if (strategy_type === 'internal' && (!name || name.length === 0)) {
+                    const sel = selected_file || 'new';
+                    if (sel && sel !== 'new') {
+                        name = sel.replace(/\.py$/i, '');
+                        if (nameInput) nameInput.value = name;
+                    }
+                }
                 if (!name) { this.showAlert('danger', 'Please enter strategy name'); return; }
                 try {
-                    await this.apiCall('/strategies', {
-                        method: 'POST',
-                        body: JSON.stringify({ name, strategy_type, description, use_template })
-                    });
+                    const payload = { name, strategy_type, description };
+                    if (strategy_type === 'internal') {
+                        Object.assign(payload, { use_template, selected_file, sl_enabled, tp_enabled, sl_price, tp_price, sl_type, tp_type });
+                    }
+                    await this.apiCall('/strategies', { method: 'POST', body: JSON.stringify(payload) });
                     this.showAlert('success', `Strategy ${name} created`);
                     const modalEl = document.getElementById('addStrategyModal');
                     const modal = bootstrap.Modal.getInstance(modalEl);
@@ -458,6 +501,25 @@ class TradingApp {
         }
     }
 
+    async ensureDefaultConnectionConfig() {
+        try {
+            const hasHost = !!localStorage.getItem('conn_host');
+            const hasPort = !!localStorage.getItem('conn_port');
+            const hasClient = !!localStorage.getItem('conn_clientId');
+            const hasAcct = !!localStorage.getItem('conn_accountType');
+            if (hasHost && hasPort && hasClient && hasAcct) return;
+            const res = await this.apiCall('/connection_config');
+            if (res) {
+                if (!hasHost && res.host) localStorage.setItem('conn_host', res.host);
+                if (!hasPort && res.port != null) localStorage.setItem('conn_port', String(res.port));
+                if (!hasClient && res.client_id != null) localStorage.setItem('conn_clientId', String(res.client_id));
+                if (!hasAcct) localStorage.setItem('conn_accountType', res.paper_trading ? 'paper' : 'live');
+            }
+        } catch (e) {
+            // ignore errors, fallback remains
+        }
+    }
+
     async connect() {
         const config = {
             host: document.getElementById('host').value,
@@ -504,14 +566,24 @@ class TradingApp {
                     modalElement.removeAttribute('aria-modal');
                 }
             }, 100);
+
+            // Persist the latest selections
+            const hostVal = document.getElementById('host')?.value;
+            const portVal = document.getElementById('port')?.value;
+            const clientIdVal = document.getElementById('clientId')?.value;
+            const acctVal = document.getElementById('accountType')?.value || 'paper';
+            if (hostVal) localStorage.setItem('conn_host', hostVal);
+            if (portVal) localStorage.setItem('conn_port', portVal);
+            if (clientIdVal) localStorage.setItem('conn_clientId', clientIdVal);
+            if (acctVal) localStorage.setItem('conn_accountType', acctVal);
             
             this.loadAccountInfo();
             this.loadOrders();
             this.loadPortfolio();
             this.loadRiskRules();
-            this.loadAutoOrders();
+            // this.loadAutoOrders();
             this.loadStrategies();
-            this.loadLogs();
+            // this.loadLogs();
         } catch (error) {
             console.error('Connection failed:', error);
         }
@@ -1668,6 +1740,23 @@ class TradingApp {
             const api = document.getElementById('editStrategyApiInput');
             if (desc) desc.value = s.description || '';
             if (api) api.value = s.api_endpoint || '';
+
+            // SL/TP: 仅对内部策略显示并填充
+            const sltpGroup = document.getElementById('editSlTpGroup');
+            if (sltpGroup) sltpGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
+            const slEnabled = document.getElementById('editSlEnabledSwitch');
+            const tpEnabled = document.getElementById('editTpEnabledSwitch');
+            const slPrice = document.getElementById('editSlPriceInput');
+            const tpPrice = document.getElementById('editTpPriceInput');
+            const slType = document.getElementById('editSlTypeSelect');
+            const tpType = document.getElementById('editTpTypeSelect');
+            if (slEnabled) slEnabled.checked = !!s.sl_enabled;
+            if (tpEnabled) tpEnabled.checked = !!s.tp_enabled;
+            if (slPrice) slPrice.value = s.sl_price ?? '';
+            if (tpPrice) tpPrice.value = s.tp_price ?? '';
+            if (slType) slType.value = s.sl_type || 'amount';
+            if (tpType) tpType.value = s.tp_type || 'amount';
+
             const modal = new bootstrap.Modal(document.getElementById('editStrategyModal'));
             modal.show();
 
@@ -1680,6 +1769,16 @@ class TradingApp {
                         description: document.getElementById('editStrategyDescriptionInput')?.value || '',
                         api_endpoint: document.getElementById('editStrategyApiInput')?.value || undefined,
                     };
+                    if (s.strategy_type === 'internal') {
+                        updates.sl_enabled = !!document.getElementById('editSlEnabledSwitch')?.checked;
+                        updates.tp_enabled = !!document.getElementById('editTpEnabledSwitch')?.checked;
+                        const slv = document.getElementById('editSlPriceInput')?.value;
+                        const tpv = document.getElementById('editTpPriceInput')?.value;
+                        updates.sl_price = slv ? Number(slv) : null;
+                        updates.tp_price = tpv ? Number(tpv) : null;
+                        updates.sl_type = document.getElementById('editSlTypeSelect')?.value || 'amount';
+                        updates.tp_type = document.getElementById('editTpTypeSelect')?.value || 'amount';
+                    }
                     try {
                         await this.apiCall(`/strategies/${name}`, { method: 'PUT', body: JSON.stringify(updates) });
                         this.showAlert('success', `Strategy ${name} updated`);

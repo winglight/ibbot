@@ -53,13 +53,20 @@ class RiskRuleRequest(BaseModel):
     max_loss_percent: Optional[float] = None
 
 class StrategyRequest(BaseModel):
-    """策略请求模型"""
     name: str
     strategy_type: str
     enabled: bool = True
     api_endpoint: Optional[str] = None
     file_path: Optional[str] = None
     description: Optional[str] = None
+    use_template: bool = False
+    selected_file: Optional[str] = None
+    sl_enabled: bool = False
+    tp_enabled: bool = False
+    sl_price: Optional[float] = None
+    tp_price: Optional[float] = None
+    sl_type: str = "amount"  # "amount" or "percent"
+    tp_type: str = "amount"  # "amount" or "percent"
 
 class StrategySettingsRequest(BaseModel):
     """策略设置请求模型"""

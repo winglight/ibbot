@@ -28,6 +28,7 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from jose import JWTError, jwt
+import httpx
 
 # Add current directory to Python path
 sys.path.append(str(Path(__file__).parent))
@@ -49,6 +50,18 @@ load_dotenv()
 
 # FastAPI app
 app = FastAPI(title="IBKR Trading Bot", version="1.0.0")
+
+# Mock server configuration
+MOCK_HOST = os.getenv('MOCK_HOST', '127.0.0.1')
+MOCK_PORT = int(os.getenv('MOCK_PORT', '18080'))
+MOCK_BASE = f"http://{MOCK_HOST}:{MOCK_PORT}/api"
+
+def is_mock_mode() -> bool:
+    try:
+        port = int(os.getenv('IBKR_PORT', str(connection_manager.config.port)))
+    except Exception:
+        port = connection_manager.config.port
+    return port == MOCK_PORT
 
 # 挂载静态资源目录
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
@@ -218,6 +231,11 @@ ibkr_client = None
 telegram_notifier = TelegramNotifier()  # 初始化
 risk_manager = RiskManager(ibkr_client=None, telegram_notifier=telegram_notifier)  # 先用None占位，连接成功后依赖连接管理器
 strategy_manager = StrategyManager()  # 初始化
+# 注入依赖：让 StrategyManager 能访问 RiskManager（用于自动创建风控规则）
+try:
+    strategy_manager.set_dependencies(risk_manager=risk_manager)
+except Exception as _sm_dep_err:
+    logger.warning(f"StrategyManager set_dependencies at startup failed: {_sm_dep_err}")
 websocket_connections = []
 order_manager = OrderManager()
 
@@ -234,15 +252,52 @@ try:
 except Exception as _dep_err:
     logger.warning(f"QueueManager set_dependencies at startup failed: {_dep_err}")
 
+@app.get("/api/connection_config")
+async def get_connection_config():
+    """获取默认连接配置（不需要认证）"""
+    try:
+        default_config = connection_manager.get_config()
+        return {
+            "host": default_config.host,
+            "port": default_config.port,
+            "client_id": default_config.client_id,
+            "paper_trading": default_config.paper_trading
+        }
+    except Exception as e:
+        logger.error(f"Failed to get connection config: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get connection config")
+
 @app.post("/api/connect")
 async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(get_current_user)):
-    """连接到IBKR"""
+    """连接到IBKR或Mock (当端口为18080时)"""
     global ibkr_client
     
     try:
+        # 更新配置
+        connection_manager.update_config(config)
+        
+        # 若为mock模式，则调用mock连接端点并标记状态
+        if config.port == MOCK_PORT or is_mock_mode():
+            logger.info(f"Entering MOCK mode on {MOCK_BASE}")
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(f"{MOCK_BASE}/connect")
+                    if resp.status_code != 200:
+                        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+                    data = resp.json()
+                    if not data.get("success"):
+                        raise HTTPException(status_code=500, detail="Mock server connect failed")
+            except httpx.RequestError as e:
+                logger.error(f"Mock server connect failed: {e}")
+                raise HTTPException(status_code=503, detail="Mock server unavailable")
+
+            # 标记连接状态为True，仅用于UI
+            connection_manager.connected = True
+            return {"success": True, "message": "Connected to MOCK server"}
+        
+        # 正常IBKR连接流程
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: connection_manager.disconnect())
-        connection_manager.update_config(config)
         success = await loop.run_in_executor(None, lambda: connection_manager.connect())
         
         if success:
@@ -295,6 +350,17 @@ async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
         if risk_manager:
             risk_manager.stop()
         
+        # 若在mock模式，调用mock断开端点
+        if is_mock_mode():
+            try:
+                async with httpx.AsyncClient() as client:
+                    await client.post(f"{MOCK_BASE}/disconnect")
+            except httpx.RequestError as e:
+                logger.warning(f"Mock server disconnect call failed: {e}")
+            # 无论mock断开是否成功，都重置本地连接状态
+            connection_manager.connected = False
+            return {"success": True, "message": "Disconnected from MOCK server"}
+
         connection_manager.disconnect()
         
         return {"success": True, "message": "Disconnected successfully"}
@@ -306,6 +372,22 @@ async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
 @app.get("/api/connection_status")
 async def get_connection_status(user: Optional[str] = Depends(get_current_user)):
     """获取连接状态"""
+    if is_mock_mode():
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{MOCK_BASE}/connection_status")
+                if response.status_code == 200:
+                    mock_data = response.json()
+                    return {
+                        "connected": mock_data.get("connected", False),
+                        "account_type": "Mock"
+                    }
+                else:
+                    return {"connected": False, "account_type": "Mock"}
+        except Exception as e:
+            logger.warning(f"Mock server connection failed: {e}")
+            return {"connected": False, "account_type": "Mock"}
+    
     return {
         "connected": connection_manager.is_connected(),
         "account_type": "Paper" if connection_manager.config.paper_trading else "Live"
@@ -315,6 +397,34 @@ async def get_connection_status(user: Optional[str] = Depends(get_current_user))
 @app.post("/api/historical_data")
 async def get_historical_data(request: HistoricalDataRequest, user: Optional[str] = Depends(get_current_user)):
     """获取历史数据"""
+    if is_mock_mode():
+        try:
+            # Convert request to dict for mock server
+            request_data = {
+                "symbol": request.symbol,
+                "duration": request.duration,
+                "bar_size": request.bar_size,
+                "exchange": request.exchange
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{MOCK_BASE}/historical_data", json=request_data)
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 404:
+                    raise HTTPException(status_code=404, detail="No historical data found")
+                else:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+                    
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Mock historical data error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -360,6 +470,31 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
 @app.post("/api/chart_data")
 async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depends(get_current_user)):
     """获取图表数据"""
+    if is_mock_mode():
+        try:
+            request_data = {
+                "symbol": request.symbol,
+                "duration": request.duration,
+                "bar_size": request.bar_size,
+                "exchange": request.exchange
+            }
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{MOCK_BASE}/chart_data", json=request_data)
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 404:
+                    raise HTTPException(status_code=404, detail="No chart data found")
+                else:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Mock chart data error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     if not ibkr_client or not ibkr_client.connected:
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -406,6 +541,26 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
 @app.get("/api/realtime_data/{symbol}")
 async def get_realtime_data(symbol: str, exchange: str = "SMART", user: Optional[str] = Depends(get_current_user)):
     """获取实时数据"""
+    if is_mock_mode():
+        try:
+            params = {"symbol": symbol, "exchange": exchange}
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{MOCK_BASE}/realtime_data/{symbol}", params={"exchange": exchange})
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 404:
+                    raise HTTPException(status_code=404, detail="No data available")
+                else:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Mock real-time data error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     if not ibkr_client or not ibkr_client.connected:
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -473,6 +628,36 @@ async def get_realtime_data(symbol: str, exchange: str = "SMART", user: Optional
 @app.post("/api/place_order")
 async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_current_user)):
     """下单"""
+    if is_mock_mode():
+        try:
+            # Convert OrderRequest to dict for mock server
+            order_data = {
+                "symbol": order.symbol,
+                "quantity": order.quantity,
+                "action": order.action,
+                "order_type": order.order_type,
+                "exchange": order.exchange,
+                "sec_type": order.sec_type,
+                "price": order.price
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{MOCK_BASE}/place_order", json=order_data)
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    error_detail = response.text if response.text else f"Mock server error: {response.status_code}"
+                    raise HTTPException(status_code=response.status_code, detail=error_detail)
+                    
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Mock order placement error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -555,6 +740,20 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
 @app.delete("/api/cancel_order/{order_id}")
 async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_user)):
     """取消订单"""
+    if is_mock_mode():
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(f"{MOCK_BASE}/cancel_order/{order_id}")
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 404:
+                    raise HTTPException(status_code=404, detail="Order not found")
+                else:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -595,6 +794,24 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
 @app.post("/api/cancel_order")
 async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_current_user)):
     """取消订单 (POST方法)"""
+    if is_mock_mode():
+        try:
+            order_id = request.get('order_id')
+            if not order_id:
+                raise HTTPException(status_code=400, detail="order_id is required")
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{MOCK_BASE}/cancel_order", json={"order_id": int(order_id)})
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    return {"success": False, "error": response.text}
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            return {"success": False, "error": "Mock server unavailable"}
+        except Exception as e:
+            logger.error(f"Cancel order (mock) error: {e}")
+            return {"success": False, "error": str(e)}
+    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -638,6 +855,18 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
 @app.delete("/api/cancel_all_orders")
 async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
     """取消所有订单"""
+    if is_mock_mode():
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(f"{MOCK_BASE}/cancel_all_orders")
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -667,6 +896,18 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
 @app.get("/api/orders")
 async def get_orders(user: Optional[str] = Depends(get_current_user)):
     """获取订单列表（从数据库读取，包含历史订单）"""
+    if is_mock_mode():
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{MOCK_BASE}/orders")
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+    
     try:
         # 先从 IB 同步最新订单状态到本地记录（若已连接）
         try:
@@ -750,6 +991,18 @@ async def get_orders(user: Optional[str] = Depends(get_current_user)):
 @app.get("/api/account_info")
 async def get_account_info(user: Optional[str] = Depends(get_current_user)):
     """获取账户信息"""
+    if is_mock_mode():
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{MOCK_BASE}/account_info")
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -774,6 +1027,18 @@ async def get_account_info(user: Optional[str] = Depends(get_current_user)):
 @app.get("/api/positions")
 async def get_positions(user: Optional[str] = Depends(get_current_user)):
     """获取持仓列表"""
+    if is_mock_mode():
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{MOCK_BASE}/positions")
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -967,6 +1232,22 @@ from fastapi import Header
 async def generate_strategy_token(user: Optional[str] = Depends(get_current_user)):
     token = strategy_manager.generate_auth_token()
     return {"success": True, "token": token}
+
+@app.get("/api/strategy/files")
+async def list_strategy_files(user: Optional[str] = Depends(get_current_user)):
+    """Get list of available strategy files from strategy directory"""
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    try:
+        files = []
+        strategy_dir = strategy_manager.strategy_dir
+        for file_path in strategy_dir.glob("*.py"):
+            if file_path.is_file():
+                files.append(file_path.name)
+        return {"success": True, "files": files}
+    except Exception as e:
+        logger.error(f"Failed to list strategy files: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/strategies")
 async def list_strategies(user: Optional[str] = Depends(get_current_user)):
