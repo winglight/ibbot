@@ -6,6 +6,8 @@ from dataclasses import dataclass, asdict
 from loguru import logger
 import json
 from pathlib import Path
+import os
+import httpx
 
 @dataclass
 class QueueTask:
@@ -38,6 +40,7 @@ class QueueManager:
         self.strategy_manager = None
         self.connection_manager = None
         self.websocket_manager = None
+        self.order_manager = None
         
         # 确保数据目录存在
         self.data_dir = Path("data")
@@ -238,14 +241,14 @@ class QueueManager:
         from datetime import datetime
         
         # 检查依赖对象是否已设置
-        if not all([self.ibkr_client, self.risk_manager, self.strategy_manager, 
+        if not all([self.risk_manager, self.strategy_manager, 
                    self.connection_manager, self.websocket_manager]):
             raise Exception("Dependencies not properly set")
         
         payload = task.payload
         
-        # 检查IBKR连接
-        if not self.ibkr_client or not self.connection_manager.is_connected():
+        # 检查连接状态（允许Mock模式，无需ibkr_client）
+        if not self.connection_manager or not self.connection_manager.is_connected():
             raise Exception("Not connected to IBKR")
         
         # 验证策略
@@ -265,44 +268,87 @@ class QueueManager:
         else:
             exchange = payload.get('exchange', 'SMART')
         
+        # 判断是否为Mock模式（根据连接配置端口与环境变量MOCK_PORT）
+        mock_port = int(os.getenv('MOCK_PORT', '18080'))
+        is_mock = False
+        try:
+            is_mock = (self.connection_manager is not None and 
+                       getattr(self.connection_manager, 'config', None) is not None and 
+                       int(self.connection_manager.config.port) == mock_port)
+        except Exception:
+            is_mock = False
+        
         # 下单
         loop = asyncio.get_event_loop()
+        order_id = None
+        order_type_for_record = "MKT" if order_type == "MARKET" else "LMT"
         
-        if order_type == "MARKET":
-            trade = await loop.run_in_executor(
-                None,
-                lambda: self.ibkr_client.place_market_order(
-                    symbol=payload['symbol'],
-                    quantity=payload['qty'],
-                    action=action,
-                    exchange=exchange,
-                    sec_type=sec_type
-                )
-            )
-        elif order_type == "LIMIT":
-            if not payload.get('price'):
+        if is_mock:
+            # 通过Mock网关HTTP下单
+            if order_type == "LIMIT" and not payload.get('price'):
                 raise Exception("Price required for limit order")
-            trade = await loop.run_in_executor(
-                None,
-                lambda: self.ibkr_client.place_limit_order(
-                    symbol=payload['symbol'],
-                    quantity=payload['qty'],
-                    price=payload['price'],
-                    action=action,
-                    exchange=exchange,
-                    sec_type=sec_type
-                )
-            )
+            order_data = {
+                "symbol": payload['symbol'],
+                "quantity": payload['qty'],
+                "action": action,
+                "order_type": order_type,
+                "exchange": exchange,
+                "sec_type": sec_type,
+                "price": payload.get('price')
+            }
+            try:
+                host = getattr(self.connection_manager.config, 'host', os.getenv('MOCK_HOST', '127.0.0.1'))
+                base = f"http://{host}:{mock_port}/api"
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(f"{base}/place_order", json=order_data)
+                    if resp.status_code != 200:
+                        raise Exception(f"Mock server error: {resp.status_code} {resp.text}")
+                    data = resp.json()
+                    if not data.get("success"):
+                        raise Exception("Mock order placement failed")
+                    order_id = str(data.get("order_id"))
+            except Exception as e:
+                raise Exception(f"Mock order placement error: {e}")
         else:
-            raise Exception("Invalid order type")
+            # 真实IBKR路径：使用 ibkr_client
+            if not self.ibkr_client:
+                raise Exception("IBKR client not initialized")
+            if order_type == "MARKET":
+                trade = await loop.run_in_executor(
+                    None,
+                    lambda: self.ibkr_client.place_market_order(
+                        symbol=payload['symbol'],
+                        quantity=payload['qty'],
+                        action=action,
+                        exchange=exchange,
+                        sec_type=sec_type
+                    )
+                )
+            elif order_type == "LIMIT":
+                if not payload.get('price'):
+                    raise Exception("Price required for limit order")
+                trade = await loop.run_in_executor(
+                    None,
+                    lambda: self.ibkr_client.place_limit_order(
+                        symbol=payload['symbol'],
+                        quantity=payload['qty'],
+                        price=payload['price'],
+                        action=action,
+                        exchange=exchange,
+                        sec_type=sec_type
+                    )
+                )
+            else:
+                raise Exception("Invalid order type")
+            
+            if not trade:
+                raise Exception("Failed to place strategy order")
+            order_id = str(trade.order.orderId)
         
-        if not trade:
-            raise Exception("Failed to place strategy order")
-        
-        order_id = str(trade.order.orderId)
+        if not order_id:
+            raise Exception("Failed to obtain order id")
         
         # 记录订单（优先使用 OrderManager）
-        order_type_for_record = "MKT" if order_type == "MARKET" else "LMT"
         if getattr(self, 'order_manager', None):
             try:
                 self.order_manager.create_order(
@@ -373,7 +419,7 @@ class QueueManager:
         if self.websocket_manager:
             await self.websocket_manager.broadcast({
                 "type": "order_placed",
-                "order_id": trade.order.orderId,
+                "order_id": order_id,
                 "symbol": payload['symbol'],
                 "action": action,
                 "quantity": payload['qty']

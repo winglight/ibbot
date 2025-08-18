@@ -302,6 +302,14 @@ class ConnectionManager:
 
     def is_connected(self) -> bool:
         """检查连接状态"""
+        # 支持Mock模式：当端口为MOCK_PORT时，返回基于self.connected的状态
+        try:
+            mock_port = int(os.getenv('MOCK_PORT', '18080'))
+            if getattr(self.config, 'port', None) == mock_port:
+                return bool(self.connected)
+        except Exception:
+            pass
+
         if not self.ib:
             self.connected = False
             return False

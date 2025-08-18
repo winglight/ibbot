@@ -58,9 +58,10 @@ MOCK_BASE = f"http://{MOCK_HOST}:{MOCK_PORT}/api"
 
 def is_mock_mode() -> bool:
     try:
-        port = int(os.getenv('IBKR_PORT', str(connection_manager.config.port)))
+        # 优先使用运行时的连接配置端口来判断是否为Mock模式
+        port = int(getattr(connection_manager.config, 'port', MOCK_PORT))
     except Exception:
-        port = connection_manager.config.port
+        port = MOCK_PORT
     return port == MOCK_PORT
 
 # 挂载静态资源目录
@@ -102,7 +103,7 @@ def setup_logging():
     try:
         os.makedirs("logs", exist_ok=True)
     except Exception:
-        # 即便创建失败也不要崩溃
+        # 即便创建失败也不崩溃
         pass
 
     # 重置默认 handler，添加控制台和文件输出
@@ -293,6 +294,8 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
 
             # 标记连接状态为True，仅用于UI
             connection_manager.connected = True
+            # 确保队列worker已启动
+            await queue_manager.start_worker()
             return {"success": True, "message": "Connected to MOCK server"}
         
         # 正常IBKR连接流程
@@ -1378,6 +1381,9 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
         "sec_type": payload.sec_type
     }
     
+    # 确保队列worker已启动
+    await queue_manager.start_worker()
+    
     task_id = queue_manager.add_task("strategy_order", task_payload)
     
     # 立即返回200
@@ -1388,13 +1394,81 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
         "status": "queued"
     }
 
+# 新增：Mock端点 - 手动触发策略（仅Mock模式）
+class MockTriggerRequest(BaseModel):
+    strategy: str
+    symbol: str
+    action: str  # BUY, SELL
+    qty: int = 1
+    type: str = "MARKET"  # MARKET, LIMIT
+    price: Optional[float] = None
+    set_price: bool = False  # 若提供价格，是否先设置Mock价格
+    exchange: str = "SMART"
+    sec_type: str = "STK"
+
+@app.post("/api/mock/trigger_strategy")
+async def mock_trigger_strategy(payload: MockTriggerRequest, user: Optional[str] = Depends(get_current_user)):
+    """在Mock模式下手动触发内部策略执行：
+    - 可选：若提供price且set_price=True，先调用Mock网关设置最新价
+    - 然后将任务加入与外部策略一致的队列，异步处理下单
+    """
+    # 仅在Mock模式下可用
+    if not is_mock_mode():
+        raise HTTPException(status_code=400, detail="This endpoint is only available in MOCK mode")
+
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+
+    # 校验策略存在且已启用
+    strategy = strategy_manager.get_strategy(payload.strategy)
+    if not strategy or not strategy.get('enabled', False):
+        raise HTTPException(status_code=400, detail="Strategy disabled or not found")
+
+    # 可选：先设置Mock价格
+    mock_price_set = False
+    if payload.set_price and payload.price is not None:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(f"{MOCK_BASE}/mock/set_price", json={"symbol": payload.symbol, "price": payload.price})
+                if resp.status_code == 200:
+                    mock_price_set = True
+                else:
+                    logger.warning(f"Mock set_price failed: {resp.status_code} {resp.text}")
+        except Exception as e:
+            logger.warning(f"Mock set_price exception: {e}")
+
+    # 构建并入队任务（与 /api/strategy 一致）
+    task_payload = {
+        "strategy": payload.strategy,
+        "symbol": payload.symbol,
+        "action": payload.action,
+        "qty": payload.qty,
+        "type": payload.type,
+        "price": payload.price,
+        "exchange": payload.exchange,
+        "sec_type": payload.sec_type,
+    }
+
+    # 确保队列worker已启动
+    await queue_manager.start_worker()
+
+    task_id = queue_manager.add_task("strategy_order", task_payload)
+
+    return {
+        "success": True,
+        "task_id": task_id,
+        "message": "Mock trigger queued for processing",
+        "status": "queued",
+        "mock_price_set": mock_price_set,
+    }
+
 # Queue Management APIs
 @app.get("/api/queue/status")
 async def get_queue_status():
     """获取队列整体状态"""
     if not queue_manager:
         raise HTTPException(status_code=500, detail="Queue manager not initialized")
-    
+
     status = queue_manager.get_queue_status()
     return status
 
@@ -1482,9 +1556,9 @@ def main():
         logger.error("Environment check failed. Please configure .env file.")
         return
     
-    # Auto connect if enabled in .env
+    # Auto connect if enabled in .env and not in mock mode
     auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
-    if auto_connect:
+    if auto_connect and not is_mock_mode():
         logger.info("Auto-connect enabled, attempting to connect to IBKR...")
         try:
             # Use the connection manager directly for synchronous connection test
@@ -1497,6 +1571,8 @@ def main():
         except Exception as e:
             logger.warning(f"Auto-connection failed: {e}")
             logger.info("You can connect later through the web interface.")
+    elif auto_connect and is_mock_mode():
+        logger.info("Auto-connect enabled but running in mock mode - skipping real IBKR connection")
     else:
         logger.info("Auto-connect disabled. You can connect later through the web interface.")
     

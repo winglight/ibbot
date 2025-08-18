@@ -1300,6 +1300,133 @@
           }
         }
       }
+    },
+    "/api/mock/set_price": {
+      "post": {
+        "tags": ["系统管理"],
+        "summary": "Mock: 设置指定标的最新价格",
+        "description": "仅供Mock服务使用。请直接调用模拟服务: http://localhost:18080/api/mock/set_price",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["symbol", "price"],
+                "properties": {
+                  "symbol": {"type": "string", "example": "AAPL"},
+                  "price": {"type": "number", "example": 123.45}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"description": "价格已更新"}
+        }
+      }
+    },
+    "/api/mock/feed_data": {
+      "post": {
+        "tags": ["系统管理"],
+        "summary": "Mock: 推送模拟OHLCV数据序列",
+        "description": "仅供Mock服务使用。请直接调用模拟服务: http://localhost:18080/api/mock/feed_data",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["symbol"],
+                "properties": {
+                  "symbol": {"type": "string", "example": "AAPL"},
+                  "duration": {"type": "string", "example": "1 D"},
+                  "bar_size": {"type": "string", "example": "5 mins"},
+                  "delay_ms": {"type": "integer", "example": 500}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "推送完成",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"type": "boolean"},
+                    "symbol": {"type": "string"},
+                    "duration": {"type": "string"},
+                    "bar_size": {"type": "string"},
+                    "pushed": {"type": "integer"},
+                    "delay_ms": {"type": "integer"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mock/trigger_strategy": {
+      "post": {
+        "tags": ["系统管理"],
+        "summary": "Mock: 手动触发内部策略执行并异步下单",
+        "description": "仅在主服务的Mock模式可用。可选：在触发前设置最新价。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["strategy", "symbol", "action"],
+                "properties": {
+                  "strategy": {"type": "string", "example": "Buy down and Sell open"},
+                  "symbol": {"type": "string", "example": "AAPL"},
+                  "action": {"type": "string", "example": "BUY"},
+                  "qty": {"type": "integer", "example": 1},
+                  "type": {"type": "string", "example": "MARKET"},
+                  "price": {"type": "number", "nullable": true, "example": 123.45},
+                  "set_price": {"type": "boolean", "example": true},
+                  "exchange": {"type": "string", "example": "SMART"},
+                  "sec_type": {"type": "string", "example": "STK"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已加入队列处理",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"type": "boolean"},
+                    "task_id": {"type": "string"},
+                    "message": {"type": "string"},
+                    "status": {"type": "string", "example": "queued"},
+                    "mock_price_set": {"type": "boolean"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mock/reset": {
+      "post": {
+        "tags": ["系统管理"],
+        "summary": "Mock: 重置模拟网关的内部状态（订单、持仓、价格、连接等）",
+        "description": "仅供Mock服务使用。请直接调用模拟服务: http://localhost:18080/api/mock/reset",
+        "responses": {
+          "200": {"description": "已重置"}
+        }
+      }
     }
   },
   "tags": [
