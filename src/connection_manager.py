@@ -423,5 +423,35 @@ class ConnectionManager:
             logger.error(f"Failed to execute function in connection thread: {e}")
             return None
 
+    def run_async_in_connection_thread(self, coro, timeout: float = 60):
+        """在连接线程的事件循环中执行协程，跨线程调度并等待结果。
+
+        该方法用于需要在连接线程的事件循环上运行的异步 IBKR API 调用，
+        可以避免在事件循环已运行时调用同步 API 导致的
+        "this event loop is already running" 错误。
+        """
+        try:
+            loop = self._loop
+            if not loop or loop.is_closed():
+                logger.warning("Connection event loop not available")
+                return None
+            if not self.ib or not self.ib.isConnected():
+                logger.warning("IBKR connection not available")
+                return None
+
+            import concurrent.futures
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            try:
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                logger.error(f"Execution in connection thread timed out after {timeout} seconds")
+                return None
+            except Exception as e:
+                logger.error(f"Execution in connection thread raised error: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Failed to execute coroutine in connection thread: {e}")
+            return None
+
 
 connection_manager = ConnectionManager()

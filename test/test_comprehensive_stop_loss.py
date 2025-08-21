@@ -160,7 +160,7 @@ class MockTelegramNotifier:
         })
         return True
 
-async def test_comprehensive_stop_loss():
+async def _test_comprehensive_stop_loss():
     """完整的止损单测试"""
     logger.info("=== 开始完整止损单测试 ===")
     
@@ -257,7 +257,7 @@ async def test_comprehensive_stop_loss():
         logger.error(f"错误堆栈: {traceback.format_exc()}")
         return False
 
-async def test_event_loop_conflict():
+async def _test_event_loop_conflict():
     """专门测试事件循环冲突问题"""
     logger.info("=== 开始事件循环冲突测试 ===")
     
@@ -320,10 +320,10 @@ async def main():
     logger.info("开始运行完整的止损单测试套件")
     
     # 测试1: 完整止损单流程
-    test1_result = await test_comprehensive_stop_loss()
+    test1_result = await _test_comprehensive_stop_loss()
     
     # 测试2: 事件循环冲突
-    test2_result = await test_event_loop_conflict()
+    test2_result = await _test_event_loop_conflict()
     
     # 总结
     logger.info("=== 测试结果总结 ===")
@@ -341,3 +341,10 @@ if __name__ == "__main__":
     # 运行测试
     result = asyncio.run(main())
     sys.exit(0 if result else 1)
+
+def test_comprehensive_stop_loss():
+    asyncio.run(_test_comprehensive_stop_loss())
+
+def test_event_loop_conflict():
+    asyncio.run(_test_event_loop_conflict())
+
