@@ -573,7 +573,28 @@ class IBKRClient:
         except Exception as e:
             logger.error(f"Failed to place limit order: {e}")
             return None
-    
+
+    def refresh_orders(self) -> bool:
+        """刷新IBKR订单数据，使用异步API避免事件循环冲突"""
+        ib = self.ib
+        if not ib or not ib.isConnected():
+            logger.error("IBKR connection lost for order refresh")
+            return False
+
+        async def _refresh():
+            try:
+                await ib.reqOpenOrdersAsync()
+                await ib.reqAllOpenOrdersAsync()
+                await asyncio.sleep(0.5)
+                logger.debug("Requested order refresh from IBKR (async)")
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to refresh orders: {e}")
+                return False
+
+        result = self.connection_manager.run_async_in_connection_thread(_refresh())
+        return bool(result)
+
     def cancel_order(self, order_id: int) -> tuple[bool, str]:
         """取消指定订单"""
         try:
@@ -582,31 +603,16 @@ class IBKRClient:
                 if not self.connect():
                     logger.error(f"Cannot connect to IBKR for cancel order: {order_id}")
                     return False, "Connection failed"
-            
+
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
                 logger.error(f"IBKR connection lost for cancel order")
                 return False, "Connection lost"
-            
-            # 使用同步方式刷新订单数据，避免事件循环冲突
-            try:
-                # 在连接线程刷新一次订单状态
-                def _refresh_orders():
-                    ib.reqOpenOrders()
-                    ib.reqAllOpenOrders()
-                    return True
-                if self.connection_manager is not None:
-                    try:
-                        self.connection_manager.run_in_connection_thread(_refresh_orders)
-                    except Exception as e:
-                        logger.debug(f"run_in_connection_thread failed during refresh: {e}, falling back to direct refresh")
-                        _refresh_orders()
-                else:
-                    _refresh_orders()
-            except Exception as e:
-                logger.warning(f"Failed to refresh orders: {e}")
-                
+
+            # 刷新订单数据，使用异步API避免事件循环冲突
+            self.refresh_orders()
+
             trades = ib.trades()
             target_trade = None
             for trade in trades:
@@ -701,16 +707,7 @@ class IBKRClient:
                 if not ib or not ib.isConnected():
                     logger.error(f"IBKR connection lost for cancel all orders")
                     return 0
-                
-                # 使用同步方式刷新订单数据
-                try:
-                    ib.reqOpenOrders()
-                    ib.reqAllOpenOrders()
-                    time.sleep(0.5)
-                    logger.debug("Requested order refresh from IBKR (sync)")
-                except Exception as e:
-                    logger.warning(f"Failed to refresh orders: {e}")
-                
+
                 # 优先使用openTrades()获取活跃订单，降级到trades()
                 trades = ib.openTrades() or ib.trades()
                 cancellable_orders = []
@@ -827,7 +824,10 @@ class IBKRClient:
                 if not self.connect():
                     logger.error(f"Cannot connect to IBKR for cancel all orders")
                     return 0
-            
+
+            # 刷新订单，使用异步API避免事件循环冲突
+            self.refresh_orders()
+
             # 尝试使用连接管理器在正确的线程中执行操作
             result = self.connection_manager.run_in_connection_thread(_cancel_orders_operation)
             
@@ -868,26 +868,9 @@ class IBKRClient:
                 # 直接使用缓存的trades，不重复请求
                 trades = ib.trades()
             else:
-                # 使用连接线程执行订单刷新，避免事件循环冲突
-                try:
-                    def _refresh_orders():
-                        ib.reqOpenOrders()
-                        ib.reqAllOpenOrders()
-                        return True
-                    if self.connection_manager is not None:
-                        try:
-                            self.connection_manager.run_in_connection_thread(_refresh_orders)
-                        except Exception as e:
-                            logger.debug(f"run_in_connection_thread failed during refresh: {e}, falling back to direct refresh")
-                            _refresh_orders()
-                    else:
-                        _refresh_orders()
-                except Exception as e:
-                    logger.warning(f"Failed to refresh orders: {e}")
-                
-                # 更新刷新时间
+                # 刷新订单数据并更新刷新时间
+                self.refresh_orders()
                 self._last_order_refresh_time = current_time
-                
                 # 读取最新的 trades 列表，优先使用openTrades()
                 trades = ib.openTrades() or ib.trades()
             
