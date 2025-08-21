@@ -255,9 +255,18 @@ class ConnectionManager:
     
     def connect(self) -> bool:
         """连接到IBKR服务器"""
+        # 检查当前连接是否使用相同配置
         if self.connected and self.ib and self.ib.isConnected():
-            logger.info("Already connected to IBKR")
-            return True
+            # 如果配置发生变化，需要重新连接
+            current_host = getattr(self.ib, 'host', None)
+            current_port = getattr(self.ib, 'port', None)
+            if (current_host == self.config.host and 
+                current_port == self.config.port):
+                logger.info("Already connected to IBKR with same configuration")
+                return True
+            else:
+                logger.info("Configuration changed, reconnecting...")
+                self.disconnect()
         
         logger.info("Connecting to IBKR...")
         return self._connect_in_thread()
@@ -368,59 +377,48 @@ class ConnectionManager:
         return self.config
     
     def run_in_connection_thread(self, func, *args, **kwargs):
-        """在连接线程的事件循环中执行函数，避免ThreadPoolExecutor事件循环警告"""
+        """在连接线程的事件循环中执行同步函数，跨线程安全调度并等待结果。"""
         try:
             loop = self._loop
             if not loop or loop.is_closed():
                 logger.warning("Connection event loop not available")
                 return None
-            
             if not self.ib or not self.ib.isConnected():
                 logger.warning("IBKR connection not available")
                 return None
-            
-            # 如果已经在连接线程中，直接调用
+
+            # 如果已在连接线程，直接执行
             if threading.current_thread() == self._connection_thread:
-                # 确保该线程具备当前事件循环
                 try:
-                    asyncio.get_event_loop()
-                except RuntimeError:
-                    try:
-                        asyncio.set_event_loop(loop)
-                    except Exception:
-                        pass
-                return func(*args, **kwargs)
-            
-            # 否则将任务投递到连接线程的事件循环中执行
-            result_holder = {'result': None, 'exc': None}
-            done = threading.Event()
-            
-            def _runner():
-                try:
-                    # 在连接线程中确保设置当前事件循环，避免 ib_insync 内部使用 get_event_loop 报错
-                    try:
-                        asyncio.get_event_loop()
-                    except RuntimeError:
-                        try:
-                            asyncio.set_event_loop(loop)
-                        except Exception:
-                            pass
-                    result_holder['result'] = func(*args, **kwargs)
+                    return func(*args, **kwargs)
                 except Exception as e:
-                    result_holder['exc'] = e
-                finally:
-                    done.set()
-            
-            loop.call_soon_threadsafe(_runner)
-            
-            # 等待最多30秒
-            if not done.wait(timeout=30):
-                logger.error("Execution in connection thread timed out")
+                    logger.error(f"Error executing function in connection thread: {e}")
+                    raise
+
+            import concurrent.futures
+            result_future: concurrent.futures.Future = concurrent.futures.Future()
+
+            def runner():
+                try:
+                    res = func(*args, **kwargs)
+                    result_future.set_result(res)
+                except Exception as e:
+                    result_future.set_exception(e)
+
+            try:
+                loop.call_soon_threadsafe(runner)
+            except Exception as e:
+                logger.error(f"Failed to schedule function on connection loop: {e}")
                 return None
-            
-            if result_holder['exc']:
-                raise result_holder['exc']
-            return result_holder['result']
+
+            try:
+                return result_future.result(timeout=60)
+            except concurrent.futures.TimeoutError:
+                logger.error("Execution in connection thread timed out after 60 seconds")
+                return None
+            except Exception as e:
+                logger.error(f"Execution in connection thread raised error: {e}")
+                raise
         except Exception as e:
             logger.error(f"Failed to execute function in connection thread: {e}")
             return None

@@ -4,7 +4,7 @@ Pydantic 请求模型定义
 基于 main.py 中的 API 端点分析，定义所有必需的请求模型
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, validator, root_validator
 from typing import Optional, Dict, Any
 
 class HistoricalDataRequest(BaseModel):
@@ -33,6 +33,20 @@ class OrderRequest(BaseModel):
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
 
+    # 校验：数量必须大于0
+    @validator('quantity')
+    def quantity_must_be_positive(cls, v):
+        if v is None or v <= 0:
+            raise ValueError('quantity must be greater than 0')
+        return v
+
+    # 校验：如提供 price/stop_loss/take_profit，则必须大于0
+    @validator('price', 'stop_loss', 'take_profit')
+    def optional_prices_must_be_positive(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError('price values must be greater than 0 when provided')
+        return v
+
 class ExternalStrategyOrderRequest(BaseModel):
     """外部策略订单请求模型"""
     strategy: str
@@ -51,6 +65,15 @@ class RiskRuleRequest(BaseModel):
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
     max_loss_percent: Optional[float] = None
+
+    # 至少提供一个止盈/止损价格，且提供的价格必须 > 0
+    @root_validator(skip_on_failure=True)
+    def validate_sl_tp_prices(cls, values):
+        sl = values.get('stop_loss_price')
+        tp = values.get('take_profit_price')
+        if (sl is None or sl <= 0) and (tp is None or tp <= 0):
+            raise ValueError('At least one of stop_loss_price or take_profit_price must be provided and > 0')
+        return values
 
 class StrategyRequest(BaseModel):
     name: str

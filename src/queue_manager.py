@@ -314,29 +314,23 @@ class QueueManager:
             if not self.ibkr_client:
                 raise Exception("IBKR client not initialized")
             if order_type == "MARKET":
-                trade = await loop.run_in_executor(
-                    None,
-                    lambda: self.ibkr_client.place_market_order(
-                        symbol=payload['symbol'],
-                        quantity=payload['qty'],
-                        action=action,
-                        exchange=exchange,
-                        sec_type=sec_type
-                    )
+                trade = self.ibkr_client.place_market_order(
+                    symbol=payload['symbol'],
+                    quantity=payload['qty'],
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type
                 )
             elif order_type == "LIMIT":
                 if not payload.get('price'):
                     raise Exception("Price required for limit order")
-                trade = await loop.run_in_executor(
-                    None,
-                    lambda: self.ibkr_client.place_limit_order(
-                        symbol=payload['symbol'],
-                        quantity=payload['qty'],
-                        price=payload['price'],
-                        action=action,
-                        exchange=exchange,
-                        sec_type=sec_type
-                    )
+                trade = self.ibkr_client.place_limit_order(
+                    symbol=payload['symbol'],
+                    quantity=payload['qty'],
+                    price=payload['price'],
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type
                 )
             else:
                 raise Exception("Invalid order type")

@@ -1,20 +1,21 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import random
 import time
+from fastapi.responses import HTMLResponse, JSONResponse
 
 app = FastAPI(title="IB Gateway Mock", version="0.1.0")
 
-# --------- State (initialize globals to avoid NameError before first use) ---------
+# In-memory state
 connected: bool = False
 orders: List[Dict] = []
 positions: Dict[str, Dict] = {}
 prices: Dict[str, float] = {}
 next_order_id: int = 1
 
-# --------- Models ---------
+
 class OrderRequest(BaseModel):
     symbol: str
     quantity: int
@@ -23,6 +24,20 @@ class OrderRequest(BaseModel):
     exchange: str = "SMART"
     sec_type: str = "STK"
     price: Optional[float] = None
+
+    @validator('quantity')
+    def quantity_must_be_positive(cls, v):
+        if v is None or v <= 0:
+            raise ValueError('quantity must be greater than 0')
+        return v
+
+    @validator('price')
+    def price_if_provided_positive(cls, v, values):
+        # Only validate if provided; for LIMIT orders it should be provided by caller
+        if v is not None and v <= 0:
+            raise ValueError('price must be greater than 0 when provided')
+        return v
+
 
 class CancelOrderRequest(BaseModel):
     order_id: int
@@ -93,25 +108,25 @@ def _fill_order(o: Dict, fill_price: float):
 
     new_pos = prev_pos + qty
     if new_pos == 0:
-        # fully closed
+        # Closed position
         pos["position"] = 0
         pos["avg_cost"] = 0.0
     elif (prev_pos >= 0 and qty >= 0) or (prev_pos <= 0 and qty <= 0):
-        # adding to same side -> weighted average
+        # Adding to position (same direction)
         total_shares = abs(prev_pos) + abs(qty)
         pos["avg_cost"] = ((abs(prev_pos) * prev_cost) + (abs(qty) * fill_price)) / total_shares
         pos["position"] = new_pos
     else:
-        # reducing or flipping side
+        # Reversing position
         if abs(qty) <= abs(prev_pos):
             pos["position"] = new_pos
-            # avg_cost unchanged when partially closing
+            # avg_cost remains the same
         else:
-            # flipped side, set new avg cost to fill price for remaining
+            # Fully reverse and more
             pos["position"] = new_pos
             pos["avg_cost"] = fill_price
 
-    # Update account cash and realized PnL for filled trade
+    # Update account cash
     cost = fill_price * abs(qty)
     if o["action"].upper() == "BUY":
         account_info["total_cash"] -= cost
@@ -142,10 +157,25 @@ def _try_fill_limit_orders_for_symbol(sym: str):
 
 
 def _recalc_market(sym: Optional[str] = None):
-    # Recalculate position market values and PnL
+    """Recalculate market value for positions"""
     syms = [sym] if sym else list(positions.keys())
     for s in syms:
-        pos = positions[s]
+        pos = positions.get(s)
+        if pos is None:
+            # Create default position
+            default_price = prices.get(s, 0.0)
+            pos = {
+                "symbol": s,
+                "position": 0,
+                "avg_cost": 0.0,
+                "market_price": default_price,
+                "current_price": default_price,
+                "market_value": 0.0,
+                "unrealized_pnl": 0.0,
+                "unrealized_pnl_percent": 0.0,
+                "price_source": "mock",
+            }
+            positions[s] = pos
         p = prices.get(s, pos.get("current_price", 0.0))
         pos["market_price"] = p
         pos["current_price"] = p
@@ -157,19 +187,19 @@ def _recalc_market(sym: Optional[str] = None):
 
 
 def _recalc_account():
-    # Simple net liquidation approximation
+    """Recalculate account totals"""
     mv = sum(v["market_value"] for v in positions.values())
     account_info["net_liquidation"] = account_info["total_cash"] + mv
-    # Simplified buying power: 4x of cash
+    # Simple buying power calculation
     account_info["buying_power"] = max(0.0, account_info["available_funds"] * 4)
 
 
 def _parse_duration_to_minutes(duration: str) -> int:
-    # Very simple parser: e.g., "1 D", "2 H", "30 mins"
+    """Parse duration like '1 D', '5 H', '30 min' to minutes"""
     try:
         parts = duration.strip().split()
         if len(parts) != 2:
-            return 24 * 60
+            return 24 * 60  # default 1 day
         qty = float(parts[0])
         unit = parts[1].lower()
         if unit.startswith('d'):
@@ -184,14 +214,14 @@ def _parse_duration_to_minutes(duration: str) -> int:
 
 
 def _bar_minutes(bar_size: str) -> int:
-    # e.g., "5 mins", "1 min", "15 mins"
+    """Parse bar size like '5 mins', '1 hour' to minutes"""
     try:
         parts = bar_size.strip().split()
         if len(parts) >= 2 and parts[1].lower().startswith('min'):
             return int(float(parts[0]))
         if parts[1].lower().startswith('hour'):
             return int(float(parts[0]) * 60)
-        return 5
+        return 5  # default
     except Exception:
         return 5
 
@@ -204,9 +234,9 @@ def _generate_ohlcv(symbol: str, duration: str, bar_size: str) -> List[Dict]:
     now = datetime.utcnow()
     data: List[Dict] = []
     for i in range(bars):
-        # oldest first
+        # Go back in time
         ts = now - timedelta(minutes=(bars - i) * step_min)
-        # random walk
+        # Random price movement
         change = random.uniform(-0.005, 0.005)
         open_p = last_price
         close_p = max(0.01, open_p * (1 + change))
@@ -222,12 +252,13 @@ def _generate_ohlcv(symbol: str, duration: str, bar_size: str) -> List[Dict]:
             "volume": vol,
         })
         last_price = close_p
-    # Update current price to last close
+    # Update global price
     prices[symbol] = float(last_price)
     _recalc_market(symbol)
     return data
 
-# --------- Connection endpoints ---------
+# --------- API Routes ---------
+
 @app.post("/api/connect")
 def connect():
     global connected
@@ -244,7 +275,7 @@ def disconnect():
 def connection_status():
     return {"success": True, "connected": connected}
 
-# --------- Trading endpoints ---------
+# Order management
 @app.post("/api/place_order")
 def place_order(order: OrderRequest):
     if not connected:
@@ -273,12 +304,12 @@ def place_order(order: OrderRequest):
     oid = next_order_id
     next_order_id += 1
 
-    # Fill logic
+    # Simulate order execution
     ref_price = prices.get(order.symbol, order.price if order.price is not None else 100.0)
     if otype == "MARKET":
         _fill_order(od, ref_price)
     else:
-        # LMT -> may fill immediately depending on current price
+        # LIMIT order - check if can fill immediately
         _try_fill_limit_orders_for_symbol(order.symbol)
 
     return {"success": True, "order_id": oid, "message": "Order placed"}
@@ -310,7 +341,7 @@ def cancel_all_orders():
 
 @app.get("/api/orders")
 def get_orders():
-    # Align response shape with main app
+    # Convert to the format expected by frontend
     converted = []
     for o in sorted(orders, key=lambda x: x["order_id"], reverse=True):
         converted.append({
@@ -330,14 +361,14 @@ def get_orders():
         })
     return {"success": True, "orders": converted}
 
-# --------- Market Data endpoints (Mock) ---------
+# Market data
 @app.get("/api/realtime_data/{symbol}")
 def realtime_data(symbol: str, exchange: str = "SMART"):
     if not connected:
         raise HTTPException(status_code=400, detail="Not connected to IBKR (mock)")
     prev = prices.get(symbol)
     base = prev if prev is not None else 100.0
-    # small random walk per call
+    # Small random movement
     new_price = max(0.01, base * (1 + random.uniform(-0.002, 0.002)))
     prices[symbol] = float(new_price)
     _recalc_market(symbol)
@@ -394,7 +425,7 @@ def chart_data(req: ChartDataRequest):
         "bar_size": req.bar_size,
     }
 
-# --------- Account / Positions ---------
+# Account & positions
 @app.get("/api/account_info")
 def get_account_info():
     if not connected:
@@ -402,65 +433,119 @@ def get_account_info():
     return {"success": True, "account_info": account_info}
 
 @app.get("/api/positions")
-def get_positions():
+def get_positions(fast: bool = True):
     if not connected:
         raise HTTPException(status_code=400, detail="Not connected to IBKR (mock)")
-    _recalc_market()  # ensure up-to-date
+    if not fast:
+        _recalc_market()  # ensure up-to-date
     return {"success": True, "positions": list(positions.values())}
 
-# --------- Mock utilities ---------
+# Mock utilities
 @app.post("/api/mock/set_price")
 def set_price(req: SetPriceRequest):
+    """Set a specific price for a symbol (for testing)"""
     prices[req.symbol] = float(req.price)
     _recalc_market(req.symbol)
     _try_fill_limit_orders_for_symbol(req.symbol)
-    return {"success": True, "symbol": req.symbol, "price": prices[req.symbol]}
-
-# 新增：推送模拟数据序列
-@app.post("/api/mock/feed_data")
-def feed_data(req: FeedDataRequest):
-    """按指定duration和bar_size生成OHLCV数据，并以delay_ms节奏逐条推送为最新价格。
-    推送方式：更新内部prices[symbol]并触发市值重算与限价单尝试成交。
-    注意：该接口为阻塞式，直到推送完所有数据才返回。
-    """
-    data = _generate_ohlcv(req.symbol, req.duration, req.bar_size)
-    pushed = 0
-    for bar in data:
-        price = float(bar.get("close"))
-        prices[req.symbol] = price
-        _recalc_market(req.symbol)
-        _try_fill_limit_orders_for_symbol(req.symbol)
-        pushed += 1
-        if req.delay_ms > 0:
-            time.sleep(req.delay_ms / 1000.0)
     return {
         "success": True,
+        "message": f"Price for {req.symbol} set to {req.price}",
         "symbol": req.symbol,
-        "duration": req.duration,
-        "bar_size": req.bar_size,
-        "pushed": pushed,
-        "delay_ms": req.delay_ms,
+        "price": float(req.price),
     }
 
-@app.post("/api/mock/reset")
-def reset_state():
-    global orders, next_order_id, positions, prices, account_info, connected
-    orders = []
-    next_order_id = 1
-    positions = {}
-    prices = {}
+@app.post("/api/mock/feed_data")
+def feed_data(req: FeedDataRequest):
+    """Stream historical data with delays"""
+    data = _generate_ohlcv(req.symbol, req.duration, req.bar_size)
+    
+    async def generate():
+        for i, d in enumerate(data):
+            # Update price and trigger limit orders
+            close_price = d["close"]
+            prices[req.symbol] = close_price
+            _recalc_market(req.symbol)
+            _try_fill_limit_orders_for_symbol(req.symbol)
+            
+            yield {
+                "success": True,
+                "data": {
+                    "time": (d["date"].isoformat() if hasattr(d["date"], 'isoformat') else str(d["date"])),
+                    "open": d["open"],
+                    "high": d["high"],
+                    "low": d["low"],
+                    "close": d["close"],
+                    "volume": d["volume"],
+                },
+                "symbol": req.symbol,
+                "index": i,
+                "total": len(data),
+                "is_last": i == len(data) - 1,
+            }
+            if i < len(data) - 1:  # Don't delay after last item
+                time.sleep(req.delay_ms / 1000.0)
+    
+    return {"success": True, "message": "Data feed started", "bars": len(data)}
+
+@app.get("/api/mock/reset")
+def reset_mock():
+    """Reset all mock data"""
+    global connected, orders, positions, prices, next_order_id, account_info
     connected = False
-    account_info = {
-        "account_id": "DU1234567",
-        "account_type": "INDIVIDUAL",
+    orders.clear()
+    positions.clear()
+    prices.clear()
+    next_order_id = 1
+    account_info.update({
         "total_cash": 100000.0,
         "available_funds": 100000.0,
         "buying_power": 400000.0,
         "net_liquidation": 100000.0,
         "unrealized_pnl": 0.0,
         "realized_pnl": 0.0,
+    })
+    return {"success": True, "message": "Mock state reset"}
+
+@app.get("/api/mock/status")
+def mock_status():
+    """Get current mock state"""
+    return {
+        "success": True,
+        "status": {
+            "connected": connected,
+            "orders_count": len(orders),
+            "positions_count": len(positions),
+            "prices_count": len(prices),
+            "next_order_id": next_order_id,
+            "account_info": account_info,
+        }
     }
-    return {"success": True}
+
+# Documentation
+@app.get("/", response_class=HTMLResponse)
+def docs():
+    return """
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>Mock Gateway API - RapiDoc</title>
+        <script type="module" src="https://unpkg.com/rapidoc/dist/rapidoc-min.js"></script>
+      </head>
+      <body>
+        <rapi-doc
+          spec-url="/api-docs.json"
+          theme="dark"
+          render-style="read"
+          nav-bg-color="#1e3a8a"
+          primary-color="#3b82f6"
+          allow-try="true"
+          show-header="true"
+          heading-text="IB Gateway Mock API">
+        </rapi-doc>
+      </body>
+    </html>
+    """
 
 if __name__ == "__main__":
     import uvicorn

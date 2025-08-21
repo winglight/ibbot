@@ -1,0 +1,244 @@
+2025-08-20 13:28:57,518 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-08-20 13:28:57,518 - __main__ - INFO - 开始运行完整的止损单测试套件
+2025-08-20 13:28:57,518 - __main__ - INFO - === 开始完整止损单测试 ===
+2025-08-20 13:28:57,518 - __main__ - INFO - 步骤1: 创建模拟组件
+2025-08-20 13:28:57,518 - __main__ - ERROR - 测试过程中发生错误: RiskManager.__init__() missing 2 required positional arguments: 'ibkr_client' and 'telegram_notifier'
+2025-08-20 13:28:57,518 - __main__ - ERROR - 错误类型: TypeError
+2025-08-20 13:28:57,519 - __main__ - ERROR - 错误堆栈: Traceback (most recent call last):
+  File "/Users/chenyu/work/opensource/ibbot/test_comprehensive_stop_loss.py", line 121, in test_comprehensive_stop_loss
+    risk_manager = RiskManager()
+TypeError: RiskManager.__init__() missing 2 required positional arguments: 'ibkr_client' and 'telegram_notifier'
+
+2025-08-20 13:28:57,519 - __main__ - INFO - === 开始事件循环冲突测试 ===
+2025-08-20 13:28:57,519 - __main__ - ERROR - 其他错误: RiskManager.__init__() missing 2 required positional arguments: 'ibkr_client' and 'telegram_notifier'
+2025-08-20 13:28:57,519 - __main__ - ERROR - 错误堆栈: Traceback (most recent call last):
+  File "/Users/chenyu/work/opensource/ibbot/test_comprehensive_stop_loss.py", line 216, in test_event_loop_conflict
+    risk_manager = RiskManager()
+TypeError: RiskManager.__init__() missing 2 required positional arguments: 'ibkr_client' and 'telegram_notifier'
+
+2025-08-20 13:28:57,519 - __main__ - INFO - === 测试结果总结 ===
+2025-08-20 13:28:57,519 - __main__ - INFO - 完整止损单测试: ❌ 失败
+2025-08-20 13:28:57,519 - __main__ - INFO - 事件循环冲突测试: ❌ 失败
+2025-08-20 13:28:57,519 - __main__ - ERROR - 💥 部分测试失败
+2025-08-20 13:29:51,807 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-08-20 13:29:51,808 - __main__ - INFO - 开始运行完整的止损单测试套件
+2025-08-20 13:29:51,808 - __main__ - INFO - === 开始完整止损单测试 ===
+2025-08-20 13:29:51,808 - __main__ - INFO - 步骤1: 创建模拟组件
+2025-08-20 13:29:51,809 - tzlocal - DEBUG - /etc/localtime found
+2025-08-20 13:29:51,814 - tzlocal - DEBUG - 1 found:
+ {'/etc/localtime is a symlink to': 'Asia/Shanghai'}
+2025-08-20 13:29:51,815 - __main__ - INFO - 步骤2: 创建并激活风险规则
+2025-08-20 13:29:51,815 - __main__ - ERROR - 测试过程中发生错误: RiskRule.__init__() got an unexpected keyword argument 'rule_id'
+2025-08-20 13:29:51,815 - __main__ - ERROR - 错误类型: TypeError
+2025-08-20 13:29:51,816 - __main__ - ERROR - 错误堆栈: Traceback (most recent call last):
+  File "/Users/chenyu/work/opensource/ibbot/test_comprehensive_stop_loss.py", line 144, in test_comprehensive_stop_loss
+    stop_loss_rule = RiskRule(
+TypeError: RiskRule.__init__() got an unexpected keyword argument 'rule_id'
+
+2025-08-20 13:29:51,816 - __main__ - INFO - === 开始事件循环冲突测试 ===
+2025-08-20 13:29:51,816 - __main__ - INFO - 执行订单以测试事件循环冲突...
+2025-08-20 13:29:51,816 - __main__ - INFO - Mock: 返回持仓信息 1 个
+2025-08-20 13:29:51,816 - __main__ - DEBUG - 模拟下单方法被调用: SELL 100 AAPL
+2025-08-20 13:29:51,817 - __main__ - DEBUG - 没有检测到运行中的事件循环
+2025-08-20 13:29:51,817 - __main__ - INFO - Mock: 下单 SELL 100 AAPL
+2025-08-20 13:29:51,817 - __main__ - DEBUG - Mock: 无法获取事件循环: no running event loop
+2025-08-20 13:29:51,817 - __main__ - INFO - Mock: 订单已记录 {'symbol': 'AAPL', 'quantity': 100, 'action': 'SELL', 'timestamp': '2025-08-20T13:29:51.817071', 'status': 'FILLED'}
+2025-08-20 13:29:51,817 - __main__ - INFO - ✅ 事件循环冲突测试通过
+2025-08-20 13:29:51,817 - __main__ - INFO - === 测试结果总结 ===
+2025-08-20 13:29:51,817 - __main__ - INFO - 完整止损单测试: ❌ 失败
+2025-08-20 13:29:51,817 - __main__ - INFO - 事件循环冲突测试: ✅ 通过
+2025-08-20 13:29:51,817 - __main__ - ERROR - 💥 部分测试失败
+2025-08-20 13:30:37,508 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-08-20 13:30:37,509 - __main__ - INFO - 开始运行完整的止损单测试套件
+2025-08-20 13:30:37,509 - __main__ - INFO - === 开始完整止损单测试 ===
+2025-08-20 13:30:37,509 - __main__ - INFO - 步骤1: 创建模拟组件
+2025-08-20 13:30:37,509 - tzlocal - DEBUG - /etc/localtime found
+2025-08-20 13:30:37,511 - tzlocal - DEBUG - 1 found:
+ {'/etc/localtime is a symlink to': 'Asia/Shanghai'}
+2025-08-20 13:30:37,512 - __main__ - INFO - 步骤2: 创建并激活风险规则
+2025-08-20 13:30:37,513 - __main__ - INFO - 风险规则已添加并激活: AAPL, 成功: True
+2025-08-20 13:30:37,513 - __main__ - INFO - 步骤3: 模拟价格数据触发止损
+2025-08-20 13:30:37,513 - __main__ - INFO - 模拟价格数据: {'symbol': 'AAPL', 'price': 145.0, 'timestamp': '2025-08-20T13:30:37.513232'}
+2025-08-20 13:30:37,513 - __main__ - INFO - 步骤4: 检查风险并执行止损
+2025-08-20 13:30:37,513 - __main__ - ERROR - 测试过程中发生错误: 'RiskManager' object has no attribute 'check_risk'
+2025-08-20 13:30:37,513 - __main__ - ERROR - 错误类型: AttributeError
+2025-08-20 13:30:37,514 - __main__ - ERROR - 错误堆栈: Traceback (most recent call last):
+  File "/Users/chenyu/work/opensource/ibbot/test_comprehensive_stop_loss.py", line 193, in test_comprehensive_stop_loss
+    await risk_manager.check_risk(price_data)
+AttributeError: 'RiskManager' object has no attribute 'check_risk'
+
+2025-08-20 13:30:37,514 - __main__ - INFO - === 开始事件循环冲突测试 ===
+2025-08-20 13:30:37,514 - __main__ - INFO - 执行订单以测试事件循环冲突...
+2025-08-20 13:30:37,514 - __main__ - INFO - Mock: 返回持仓信息 1 个
+2025-08-20 13:30:37,514 - __main__ - DEBUG - 模拟下单方法被调用: SELL 100 AAPL
+2025-08-20 13:30:37,514 - __main__ - DEBUG - 没有检测到运行中的事件循环
+2025-08-20 13:30:37,514 - __main__ - INFO - Mock: 下单 SELL 100 AAPL
+2025-08-20 13:30:37,514 - __main__ - DEBUG - Mock: 无法获取事件循环: no running event loop
+2025-08-20 13:30:37,514 - __main__ - INFO - Mock: 订单已记录 {'symbol': 'AAPL', 'quantity': 100, 'action': 'SELL', 'timestamp': '2025-08-20T13:30:37.514981', 'status': 'FILLED'}
+2025-08-20 13:30:37,515 - __main__ - INFO - ✅ 事件循环冲突测试通过
+2025-08-20 13:30:37,515 - __main__ - INFO - === 测试结果总结 ===
+2025-08-20 13:30:37,515 - __main__ - INFO - 完整止损单测试: ❌ 失败
+2025-08-20 13:30:37,515 - __main__ - INFO - 事件循环冲突测试: ✅ 通过
+2025-08-20 13:30:37,515 - __main__ - ERROR - 💥 部分测试失败
+2025-08-20 13:30:53,588 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-08-20 13:30:53,589 - __main__ - INFO - 开始运行完整的止损单测试套件
+2025-08-20 13:30:53,589 - __main__ - INFO - === 开始完整止损单测试 ===
+2025-08-20 13:30:53,589 - __main__ - INFO - 步骤1: 创建模拟组件
+2025-08-20 13:30:53,590 - tzlocal - DEBUG - /etc/localtime found
+2025-08-20 13:30:53,591 - tzlocal - DEBUG - 1 found:
+ {'/etc/localtime is a symlink to': 'Asia/Shanghai'}
+2025-08-20 13:30:53,591 - __main__ - INFO - 步骤2: 创建并激活风险规则
+2025-08-20 13:30:53,592 - __main__ - INFO - 风险规则已添加并激活: AAPL, 成功: True
+2025-08-20 13:30:53,592 - __main__ - INFO - 步骤3: 模拟价格数据触发止损
+2025-08-20 13:30:53,592 - __main__ - INFO - 模拟价格数据: {'symbol': 'AAPL', 'price': 145.0, 'timestamp': '2025-08-20T13:30:53.592684'}
+2025-08-20 13:30:53,592 - __main__ - INFO - 步骤4: 检查风险并执行止损
+2025-08-20 13:30:53,592 - __main__ - ERROR - 测试过程中发生错误: 'RiskManager' object has no attribute 'check_risk'
+2025-08-20 13:30:53,592 - __main__ - ERROR - 错误类型: AttributeError
+2025-08-20 13:30:53,593 - __main__ - ERROR - 错误堆栈: Traceback (most recent call last):
+  File "/Users/chenyu/work/opensource/ibbot/test_comprehensive_stop_loss.py", line 194, in test_comprehensive_stop_loss
+    await risk_manager.check_risk(price_data)
+AttributeError: 'RiskManager' object has no attribute 'check_risk'
+
+2025-08-20 13:30:53,593 - __main__ - INFO - === 开始事件循环冲突测试 ===
+2025-08-20 13:30:53,593 - __main__ - INFO - 执行订单以测试事件循环冲突...
+2025-08-20 13:30:53,593 - __main__ - INFO - Mock: 返回持仓信息 1 个
+2025-08-20 13:30:53,594 - __main__ - DEBUG - 模拟下单方法被调用: SELL 100 AAPL
+2025-08-20 13:30:53,594 - __main__ - DEBUG - 没有检测到运行中的事件循环
+2025-08-20 13:30:53,594 - __main__ - INFO - Mock: 下单 SELL 100 AAPL
+2025-08-20 13:30:53,594 - __main__ - DEBUG - Mock: 无法获取事件循环: no running event loop
+2025-08-20 13:30:53,594 - __main__ - INFO - Mock: 订单已记录 {'symbol': 'AAPL', 'quantity': 100, 'action': 'SELL', 'timestamp': '2025-08-20T13:30:53.594434', 'status': 'FILLED'}
+2025-08-20 13:30:53,594 - __main__ - INFO - ✅ 事件循环冲突测试通过
+2025-08-20 13:30:53,594 - __main__ - INFO - === 测试结果总结 ===
+2025-08-20 13:30:53,594 - __main__ - INFO - 完整止损单测试: ❌ 失败
+2025-08-20 13:30:53,594 - __main__ - INFO - 事件循环冲突测试: ✅ 通过
+2025-08-20 13:30:53,594 - __main__ - ERROR - 💥 部分测试失败
+2025-08-20 13:31:11,609 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-08-20 13:31:11,609 - __main__ - INFO - 开始运行完整的止损单测试套件
+2025-08-20 13:31:11,610 - __main__ - INFO - === 开始完整止损单测试 ===
+2025-08-20 13:31:11,610 - __main__ - INFO - 步骤1: 创建模拟组件
+2025-08-20 13:31:11,610 - tzlocal - DEBUG - /etc/localtime found
+2025-08-20 13:31:11,611 - tzlocal - DEBUG - 1 found:
+ {'/etc/localtime is a symlink to': 'Asia/Shanghai'}
+2025-08-20 13:31:11,612 - __main__ - INFO - 步骤2: 创建并激活风险规则
+2025-08-20 13:31:11,612 - __main__ - INFO - 风险规则已添加并激活: AAPL, 成功: True
+2025-08-20 13:31:11,612 - __main__ - INFO - 步骤3: 模拟价格数据触发止损
+2025-08-20 13:31:11,612 - __main__ - INFO - 模拟价格数据: {'symbol': 'AAPL', 'price': 145.0, 'timestamp': '2025-08-20T13:31:11.612708'}
+2025-08-20 13:31:11,612 - __main__ - INFO - 步骤4: 检查风险并执行止损
+2025-08-20 13:31:11,612 - __main__ - ERROR - 测试过程中发生错误: 'RiskManager' object has no attribute 'check_risk'
+2025-08-20 13:31:11,612 - __main__ - ERROR - 错误类型: AttributeError
+2025-08-20 13:31:11,613 - __main__ - ERROR - 错误堆栈: Traceback (most recent call last):
+  File "/Users/chenyu/work/opensource/ibbot/test_comprehensive_stop_loss.py", line 195, in test_comprehensive_stop_loss
+    await risk_manager.check_risk(price_data)
+AttributeError: 'RiskManager' object has no attribute 'check_risk'
+
+2025-08-20 13:31:11,613 - __main__ - INFO - === 开始事件循环冲突测试 ===
+2025-08-20 13:31:11,613 - __main__ - INFO - 执行订单以测试事件循环冲突...
+2025-08-20 13:31:11,613 - __main__ - INFO - Mock: 返回持仓信息 1 个
+2025-08-20 13:31:11,614 - __main__ - DEBUG - 模拟下单方法被调用: SELL 100 AAPL
+2025-08-20 13:31:11,614 - __main__ - DEBUG - 没有检测到运行中的事件循环
+2025-08-20 13:31:11,614 - __main__ - INFO - Mock: 下单 SELL 100 AAPL
+2025-08-20 13:31:11,614 - __main__ - DEBUG - Mock: 无法获取事件循环: no running event loop
+2025-08-20 13:31:11,614 - __main__ - INFO - Mock: 订单已记录 {'symbol': 'AAPL', 'quantity': 100, 'action': 'SELL', 'timestamp': '2025-08-20T13:31:11.614170', 'status': 'FILLED'}
+2025-08-20 13:31:11,614 - __main__ - INFO - ✅ 事件循环冲突测试通过
+2025-08-20 13:31:11,614 - __main__ - INFO - === 测试结果总结 ===
+2025-08-20 13:31:11,614 - __main__ - INFO - 完整止损单测试: ❌ 失败
+2025-08-20 13:31:11,614 - __main__ - INFO - 事件循环冲突测试: ✅ 通过
+2025-08-20 13:31:11,614 - __main__ - ERROR - 💥 部分测试失败
+2025-08-20 13:32:10,794 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-08-20 13:32:10,795 - __main__ - INFO - 开始运行完整的止损单测试套件
+2025-08-20 13:32:10,795 - __main__ - INFO - === 开始完整止损单测试 ===
+2025-08-20 13:32:10,795 - __main__ - INFO - 步骤1: 创建模拟组件
+2025-08-20 13:32:10,796 - tzlocal - DEBUG - /etc/localtime found
+2025-08-20 13:32:10,800 - tzlocal - DEBUG - 1 found:
+ {'/etc/localtime is a symlink to': 'Asia/Shanghai'}
+2025-08-20 13:32:10,801 - __main__ - INFO - 步骤2: 创建并激活风险规则
+2025-08-20 13:32:10,803 - __main__ - INFO - 风险规则已添加并激活: AAPL, 成功: True
+2025-08-20 13:32:10,803 - __main__ - INFO - 步骤3: 模拟价格数据触发止损
+2025-08-20 13:32:10,803 - __main__ - INFO - 模拟价格数据: {'symbol': 'AAPL', 'price': 145.0, 'timestamp': '2025-08-20T13:32:10.803427'}
+2025-08-20 13:32:10,803 - __main__ - INFO - 步骤4: 检查风险并执行止损
+2025-08-20 13:32:10,803 - __main__ - ERROR - 测试过程中发生错误: 'RiskManager' object has no attribute 'check_risk'
+2025-08-20 13:32:10,803 - __main__ - ERROR - 错误类型: AttributeError
+2025-08-20 13:32:10,804 - __main__ - ERROR - 错误堆栈: Traceback (most recent call last):
+  File "/Users/chenyu/work/opensource/ibbot/test_comprehensive_stop_loss.py", line 210, in test_comprehensive_stop_loss
+    await risk_manager.check_risk(price_data)
+AttributeError: 'RiskManager' object has no attribute 'check_risk'
+
+2025-08-20 13:32:10,804 - __main__ - INFO - === 开始事件循环冲突测试 ===
+2025-08-20 13:32:10,806 - __main__ - INFO - 执行订单以测试事件循环冲突...
+2025-08-20 13:32:10,806 - __main__ - INFO - Mock: 返回持仓信息 1 个
+2025-08-20 13:32:10,807 - __main__ - DEBUG - 模拟下单方法被调用: SELL 100 AAPL
+2025-08-20 13:32:10,807 - __main__ - DEBUG - 没有检测到运行中的事件循环
+2025-08-20 13:32:10,807 - __main__ - INFO - Mock: 下单 SELL 100 AAPL
+2025-08-20 13:32:10,807 - __main__ - DEBUG - Mock: 无法获取事件循环: no running event loop
+2025-08-20 13:32:10,807 - __main__ - INFO - Mock: 订单已记录 {'symbol': 'AAPL', 'quantity': 100, 'action': 'SELL', 'timestamp': '2025-08-20T13:32:10.807956', 'status': 'FILLED'}
+2025-08-20 13:32:10,810 - __main__ - INFO - ✅ 事件循环冲突测试通过
+2025-08-20 13:32:10,810 - __main__ - INFO - === 测试结果总结 ===
+2025-08-20 13:32:10,811 - __main__ - INFO - 完整止损单测试: ❌ 失败
+2025-08-20 13:32:10,811 - __main__ - INFO - 事件循环冲突测试: ✅ 通过
+2025-08-20 13:32:10,811 - __main__ - ERROR - 💥 部分测试失败
+2025-08-20 13:32:49,259 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-08-20 13:32:49,259 - __main__ - INFO - 开始运行完整的止损单测试套件
+2025-08-20 13:32:49,259 - __main__ - INFO - === 开始完整止损单测试 ===
+2025-08-20 13:32:49,259 - __main__ - INFO - 步骤1: 创建模拟组件
+2025-08-20 13:32:49,261 - tzlocal - DEBUG - /etc/localtime found
+2025-08-20 13:32:49,263 - tzlocal - DEBUG - 1 found:
+ {'/etc/localtime is a symlink to': 'Asia/Shanghai'}
+2025-08-20 13:32:49,264 - __main__ - INFO - 步骤2: 创建并激活风险规则
+2025-08-20 13:32:49,266 - __main__ - INFO - 风险规则已添加并激活: AAPL, 成功: True
+2025-08-20 13:32:49,266 - __main__ - INFO - 步骤3: 模拟价格数据触发止损
+2025-08-20 13:32:49,266 - __main__ - INFO - 模拟价格数据: {'symbol': 'AAPL', 'price': 145.0, 'timestamp': '2025-08-20T13:32:49.266150'}
+2025-08-20 13:32:49,266 - __main__ - INFO - 步骤4: 检查风险并执行止损
+2025-08-20 13:32:49,266 - __main__ - ERROR - 测试过程中发生错误: 'RiskManager' object has no attribute 'check_risk'
+2025-08-20 13:32:49,266 - __main__ - ERROR - 错误类型: AttributeError
+2025-08-20 13:32:49,267 - __main__ - ERROR - 错误堆栈: Traceback (most recent call last):
+  File "/Users/chenyu/work/opensource/ibbot/test_comprehensive_stop_loss.py", line 213, in test_comprehensive_stop_loss
+    await risk_manager.check_risk(price_data)
+AttributeError: 'RiskManager' object has no attribute 'check_risk'
+
+2025-08-20 13:32:49,267 - __main__ - INFO - === 开始事件循环冲突测试 ===
+2025-08-20 13:32:49,268 - __main__ - INFO - 执行订单以测试事件循环冲突...
+2025-08-20 13:32:49,268 - __main__ - INFO - Mock: 返回持仓信息 1 个
+2025-08-20 13:32:49,268 - __main__ - DEBUG - 模拟下单方法被调用: SELL 100 AAPL
+2025-08-20 13:32:49,269 - __main__ - DEBUG - 没有检测到运行中的事件循环
+2025-08-20 13:32:49,269 - __main__ - INFO - Mock: 下单 SELL 100 AAPL
+2025-08-20 13:32:49,269 - __main__ - DEBUG - Mock: 无法获取事件循环: no running event loop
+2025-08-20 13:32:49,269 - __main__ - INFO - Mock: 订单已记录 {'symbol': 'AAPL', 'quantity': 100, 'action': 'SELL', 'timestamp': '2025-08-20T13:32:49.269094', 'status': 'FILLED'}
+2025-08-20 13:32:49,270 - __main__ - INFO - Mock Telegram Alert: 🚨 Stop Loss执行: AAPL @ $145.0, 持仓: 100
+2025-08-20 13:32:49,270 - __main__ - INFO - ✅ 事件循环冲突测试通过
+2025-08-20 13:32:49,271 - __main__ - INFO - === 测试结果总结 ===
+2025-08-20 13:32:49,271 - __main__ - INFO - 完整止损单测试: ❌ 失败
+2025-08-20 13:32:49,271 - __main__ - INFO - 事件循环冲突测试: ✅ 通过
+2025-08-20 13:32:49,271 - __main__ - ERROR - 💥 部分测试失败
+2025-08-20 13:41:03,197 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-08-20 13:41:03,198 - __main__ - INFO - 开始运行完整的止损单测试套件
+2025-08-20 13:41:03,198 - __main__ - INFO - === 开始完整止损单测试 ===
+2025-08-20 13:41:03,198 - __main__ - INFO - 步骤1: 创建模拟组件
+2025-08-20 13:41:03,200 - tzlocal - DEBUG - /etc/localtime found
+2025-08-20 13:41:03,202 - tzlocal - DEBUG - 1 found:
+ {'/etc/localtime is a symlink to': 'Asia/Shanghai'}
+2025-08-20 13:41:03,202 - __main__ - INFO - 步骤2: 创建并激活风险规则
+2025-08-20 13:41:03,203 - __main__ - INFO - 风险规则已添加并激活: AAPL, 成功: True
+2025-08-20 13:41:03,203 - __main__ - INFO - 步骤3: 模拟价格数据触发止损
+2025-08-20 13:41:03,203 - __main__ - INFO - 模拟价格数据: {'symbol': 'AAPL', 'price': 145.0, 'timestamp': '2025-08-20T13:41:03.203346'}
+2025-08-20 13:41:03,203 - __main__ - INFO - 步骤4: 检查风险并执行止损
+2025-08-20 13:41:03,203 - __main__ - ERROR - 测试过程中发生错误: 'RiskManager' object has no attribute 'check_risk'
+2025-08-20 13:41:03,203 - __main__ - ERROR - 错误类型: AttributeError
+2025-08-20 13:41:03,204 - __main__ - ERROR - 错误堆栈: Traceback (most recent call last):
+  File "/Users/chenyu/work/opensource/ibbot/test_comprehensive_stop_loss.py", line 213, in test_comprehensive_stop_loss
+    await risk_manager.check_risk(price_data)
+AttributeError: 'RiskManager' object has no attribute 'check_risk'
+
+2025-08-20 13:41:03,204 - __main__ - INFO - === 开始事件循环冲突测试 ===
+2025-08-20 13:41:03,204 - __main__ - INFO - 执行订单以测试事件循环冲突...
+2025-08-20 13:41:03,204 - __main__ - INFO - Mock: 返回持仓信息 1 个
+2025-08-20 13:41:03,205 - __main__ - DEBUG - 模拟下单方法被调用: SELL 100 AAPL
+2025-08-20 13:41:03,205 - __main__ - DEBUG - 没有检测到运行中的事件循环
+2025-08-20 13:41:03,205 - __main__ - INFO - Mock: 下单 SELL 100 AAPL
+2025-08-20 13:41:03,205 - __main__ - DEBUG - Mock: 无法获取事件循环: no running event loop
+2025-08-20 13:41:03,205 - __main__ - INFO - Mock: 订单已记录 {'symbol': 'AAPL', 'quantity': 100, 'action': 'SELL', 'timestamp': '2025-08-20T13:41:03.205182', 'status': 'FILLED'}
+2025-08-20 13:41:03,205 - __main__ - INFO - Mock Telegram Alert: 🚨 Stop Loss执行: AAPL @ $145.0, 持仓: 100
+2025-08-20 13:41:03,205 - __main__ - INFO - ✅ 事件循环冲突测试通过
+2025-08-20 13:41:03,205 - __main__ - INFO - === 测试结果总结 ===
+2025-08-20 13:41:03,205 - __main__ - INFO - 完整止损单测试: ❌ 失败
+2025-08-20 13:41:03,205 - __main__ - INFO - 事件循环冲突测试: ✅ 通过
+2025-08-20 13:41:03,205 - __main__ - ERROR - 💥 部分测试失败

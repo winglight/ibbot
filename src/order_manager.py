@@ -5,7 +5,7 @@
 
 import sqlite3
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 from enum import Enum
 from loguru import logger
@@ -62,6 +62,8 @@ class Order:
     # 附加字段
     notes: Optional[str] = None
     commission: Optional[float] = None
+    # 新增：软删除标记，防止被 IBKR 同步重新创建
+    is_deleted: int = 0
     
     def __post_init__(self):
         if self.created_at is None:
@@ -75,9 +77,9 @@ class OrderManager:
     
     def __init__(self):
         self.db_manager = get_db_manager()
-        
-        # 内存缓存订单数据
         self.orders: Dict[str, Order] = {}
+        # 新增：记录已软删除的订单ID集合（避免IBKR重新创建）
+        self.deleted_order_ids: set[str] = set()
         
         # 初始化数据库表结构
         self._initialize_database()
@@ -114,9 +116,17 @@ class OrderManager:
                         exchange TEXT DEFAULT 'SMART',
                         sec_type TEXT DEFAULT 'STK',
                         notes TEXT,
-                        commission REAL
+                        commission REAL,
+                        is_deleted INTEGER DEFAULT 0
                     )
                 """)
+                
+                # 兼容老库：缺失 is_deleted 列则补齐
+                cursor.execute("PRAGMA table_info('orders')")
+                cols = [row[1] for row in cursor.fetchall()]
+                if 'is_deleted' not in cols:
+                    cursor.execute("ALTER TABLE orders ADD COLUMN is_deleted INTEGER DEFAULT 0")
+                    logger.info("Added is_deleted column to orders table")
                 
                 # 检查是否需要从 auto_orders 迁移数据
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='auto_orders'")
@@ -166,7 +176,7 @@ class OrderManager:
                     SELECT order_id, symbol, action, quantity, order_type, price,
                            status, created_at, updated_at, executed_at, fill_price,
                            order_source, strategy_name, rule_id, parent_order_id,
-                           exchange, sec_type, notes, commission
+                           exchange, sec_type, notes, commission, is_deleted
                     FROM orders
                     ORDER BY created_at DESC
                 """)
@@ -174,6 +184,10 @@ class OrderManager:
                 rows = cursor.fetchall()
                 
                 for row in rows:
+                    if row[19]:
+                        # 软删除的订单，记录其ID用于去重，避免IBKR重新创建
+                        self.deleted_order_ids.add(row[0])
+                        continue
                     order = Order(
                         order_id=row[0],
                         symbol=row[1],
@@ -193,7 +207,8 @@ class OrderManager:
                         exchange=row[15] or "SMART",
                         sec_type=row[16] or "STK",
                         notes=row[17],
-                        commission=row[18]
+                        commission=row[18],
+                        is_deleted=0
                     )
                     self.orders[order.order_id] = order
                 
@@ -424,8 +439,8 @@ class OrderManager:
                         order_id, symbol, action, quantity, order_type, price,
                         status, created_at, updated_at, executed_at, fill_price,
                         order_source, strategy_name, rule_id, parent_order_id,
-                        exchange, sec_type, notes, commission
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        exchange, sec_type, notes, commission, is_deleted
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     order.order_id, order.symbol, order.action, order.quantity,
                     order.order_type, order.price, order.status,
@@ -433,7 +448,7 @@ class OrderManager:
                     order.executed_at.isoformat() if order.executed_at else None,
                     order.fill_price, order.order_source, order.strategy_name,
                     order.rule_id, order.parent_order_id, order.exchange,
-                    order.sec_type, order.notes, order.commission
+                    order.sec_type, order.notes, order.commission, order.is_deleted
                 ))
                 conn.commit()
                 
@@ -451,7 +466,7 @@ class OrderManager:
                         symbol = ?, action = ?, quantity = ?, order_type = ?, price = ?,
                         status = ?, updated_at = ?, executed_at = ?, fill_price = ?,
                         order_source = ?, strategy_name = ?, rule_id = ?, parent_order_id = ?,
-                        exchange = ?, sec_type = ?, notes = ?, commission = ?
+                        exchange = ?, sec_type = ?, notes = ?, commission = ?, is_deleted = ?
                     WHERE order_id = ?
                 """, (
                     order.symbol, order.action, order.quantity, order.order_type, order.price,
@@ -459,7 +474,7 @@ class OrderManager:
                     order.executed_at.isoformat() if order.executed_at else None,
                     order.fill_price, order.order_source, order.strategy_name,
                     order.rule_id, order.parent_order_id, order.exchange,
-                    order.sec_type, order.notes, order.commission, order.order_id
+                    order.sec_type, order.notes, order.commission, order.is_deleted, order.order_id
                 ))
                 conn.commit()
                 
@@ -494,34 +509,76 @@ class OrderManager:
         }
 
     def cleanup_old_orders(self, days: int = 30):
-        """清理超过指定天数的已完成订单"""
+        """清理超过指定天数的已完成订单（软删除）"""
         try:
             cutoff_date = datetime.now() - timedelta(days=days)
             
-            orders_to_remove = []
-            for order_id, order in self.orders.items():
-                if (order.status in [OrderStatus.FILLED.value, OrderStatus.CANCELLED.value, OrderStatus.REJECTED.value] 
-                    and order.updated_at < cutoff_date):
-                    orders_to_remove.append(order_id)
+            orders_to_mark = []
+            # 标记内存中的旧订单并记录
+            for order_id, order in list(self.orders.items()):
+                if (
+                    order.status in [OrderStatus.FILLED.value, OrderStatus.CANCELLED.value, OrderStatus.REJECTED.value]
+                    and order.updated_at < cutoff_date
+                ):
+                    order.is_deleted = 1
+                    order.updated_at = datetime.now()
+                    orders_to_mark.append(order_id)
+                    # 从内存活动字典移除
+                    del self.orders[order_id]
+                    # 记录进已删除集合以防止重新同步
+                    self.deleted_order_ids.add(order_id)
             
-            # 从内存中移除
-            for order_id in orders_to_remove:
-                del self.orders[order_id]
-            
-            # 从数据库中删除
-            if orders_to_remove:
+            # 批量更新数据库为软删除
+            if orders_to_mark:
                 with sqlite3.connect(self.db_manager.db_path) as conn:
                     cursor = conn.cursor()
-                    placeholders = ','.join(['?'] * len(orders_to_remove))
-                    cursor.execute(f"""
-                        DELETE FROM orders 
+                    placeholders = ','.join(['?'] * len(orders_to_mark))
+                    now_iso = datetime.now().isoformat()
+                    cursor.execute(
+                        f"""
+                        UPDATE orders
+                        SET is_deleted = 1, updated_at = ?
                         WHERE order_id IN ({placeholders})
                         AND status IN ('Filled', 'Cancelled', 'Rejected')
                         AND updated_at < ?
-                    """, orders_to_remove + [cutoff_date.isoformat()])
+                        """,
+                        [now_iso, *orders_to_mark, cutoff_date.isoformat()]
+                    )
                     conn.commit()
                 
-                logger.info(f"Cleaned up {len(orders_to_remove)} old orders")
+                logger.info(f"Soft-deleted {len(orders_to_mark)} old orders")
                 
         except Exception as e:
             logger.error(f"Error cleaning up old orders: {e}")
+
+    def mark_order_deleted(self, order_id: str) -> bool:
+        """软删除订单，防止被IBKR重新同步创建"""
+        try:
+            now = datetime.now()
+            if order_id in self.orders:
+                order = self.orders[order_id]
+                order.is_deleted = 1
+                order.updated_at = now
+                self._update_order_in_database(order)
+                del self.orders[order_id]
+            else:
+                # 仅数据库存在的记录，直接执行 UPDATE，避免覆盖其他字段
+                with sqlite3.connect(self.db_manager.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE orders SET is_deleted = 1, updated_at = ? WHERE order_id = ?",
+                        (now.isoformat(), order_id)
+                    )
+                    conn.commit()
+            
+            # 记录到已删除集合，防止 IBKR 重新同步
+            self.deleted_order_ids.add(order_id)
+            logger.info(f"🗑️ 订单软删除: {order_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error soft-deleting order {order_id}: {e}")
+            return False
+
+    def was_order_deleted(self, order_id: str) -> bool:
+        """查询订单是否曾被标记为删除（避免IBKR重新创建）"""
+        return order_id in self.deleted_order_ids

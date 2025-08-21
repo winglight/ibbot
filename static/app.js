@@ -455,6 +455,16 @@ class TradingApp {
                 this.loadOrders();
                 this.showAlert('success', 'Order updated successfully');
                 break;
+            case 'account_update':
+                if (data.account_info) {
+                    this.updateAccountInfoUI(data.account_info);
+                }
+                break;
+            case 'positions_update':
+                if (data.positions) {
+                    this.updatePositionsUI(data.positions);
+                }
+                break;
             default:
                 console.log('Unknown WebSocket message:', data);
         }
@@ -602,6 +612,9 @@ class TradingApp {
 
     async checkConnectionStatus() {
         try {
+            // 未登录则跳过，避免产生401以及触发登录弹窗循环
+            const token = localStorage.getItem('access_token');
+            if (!token) return;
             const data = await this.apiCall('/connection_status');
             this.updateConnectionStatus(data.connected, data.account_type);
             
@@ -667,6 +680,59 @@ class TradingApp {
             `;
         } catch (error) {
             console.error('Failed to load account info:', error);
+        }
+    }
+
+    updateAccountInfoUI(info) {
+        try {
+            const accountInfoDiv = document.getElementById('accountInfo');
+            if (!accountInfoDiv) return;
+            accountInfoDiv.innerHTML = `
+                <div class="row">
+                    <div class="col-md-6">
+                        <p><strong>Account ID:</strong> ${info.account_id || 'N/A'}</p>
+                        <p><strong>Account Type:</strong> ${info.account_type}</p>
+                        <p><strong>Net Liquidation:</strong> $${this.formatNumber(info.net_liquidation)}</p>
+                    </div>
+                    <div class="col-md-6">
+                        <p><strong>Available Funds:</strong> $${this.formatNumber(info.available_funds)}</p>
+                        <p><strong>Buying Power:</strong> $${this.formatNumber(info.buying_power)}</p>
+                        <p class="${info.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
+                            <strong>Unrealized P&L:</strong> $${this.formatNumber(info.unrealized_pnl)}
+                        </p>
+                    </div>
+                </div>
+            `;
+        } catch (e) {
+            console.error('updateAccountInfoUI failed', e);
+        }
+    }
+
+    updatePositionsUI(positions) {
+        try {
+            const tbody = document.querySelector('#positionsTable tbody');
+            if (!tbody) return;
+            tbody.innerHTML = positions.map(pos => `
+                <tr>
+                    <td>${pos.symbol}</td>
+                    <td>${pos.position}</td>
+                    <td>$${this.formatNumber(pos.avg_cost)}</td>
+                    <td>$${this.formatNumber(pos.current_price)}</td>
+                    <td class="${pos.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
+                        $${this.formatNumber(pos.unrealized_pnl)}
+                    </td>
+                    <td class="${pos.unrealized_pnl_percent >= 0 ? 'profit' : 'loss'}">
+                        ${this.formatNumber(pos.unrealized_pnl_percent)}%
+                    </td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-primary" onclick="app.editPositionRiskRule('${pos.symbol}', ${pos.current_price}, ${pos.avg_cost}, ${pos.position})" title="Set TP/SL">
+                            <i class="fas fa-shield-alt"></i>
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        } catch (e) {
+            console.error('updatePositionsUI failed', e);
         }
     }
 

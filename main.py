@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depe
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 from jose import JWTError, jwt
 import httpx
@@ -55,6 +56,8 @@ app = FastAPI(title="IBKR Trading Bot", version="1.0.0")
 MOCK_HOST = os.getenv('MOCK_HOST', '127.0.0.1')
 MOCK_PORT = int(os.getenv('MOCK_PORT', '18080'))
 MOCK_BASE = f"http://{MOCK_HOST}:{MOCK_PORT}/api"
+# 优化：可配置的PnL广播间隔（秒），默认5秒
+PNL_BROADCAST_INTERVAL_SEC = int(os.getenv('PNL_BROADCAST_INTERVAL_SEC', '5'))
 
 def is_mock_mode() -> bool:
     try:
@@ -75,6 +78,193 @@ async def index_page():
         # 若前端文件缺失，返回简单提示
         return HTMLResponse("<h3>Front-end index.html not found under /static</h3>", status_code=500)
     return FileResponse(str(index_path))
+
+# RapiDoc for main service
+@app.get("/api-docs.json", include_in_schema=False)
+async def get_api_docs_main():
+    return JSONResponse(app.openapi())
+
+@app.get("/rapidoc", response_class=HTMLResponse, include_in_schema=False)
+async def rapidoc_html_main():
+    return HTMLResponse(
+        """
+        <!doctype html>
+        <html>
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>IBKR Trading Bot API - RapiDoc</title>
+            <script type="module" src="https://unpkg.com/rapidoc/dist/rapidoc-min.js"></script>
+            <style>
+              body { margin: 0; padding: 0; }
+              #paste-last { position: fixed; right: 16px; top: 12px; z-index: 9999; }
+            </style>
+            <script>
+              const STORAGE_KEY = 'rapidoc:lastRequestBody';
+              window.addEventListener('DOMContentLoaded', () => {
+                const rd = document.querySelector('rapi-doc');
+                if (!rd) return;
+                rd.addEventListener('before-try', (e) => {
+                  try {
+                    const body = e?.detail?.requestBody;
+                    if (body) localStorage.setItem(STORAGE_KEY, JSON.stringify(body, null, 2));
+                  } catch (_) {}
+                });
+              });
+            </script>
+          </head>
+          <body>
+            <button id="paste-last">复制上次请求体</button>
+            <script>
+              document.getElementById('paste-last').addEventListener('click', () => {
+                const cache = localStorage.getItem('rapidoc:lastRequestBody');
+                if (cache) {
+                  navigator.clipboard.writeText(cache).then(()=>alert('已复制到剪贴板')).catch(()=>alert('复制失败，请手动复制'));
+                } else {
+                  alert('暂无缓存的请求体');
+                }
+              });
+            </script>
+            <rapi-doc
+              spec-url="/api-docs.json"
+              render-style="read"
+              show-header="true"
+              allow-try="true"
+              theme="light"
+              primary-color="#0d6efd"
+              nav-bg-color="#f8f9fa"
+              regular-font="Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, Apple Color Emoji, Segoe UI Emoji">
+            </rapi-doc>
+          </body>
+        </html>
+        """,
+        status_code=200,
+    )
+
+# 自定义 OpenAPI：为 /api/mock/* 设置独立 servers，并按“主服务/Mock 网关”分组
+
+def _ensure_tag(tags_list, name: str, description: str):
+    if not any(t.get("name") == name for t in tags_list):
+        tags_list.append({"name": name, "description": description})
+
+
+def custom_openapi():
+    if getattr(app, "openapi_schema", None):
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description="IBKR Trading Bot API",
+        routes=app.routes,
+    )
+
+    # 顶层服务器（主服务）
+    main_host = os.getenv("WEB_HOST", "127.0.0.1")
+    main_port = os.getenv("WEB_PORT", "8000")
+    schema["servers"] = [{"url": f"http://{main_host}:{main_port}"}]
+
+    # 确保 OpenAPI 中包含安全方案，以便 RapiDoc 提供 Authentication 设置
+    components = schema.setdefault("components", {})
+    security_schemes = components.setdefault("securitySchemes", {})
+    if "bearerAuth" not in security_schemes:
+        security_schemes["bearerAuth"] = {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "JWT 令牌，形如：Bearer eyJhbGciOi..."
+        }
+    if "strategyToken" not in security_schemes:
+        security_schemes["strategyToken"] = {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Strategy-Token",
+            "description": "策略侧可选令牌，可与 Authorization 并存"
+        }
+
+    # Tag 分组
+    schema.setdefault("tags", [])
+    _ensure_tag(schema["tags"], "主服务", "主服务 API")
+    _ensure_tag(schema["tags"], "Mock 网关", "Mock 网关 API")
+
+    # 设置全局默认安全要求（如需取消，可在具体 operation 设置 security: []）
+    if not schema.get("security"):
+        schema["security"] = [{"bearerAuth": []}]
+
+    # 为 /api/mock/* 设置 per-operation servers，并分配 Tag
+    # 特殊处理：trigger_strategy 属于主服务，不应指向 mock 地址
+    for path, methods in list(schema.get("paths", {}).items()):
+        is_mock = path.startswith("/api/mock/") and path != "/api/mock/trigger_strategy"
+        for method, op in list(methods.items()):
+            if method.lower() not in {"get", "post", "put", "delete", "patch", "options", "head"}:
+                continue
+            op.setdefault("tags", [])
+            if is_mock:
+                if "Mock 网关" not in op["tags"]:
+                    op["tags"].append("Mock 网关")
+                op["servers"] = [{"url": f"http://{MOCK_HOST}:{MOCK_PORT}"}]
+                # Mock 接口默认不要求认证
+                op["security"] = []
+                # 注入更有意义的示例
+                if method.lower() == "post" and path in {"/api/mock/set_price", "/api/mock/feed_data", "/api/mock/reset"}:
+                    op.setdefault("requestBody", {}).setdefault("content", {}).setdefault("application/json", {}).setdefault("examples", {})
+                    examples = op["requestBody"]["content"]["application/json"]["examples"]
+                    if path == "/api/mock/set_price":
+                        examples.update({
+                            "mnq_set_price": {
+                                "summary": "设置 MNQ 价格",
+                                "value": {"symbol": "MNQ", "price": 18000.5}
+                            }
+                        })
+                    elif path == "/api/mock/feed_data":
+                        examples.update({
+                            "mnq_feed_1d": {
+                                "summary": "推送 MNQ 1D/5mins 数据，200ms 间隔",
+                                "value": {"symbol": "MNQ", "duration": "1 D", "bar_size": "5 mins", "delay_ms": 200}
+                            }
+                        })
+            else:
+                if "主服务" not in op["tags"]:
+                    op["tags"].append("主服务")
+                # 为 trigger_strategy 注入示例
+                if path == "/api/mock/trigger_strategy" and method.lower() == "post":
+                    op.setdefault("requestBody", {}).setdefault("content", {}).setdefault("application/json", {}).setdefault("examples", {})
+                    op["requestBody"]["content"]["application/json"]["examples"].update({
+                        "market_buy_mnq": {
+                            "summary": "Buy down and Sell open 在 MNQ 上市价买 1 手",
+                            "value": {
+                                "strategy": "Buy down and Sell open",
+                                "symbol": "MNQ",
+                                "action": "BUY",
+                                "qty": 1,
+                                "type": "MARKET",
+                                "price": None,
+                                "set_price": False,
+                                "exchange": "SMART",
+                                "sec_type": "FUT"
+                            }
+                        },
+                        "limit_buy_mnq": {
+                            "summary": "Buy the Dip Strategy 在 MNQ 上挂 17950 的限价买 1 手（先设置价格）",
+                            "value": {
+                                "strategy": "Buy the Dip Strategy",
+                                "symbol": "MNQ",
+                                "action": "BUY",
+                                "qty": 1,
+                                "type": "LIMIT",
+                                "price": 17950,
+                                "set_price": True,
+                                "exchange": "SMART",
+                                "sec_type": "FUT"
+                            }
+                        }
+                    })
+
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+# 覆盖默认 openapi 生成器
+app.openapi = custom_openapi
 
 # Auth config
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
@@ -239,6 +429,131 @@ except Exception as _sm_dep_err:
     logger.warning(f"StrategyManager set_dependencies at startup failed: {_sm_dep_err}")
 websocket_connections = []
 order_manager = OrderManager()
+# 注入 OrderManager 到 RiskManager（用于软删除等操作）
+try:
+    risk_manager.set_dependencies(order_manager=order_manager)
+except Exception as _rm_dep_err:
+    logger.warning(f"RiskManager set_dependencies at startup failed: {_rm_dep_err}")
+
+# 添加：全局任务引用用于定期广播账户与持仓（实时PnL展示）
+pnl_broadcast_task = None
+
+# 添加：定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
+async def _pnl_broadcast_loop():
+    try:
+        while True:
+            await asyncio.sleep(PNL_BROADCAST_INTERVAL_SEC)
+            # 若没有活跃的WebSocket连接，跳过数据拉取与广播，降低负载
+            if not websocket_manager.connections:
+                continue
+            try:
+                if is_mock_mode():
+                    # 从模拟服务器获取数据并广播
+                    async with httpx.AsyncClient() as client:
+                        account_info = None
+                        positions = None
+                        try:
+                            resp_ai = await client.get(f"{MOCK_BASE}/account_info")
+                            if resp_ai.status_code == 200:
+                                data_ai = resp_ai.json()
+                                account_info = data_ai.get("account_info") or data_ai
+                        except Exception:
+                            account_info = None
+                        try:
+                            resp_pos = await client.get(f"{MOCK_BASE}/positions")
+                            if resp_pos.status_code == 200:
+                                data_pos = resp_pos.json()
+                                positions = data_pos.get("positions") or data_pos
+                        except Exception:
+                            positions = None
+                        if account_info is not None:
+                            await websocket_manager.broadcast({
+                                "type": "account_update",
+                                "account_info": account_info
+                            })
+                        if positions is not None:
+                            await websocket_manager.broadcast({
+                                "type": "positions_update",
+                                "positions": positions
+                            })
+                else:
+                    # 仅在已连接且 ibkr_client 可用时运行
+                    if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
+                        continue
+                    loop = asyncio.get_event_loop()
+                    account_info = None
+                    positions = None
+                    try:
+                        account_info = await asyncio.wait_for(
+                            loop.run_in_executor(None, ibkr_client.get_account_info),
+                            timeout=5.0
+                        )
+                    except Exception:
+                        account_info = None
+                    try:
+                        positions = await asyncio.wait_for(
+                            loop.run_in_executor(None, lambda: ibkr_client.get_positions(fast=True)),
+                            timeout=5.0
+                        )
+                    except Exception:
+                        positions = None
+                    if account_info is not None:
+                        await websocket_manager.broadcast({
+                            "type": "account_update",
+                            "account_info": account_info
+                        })
+                    if positions is not None:
+                        await websocket_manager.broadcast({
+                            "type": "positions_update",
+                            "positions": positions
+                        })
+            except Exception as be:
+                logger.debug(f"PnL broadcast iteration error: {be}")
+    except asyncio.CancelledError:
+        # 任务被取消时正常退出
+        pass
+    except Exception as e:
+        logger.warning(f"PnL broadcast loop error: {e}")
+
+# FastAPI 启动和关闭事件
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时的初始化"""
+    try:
+        # 在事件循环中启动 risk_manager
+        risk_manager.start()
+        logger.info("Risk manager started during application startup")
+    except Exception as e:
+        logger.warning(f"Risk manager startup warning: {e}")
+
+    # 启动定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
+    try:
+        global pnl_broadcast_task
+        if pnl_broadcast_task is None:
+            pnl_broadcast_task = asyncio.create_task(_pnl_broadcast_loop())
+            logger.info("Started PnL broadcast loop task")
+    except Exception as e:
+        logger.warning(f"Failed to start PnL broadcast loop: {e}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时的清理"""
+    try:
+        if hasattr(risk_manager, 'scheduler') and risk_manager.scheduler.running:
+            risk_manager.scheduler.shutdown()
+            logger.info("Risk manager scheduler shutdown")
+    except Exception as e:
+        logger.warning(f"Risk manager shutdown warning: {e}")
+
+    # 关闭PnL广播任务
+    try:
+        global pnl_broadcast_task
+        if pnl_broadcast_task is not None and not pnl_broadcast_task.done():
+            pnl_broadcast_task.cancel()
+            pnl_broadcast_task = None
+            logger.info("Stopped PnL broadcast loop task")
+    except Exception as e:
+        logger.warning(f"Failed to stop PnL broadcast loop: {e}")
 
 # 在应用启动时注入依赖（即使部分为None，也可在连接后更新）
 try:
@@ -300,8 +615,19 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
         
         # 正常IBKR连接流程
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: connection_manager.disconnect())
-        success = await loop.run_in_executor(None, lambda: connection_manager.connect())
+        try:
+            # 添加超时机制避免无限期阻塞
+            await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: connection_manager.disconnect()),
+                timeout=15.0
+            )
+            success = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: connection_manager.connect()),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            logger.error("Connection operation timed out")
+            raise HTTPException(status_code=408, detail="Connection operation timed out")
         
         if success:
             # 建立/更新 ibkr_client 引用
@@ -313,10 +639,14 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
             # 更新 risk_manager 的 ibkr_client（RiskManager 依赖 ibkr_client）
             try:
                 risk_manager.ibkr_client = ibkr_client_local
-                # 风险管理启动
-                risk_manager.start()
+                # 确保 RiskManager 已注入 OrderManager 引用
+                try:
+                    risk_manager.set_dependencies(order_manager=order_manager)
+                except Exception as _rm_dep_err:
+                    logger.warning(f"RiskManager set_dependencies after connect failed: {_rm_dep_err}")
+                logger.info("Risk manager ibkr_client updated after connection")
             except Exception as re_err:
-                logger.warning(f"RiskManager start warning: {re_err}")
+                logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
             
             # 将 ibkr_client 注入到队列管理器
             try:
@@ -434,15 +764,22 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
     try:
         # Run in executor to avoid blocking event loop
         loop = asyncio.get_event_loop()
-        df = await loop.run_in_executor(
-            None, 
-            lambda: ibkr_client.get_historical_data(
-                symbol=request.symbol,
-                duration=request.duration,
-                bar_size=request.bar_size,
-                exchange=request.exchange
+        try:
+            df = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, 
+                    lambda: ibkr_client.get_historical_data(
+                        symbol=request.symbol,
+                        duration=request.duration,
+                        bar_size=request.bar_size,
+                        exchange=request.exchange
+                    )
+                ),
+                timeout=30.0  # 30-second timeout for historical data
             )
-        )
+        except asyncio.TimeoutError:
+            logger.error(f"Historical data request timed out for {request.symbol}")
+            raise HTTPException(status_code=408, detail="Historical data request timed out")
         
         if df.empty:
             raise HTTPException(status_code=404, detail="No data found")
@@ -504,15 +841,22 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
     try:
         # Run in executor to avoid blocking event loop
         loop = asyncio.get_event_loop()
-        df = await loop.run_in_executor(
-            None,
-            lambda: ibkr_client.get_historical_data(
-                symbol=request.symbol,
-                duration=request.duration,
-                bar_size=request.bar_size,
-                exchange=request.exchange
+        try:
+            df = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: ibkr_client.get_historical_data(
+                        symbol=request.symbol,
+                        duration=request.duration,
+                        bar_size=request.bar_size,
+                        exchange=request.exchange
+                    )
+                ),
+                timeout=30.0  # 30-second timeout for chart data
             )
-        )
+        except asyncio.TimeoutError:
+            logger.error(f"Chart data request timed out for {request.symbol}")
+            raise HTTPException(status_code=408, detail="Chart data request timed out")
         
         if df.empty:
             raise HTTPException(status_code=404, detail="No chart data found")
@@ -665,33 +1009,25 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        # Run blocking order placement in executor
-        loop = asyncio.get_event_loop()
-        
+        # 直接调用下单方法，避免嵌套的事件循环调用
         if order.order_type.upper() == "MARKET":
-            trade = await loop.run_in_executor(
-                None,
-                lambda: ibkr_client.place_market_order(
-                    symbol=order.symbol,
-                    quantity=order.quantity,
-                    action=order.action,
-                    exchange=order.exchange,
-                    sec_type=order.sec_type
-                )
+            trade = ibkr_client.place_market_order(
+                symbol=order.symbol,
+                quantity=order.quantity,
+                action=order.action,
+                exchange=order.exchange,
+                sec_type=order.sec_type
             )
         elif order.order_type.upper() == "LIMIT":
             if not order.price:
                 raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = await loop.run_in_executor(
-                None,
-                lambda: ibkr_client.place_limit_order(
-                    symbol=order.symbol,
-                    quantity=order.quantity,
-                    price=order.price,
-                    action=order.action,
-                    exchange=order.exchange,
-                    sec_type=order.sec_type
-                )
+            trade = ibkr_client.place_limit_order(
+                symbol=order.symbol,
+                quantity=order.quantity,
+                price=order.price,
+                action=order.action,
+                exchange=order.exchange,
+                sec_type=order.sec_type
             )
         else:
             raise HTTPException(status_code=400, detail="Invalid order type")
@@ -762,11 +1098,8 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
     
     try:
         # Run in executor to avoid blocking event loop
-        loop = asyncio.get_event_loop()
-        success, message = await loop.run_in_executor(
-            None,
-            lambda: ibkr_client.cancel_order(order_id)
-        )
+        # 直接调用取消订单方法，避免嵌套的事件循环调用
+        success, message = ibkr_client.cancel_order(order_id)
         
         if success:
             # 更新 OrderManager 本地状态
@@ -825,10 +1158,17 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
             
         # Run in executor to avoid blocking event loop
         loop = asyncio.get_event_loop()
-        success, message = await loop.run_in_executor(
-            None,
-            lambda: ibkr_client.cancel_order(int(order_id))
-        )
+        try:
+            success, message = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: ibkr_client.cancel_order(int(order_id))
+                ),
+                timeout=20.0  # 20-second timeout for order cancellation
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Order cancellation timed out for order {order_id}")
+            return {"success": False, "error": "Order cancellation timed out"}
         
         if success:
             # 更新 OrderManager 本地状态
@@ -874,12 +1214,8 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        # Run in executor to avoid blocking event loop
-        loop = asyncio.get_event_loop()
-        cancelled_count = await loop.run_in_executor(
-            None,
-            ibkr_client.cancel_all_orders
-        )
+        # 直接调用取消所有订单方法，避免嵌套的事件循环调用
+        cancelled_count = ibkr_client.cancel_all_orders()
         
         await websocket_manager.broadcast({  # 替换 manager
             "type": "all_orders_cancelled",
@@ -1028,12 +1364,14 @@ async def get_account_info(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/positions")
-async def get_positions(user: Optional[str] = Depends(get_current_user)):
-    """获取持仓列表"""
+async def get_positions(user: Optional[str] = Depends(get_current_user), fast: bool = True):
+    """获取持仓列表
+    - fast: 是否启用快速模式（默认 True）。快速模式下跳过实时价格抓取，使用缓存/最近价格以提升响应速度。
+    """
     if is_mock_mode():
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(f"{MOCK_BASE}/positions")
+                response = await client.get(f"{MOCK_BASE}/positions", params={"fast": fast})
                 if response.status_code == 200:
                     return response.json()
                 else:
@@ -1050,7 +1388,7 @@ async def get_positions(user: Optional[str] = Depends(get_current_user)):
         loop = asyncio.get_event_loop()
         try:
             positions = await asyncio.wait_for(
-                loop.run_in_executor(None, ibkr_client.get_positions),
+                loop.run_in_executor(None, lambda: ibkr_client.get_positions(fast=fast)),
                 timeout=10.0  # 10-second timeout
             )
         except asyncio.TimeoutError:
@@ -1396,6 +1734,34 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
 
 # 新增：Mock端点 - 手动触发策略（仅Mock模式）
 class MockTriggerRequest(BaseModel):
+    """在 Mock 模式下手动触发内部策略执行的请求体
+    
+    示例1：以 Buy down and Sell open 策略在 MNQ 上买入 1 手市价单
+    {
+      "strategy": "Buy down and Sell open",
+      "symbol": "MNQ",
+      "action": "BUY",
+      "qty": 1,
+      "type": "MARKET",
+      "price": null,
+      "set_price": false,
+      "exchange": "SMART",
+      "sec_type": "FUT"
+    }
+    
+    示例2：以 Buy the Dip Strategy 在 MNQ 上挂 17950 的限价买入 1 手，并先设置价格
+    {
+      "strategy": "Buy the Dip Strategy",
+      "symbol": "MNQ",
+      "action": "BUY",
+      "qty": 1,
+      "type": "LIMIT",
+      "price": 17950,
+      "set_price": true,
+      "exchange": "SMART",
+      "sec_type": "FUT"
+    }
+    """
     strategy: str
     symbol: str
     action: str  # BUY, SELL
@@ -1408,9 +1774,18 @@ class MockTriggerRequest(BaseModel):
 
 @app.post("/api/mock/trigger_strategy")
 async def mock_trigger_strategy(payload: MockTriggerRequest, user: Optional[str] = Depends(get_current_user)):
-    """在Mock模式下手动触发内部策略执行：
-    - 可选：若提供price且set_price=True，先调用Mock网关设置最新价
+    """在 Mock 模式下手动触发内部策略执行
+    - 可选：若提供 price 且 set_price=True，先调用 Mock 网关设置最新价
     - 然后将任务加入与外部策略一致的队列，异步处理下单
+    
+    成功返回示例：
+    {
+      "success": true,
+      "task_id": "abc123",
+      "message": "Mock trigger queued for processing",
+      "status": "queued",
+      "mock_price_set": true
+    }
     """
     # 仅在Mock模式下可用
     if not is_mock_mode():
@@ -1568,6 +1943,32 @@ def main():
                 logger.info("You can connect later through the web interface.")
             else:
                 logger.info("IBKR auto-connection successful!")
+                # Initialize ibkr_client when auto-connect succeeds
+                global ibkr_client
+                if ibkr_client is None:
+                    ibkr_client = IBKRClient()
+                    logger.info("IBKRClient initialized after auto-connect")
+                    
+                    # Update risk_manager with ibkr_client
+                    try:
+                        risk_manager.ibkr_client = ibkr_client
+                        logger.info("Risk manager ibkr_client updated with auto-connected client")
+                    except Exception as re_err:
+                        logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
+                    
+                    # Update queue_manager dependencies
+                    try:
+                        queue_manager.set_dependencies(
+                            ibkr_client=ibkr_client,
+                            risk_manager=risk_manager,
+                            strategy_manager=strategy_manager,
+                            connection_manager=connection_manager,
+                            websocket_manager=websocket_manager,
+                            order_manager=order_manager
+                        )
+                        logger.info("Queue manager dependencies updated after auto-connect")
+                    except Exception as dep_err:
+                        logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
         except Exception as e:
             logger.warning(f"Auto-connection failed: {e}")
             logger.info("You can connect later through the web interface.")

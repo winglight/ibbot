@@ -79,7 +79,10 @@ class RiskManager:
         
         # 调度器
         self.scheduler = AsyncIOScheduler()
-        
+
+        # 组件依赖
+        self.order_manager = None
+
         # 监控状态
         self.monitoring_active = False
         
@@ -189,53 +192,72 @@ class RiskManager:
     def start(self):
         """启动风险管理器"""
         try:
-            # 启动调度器
-            if not self.scheduler.running:
-                self.scheduler.start()
-                logger.info("Risk manager scheduler started")
-            
-            # 添加监控任务
-            self.scheduler.add_job(
-                self._monitor_positions,
-                'interval',
-                seconds=15,  # 从30秒改为15秒，提高检查频率
-                id='position_monitor',
-                replace_existing=True,
-                coalesce=True,
-                misfire_grace_time=10,
-                max_instances=1
-            )
-            
-            # 添加处理订单队列任务
-            self.scheduler.add_job(
-                self.process_pending_orders,
-                'interval',
-                seconds=5,
-                id='order_processor',
-                replace_existing=True,
-                coalesce=True,
-                misfire_grace_time=10,
-                max_instances=1
-            )
-            
-            # 添加每日汇总任务（每天早上9点）
-            self.scheduler.add_job(
-                self._send_daily_summary,
-                'cron',
-                hour=9,
-                minute=0,
-                id='daily_summary',
-                replace_existing=True,
-                coalesce=True,
-                misfire_grace_time=60,
-                max_instances=1
-            )
+            # 检查是否有运行的事件循环
+            try:
+                loop = asyncio.get_running_loop()
+                # 如果有运行的事件循环，直接启动调度器
+                self._start_scheduler()
+            except RuntimeError:
+                # 没有运行的事件循环，创建一个新的事件循环来启动调度器
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    self._start_scheduler()
+                except Exception as e:
+                    logger.warning(f"无法启动异步调度器: {e}，将使用简化模式")
+                    self.monitoring_active = True
+                    logger.info("Risk manager started in simplified mode")
+                    return
             
             self.monitoring_active = True
             logger.info("Risk monitoring started successfully")
             
         except Exception as e:
             logger.error(f"Error starting risk manager: {e}")
+    
+    def _start_scheduler(self):
+        """启动调度器和添加任务"""
+        # 启动调度器
+        if not self.scheduler.running:
+            self.scheduler.start()
+            logger.info("Risk manager scheduler started")
+        
+        # 添加监控任务
+        self.scheduler.add_job(
+            self._monitor_positions,
+            'interval',
+            seconds=15,  # 从30秒改为15秒，提高检查频率
+            id='position_monitor',
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=10,
+            max_instances=1
+        )
+        
+        # 添加处理订单队列任务
+        self.scheduler.add_job(
+            self.process_pending_orders,
+            'interval',
+            seconds=5,
+            id='order_processor',
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=10,
+            max_instances=1
+        )
+        
+        # 添加每日汇总任务（每天早上9点）
+        self.scheduler.add_job(
+            self._send_daily_summary,
+            'cron',
+            hour=9,
+            minute=0,
+            id='daily_summary',
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=60,
+            max_instances=1
+        )
 
     def stop(self):
         """停止风险管理器"""
@@ -491,6 +513,7 @@ class RiskManager:
                 logger.info(f"Price close to take profit for {symbol}, placing limit order")
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
+                    # 直接调用下单方法，避免嵌套的事件循环调用
                     trade = self.ibkr_client.place_limit_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
@@ -521,19 +544,7 @@ class RiskManager:
                         self.save_auto_order_to_db(auto_order)
                         
                         logger.info(f"✅ Limit order placed for take profit: {symbol} at ${rule.take_profit_price:.2f}")
-                        
-                        # 下单后禁用该规则并持久化，避免重复触发
-                        rule.enabled = False
-                        db_rule = DatabaseRiskRule(
-                            symbol=rule.symbol,
-                            stop_loss_price=rule.stop_loss_price,
-                            take_profit_price=rule.take_profit_price,
-                            max_loss_percent=rule.max_loss_percent,
-                            enabled=rule.enabled,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
-                        )
-                        self.db_manager.save_risk_rule(db_rule)
-                        logger.info(f"Take profit limit order queued for {symbol}, rule disabled")
+                        logger.info(f"Take profit limit order successfully placed for {symbol}, rule remains active")
                         
                         # Send notification
                         await self.telegram_notifier.send_message(
@@ -545,8 +556,32 @@ class RiskManager:
                         )
                     else:
                         logger.warning(f"Failed to place take profit limit order for {symbol}")
+                        # 下单失败时禁用规则
+                        rule.enabled = False
+                        db_rule = DatabaseRiskRule(
+                            symbol=rule.symbol,
+                            stop_loss_price=rule.stop_loss_price,
+                            take_profit_price=rule.take_profit_price,
+                            max_loss_percent=rule.max_loss_percent,
+                            enabled=rule.enabled,
+                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        )
+                        self.db_manager.save_risk_rule(db_rule)
+                        logger.info(f"Take profit rule disabled due to order failure for {symbol}")
                 except Exception as e:
                     logger.error(f"Failed to place take profit limit order for {symbol}: {e}")
+                    # 下单异常时禁用规则
+                    rule.enabled = False
+                    db_rule = DatabaseRiskRule(
+                        symbol=rule.symbol,
+                        stop_loss_price=rule.stop_loss_price,
+                        take_profit_price=rule.take_profit_price,
+                        max_loss_percent=rule.max_loss_percent,
+                        enabled=rule.enabled,
+                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    )
+                    self.db_manager.save_risk_rule(db_rule)
+                    logger.info(f"Take profit rule disabled due to exception for {symbol}")
             
             # If price has reached take profit, execute market order
             if current_price >= rule.take_profit_price:
@@ -594,6 +629,7 @@ class RiskManager:
                 logger.info(f"Price close to stop loss for {symbol}, placing limit order")
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
+                    # 直接调用下单方法，避免嵌套的事件循环调用
                     trade = self.ibkr_client.place_limit_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
@@ -623,19 +659,7 @@ class RiskManager:
                         self.save_auto_order_to_db(auto_order)
                         
                         logger.info(f"✅ Limit order placed for stop loss: {symbol} at ${rule.stop_loss_price:.2f}")
-                        
-                        # 下单后禁用该规则并持久化，避免重复触发
-                        rule.enabled = False
-                        db_rule = DatabaseRiskRule(
-                            symbol=rule.symbol,
-                            stop_loss_price=rule.stop_loss_price,
-                            take_profit_price=rule.take_profit_price,
-                            max_loss_percent=rule.max_loss_percent,
-                            enabled=rule.enabled,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
-                        )
-                        self.db_manager.save_risk_rule(db_rule)
-                        logger.info(f"Stop loss limit order queued for {symbol}, rule disabled")
+                        logger.info(f"Stop loss limit order successfully placed for {symbol}, rule remains active")
                         
                         # Send notification
                         await self.telegram_notifier.send_message(
@@ -647,8 +671,32 @@ class RiskManager:
                         )
                     else:
                         logger.warning(f"Failed to place stop loss limit order for {symbol}")
+                        # 下单失败时禁用规则
+                        rule.enabled = False
+                        db_rule = DatabaseRiskRule(
+                            symbol=rule.symbol,
+                            stop_loss_price=rule.stop_loss_price,
+                            take_profit_price=rule.take_profit_price,
+                            max_loss_percent=rule.max_loss_percent,
+                            enabled=rule.enabled,
+                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        )
+                        self.db_manager.save_risk_rule(db_rule)
+                        logger.info(f"Stop loss rule disabled due to order failure for {symbol}")
                 except Exception as e:
                     logger.error(f"Failed to place stop loss limit order for {symbol}: {e}")
+                    # 下单异常时禁用规则
+                    rule.enabled = False
+                    db_rule = DatabaseRiskRule(
+                        symbol=rule.symbol,
+                        stop_loss_price=rule.stop_loss_price,
+                        take_profit_price=rule.take_profit_price,
+                        max_loss_percent=rule.max_loss_percent,
+                        enabled=rule.enabled,
+                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    )
+                    self.db_manager.save_risk_rule(db_rule)
+                    logger.info(f"Stop loss rule disabled due to exception for {symbol}")
             
             # If price has reached stop loss, execute market order
             if current_price <= rule.stop_loss_price:
@@ -702,28 +750,59 @@ class RiskManager:
     
     async def _execute_order(self, order_request: OrderRequest):
         """执行订单"""
+        logger.info(f"开始执行订单: {order_request.order_type.value} for {order_request.symbol}, quantity: {order_request.quantity}")
+        
         try:
+            # 检查连接状态
             if not self.ibkr_client.connected:
-                logger.error("Cannot execute order: IBKR not connected")
+                logger.error(f"Cannot execute order for {order_request.symbol}: IBKR not connected")
                 return
+            
+            logger.debug(f"IBKR连接状态正常，开始获取持仓信息 for {order_request.symbol}")
             
             # Determine order action
             positions = self.ibkr_client.get_positions()
+            logger.debug(f"获取到 {len(positions)} 个持仓")
+            
             position = next((p for p in positions if p['symbol'] == order_request.symbol), None)
             
             if not position or position['position'] == 0:
-                logger.warning(f"No position found for {order_request.symbol}, skipping order")
+                logger.warning(f"No position found for {order_request.symbol}, skipping order. Available positions: {[p['symbol'] for p in positions]}")
                 return
+            
+            logger.info(f"找到持仓: {order_request.symbol}, position: {position['position']}, avg_cost: {position.get('avg_cost', 'N/A')}")
             
             # Determine action based on current position
             action = 'SELL' if position['position'] > 0 else 'BUY'
+            logger.info(f"确定订单动作: {action} {order_request.quantity} {order_request.symbol}")
             
-            # Place market order for immediate execution
-            trade = self.ibkr_client.place_market_order(
-                symbol=order_request.symbol,
-                quantity=order_request.quantity,
-                action=action
-            )
+            # 检查当前事件循环状态
+            try:
+                current_loop = asyncio.get_running_loop()
+                logger.debug(f"当前事件循环: {current_loop}, 是否运行中: {current_loop.is_running()}")
+            except RuntimeError as e:
+                logger.debug(f"获取事件循环状态失败: {e}")
+            
+            # Place market order for immediate execution using executor to avoid event loop conflicts
+            logger.info(f"使用executor执行下单操作以避免事件循环冲突")
+            loop = asyncio.get_event_loop()
+            
+            try:
+                trade = await loop.run_in_executor(
+                    None,
+                    lambda: self.ibkr_client.place_market_order(
+                        symbol=order_request.symbol,
+                        quantity=order_request.quantity,
+                        action=action
+                    )
+                )
+                logger.info(f"下单操作完成，trade结果: {trade is not None}")
+            except Exception as executor_error:
+                logger.error(f"Executor执行下单失败 for {order_request.symbol}: {executor_error}")
+                logger.error(f"错误类型: {type(executor_error).__name__}")
+                import traceback
+                logger.error(f"错误堆栈: {traceback.format_exc()}")
+                raise
             
             if trade:
                 order_id = trade.order.orderId
@@ -861,18 +940,33 @@ class RiskManager:
             })
         return orders
 
+    def set_dependencies(self, order_manager=None):
+        """注入外部依赖"""
+        self.order_manager = order_manager
+
     def remove_order_record(self, order_id: str):
         """从记录中删除订单"""
         try:
-            if order_id in self.auto_orders:
-                # 从数据库删除（如果数据库支持删除操作）
-                # 目前DatabaseManager没有提供删除订单的方法，只能从内存删除
+            soft_deleted = False
+            # 优先尝试通过 OrderManager 执行软删除，避免被 IBKR 重新同步
+            if getattr(self, 'order_manager', None) and hasattr(self.order_manager, 'mark_order_deleted'):
+                try:
+                    soft_deleted = bool(self.order_manager.mark_order_deleted(order_id))
+                    if soft_deleted:
+                        logger.info(f"Order {order_id} soft-deleted via OrderManager")
+                except Exception as e:
+                    logger.warning(f"Order {order_id} soft-delete failed: {e}")
+
+            had_memory_record = order_id in self.auto_orders
+            if had_memory_record:
                 del self.auto_orders[order_id]
+
+            if soft_deleted or had_memory_record:
                 logger.info(f"Order {order_id} removed from records")
                 return True
             else:
                 logger.warning(f"Order {order_id} not found in records")
-                return False
+                return soft_deleted
         except Exception as e:
             logger.error(f"Error removing order {order_id}: {e}")
             return False
