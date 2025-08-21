@@ -13,7 +13,7 @@ from loguru import logger
 BASE_URL = "http://localhost:8000"
 TEST_TIMEOUT = 5.0  # 每个API调用的测试超时时间
 
-async def test_api_endpoint(client: httpx.AsyncClient, method: str, endpoint: str, data=None, expected_status=None):
+async def _test_api_endpoint(client: httpx.AsyncClient, method: str, endpoint: str, data=None, expected_status=None):
     """
     测试单个API端点的响应时间和超时处理
     """
@@ -60,7 +60,7 @@ async def test_api_endpoint(client: httpx.AsyncClient, method: str, endpoint: st
         logger.error(f"❌ {method} {endpoint} - 异常: {e} ({elapsed:.2f}s)")
         return False
 
-async def test_api_performance():
+async def _test_api_performance():
     """
     测试主要API端点的性能和超时处理
     """
@@ -112,7 +112,7 @@ async def test_api_performance():
     async with httpx.AsyncClient() as client:
         for i, (method, endpoint, data, expected_status) in enumerate(test_cases, 1):
             logger.info(f"\n[{i}/{total_tests}] 测试 {method} {endpoint}")
-            success = await test_api_endpoint(client, method, endpoint, data, expected_status)
+            success = await _test_api_endpoint(client, method, endpoint, data, expected_status)
             results.append((method, endpoint, success))
             
             # 短暂延迟避免过快请求
@@ -139,7 +139,7 @@ async def test_api_performance():
     
     return failed == 0
 
-async def test_concurrent_requests():
+async def _test_concurrent_requests():
     """
     测试并发请求处理能力
     """
@@ -175,10 +175,10 @@ async def main():
     logger.info("=" * 60)
     
     # 测试API性能
-    api_test_passed = await test_api_performance()
+    api_test_passed = await _test_api_performance()
     
     # 测试并发处理
-    concurrent_test_passed = await test_concurrent_requests()
+    concurrent_test_passed = await _test_concurrent_requests()
     
     # 总结
     logger.info("\n" + "=" * 60)
@@ -203,3 +203,10 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+def test_api_performance():
+    asyncio.run(_test_api_performance())
+
+def test_concurrent_requests():
+    asyncio.run(_test_concurrent_requests())
+
