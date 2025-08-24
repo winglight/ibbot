@@ -94,14 +94,15 @@ async def request_id_middleware(request: Request, call_next):
     token_id = request_id_ctx.set(request_id)
     token_mod = module_ctx.set(module)
     start = time.time()
-    with logger.contextualize(request_id=request_id, module=module):
+    try:
         response = await call_next(request)
         duration = (time.time() - start) * 1000
         logger.info(
             f"REQUEST {request.method} {path} status={response.status_code} duration={duration:.2f}ms"
         )
-    request_id_ctx.reset(token_id)
-    module_ctx.reset(token_mod)
+    finally:
+        request_id_ctx.reset(token_id)
+        module_ctx.reset(token_mod)
     response.headers["X-Request-ID"] = request_id
     return response
 
@@ -336,6 +337,7 @@ def setup_logging():
     """Configure loguru to log to console and file.
     确保 logs/trading_bot.log 存在，并设置合理的滚动与保留策略。
     """
+    global logger
     try:
         os.makedirs("logs", exist_ok=True)
     except Exception:
@@ -350,6 +352,12 @@ def setup_logging():
 
     # 设置默认 extra，确保格式化时不会缺失
     logger.configure(extra={"request_id": "-", "module": "-"})
+
+    logger = logger.patch(
+        lambda record: record["extra"].update(
+            request_id=request_id_ctx.get(), module=module_ctx.get()
+        )
+    )
 
     # 统一格式，便于 /api/logs 按等级过滤：会匹配 "| LEVEL |"
     log_format = (
