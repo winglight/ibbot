@@ -352,6 +352,7 @@ def setup_logging():
 
     # 设置默认 extra，确保格式化时不会缺失
     logger.configure(extra={"request_id": "-", "module": "-"})
+
     logger = logger.patch(
         lambda record: record["extra"].update(
             request_id=request_id_ctx.get(), module=module_ctx.get()
