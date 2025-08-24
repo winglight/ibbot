@@ -21,6 +21,7 @@ class TradingApp {
         await this.tryAutoLogin();
         await this.checkConnectionStatus();
         await this.loadStrategies();
+        await this.loadLogs();
     }
 
     // Show login modal
@@ -73,8 +74,8 @@ class TradingApp {
                 this.loadOrders();
                 this.loadPortfolio();
                 this.loadRiskRules();
+                this.loadLogs();
                 // this.loadAutoOrders();
-                // this.loadLogs();
             }
         } catch (e) {}
     }
@@ -116,7 +117,7 @@ class TradingApp {
                         this.loadRiskRules();
                         // this.loadAutoOrders();
                         this.loadStrategies();
-                        // this.loadLogs();
+                        this.loadLogs();
                     } catch (e) {
                         console.warn('Auto-connect failed:', e);
                     }
@@ -212,12 +213,20 @@ class TradingApp {
                 }
             });
         }
-        const logsBtn = document.getElementById('logsBtn');
-        if (logsBtn) {
-            logsBtn.addEventListener('click', () => {
-                // Logs panel removed
-            });
-        }
+        const refreshLogsBtn = document.getElementById('refreshLogsBtn');
+        if (refreshLogsBtn) refreshLogsBtn.addEventListener('click', () => this.loadLogs());
+
+        const searchLogsBtn = document.getElementById('searchLogsBtn');
+        if (searchLogsBtn) searchLogsBtn.addEventListener('click', () => this.loadLogs());
+
+        const logModule = document.getElementById('logModule');
+        if (logModule) logModule.addEventListener('change', () => this.loadLogs());
+
+        const logRange = document.getElementById('logRange');
+        if (logRange) logRange.addEventListener('change', () => this.loadLogs());
+
+        const logStatsBtn = document.getElementById('logStatsBtn');
+        if (logStatsBtn) logStatsBtn.addEventListener('click', () => this.showLogStats());
         const refreshStrategiesBtn = document.getElementById('refreshStrategiesBtn');
         if (refreshStrategiesBtn) {
             refreshStrategiesBtn.addEventListener('click', () => this.loadStrategies());
@@ -497,6 +506,8 @@ class TradingApp {
             }
             
             const data = await response.json();
+            const reqId = response.headers.get('x-request-id');
+            if (reqId) data.request_id = reqId;
             
             if (!response.ok) {
                 throw new Error(data.detail || 'API call failed');
@@ -2641,6 +2652,54 @@ class TradingApp {
         } catch (error) {
             console.error('Cancel order error:', error);
             this.showAlert('danger', '取消订单时发生错误');
+        }
+    }
+
+    async loadLogs() {
+        try {
+            const module = document.getElementById('logModule')?.value || 'all';
+            const range = document.getElementById('logRange')?.value || 'today';
+            const requestId = document.getElementById('logRequestId')?.value.trim();
+            let url = `/logs?lines=200&range=${range}`;
+            if (module !== 'all') url += `&module=${module}`;
+            if (requestId) url += `&request_id=${encodeURIComponent(requestId)}`;
+            const res = await this.apiCall(url);
+            if (res?.logs) {
+                const content = document.getElementById('logsContent');
+                if (content) content.textContent = res.logs.join('');
+            }
+        } catch (e) {
+            console.error('Load logs error:', e);
+            this.showAlert('danger', '加载日志失败');
+        }
+    }
+
+    async showLogStats() {
+        try {
+            const module = document.getElementById('logModule')?.value || 'all';
+            const range = document.getElementById('logRange')?.value || 'today';
+            let url = `/logs/stats?range=${range}`;
+            if (module !== 'all') url += `&module=${module}`;
+            const res = await this.apiCall(url);
+            const tbody = document.querySelector('#logStatsTable tbody');
+            if (tbody) {
+                tbody.innerHTML = '';
+                for (const [mod, paths] of Object.entries(res.stats || {})) {
+                    for (const [path, s] of Object.entries(paths)) {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `<td>${mod}</td><td>${path}</td><td>${s.count}</td><td>${s.avg_time}</td><td>${(s.success_rate*100).toFixed(1)}%</td>`;
+                        tbody.appendChild(tr);
+                    }
+                }
+            }
+            const modalEl = document.getElementById('logStatsModal');
+            if (modalEl) {
+                const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+                modal.show();
+            }
+        } catch (e) {
+            console.error('Load log stats error:', e);
+            this.showAlert('danger', '加载日志统计失败');
         }
     }
 

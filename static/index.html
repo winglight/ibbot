@@ -723,6 +723,76 @@
         </div>
     </div>
 
+    <!-- Logs Panel -->
+    <div class="row mt-4">
+        <div class="col-md-12">
+            <div class="card" id="logsCard">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="fas fa-file-alt"></i> Logs</h5>
+                    <div>
+                        <button class="btn btn-sm btn-outline-light me-2" id="logStatsBtn">统计</button>
+                        <button class="btn btn-sm btn-outline-light" id="refreshLogsBtn"><i class="fas fa-sync"></i></button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-3">
+                            <select class="form-select form-select-sm" id="logModule">
+                                <option value="all">All Modules</option>
+                                <option value="internal_strategy">内部策略</option>
+                                <option value="external_strategy">外部策略</option>
+                                <option value="risk_rule">risk rule</option>
+                                <option value="orders">orders</option>
+                                <option value="portfolio">portfolio</option>
+                                <option value="connection">connection</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-select form-select-sm" id="logRange">
+                                <option value="today">Today</option>
+                                <option value="week">This Week</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <input type="text" class="form-control form-control-sm" id="logRequestId" placeholder="Request ID">
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-sm btn-primary w-100" id="searchLogsBtn">Search</button>
+                        </div>
+                    </div>
+                    <pre id="logsContent" class="bg-dark text-light p-2" style="max-height:300px; overflow:auto;"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log Stats Modal -->
+    <div class="modal fade" id="logStatsModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">日志统计</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="table-responsive">
+                        <table class="table table-sm" id="logStatsTable">
+                            <thead>
+                                <tr>
+                                    <th>模块</th>
+                                    <th>接口</th>
+                                    <th>请求数</th>
+                                    <th>平均响应时间(ms)</th>
+                                    <th>成功率</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
 
     <!-- Add Strategy Modal -->

@@ -20,6 +20,10 @@ from typing import List, Optional, Dict, Any
 from loguru import logger
 from dotenv import load_dotenv
 from dataclasses import asdict
+import uuid
+import contextvars
+import time
+import re
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request
@@ -58,6 +62,48 @@ MOCK_PORT = int(os.getenv('MOCK_PORT', '18080'))
 MOCK_BASE = f"http://{MOCK_HOST}:{MOCK_PORT}/api"
 # 优化：可配置的PnL广播间隔（秒），默认5秒
 PNL_BROADCAST_INTERVAL_SEC = int(os.getenv('PNL_BROADCAST_INTERVAL_SEC', '5'))
+
+# Context variables for request-scoped logging
+request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+module_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("module", default="-")
+
+
+def resolve_module(path: str) -> str:
+    """Simple mapping from request path to module name."""
+    if path.startswith("/api/strategies/internal"):
+        return "internal_strategy"
+    if path.startswith("/api/strategies"):
+        return "external_strategy"
+    if "/risk" in path:
+        return "risk_rule"
+    if "/orders" in path:
+        return "orders"
+    if any(p in path for p in ["/portfolio", "/positions"]):
+        return "portfolio"
+    if any(p in path for p in ["/connect", "/disconnect", "/connection"]):
+        return "connection"
+    return "general"
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Attach a request_id to each request and log basic metrics."""
+    request_id = str(uuid.uuid4())
+    path = request.url.path
+    module = resolve_module(path)
+    token_id = request_id_ctx.set(request_id)
+    token_mod = module_ctx.set(module)
+    start = time.time()
+    with logger.contextualize(request_id=request_id, module=module):
+        response = await call_next(request)
+        duration = (time.time() - start) * 1000
+        logger.info(
+            f"REQUEST {request.method} {path} status={response.status_code} duration={duration:.2f}ms"
+        )
+    request_id_ctx.reset(token_id)
+    module_ctx.reset(token_mod)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 def is_mock_mode() -> bool:
     try:
@@ -302,8 +348,14 @@ def setup_logging():
     except Exception:
         pass
 
+    # 设置默认 extra，确保格式化时不会缺失
+    logger.configure(extra={"request_id": "-", "module": "-"})
+
     # 统一格式，便于 /api/logs 按等级过滤：会匹配 "| LEVEL |"
-    log_format = "| {time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{function}:{line} - {message}"
+    log_format = (
+        "| {time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {extra[module]:<15} | "
+        "{extra[request_id]:<36} | {name}:{function}:{line} - {message}"
+    )
 
     # 控制台
     logger.add(sys.stderr, level="INFO", format=log_format, enqueue=True, backtrace=False, diagnose=False)
@@ -1901,18 +1953,115 @@ async def clear_strategy_executions(name: str, user: Optional[str] = Depends(get
 
 # System Logs API (kept for general debugging)
 @app.get("/api/logs")
-async def get_logs(lines: int = 100, level: str = "all", user: Optional[str] = Depends(get_current_user)):
+async def get_logs(
+    lines: int = 100,
+    level: str = "all",
+    request_id: Optional[str] = None,
+    module: str = "all",
+    range: str = "today",
+    user: Optional[str] = Depends(get_current_user),
+):
     try:
         log_file = "logs/trading_bot.log"
         if not os.path.exists(log_file):
             return {"success": True, "logs": []}
-        with open(log_file, 'r') as f:
+        with open(log_file, "r") as f:
             content = f.readlines()
+
+        # Filter by date range
+        now = datetime.now()
+        if range == "today":
+            date_str = now.strftime("%Y-%m-%d")
+            content = [line for line in content if line.startswith(f"| {date_str}")]
+        elif range == "week":
+            start = now - timedelta(days=now.weekday())
+            filtered = []
+            for line in content:
+                try:
+                    ts = datetime.strptime(line[2:21], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if ts.date() >= start.date():
+                    filtered.append(line)
+            content = filtered
+
         if level.lower() != "all":
             content = [line for line in content if f"| {level.upper()} |" in line]
+
+        if module != "all":
+            content = [line for line in content if f"| {module} |" in line]
+
+        if request_id:
+            content = [line for line in content if request_id in line]
+
         return {"success": True, "logs": content[-lines:]}
     except Exception as e:
         logger.error(f"Get logs error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/logs/stats")
+async def get_log_stats(
+    range: str = "today",
+    module: str = "all",
+    user: Optional[str] = Depends(get_current_user),
+):
+    try:
+        log_file = "logs/trading_bot.log"
+        if not os.path.exists(log_file):
+            return {"success": True, "stats": {}}
+        with open(log_file, "r") as f:
+            lines = f.readlines()
+
+        now = datetime.now()
+        if range == "today":
+            date_str = now.strftime("%Y-%m-%d")
+            lines = [line for line in lines if line.startswith(f"| {date_str}")]
+        elif range == "week":
+            start = now - timedelta(days=now.weekday())
+            filtered = []
+            for line in lines:
+                try:
+                    ts = datetime.strptime(line[2:21], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if ts.date() >= start.date():
+                    filtered.append(line)
+            lines = filtered
+
+        pattern = re.compile(r"REQUEST \w+ (?P<path>\S+) status=(?P<status>\d+) duration=(?P<duration>[0-9.]+)ms")
+        stats: Dict[str, Dict[str, Dict[str, float]]] = {}
+
+        for line in lines:
+            parts = line.split("|")
+            if len(parts) < 6:
+                continue
+            mod = parts[3].strip()
+            if module != "all" and mod != module:
+                continue
+            m = pattern.search(line)
+            if not m:
+                continue
+            path = m.group("path")
+            status = int(m.group("status"))
+            duration = float(m.group("duration"))
+            mod_stats = stats.setdefault(mod, {})
+            entry = mod_stats.setdefault(path, {"count": 0, "total_time": 0.0, "success": 0})
+            entry["count"] += 1
+            entry["total_time"] += duration
+            if status < 400:
+                entry["success"] += 1
+
+        for mod, paths in stats.items():
+            for path, data in paths.items():
+                data["avg_time"] = round(data["total_time"] / data["count"], 2)
+                data["success_rate"] = round(data["success"] / data["count"], 2)
+                del data["total_time"]
+                del data["success"]
+
+        return {"success": True, "stats": stats}
+    except Exception as e:
+        logger.error(f"Get log stats error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
