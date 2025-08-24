@@ -1,6 +1,27 @@
 version: '3.8'
 
 services:
+  ib-gateway:
+    image: jlesage/ib-gateway:latest
+    container_name: ib-gateway
+    environment:
+      - TZ=Asia/Shanghai
+      - USER_ID=1000
+      - GROUP_ID=1000
+      - DISPLAY_WIDTH=1366
+      - DISPLAY_HEIGHT=800
+      - SECURE_CONNECTION=0
+    volumes:
+      - ../data/ibgateway:/config:rw
+    ports:
+      - "4002:4002"
+      - "4001:4001"
+      - "5800:5800"   # noVNC Web UI
+      - "5900:5900"   # VNC
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+
   ibbot:
     image: ghcr.io/<owner>/ibbot:v1.0.0  # 生产推荐固定版本；可改为 :latest（如仓库提供）
     container_name: ibbot
@@ -10,7 +31,7 @@ services:
       - WEB_PORT=8000
 
       # IBKR 实盘/纸交易连接（视环境修改）
-      - IBKR_HOST=host.docker.internal
+      - IBKR_HOST=ib-gateway
       - IBKR_PORT=4002
 
       # 认证与安全（务必覆盖默认值）
@@ -27,11 +48,13 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./logs:/app/logs
-      - ./data:/app/data
-      - ./strategy:/app/strategy
+      - ../logs:/app/logs
+      - ../data:/app/data
+      - ../strategy:/app/strategy
     networks:
       - ibbot-network
+    depends_on:
+      - ib-gateway
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]

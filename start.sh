@@ -45,11 +45,11 @@ pip install -r requirements.txt
 
 # 6) 自动检测/安装 IB Gateway（不自动启动）
 # 优先尝试检测系统中已安装的 IB Gateway 并生成 .env.gateway
-if [ -f "./install_ib_gateway.sh" ]; then
+if [ -f "./docker/install_ib_gateway.sh" ]; then
   echo "🔍 检测系统中的 IB Gateway 安装..."
-  bash ./install_ib_gateway.sh || echo "⚠️ IB Gateway 检测/安装流程出现警告，可稍后手动处理。"
+  bash ./docker/install_ib_gateway.sh || echo "⚠️ IB Gateway 检测/安装流程出现警告，可稍后手动处理。"
 else
-  echo "⚠️ 缺少 install_ib_gateway.sh，无法自动检测/安装 IB Gateway。"
+  echo "⚠️ 缺少 docker/install_ib_gateway.sh，无法自动检测/安装 IB Gateway。"
 fi
 
 # 不自动启动 IB Gateway，仅提示用户手动启动

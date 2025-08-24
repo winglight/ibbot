@@ -4,8 +4,8 @@ services:
   # Main IBKR Trading Bot Application
   ibbot:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: ibbot-main
     ports:
       - "8000:8000"
@@ -15,8 +15,8 @@ services:
       - WEB_PORT=8000
       
       # IBKR Configuration  
-      - IBKR_HOST=host.docker.internal
-      - IBKR_PORT=18080
+      - IBKR_HOST=ib-gateway
+      - IBKR_PORT=4002
       
       # Mock Configuration
       - MOCK_HOST=mock-gateway
@@ -35,11 +35,11 @@ services:
       - ENABLE_WEBSOCKET=true
       
     volumes:
-      - ./logs:/app/logs
-      - ./data:/app/data
-      - ./strategy:/app/strategy
+      - ../logs:/app/logs
+      - ../data:/app/data
+      - ../strategy:/app/strategy
     depends_on:
-      - mock-gateway
+      - ib-gateway
     networks:
       - ibbot-network
     restart: unless-stopped
@@ -53,8 +53,8 @@ services:
   # Mock IB Gateway
   mock-gateway:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: ibbot-mock
     command: ["mock"]
     ports:
@@ -71,6 +71,29 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    profiles: ["mock"]
+
+  # IB Gateway with GUI (noVNC)
+  ib-gateway:
+    image: jlesage/ib-gateway:latest
+    container_name: ib-gateway
+    environment:
+      - TZ=Asia/Shanghai
+      - USER_ID=1000
+      - GROUP_ID=1000
+      - DISPLAY_WIDTH=1366
+      - DISPLAY_HEIGHT=800
+      - SECURE_CONNECTION=0
+    volumes:
+      - ../data/ibgateway:/config:rw
+    ports:
+      - "4002:4002"   # Paper Trading API
+      - "4001:4001"   # Live Trading API (optional)
+      - "5800:5800"   # noVNC Web UI (http://localhost:5800)
+      - "5900:5900"   # VNC (optional)
+    networks:
+      - ibbot-network
+    restart: unless-stopped
 
 networks:
   ibbot-network:

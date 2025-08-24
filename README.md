@@ -268,7 +268,7 @@ docker run -d \
 
 ```bash
 # 构建并启动所有服务
-docker-compose up -d
+docker-compose -f docker/docker-compose.prod.yml up -d
 
 # 查看服务状态
 docker-compose ps
@@ -520,13 +520,13 @@ networks:
 export ADMIN_PASSWORD=your_secure_password
 export JWT_SECRET=your_production_jwt_secret
 
-docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker/docker-compose.prod.yml up -d
 
 # 查看服务与健康状态
-docker compose -f docker-compose.prod.yml ps
+docker compose -f docker/docker-compose.prod.yml ps
 
 # 查看日志
-docker compose -f docker-compose.prod.yml logs -f
+docker compose -f docker/docker-compose.prod.yml logs -f
 ```
 
 > 提示：
