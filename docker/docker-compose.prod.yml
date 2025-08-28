@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   ib-gateway:
     image: jlesage/ib-gateway:latest
@@ -35,7 +33,7 @@ services:
       - IBKR_PORT=4002
 
       # 认证与安全（务必覆盖默认值）
-      - ADMIN_USERNAME=admin
+      - ADMIN_USERNAME=${ADMIN_USERNAME}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
       - JWT_ALGORITHM=HS256
@@ -51,6 +49,8 @@ services:
       - ../logs:/app/logs
       - ../data:/app/data
       - ../strategy:/app/strategy
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     networks:
       - ibbot-network
     depends_on:

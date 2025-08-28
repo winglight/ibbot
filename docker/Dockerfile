@@ -42,11 +42,17 @@ if [ ! -f ".env" ]; then\n\
     fi\n\
 fi\n\
 \
-# Export variables from .env so they are available to all modes (main/mock/runner/test)\n\
+# Load .env as defaults only (do NOT override existing environment variables)\n\
 if [ -f ".env" ]; then\n\
-    set -a\n\
-    . ./.env\n\
-    set +a\n\
+    while IFS="=" read -r key value; do\n\
+        # Skip blank lines and comments\n\
+        [ -z "$key" ] && continue\n\
+        case "$key" in \#*) continue;; esac\n\
+        # Preserve variables already provided by Docker/Compose\n\
+        if [ -z "${!key+x}" ]; then\n\
+            export "$key=$value"\n\
+        fi\n\
+    done < .env\n\
 fi\n\
 \
 # Default to main app if no command specified\n\

@@ -50,32 +50,25 @@ class IBKRClient:
     def _place_order_in_thread(self, ib, symbol: str, quantity: int, action: str, 
                               exchange: str, sec_type: str, order_type: str, price: float = None):
         """在连接管理器的事件循环中执行下单操作，避免事件循环冲突。
-        使用异步的 qualifyContractsAsync 并通过 run_coroutine_threadsafe 在连接线程的事件循环上执行，
-        从当前调用线程等待结果，防止出现 "this event loop is already running" 错误。
+        使用连接管理器的 run_async_in_connection_thread 方法确保正确执行。
         """
         import threading
         current_thread = threading.current_thread()
         logger.info(f"_place_order_in_thread called for {symbol} in thread: {current_thread.name}")
 
         try:
+            # 检查连接状态
+            if not self.connection_manager.is_connected():
+                logger.error("IBKR connection is not active")
+                return None
+
             # 获取IB实例
             ib_instance = self.connection_manager.get_ib_instance()
             if not ib_instance:
                 logger.error("No active IB instance for placing order")
                 return None
 
-            # 检查连接状态
-            if not self.connection_manager.is_connected():
-                logger.error("IBKR connection is not active")
-                return None
-
-            # 获取连接线程的事件循环
-            loop = getattr(self.connection_manager, '_loop', None)
-            if not loop or loop.is_closed():
-                logger.error("No active event loop for IBKR connection")
-                return None
-
-            # 构建异步下单流程，避免在已运行的事件循环中调用同步API
+            # 构建异步下单流程
             async def execute_order_async():
                 try:
                     # 根据证券类型获取正确的合约
@@ -109,16 +102,11 @@ class IBKRClient:
                     logger.error(f"Failed to place order in async execution: {e}")
                     return None
 
-            # 将协程调度到连接线程的事件循环，并在当前线程等待结果
+            # 使用连接管理器的方法在正确的事件循环中执行
             try:
-                future = asyncio.run_coroutine_threadsafe(execute_order_async(), loop)
-                # 设置超时（小于连接管理器的60秒），防止长时间阻塞
-                return future.result(timeout=45)
-            except concurrent.futures.TimeoutError:
-                logger.error(f"Timeout placing order for {symbol} after 45 seconds")
-                return None
+                return self.connection_manager.run_async_in_connection_thread(execute_order_async(), timeout=45)
             except Exception as e:
-                logger.error(f"Failed to place {order_type.lower()} order via coroutine: {e}")
+                logger.error(f"Failed to place {order_type.lower()} order via connection manager: {e}")
                 return None
 
         except Exception as e:

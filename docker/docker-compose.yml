@@ -1,5 +1,4 @@
-version: '3.8'
-
+name: algo-trader
 services:
   # Main IBKR Trading Bot Application
   ibbot:
@@ -9,6 +8,8 @@ services:
     container_name: ibbot-main
     ports:
       - "8000:8000"
+    env_file:
+      - ./.env
     environment:
       # Server Configuration
       - WEB_HOST=0.0.0.0
@@ -23,9 +24,9 @@ services:
       - MOCK_PORT=18080
       
       # Authentication
-      - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=change_me
-      - JWT_SECRET=please_change_me_in_production
+      - ADMIN_USERNAME=${ADMIN_USERNAME}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
       - JWT_ALGORITHM=HS256
       - JWT_EXPIRE_DAYS=1
       
@@ -73,27 +74,56 @@ services:
       start_period: 30s
     profiles: ["mock"]
 
-  # IB Gateway with GUI (noVNC)
+  # IB Gateway (gnzsnz)
   ib-gateway:
-    image: jlesage/ib-gateway:latest
+    image: ghcr.io/gnzsnz/ib-gateway:latest
     container_name: ib-gateway
+    restart: always
+    env_file:
+      - ./.env
     environment:
-      - TZ=Asia/Shanghai
-      - USER_ID=1000
-      - GROUP_ID=1000
-      - DISPLAY_WIDTH=1366
-      - DISPLAY_HEIGHT=800
-      - SECURE_CONNECTION=0
+      - TWS_USERID=${TWS_USERID_PAPER}
+      - TWS_PASSWORD=${TWS_PASSWORD_PAPER}
+      - TRADING_MODE=${TRADING_MODE:-paper}
+      - TWS_SETTINGS_PATH=${TWS_SETTINGS_PATH:-}
+      - TWS_ACCEPT_INCOMING=${TWS_ACCEPT_INCOMING:-}
+      - READ_ONLY_API=${READ_ONLY_API:-}
+      - VNC_SERVER_PASSWORD=${VNC_SERVER_PASSWORD:-}
+      - TWOFA_TIMEOUT_ACTION=${TWOFA_TIMEOUT_ACTION:-exit}
+      - BYPASS_WARNING=${BYPASS_WARNING:-}
+      - AUTO_RESTART_TIME=${AUTO_RESTART_TIME:-}
+      - AUTO_LOGOFF_TIME=${AUTO_LOGOFF_TIME:-}
+      - TWS_COLD_RESTART=${TWS_COLD_RESTART:-}
+      - SAVE_TWS_SETTINGS=${SAVE_TWS_SETTINGS:-}
+      - RELOGIN_AFTER_TWOFA_TIMEOUT=${RELOGIN_AFTER_TWOFA_TIMEOUT:-no}
+      - TWOFA_EXIT_INTERVAL=${TWOFA_EXIT_INTERVAL:-60}
+      - TWOFA_DEVICE=${TWOFA_DEVICE:-}
+      - EXISTING_SESSION_DETECTED_ACTION=${EXISTING_SESSION_DETECTED_ACTION:-primary}
+      - ALLOW_BLIND_TRADING=${ALLOW_BLIND_TRADING:-no}
+      - TIME_ZONE=${TIME_ZONE:-Etc/UTC}
+      - TZ=${TIME_ZONE:-Etc/UTC}
+      - CUSTOM_CONFIG=${CUSTOM_CONFIG:-NO}
+      - JAVA_HEAP_SIZE=${JAVA_HEAP_SIZE:-}
+      - SSH_TUNNEL=${SSH_TUNNEL:-}
+      - SSH_OPTIONS=${SSH_OPTIONS:-}
+      - SSH_ALIVE_INTERVAL=${SSH_ALIVE_INTERVAL:-}
+      - SSH_ALIVE_COUNT=${SSH_ALIVE_COUNT:-}
+      - SSH_PASSPHRASE=${SSH_PASSPHRASE:-}
+      - SSH_REMOTE_PORT=${SSH_REMOTE_PORT:-}
+      - SSH_USER_TUNNEL=${SSH_USER_TUNNEL:-}
+      - SSH_RESTART=${SSH_RESTART:-}
+      - SSH_VNC_PORT=${SSH_VNC_PORT:-}
+    ports:
+      - "4001:4001"
+      - "4002:4002"
+      - "5900:5900"
     volumes:
       - ../data/ibgateway:/config:rw
-    ports:
-      - "4002:4002"   # Paper Trading API
-      - "4001:4001"   # Live Trading API (optional)
-      - "5800:5800"   # noVNC Web UI (http://localhost:5800)
-      - "5900:5900"   # VNC (optional)
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+
     networks:
       - ibbot-network
-    restart: unless-stopped
 
 networks:
   ibbot-network:

@@ -463,6 +463,10 @@ async def get_current_user(request: Request):
 @app.post('/api/login')
 async def login(req: LoginRequest):
     if req.username != ADMIN_USERNAME or req.password != ADMIN_PASSWORD:
+        print(req.username, req.password)
+        print(ADMIN_USERNAME, ADMIN_PASSWORD)
+        print(req.username != ADMIN_USERNAME)
+        print(req.password != ADMIN_PASSWORD)
         raise HTTPException(status_code=401, detail='Invalid credentials')
     token, expires_in = create_access_token({"sub": req.username})
     return {"access_token": token, "token_type": "bearer", "expires_in": expires_in}

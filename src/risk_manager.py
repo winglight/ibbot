@@ -368,8 +368,8 @@ class RiskManager:
     async def _monitor_positions(self):
         """监控持仓风险"""
         try:
-            if not self.ibkr_client.connected:
-                logger.warning("IBKR not connected, skipping position monitoring")
+            if not self.ibkr_client or not getattr(self.ibkr_client, 'connected', False):
+                logger.warning("IBKR client not ready, skipping position monitoring")
                 return
             
             logger.info("=== Starting position monitoring cycle ===")
@@ -754,8 +754,8 @@ class RiskManager:
         
         try:
             # 检查连接状态
-            if not self.ibkr_client.connected:
-                logger.error(f"Cannot execute order for {order_request.symbol}: IBKR not connected")
+            if not self.ibkr_client or not getattr(self.ibkr_client, 'connected', False):
+                logger.error(f"Cannot execute order for {order_request.symbol}: IBKR client not ready")
                 return
             
             logger.debug(f"IBKR连接状态正常，开始获取持仓信息 for {order_request.symbol}")
@@ -867,7 +867,7 @@ class RiskManager:
     async def _send_daily_summary(self):
         """发送每日摘要"""
         try:
-            if not self.ibkr_client.connected:
+            if not self.ibkr_client or not getattr(self.ibkr_client, 'connected', False):
                 return
             
             account_info = self.ibkr_client.get_account_info()

@@ -13,6 +13,26 @@ import types
 
 load_dotenv()
 
+# Robust env int parser to tolerate inline comments and invalid values
+# Examples:
+#   IBKR_PORT="4002  # paper"
+#   IBKR_PORT=4002
+# Both will parse to 4002; invalid values fall back to default with a warning
+
+def _get_env_int(key: str, default: int) -> int:
+    val = os.getenv(key)
+    if val is None or val == "":
+        return int(default)
+    try:
+        cleaned = val.split('#', 1)[0].strip()
+        return int(cleaned)
+    except Exception:
+        try:
+            logger.warning(f"Invalid integer for {key}='{val}', falling back to {default}")
+        except Exception:
+            pass
+        return int(default)
+
 @dataclass
 class ConnectionConfig:
     """连接配置类"""
@@ -26,8 +46,8 @@ class ConnectionConfig:
         """从环境变量加载配置"""
         return cls(
             host=os.getenv('IBKR_HOST', '127.0.0.1'),
-            port=int(os.getenv('IBKR_PORT', '7497')),
-            client_id=int(os.getenv('IBKR_CLIENT_ID', '1')),
+            port=_get_env_int('IBKR_PORT', 4002),
+            client_id=_get_env_int('IBKR_CLIENT_ID', 1),
             paper_trading=os.getenv('IBKR_PAPER_TRADING', 'True').lower() == 'true'
         )
     
@@ -125,7 +145,7 @@ class ConnectionManager:
                 
                 # 连接后设置默认市场数据类型，避免无权限时报 10197
                 try:
-                    default_mkt_data_type = int(os.getenv('IBKR_MARKET_DATA_TYPE', '3'))  # 1=实时,2=冻结,3=延迟,4=延迟冻结
+                    default_mkt_data_type = _get_env_int('IBKR_MARKET_DATA_TYPE', 3)  # 1=实时,2=冻结,3=延迟,4=延迟冻结
                     self.ib.reqMarketDataType(default_mkt_data_type)
                     logger.info(f"Set default IBKR market data type to {default_mkt_data_type}")
                 except Exception as e:
@@ -200,6 +220,9 @@ class ConnectionManager:
             # 在新线程中创建新的事件循环
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            
+            # 立即保存事件循环引用，确保其他线程能够使用
+            self._loop = loop
             
             task = None
             try:
@@ -432,6 +455,14 @@ class ConnectionManager:
         """
         try:
             loop = self._loop
+            # 如果循环还未就绪，但连接线程可能刚启动，给出短暂重试机会
+            if (not loop or loop.is_closed()) and self._connection_thread and self._connection_thread.is_alive():
+                try:
+                    time.sleep(0.05)
+                except Exception:
+                    pass
+                loop = self._loop
+
             if not loop or loop.is_closed():
                 logger.warning("Connection event loop not available")
                 return None

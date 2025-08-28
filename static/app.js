@@ -736,8 +736,11 @@ class TradingApp {
                         ${this.formatNumber(pos.unrealized_pnl_percent)}%
                     </td>
                     <td>
-                        <button class="btn btn-sm btn-outline-primary" onclick="app.editPositionRiskRule('${pos.symbol}', ${pos.current_price}, ${pos.avg_cost}, ${pos.position})" title="Set TP/SL">
+                        <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editPositionRiskRule('${pos.symbol}', ${pos.current_price}, ${pos.avg_cost}, ${pos.position})" title="Set TP/SL">
                             <i class="fas fa-shield-alt"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-success" onclick="app.openMonitorModal('${pos.symbol}', ${pos.position}, ${pos.current_price}, ${pos.avg_cost}, ${pos.unrealized_pnl}, ${pos.unrealized_pnl_percent})" title="Monitor">
+                            <i class="fas fa-eye"></i>
                         </button>
                     </td>
                 </tr>
@@ -980,9 +983,310 @@ class TradingApp {
         }
     }
 
+    async openMonitorModal(symbol, positionQty = 0, currentPrice = 0, avgCost = 0, pnl = 0, pnlPercent = 0) {
+        try {
+            // 填充基础字段
+            const symEl = document.getElementById('monitorSymbol');
+            if (!symEl) return;
+            symEl.textContent = symbol || '—';
+            const qtyEl = document.getElementById('monitorPositionQty');
+            if (qtyEl) qtyEl.textContent = (positionQty || 0).toString();
+            const curEl = document.getElementById('monitorCurrentPrice');
+            if (curEl) curEl.textContent = `$${this.formatNumber(currentPrice || 0)}`;
+            const avgEl = document.getElementById('monitorAvgCost');
+            if (avgEl) avgEl.textContent = `$${this.formatNumber(avgCost || 0)}`;
+            const pnlEl = document.getElementById('monitorPnL');
+            if (pnlEl) pnlEl.textContent = `$${this.formatNumber(pnl || 0)}`;
+            const pnlPctEl = document.getElementById('monitorPnLPercent');
+            if (pnlPctEl) pnlPctEl.textContent = `(${this.formatNumber(pnlPercent || 0)}%)`;
+            const valueEl = document.getElementById('monitorPositionValue');
+            if (valueEl) valueEl.textContent = `$${this.formatNumber((avgCost || 0) * (positionQty || 0))}`;
 
+            // 保存当前监控上下文
+            this.currentMonitor = {
+                symbol,
+                positionQty: Number(positionQty) || 0,
+                currentPrice: Number(currentPrice) || 0,
+                avgCost: Number(avgCost) || 0,
+                pnl: Number(pnl) || 0,
+                pnlPercent: Number(pnlPercent) || 0,
+            };
 
+            // 清理输入框
+            const slInput = document.getElementById('monitorStopLoss');
+            if (slInput) slInput.value = '';
+            const tpInput = document.getElementById('monitorTakeProfit');
+            if (tpInput) tpInput.value = '';
 
+            // 显示模态框
+            const modalEl = document.getElementById('monitorModal');
+            if (modalEl) {
+                const modal = new bootstrap.Modal(modalEl);
+                modal.show();
+
+                // 绑定按钮与输入事件
+                const refreshBtn = document.getElementById('refreshMonitorChartBtn');
+                if (refreshBtn) {
+                    refreshBtn.onclick = () => this.loadMonitorChart(symbol);
+                }
+                const realtimeBtn = document.getElementById('monitorRealtimeBtn');
+                if (realtimeBtn) {
+                    realtimeBtn.onclick = () => {
+                        // 简单切换按钮状态，不实现长连
+                        realtimeBtn.classList.toggle('btn-success');
+                        realtimeBtn.classList.toggle('btn-info');
+                    };
+                }
+
+                const slInput = document.getElementById('monitorStopLoss');
+                if (slInput) {
+                    slInput.oninput = () => this.updateMonitorStopLossLine();
+                }
+                const tpInput = document.getElementById('monitorTakeProfit');
+                if (tpInput) {
+                    tpInput.oninput = () => this.updateMonitorTakeProfitLine();
+                }
+
+                const saveBtn = document.getElementById('saveMonitorRiskBtn');
+                if (saveBtn) {
+                    saveBtn.onclick = async () => {
+                        const sl = slInput?.value ? parseFloat(slInput.value) : null;
+                        const tp = tpInput?.value ? parseFloat(tpInput.value) : null;
+
+                        if (!sl && !tp) {
+                            this.showAlert('warning', '请至少输入止损或止盈价');
+                            return;
+                        }
+
+                        try {
+                            await this.apiCall('/risk_rules', {
+                                method: 'POST',
+                                body: JSON.stringify({
+                                    symbol: symbol,
+                                    stop_loss_price: sl,
+                                    take_profit_price: tp
+                                })
+                            });
+                            this.showAlert('success', '已保存风险规则');
+                        } catch (err) {
+                            console.error('保存风险规则失败:', err);
+                            this.showAlert('danger', `保存失败: ${err.message || err}`);
+                        }
+                    };
+                }
+
+                // 初次载入图表
+                this.loadMonitorChart(symbol);
+            }
+        } catch (e) {
+            console.error('openMonitorModal failed:', e);
+            this.showAlert('danger', `打开监控失败: ${e.message || e}`);
+        }
+    }
+
+    async loadMonitorChart(symbol) {
+        try {
+            const chartContainer = document.getElementById('monitorChartContainer');
+            if (!chartContainer) return;
+
+            // Clear previous chart
+            chartContainer.innerHTML = `<canvas id="monitorChart" width="800" height="400"></canvas>`;
+
+            // Request chart data from API
+            const response = await this.apiCall('/chart_data', {
+                method: 'POST',
+                body: JSON.stringify({
+                    symbol: symbol,
+                    duration: "1 D",
+                    bar_size: "1 min",
+                    data_type: "TRADES"
+                })
+            });
+
+            if (!response.data || response.data.length === 0) {
+                chartContainer.innerHTML = '<div class="alert alert-warning">No chart data available</div>';
+                return;
+            }
+
+            // Wait a bit for DOM to update
+            setTimeout(() => {
+                const ctx = document.getElementById('monitorChart')?.getContext('2d');
+                if (!ctx) return;
+
+                // Prepare data for Chart.js
+                const labels = response.data.map(bar => {
+                    const date = new Date(bar.date);
+                    return date.toLocaleTimeString('en-US', { 
+                        hour: '2-digit', 
+                        minute: '2-digit',
+                        hour12: false 
+                    });
+                });
+                const prices = response.data.map(bar => bar.close);
+
+                // Get stop loss and take profit values for annotations
+                const stopLossInput = document.getElementById('monitorStopLoss');
+                const takeProfitInput = document.getElementById('monitorTakeProfit');
+                const stopLossPrice = stopLossInput?.value ? parseFloat(stopLossInput.value) : null;
+                const takeProfitPrice = takeProfitInput?.value ? parseFloat(takeProfitInput.value) : null;
+
+                // Prepare annotations
+                const annotations = {};
+                if (stopLossPrice) {
+                    annotations.stopLoss = {
+                        type: 'line',
+                        yMin: stopLossPrice,
+                        yMax: stopLossPrice,
+                        borderColor: 'rgb(255, 99, 132)',
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                        label: {
+                            content: `Stop Loss: $${stopLossPrice.toFixed(2)}`,
+                            enabled: true,
+                            position: 'start'
+                        }
+                    };
+                }
+                if (takeProfitPrice) {
+                    annotations.takeProfit = {
+                        type: 'line',
+                        yMin: takeProfitPrice,
+                        yMax: takeProfitPrice,
+                        borderColor: 'rgb(75, 192, 192)',
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                        label: {
+                            content: `Take Profit: $${takeProfitPrice.toFixed(2)}`,
+                            enabled: true,
+                            position: 'start'
+                        }
+                    };
+                }
+
+                // Destroy existing chart if exists
+                if (this.monitorChart) {
+                    this.monitorChart.destroy();
+                }
+
+                // Create new chart
+                this.monitorChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: `${symbol} Price`,
+                            data: prices,
+                            borderColor: 'rgb(54, 162, 235)',
+                            backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                            tension: 0.1,
+                            pointRadius: 1,
+                            pointHoverRadius: 3
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: {
+                            intersect: false,
+                            mode: 'index'
+                        },
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: `${symbol} - Real-time Price Chart`
+                            },
+                            legend: {
+                                display: false
+                            },
+                            annotation: {
+                                annotations: annotations
+                            }
+                        },
+                        scales: {
+                            x: {
+                                display: true,
+                                title: {
+                                    display: true,
+                                    text: 'Time'
+                                }
+                            },
+                            y: {
+                                display: true,
+                                title: {
+                                    display: true,
+                                    text: 'Price ($)'
+                                },
+                                beginAtZero: false
+                            }
+                        }
+                    }
+                });
+            }, 100);
+
+        } catch (error) {
+            console.error('Failed to load monitor chart:', error);
+            const chartContainer = document.getElementById('monitorChartContainer');
+            if (chartContainer) {
+                chartContainer.innerHTML = `<div class="alert alert-danger">Failed to load chart: ${error.message}</div>`;
+            }
+        }
+    }
+
+    updateMonitorStopLossLine() {
+        if (!this.monitorChart) return;
+        
+        const stopLossInput = document.getElementById('monitorStopLoss');
+        const stopLossPrice = stopLossInput?.value ? parseFloat(stopLossInput.value) : null;
+
+        // Update or remove stop loss annotation
+        if (stopLossPrice && !isNaN(stopLossPrice)) {
+            this.monitorChart.options.plugins.annotation.annotations.stopLoss = {
+                type: 'line',
+                yMin: stopLossPrice,
+                yMax: stopLossPrice,
+                borderColor: 'rgb(255, 99, 132)',
+                borderWidth: 2,
+                borderDash: [5, 5],
+                label: {
+                    content: `Stop Loss: $${stopLossPrice.toFixed(2)}`,
+                    enabled: true,
+                    position: 'start'
+                }
+            };
+        } else {
+            delete this.monitorChart.options.plugins.annotation.annotations.stopLoss;
+        }
+        
+        this.monitorChart.update('none');
+    }
+
+    updateMonitorTakeProfitLine() {
+        if (!this.monitorChart) return;
+        
+        const takeProfitInput = document.getElementById('monitorTakeProfit');
+        const takeProfitPrice = takeProfitInput?.value ? parseFloat(takeProfitInput.value) : null;
+
+        // Update or remove take profit annotation
+        if (takeProfitPrice && !isNaN(takeProfitPrice)) {
+            this.monitorChart.options.plugins.annotation.annotations.takeProfit = {
+                type: 'line',
+                yMin: takeProfitPrice,
+                yMax: takeProfitPrice,
+                borderColor: 'rgb(75, 192, 192)',
+                borderWidth: 2,
+                borderDash: [5, 5],
+                label: {
+                    content: `Take Profit: $${takeProfitPrice.toFixed(2)}`,
+                    enabled: true,
+                    position: 'start'
+                }
+            };
+        } else {
+            delete this.monitorChart.options.plugins.annotation.annotations.takeProfit;
+        }
+        
+        this.monitorChart.update('none');
+    }
 
     displayChart(symbol, data) {
          // Show chart modal
@@ -1183,8 +1487,11 @@ class TradingApp {
                         ${this.formatNumber(pos.unrealized_pnl_percent)}%
                     </td>
                     <td>
-                        <button class="btn btn-sm btn-outline-primary" onclick="app.editPositionRiskRule('${pos.symbol}', ${pos.current_price}, ${pos.avg_cost}, ${pos.position})" title="Set TP/SL">
+                        <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editPositionRiskRule('${pos.symbol}', ${pos.current_price}, ${pos.avg_cost}, ${pos.position})" title="Set TP/SL">
                             <i class="fas fa-shield-alt"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-success" onclick="app.openMonitorModal('${pos.symbol}', ${pos.position}, ${pos.current_price}, ${pos.avg_cost}, ${pos.unrealized_pnl}, ${pos.unrealized_pnl_percent})" title="Monitor">
+                            <i class="fas fa-eye"></i>
                         </button>
                     </td>
                 </tr>
