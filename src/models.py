@@ -20,6 +20,7 @@ class ChartDataRequest(BaseModel):
     duration: str
     bar_size: str
     exchange: str = "SMART"
+    data_type: str = "TRADES"  # 添加data_type支持
 
 class OrderRequest(BaseModel):
     """订单请求模型 - 与 API 端点保持一致"""

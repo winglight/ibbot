@@ -93,7 +93,9 @@ class TelegramNotifier:
         message = f"{emoji} <b>IBKR {title}</b> {emoji}\n\n"
         if details:
             message += f"<b>Details:</b> {details}\n\n"
-        message += f"🕐 Time: {asyncio.get_event_loop().time()}"
+        # 使用系统时间避免事件循环依赖
+        from datetime import datetime
+        message += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         await self.send_message(message)
     

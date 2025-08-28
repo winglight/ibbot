@@ -501,10 +501,12 @@ class RiskManager:
             # 对于止盈：多头持仓时价格应该上涨到目标价格，空头持仓时价格应该下跌到目标价格
             if position_qty > 0:  # 多头持仓
                 price_diff = current_price - rule.take_profit_price  # 当前价格 - 止盈价格
-                should_trigger = price_diff >= -threshold_price  # 当前价格接近或超过止盈价格
+                # 修复：只有当价格接近止盈价格时才触发（price_diff应该接近0且为负值或小正值）
+                should_trigger = price_diff >= -threshold_price and price_diff <= threshold_price
             else:  # 空头持仓
                 price_diff = rule.take_profit_price - current_price  # 止盈价格 - 当前价格
-                should_trigger = price_diff >= -threshold_price  # 当前价格接近或低于止盈价格
+                # 修复：只有当价格接近止盈价格时才触发（price_diff应该接近0且为负值或小正值）
+                should_trigger = price_diff >= -threshold_price and price_diff <= threshold_price
             
             logger.info(f"Take profit check for {symbol}: current=${current_price:.2f}, target=${rule.take_profit_price:.2f}, price_diff=${price_diff:.4f}, threshold_price=${threshold_price:.4f}, position_qty={position_qty}")
             
@@ -617,10 +619,12 @@ class RiskManager:
             # 对于止损：多头持仓时价格应该下跌到目标价格，空头持仓时价格应该上涨到目标价格
             if position_qty > 0:  # 多头持仓
                 price_diff = rule.stop_loss_price - current_price  # 止损价格 - 当前价格
-                should_trigger = price_diff >= -threshold_price  # 当前价格接近或低于止损价格
+                # 修复：只有当价格接近止损价格时才触发（price_diff应该接近0且为负值或小正值）
+                should_trigger = price_diff >= -threshold_price and price_diff <= threshold_price
             else:  # 空头持仓
                 price_diff = current_price - rule.stop_loss_price  # 当前价格 - 止损价格
-                should_trigger = price_diff >= -threshold_price  # 当前价格接近或超过止损价格
+                # 修复：只有当价格接近止损价格时才触发（price_diff应该接近0且为负值或小正值）
+                should_trigger = price_diff >= -threshold_price and price_diff <= threshold_price
             
             logger.info(f"Stop loss check for {symbol}: current=${current_price:.2f}, target=${rule.stop_loss_price:.2f}, price_diff=${price_diff:.4f}, threshold_price=${threshold_price:.4f}, position_qty={position_qty}")
             
@@ -785,7 +789,11 @@ class RiskManager:
             
             # Place market order for immediate execution using executor to avoid event loop conflicts
             logger.info(f"使用executor执行下单操作以避免事件循环冲突")
-            loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
             
             try:
                 trade = await loop.run_in_executor(

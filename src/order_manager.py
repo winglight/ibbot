@@ -281,6 +281,24 @@ class OrderManager:
             order = self.orders[order_id]
             old_status = order.status
             
+            # 防止订单状态回退：定义状态优先级
+            status_priority = {
+                "PendingSubmit": 1,
+                "Submitted": 2,
+                "PartiallyFilled": 3,
+                "Filled": 4,
+                "Cancelled": 4,
+                "Rejected": 4
+            }
+            
+            # 检查是否为状态回退
+            old_priority = status_priority.get(old_status, 0)
+            new_priority = status_priority.get(status, 0)
+            
+            if new_priority < old_priority:
+                logger.warning(f"🚫 防止订单状态回退: {order_id} | {old_status} (优先级{old_priority}) → {status} (优先级{new_priority}) | 跳过更新")
+                return False
+            
             # 更新订单状态
             order.status = status
             order.updated_at = datetime.now()

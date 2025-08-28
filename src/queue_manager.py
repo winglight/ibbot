@@ -279,7 +279,12 @@ class QueueManager:
             is_mock = False
         
         # 下单
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 如果不在事件循环中，创建一个
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         order_id = None
         order_type_for_record = "MKT" if order_type == "MARKET" else "LMT"
         

@@ -882,6 +882,9 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
                 "bar_size": request.bar_size,
                 "exchange": request.exchange
             }
+            # 透传 data_type 给 mock（若 mock 忽略也不影响）
+            if hasattr(request, 'data_type') and request.data_type:
+                request_data["data_type"] = request.data_type
             async with httpx.AsyncClient() as client:
                 response = await client.post(f"{MOCK_BASE}/chart_data", json=request_data)
                 if response.status_code == 200:
@@ -904,7 +907,11 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
     
     try:
         # Run in executor to avoid blocking event loop
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         try:
             df = await asyncio.wait_for(
                 loop.run_in_executor(

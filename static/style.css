@@ -66,3 +66,18 @@
         max-height: 250px;
     }
 }
+
+/* Monitor Modal Styles */
+#monitorChartContainer {
+    background-color: #fff;
+    border-radius: 6px;
+}
+#monitorModal .card {
+    box-shadow: none;
+}
+#monitorModal .card-body .fw-bold.text-success {
+    color: #198754 !important;
+}
+#monitorModal .card-body .fw-bold.text-danger {
+    color: #dc3545 !important;
+}

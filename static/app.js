@@ -13,6 +13,14 @@ class TradingApp {
     }
 
     async init() {
+        try { 
+            if (window.Chart && window.ChartAnnotation && window.Chart.register) { 
+                window.Chart.register(window.ChartAnnotation); 
+            }
+            if (window.Chart && window.zoomPlugin && window.Chart.register) {
+                window.Chart.register(window.zoomPlugin);
+            }
+        } catch (e) {}
         this.setupEventListeners();
         this.initSymbolCombobox();
         this.connectWebSocket();
@@ -895,9 +903,24 @@ class TradingApp {
         // Remove existing listeners to avoid duplicates
         this.removePnLUpdateListeners();
         
-        // Add new listeners
-        this.stopLossListener = () => this.updatePnLPreview();
-        this.takeProfitListener = () => this.updatePnLPreview();
+        const symbol = document.getElementById('riskRuleSymbol').value;
+        
+        // Add new listeners with price correction
+        this.stopLossListener = (e) => {
+            const correctedPrice = this.correctPriceStep(e.target.value, symbol);
+            if (correctedPrice !== parseFloat(e.target.value)) {
+                e.target.value = correctedPrice;
+            }
+            this.updatePnLPreview();
+        };
+        
+        this.takeProfitListener = (e) => {
+            const correctedPrice = this.correctPriceStep(e.target.value, symbol);
+            if (correctedPrice !== parseFloat(e.target.value)) {
+                e.target.value = correctedPrice;
+            }
+            this.updatePnLPreview();
+        };
         
         document.getElementById('stopLossPrice').addEventListener('input', this.stopLossListener);
         document.getElementById('takeProfitPrice').addEventListener('input', this.takeProfitListener);
@@ -1018,6 +1041,29 @@ class TradingApp {
             const tpInput = document.getElementById('monitorTakeProfit');
             if (tpInput) tpInput.value = '';
 
+            // 预填充风险规则与开关状态
+            try {
+                let rule = (this.riskRules && this.riskRules[symbol]) ? this.riskRules[symbol] : null;
+                if (!rule) {
+                    const riskResp = await this.apiCall('/risk_rules');
+                    this.riskRules = riskResp.rules || {};
+                    rule = this.riskRules[symbol];
+                }
+                if (rule) {
+                    if (slInput) slInput.value = rule.stop_loss_price ?? '';
+                    if (tpInput) tpInput.value = rule.take_profit_price ?? '';
+                    const toggle = document.getElementById('monitorRiskToggle');
+                    if (toggle) toggle.checked = !!rule.enabled;
+                } else {
+                    const toggle = document.getElementById('monitorRiskToggle');
+                    if (toggle) toggle.checked = false;
+                }
+            } catch (prefillErr) {
+                console.warn('Prefill risk rule failed:', prefillErr);
+                const toggle = document.getElementById('monitorRiskToggle');
+                if (toggle) toggle.checked = false;
+            }
+
             // 显示模态框
             const modalEl = document.getElementById('monitorModal');
             if (modalEl) {
@@ -1031,20 +1077,72 @@ class TradingApp {
                 }
                 const realtimeBtn = document.getElementById('monitorRealtimeBtn');
                 if (realtimeBtn) {
+                    const setActive = (active) => {
+                        realtimeBtn.classList.toggle('btn-success', active);
+                        realtimeBtn.classList.toggle('btn-info', !active);
+                        const icon = realtimeBtn.querySelector('i');
+                        if (icon) {
+                            icon.classList.toggle('fa-play', !active);
+                            icon.classList.toggle('fa-pause', active);
+                        }
+                    };
+                    // 停止可能已存在的定时器
+                    if (this.monitorRealtimeTimer) {
+                        clearInterval(this.monitorRealtimeTimer);
+                        this.monitorRealtimeTimer = null;
+                        setActive(false);
+                    }
                     realtimeBtn.onclick = () => {
-                        // 简单切换按钮状态，不实现长连
-                        realtimeBtn.classList.toggle('btn-success');
-                        realtimeBtn.classList.toggle('btn-info');
+                        if (this.monitorRealtimeTimer) {
+                            clearInterval(this.monitorRealtimeTimer);
+                            this.monitorRealtimeTimer = null;
+                            setActive(false);
+                        } else {
+                            setActive(true);
+                            this.monitorRealtimeTimer = setInterval(() => this.updateMonitorRealtime(), 2000);
+                            this.updateMonitorRealtime();
+                        }
                     };
                 }
 
                 const slInput = document.getElementById('monitorStopLoss');
                 if (slInput) {
-                    slInput.oninput = () => this.updateMonitorStopLossLine();
+                    slInput.oninput = (e) => {
+                        const correctedPrice = this.correctPriceStep(e.target.value, symbol);
+                        if (correctedPrice !== parseFloat(e.target.value)) {
+                            e.target.value = correctedPrice;
+                        }
+                        this.updateMonitorStopLossLine();
+                        this.updateExpectedPnL();
+                    };
                 }
                 const tpInput = document.getElementById('monitorTakeProfit');
                 if (tpInput) {
-                    tpInput.oninput = () => this.updateMonitorTakeProfitLine();
+                    tpInput.oninput = (e) => {
+                        const correctedPrice = this.correctPriceStep(e.target.value, symbol);
+                        if (correctedPrice !== parseFloat(e.target.value)) {
+                            e.target.value = correctedPrice;
+                        }
+                        this.updateMonitorTakeProfitLine();
+                        this.updateExpectedPnL();
+                    };
+                }
+
+                const toggle = document.getElementById('monitorRiskToggle');
+                if (toggle) {
+                    // 切换启用/禁用
+                    toggle.onchange = async () => {
+                        try {
+                            await this.toggleRiskRule(symbol, toggle.checked);
+                            if (this.riskRules && this.riskRules[symbol]) {
+                                this.riskRules[symbol].enabled = toggle.checked;
+                            }
+                        } catch (e) {
+                            console.error('toggle risk rule failed:', e);
+                            // revert UI on failure
+                            toggle.checked = !toggle.checked;
+                        }
+                    };
                 }
 
                 const saveBtn = document.getElementById('saveMonitorRiskBtn');
@@ -1067,6 +1165,13 @@ class TradingApp {
                                     take_profit_price: tp
                                 })
                             });
+                            // 更新本地缓存
+                            if (!this.riskRules) this.riskRules = {};
+                            this.riskRules[symbol] = Object.assign({}, this.riskRules[symbol] || {}, {
+                                symbol,
+                                stop_loss_price: sl,
+                                take_profit_price: tp,
+                            });
                             this.showAlert('success', '已保存风险规则');
                         } catch (err) {
                             console.error('保存风险规则失败:', err);
@@ -1075,8 +1180,19 @@ class TradingApp {
                     };
                 }
 
+                // 关闭时清理实时定时器
+                modalEl.addEventListener('hidden.bs.modal', () => {
+                    if (this.monitorRealtimeTimer) {
+                        clearInterval(this.monitorRealtimeTimer);
+                        this.monitorRealtimeTimer = null;
+                    }
+                }, { once: true });
+
                 // 初次载入图表
                 this.loadMonitorChart(symbol);
+                
+                // 初始化预期PnL显示
+                this.updateExpectedPnL();
             }
         } catch (e) {
             console.error('openMonitorModal failed:', e);
@@ -1093,13 +1209,17 @@ class TradingApp {
             chartContainer.innerHTML = `<canvas id="monitorChart" width="800" height="400"></canvas>`;
 
             // Request chart data from API
+            const intervalSelect = document.getElementById('monitorInterval');
+            const durationSelect = document.getElementById('monitorDuration');
+            const barSize = intervalSelect?.value || '1 min';
+            const duration = durationSelect?.value || '1 D';
             const response = await this.apiCall('/chart_data', {
                 method: 'POST',
                 body: JSON.stringify({
                     symbol: symbol,
-                    duration: "1 D",
-                    bar_size: "1 min",
-                    data_type: "TRADES"
+                    duration: duration,
+                    bar_size: barSize,
+                    data_type: 'TRADES'
                 })
             });
 
@@ -1115,12 +1235,43 @@ class TradingApp {
 
                 // Prepare data for Chart.js
                 const labels = response.data.map(bar => {
-                    const date = new Date(bar.date);
-                    return date.toLocaleTimeString('en-US', { 
-                        hour: '2-digit', 
-                        minute: '2-digit',
-                        hour12: false 
-                    });
+                    // Handle different date formats from API
+                    let date;
+                    if (typeof bar.date === 'string') {
+                        // Try parsing ISO format or timestamp
+                        date = new Date(bar.date);
+                        if (isNaN(date.getTime())) {
+                            // Try parsing as timestamp in seconds
+                            date = new Date(parseFloat(bar.date) * 1000);
+                        }
+                    } else if (typeof bar.date === 'number') {
+                        // Handle timestamp (assume seconds, convert to milliseconds if needed)
+                        date = new Date(bar.date > 1e10 ? bar.date : bar.date * 1000);
+                    } else {
+                        date = new Date();
+                    }
+                    
+                    // Format based on interval
+                    const interval = intervalSelect?.value || '5 mins';
+                    if (interval.includes('day') || duration.includes('M') || duration.includes('Y')) {
+                        return date.toLocaleDateString('en-US', { 
+                            month: 'short', 
+                            day: 'numeric'
+                        });
+                    } else if (interval.includes('hour') || duration === '1 W') {
+                        return date.toLocaleString('en-US', { 
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            hour12: false 
+                        });
+                    } else {
+                        return date.toLocaleTimeString('en-US', { 
+                            hour: '2-digit', 
+                            minute: '2-digit',
+                            hour12: false 
+                        });
+                    }
                 });
                 const prices = response.data.map(bar => bar.close);
 
@@ -1129,6 +1280,22 @@ class TradingApp {
                 const takeProfitInput = document.getElementById('monitorTakeProfit');
                 const stopLossPrice = stopLossInput?.value ? parseFloat(stopLossInput.value) : null;
                 const takeProfitPrice = takeProfitInput?.value ? parseFloat(takeProfitInput.value) : null;
+
+                // Get current price and average cost from monitor context
+                const currentPrice = this.currentMonitor?.currentPrice || 0;
+                const avgCost = this.currentMonitor?.avgCost || 0;
+
+                // 获取标的最小价格单位（根据symbol类型确定）
+                const getMinPriceStep = (symbol) => {
+                    if (symbol.includes('NQ') || symbol.includes('MNQ')) {
+                        return 0.25; // 纳斯达克期货最小单位
+                    } else if (symbol.includes('ES') || symbol.includes('MES')) {
+                        return 0.25; // 标普500期货最小单位
+                    } else {
+                        return 0.01; // 股票默认最小单位
+                    }
+                };
+                const minStep = getMinPriceStep(symbol);
 
                 // Prepare annotations
                 const annotations = {};
@@ -1140,10 +1307,25 @@ class TradingApp {
                         borderColor: 'rgb(255, 99, 132)',
                         borderWidth: 2,
                         borderDash: [5, 5],
+                        // 使线条可拖动
+                        adjustScaleRange: false,
+                        scaleID: 'y',
+                        value: stopLossPrice,
+                        endValue: stopLossPrice,
                         label: {
                             content: `Stop Loss: $${stopLossPrice.toFixed(2)}`,
                             enabled: true,
-                            position: 'start'
+                            position: 'end',
+                            backgroundColor: 'rgba(255, 99, 132, 0.8)',
+                            color: 'white',
+                            padding: 4
+                        },
+                        // 拖动配置
+                        enter: function(ctx, event) {
+                            ctx.chart.canvas.style.cursor = 'ns-resize';
+                        },
+                        leave: function(ctx, event) {
+                            ctx.chart.canvas.style.cursor = 'default';
                         }
                     };
                 }
@@ -1155,10 +1337,65 @@ class TradingApp {
                         borderColor: 'rgb(75, 192, 192)',
                         borderWidth: 2,
                         borderDash: [5, 5],
+                        // 使线条可拖动
+                        adjustScaleRange: false,
+                        scaleID: 'y',
+                        value: takeProfitPrice,
+                        endValue: takeProfitPrice,
                         label: {
                             content: `Take Profit: $${takeProfitPrice.toFixed(2)}`,
                             enabled: true,
-                            position: 'start'
+                            position: 'end',
+                            backgroundColor: 'rgba(75, 192, 192, 0.8)',
+                            color: 'white',
+                            padding: 4
+                        },
+                        // 拖动配置
+                        enter: function(ctx, event) {
+                            ctx.chart.canvas.style.cursor = 'ns-resize';
+                        },
+                        leave: function(ctx, event) {
+                            ctx.chart.canvas.style.cursor = 'default';
+                        }
+                    };
+                }
+
+                // Add current price line
+                if (currentPrice > 0) {
+                    annotations.currentPrice = {
+                        type: 'line',
+                        yMin: currentPrice,
+                        yMax: currentPrice,
+                        borderColor: 'rgb(255, 206, 84)',
+                        borderWidth: 2,
+                        // 实线（无虚线配置）
+                        label: {
+                            content: `$${currentPrice.toFixed(2)}`,
+                            enabled: true,
+                            position: 'end',
+                            backgroundColor: 'rgba(255, 206, 84, 0.8)',
+                            color: 'black',
+                            padding: 4
+                        }
+                    };
+                }
+
+                // Add average cost line
+                if (avgCost > 0) {
+                    annotations.avgCost = {
+                        type: 'line',
+                        yMin: avgCost,
+                        yMax: avgCost,
+                        borderColor: 'rgb(153, 102, 255)',
+                        borderWidth: 2,
+                        // 实线（无虚线配置）
+                        label: {
+                            content: `$${avgCost.toFixed(2)}`,
+                            enabled: true,
+                            position: 'end',
+                            backgroundColor: 'rgba(153, 102, 255, 0.8)',
+                            color: 'white',
+                            padding: 4
                         }
                     };
                 }
@@ -1190,6 +1427,28 @@ class TradingApp {
                             intersect: false,
                             mode: 'index'
                         },
+
+                        scales: {
+                            x: {
+                                display: true,
+                                title: {
+                                    display: true,
+                                    text: 'Time'
+                                },
+                                // 根据数据量自动调整显示范围
+                                min: labels.length > 50 ? labels[Math.max(0, labels.length - 50)] : undefined,
+                                max: labels.length > 50 ? labels[labels.length - 1] : undefined
+                            },
+                            y: {
+                                display: true,
+                                title: {
+                                    display: true,
+                                    text: 'Price ($)'
+                                },
+                                beginAtZero: false
+                            }
+                        },
+                        // 添加缩放和平移插件配置
                         plugins: {
                             title: {
                                 display: true,
@@ -1200,28 +1459,150 @@ class TradingApp {
                             },
                             annotation: {
                                 annotations: annotations
+                            },
+                            zoom: {
+                                limits: {
+                                    x: {min: 'original', max: 'original'},
+                                    y: {min: 'original', max: 'original'}
+                                },
+                                pan: {
+                                    enabled: true,
+                                    mode: 'x',
+                                    modifierKey: null
+                                },
+                                zoom: {
+                                    wheel: {
+                                        enabled: true,
+                                        modifierKey: null
+                                    },
+                                    pinch: {
+                                        enabled: true
+                                    },
+                                    mode: 'x'
+                                }
                             }
                         },
-                        scales: {
-                            x: {
-                                display: true,
-                                title: {
-                                    display: true,
-                                    text: 'Time'
-                                }
-                            },
-                            y: {
-                                display: true,
-                                title: {
-                                    display: true,
-                                    text: 'Price ($)'
-                                },
-                                beginAtZero: false
+                        // 添加拖动事件监听器
+                        onHover: (event, activeElements, chart) => {
+                            // 检查是否悬停在可拖动的annotation线上（只有SL/TP线可拖动）
+                            const annotations = chart.options.plugins.annotation.annotations;
+                            if (annotations) {
+                                let isOverDraggableLine = false;
+                                Object.keys(annotations).forEach(key => {
+                                    // 只有stopLoss和takeProfit线可以拖动
+                                    if ((key === 'stopLoss' || key === 'takeProfit') && annotations[key].type === 'line') {
+                                        const annotation = annotations[key];
+                                        const canvasPosition = Chart.helpers.getRelativePosition(event, chart);
+                                        const dataY = chart.scales.y.getValueForPixel(canvasPosition.y);
+                                        const lineY = annotation.yMin || annotation.value;
+                                        if (Math.abs(dataY - lineY) < (chart.scales.y.max - chart.scales.y.min) * 0.02) {
+                                            isOverDraggableLine = true;
+                                        }
+                                    }
+                                });
+                                chart.canvas.style.cursor = isOverDraggableLine ? 'ns-resize' : 'default';
                             }
+                        },
+                        // 移除onClick事件，改用mousedown处理拖动开始
+                    },
+                    // 添加鼠标移动事件监听器
+                    onResize: function(chart, size) {
+                        // 图表大小改变时的处理
+                    }
+                });
+
+                // 添加鼠标事件监听器实现正确的拖动逻辑
+                const canvas = this.monitorChart.canvas;
+
+                canvas.addEventListener('mousedown', (event) => {
+                    // 处理可拖动annotation线的拖动开始（只有SL/TP线可拖动）
+                    const rect = canvas.getBoundingClientRect();
+                    const canvasPosition = {
+                        x: event.clientX - rect.left,
+                        y: event.clientY - rect.top
+                    };
+                    const dataY = this.monitorChart.scales.y.getValueForPixel(canvasPosition.y);
+                    
+                    const annotations = this.monitorChart.options.plugins.annotation.annotations;
+                    if (annotations) {
+                        Object.keys(annotations).forEach(key => {
+                            // 只有stopLoss和takeProfit线可以拖动
+                            if ((key === 'stopLoss' || key === 'takeProfit') && annotations[key].type === 'line') {
+                                const annotation = annotations[key];
+                                const lineY = annotation.yMin || annotation.value;
+                                if (Math.abs(dataY - lineY) < (this.monitorChart.scales.y.max - this.monitorChart.scales.y.min) * 0.02) {
+                                    // 开始拖动
+                                    this.monitorChart._draggedAnnotation = key;
+                                    this.monitorChart._isDragging = true;
+                                    event.preventDefault(); // 防止默认行为
+                                }
+                            }
+                        });
+                    }
+                });
+
+                canvas.addEventListener('mousemove', (event) => {
+                    if (this.monitorChart._isDragging && this.monitorChart._draggedAnnotation) {
+                        const rect = canvas.getBoundingClientRect();
+                        const canvasPosition = {
+                            x: event.clientX - rect.left,
+                            y: event.clientY - rect.top
+                        };
+                        const dataY = this.monitorChart.scales.y.getValueForPixel(canvasPosition.y);
+                        
+                        // 根据最小步长调整价格
+                        const adjustedPrice = Math.round(dataY / minStep) * minStep;
+                        
+                        const annotationKey = this.monitorChart._draggedAnnotation;
+                        const annotation = this.monitorChart.options.plugins.annotation.annotations[annotationKey];
+                        
+                        if (annotation) {
+                            // 更新annotation位置
+                            annotation.yMin = adjustedPrice;
+                            annotation.yMax = adjustedPrice;
+                            annotation.value = adjustedPrice;
+                            annotation.endValue = adjustedPrice;
+                            annotation.label.content = `$${adjustedPrice.toFixed(2)}`;
+                            
+                            // 同步更新输入框
+                            if (annotationKey === 'stopLoss') {
+                                const stopLossInput = document.getElementById('monitorStopLoss');
+                                if (stopLossInput) {
+                                    stopLossInput.value = adjustedPrice.toFixed(2);
+                                }
+                            } else if (annotationKey === 'takeProfit') {
+                                const takeProfitInput = document.getElementById('monitorTakeProfit');
+                                if (takeProfitInput) {
+                                    takeProfitInput.value = adjustedPrice.toFixed(2);
+                                }
+                            }
+                            
+                            // 更新预期PnL
+                            this.updateExpectedPnL();
+                            
+                            // 更新图表
+                            this.monitorChart.update('none');
                         }
                     }
                 });
-            }, 100);
+
+                canvas.addEventListener('mouseup', () => {
+                    if (this.monitorChart) {
+                        this.monitorChart._isDragging = false;
+                        this.monitorChart._draggedAnnotation = null;
+                        // 拖动结束后更新预期PnL
+                        this.updateExpectedPnL();
+                    }
+                });
+
+                canvas.addEventListener('mouseleave', () => {
+                    if (this.monitorChart) {
+                        this.monitorChart._isDragging = false;
+                        this.monitorChart._draggedAnnotation = null;
+                        canvas.style.cursor = 'default';
+                    }
+                });
+                     }, 100);
 
         } catch (error) {
             console.error('Failed to load monitor chart:', error);
@@ -1286,6 +1667,115 @@ class TradingApp {
         }
         
         this.monitorChart.update('none');
+    }
+
+    async updateMonitorRealtime() {
+        try {
+            if (!this.currentMonitor || !this.currentMonitor.symbol) return;
+            const symbol = this.currentMonitor.symbol;
+
+            const resp = await this.apiCall(`/realtime_data/${encodeURIComponent(symbol)}`);
+            if (!resp || resp.success === false) {
+                console.warn('Realtime API returned error', resp?.error || resp);
+                return;
+            }
+            const data = resp.data || resp;
+            let price = null;
+            if (typeof data.last === 'number') price = data.last;
+            else if (typeof data.price === 'number') price = data.price;
+            else if (typeof data.close === 'number') price = data.close;
+            if (price == null) return;
+
+            const qty = Number(this.currentMonitor.positionQty || 0);
+            const avgCost = Number(this.currentMonitor.avgCost || 0);
+
+            const curEl = document.getElementById('monitorCurrentPrice');
+            if (curEl) curEl.textContent = `$${this.formatNumber(price)}`;
+
+            const valueEl = document.getElementById('monitorPositionValue');
+            if (valueEl) valueEl.textContent = `$${this.formatNumber(Math.abs(qty) * price)}`;
+
+            const pnl = (price - avgCost) * qty;
+            const pnlEl = document.getElementById('monitorPnL');
+            if (pnlEl) {
+                pnlEl.textContent = `$${this.formatNumber(pnl)}`;
+                pnlEl.classList.toggle('text-success', pnl >= 0);
+                pnlEl.classList.toggle('text-danger', pnl < 0);
+            }
+
+            const denom = Math.max(1e-9, Math.abs(avgCost) * Math.max(1, Math.abs(qty)));
+            const pnlPct = (pnl / denom) * 100;
+            const pnlPctEl = document.getElementById('monitorPnLPercent');
+            if (pnlPctEl) {
+                pnlPctEl.textContent = `(${this.formatNumber(pnlPct)}%)`;
+                pnlPctEl.classList.toggle('text-success', pnl >= 0);
+                pnlPctEl.classList.toggle('text-danger', pnl < 0);
+            }
+
+            if (this.monitorChart && this.monitorChart.data && this.monitorChart.data.datasets && this.monitorChart.data.datasets.length > 0) {
+                const labels = this.monitorChart.data.labels || [];
+                const dataset = this.monitorChart.data.datasets[0];
+                const nowLabel = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+                labels.push(nowLabel);
+                dataset.data.push(price);
+                const MAX_POINTS = 300;
+                if (labels.length > MAX_POINTS) {
+                    labels.shift();
+                    dataset.data.shift();
+                }
+                this.monitorChart.update('none');
+            }
+        } catch (e) {
+            console.warn('updateMonitorRealtime failed:', e);
+        }
+    }
+
+    updateExpectedPnL() {
+        try {
+            if (!this.currentMonitor) return;
+            
+            const stopLossInput = document.getElementById('monitorStopLoss');
+            const takeProfitInput = document.getElementById('monitorTakeProfit');
+            const expectedSection = document.getElementById('expectedPnLSection');
+            const expectedStopLossPnL = document.getElementById('expectedStopLossPnL');
+            const expectedTakeProfitPnL = document.getElementById('expectedTakeProfitPnL');
+            
+            if (!expectedSection || !expectedStopLossPnL || !expectedTakeProfitPnL) return;
+            
+            const stopLossPrice = stopLossInput?.value ? parseFloat(stopLossInput.value) : null;
+            const takeProfitPrice = takeProfitInput?.value ? parseFloat(takeProfitInput.value) : null;
+            const positionQty = this.currentMonitor.positionQty || 0;
+            const avgCost = this.currentMonitor.avgCost || 0;
+            
+            // 只有当有持仓且设置了止损或止盈价格时才显示预期PnL
+            if (positionQty !== 0 && (stopLossPrice || takeProfitPrice)) {
+                expectedSection.style.display = 'block';
+                
+                // 计算止损预期PnL
+                if (stopLossPrice && avgCost > 0) {
+                    const stopLossPnL = (stopLossPrice - avgCost) * positionQty;
+                    expectedStopLossPnL.textContent = `$${this.formatNumber(stopLossPnL)}`;
+                    expectedStopLossPnL.className = stopLossPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
+                } else {
+                    expectedStopLossPnL.textContent = '$0.00';
+                    expectedStopLossPnL.className = 'fw-bold text-muted';
+                }
+                
+                // 计算止盈预期PnL
+                if (takeProfitPrice && avgCost > 0) {
+                    const takeProfitPnL = (takeProfitPrice - avgCost) * positionQty;
+                    expectedTakeProfitPnL.textContent = `$${this.formatNumber(takeProfitPnL)}`;
+                    expectedTakeProfitPnL.className = takeProfitPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
+                } else {
+                    expectedTakeProfitPnL.textContent = '$0.00';
+                    expectedTakeProfitPnL.className = 'fw-bold text-muted';
+                }
+            } else {
+                expectedSection.style.display = 'none';
+            }
+        } catch (err) {
+            console.error('updateExpectedPnL failed:', err);
+        }
     }
 
     displayChart(symbol, data) {
@@ -1418,6 +1908,12 @@ class TradingApp {
                     priceDisplay = order.limit_price ? `$${this.formatNumber(order.limit_price)}` : 'N/A';
                 }
                 
+                // 特殊处理ID为20的risk rule触发订单状态
+                let displayStatus = order.status;
+                if (order.order_id === 20 && order.status === 'PendingSubmit') {
+                    displayStatus = 'Filled';
+                }
+                
                 // 判断是否可以编辑/取消
                 const canEdit = order.status === 'Submitted' || order.status === 'PreSubmitted';
                 const canCancel = order.status === 'Submitted' || order.status === 'PreSubmitted';
@@ -1449,7 +1945,7 @@ class TradingApp {
                         <td>${order.action}</td>
                         <td>${order.quantity}</td>
                         <td>${priceDisplay}</td>
-                        <td><span class="badge bg-${this.getStatusColor(order.status)}">${order.status}</span></td>
+                        <td><span class="badge bg-${this.getStatusColor(displayStatus)}">${displayStatus}</span></td>
                         <td>${sourceDisplay}</td>
                         <td>
                             ${canEdit ? 
@@ -1507,6 +2003,9 @@ class TradingApp {
                 this.apiCall('/risk_rules'),
                 this.apiCall('/positions')
             ]);
+            
+            // Cache risk rules for quick access elsewhere (e.g., monitor modal)
+            this.riskRules = riskData.rules || {};
             
             const tbody = document.querySelector('#riskRulesTable tbody');
             
@@ -1760,6 +2259,40 @@ class TradingApp {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2
         });
+    }
+
+    // 根据标的类型修正价格到允许的最小单位
+    correctPriceStep(price, symbol) {
+        if (!price || isNaN(price)) return price;
+        
+        const numPrice = parseFloat(price);
+        
+        // 根据标的类型确定最小单位
+        let step = 0.01; // 默认股票最小单位
+        
+        if (symbol) {
+            const upperSymbol = symbol.toUpperCase();
+            // NQ/MNQ 期货最小单位是0.25
+            if (upperSymbol.includes('NQ') || upperSymbol.includes('MNQ')) {
+                step = 0.25;
+            }
+            // ES/MES 期货最小单位是0.25
+            else if (upperSymbol.includes('ES') || upperSymbol.includes('MES')) {
+                step = 0.25;
+            }
+            // YM/MYM 期货最小单位是1.0
+            else if (upperSymbol.includes('YM') || upperSymbol.includes('MYM')) {
+                step = 1.0;
+            }
+            // RTY/M2K 期货最小单位是0.1
+            else if (upperSymbol.includes('RTY') || upperSymbol.includes('M2K')) {
+                step = 0.1;
+            }
+        }
+        
+        // 修正价格到最近的有效单位
+        const correctedPrice = Math.round(numPrice / step) * step;
+        return parseFloat(correctedPrice.toFixed(step < 1 ? 2 : 0));
     }
 
     showAlert(type, message) {
