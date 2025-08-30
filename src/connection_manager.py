@@ -2,6 +2,9 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from ib_insync import IB, util
 from loguru import logger
+
+# 为connection模块创建专用logger
+connection_logger = logger.bind(module="connection", request_id="-")
 import os
 import threading
 import asyncio
@@ -28,7 +31,7 @@ def _get_env_int(key: str, default: int) -> int:
         return int(cleaned)
     except Exception:
         try:
-            logger.warning(f"Invalid integer for {key}='{val}', falling back to {default}")
+            connection_logger.warning(f"Invalid integer for {key}='{val}', falling back to {default}")
         except Exception:
             pass
         return int(default)
@@ -76,11 +79,11 @@ class ConnectionManager:
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
         if self.connected:
-            logger.warning("Connection is active. Disconnect first before updating config.")
+            connection_logger.warning("Connection is active. Disconnect first before updating config.")
             return
         
         self.config = config
-        logger.info(f"Connection config updated: {config.to_dict()}")
+        connection_logger.info(f"Connection config updated: {config.to_dict()}")
     
     def _connect_in_thread(self) -> bool:
         """在独立线程中连接到IBKR服务器"""
@@ -109,7 +112,7 @@ class ConnectionManager:
                         try_client_id = try_client_id - 32
                     
                     try:
-                        logger.info(f"尝试连接IBKR，客户端ID: {try_client_id}")
+                        connection_logger.info(f"尝试连接IBKR，客户端ID: {try_client_id}")
                         await self.ib.connectAsync(
                             host=self.config.host,
                             port=self.config.port,
@@ -120,12 +123,12 @@ class ConnectionManager:
                         self.config.client_id = try_client_id
                         connected = True
                         self._last_connect_error = None
-                        logger.info(f"成功连接IBKR，使用客户端ID: {try_client_id}")
+                        connection_logger.info(f"成功连接IBKR，使用客户端ID: {try_client_id}")
                         break
                     except Exception as conn_error:
                         error_msg = str(conn_error)
                         if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():
-                            logger.warning(f"客户端ID {try_client_id} 已被使用，尝试下一个ID")
+                            connection_logger.warning(f"客户端ID {try_client_id} 已被使用，尝试下一个ID")
                             continue
                         elif "TimeoutError" in error_msg or "timeout" in error_msg.lower():
                             self._last_connect_error = f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
@@ -137,8 +140,8 @@ class ConnectionManager:
                             if attempt == 4:  # 最后一次尝试
                                 self._last_connect_error = f"连接失败: {error_msg}"
                                 raise Exception(self._last_connect_error)
-                            logger.warning(f"客户端ID {try_client_id} 连接失败: {error_msg}，尝试下一个ID")
-                
+                            connection_logger.warning(f"客户端ID {try_client_id} 连接失败: {error_msg}，尝试下一个ID")
+                 
                 if not connected:
                     self._last_connect_error = f"无法找到可用的客户端ID (尝试了 {original_client_id} 到 {original_client_id + 4})"
                     raise Exception(self._last_connect_error)
@@ -147,9 +150,9 @@ class ConnectionManager:
                 try:
                     default_mkt_data_type = _get_env_int('IBKR_MARKET_DATA_TYPE', 3)  # 1=实时,2=冻结,3=延迟,4=延迟冻结
                     self.ib.reqMarketDataType(default_mkt_data_type)
-                    logger.info(f"Set default IBKR market data type to {default_mkt_data_type}")
+                    connection_logger.info(f"Set default IBKR market data type to {default_mkt_data_type}")
                 except Exception as e:
-                    logger.debug(f"Failed to set default market data type: {e}")
+                    connection_logger.debug(f"Failed to set default market data type: {e}")
                 
                 # 在连接建立后为 completedOrder 事件做安全防护，避免 KeyError: 'completedOrders'
                 try:
@@ -177,13 +180,13 @@ class ConnectionManager:
                         w._results['completedOrders'] = []
                     except Exception:
                         pass
-                    logger.debug("Patched ib_insync wrapper.completedOrder to guard 'completedOrders' key")
+                    connection_logger.debug("Patched ib_insync wrapper.completedOrder to guard 'completedOrders' key")
                 except Exception as e:
-                    logger.debug(f"Failed to patch wrapper.completedOrder: {e}")
+                    connection_logger.debug(f"Failed to patch wrapper.completedOrder: {e}")
                 
                 self.connected = True
                 account_type = "Paper" if self.config.paper_trading else "Live"
-                logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
+                connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
                 
                 # 保存事件循环引用
                 self._loop = loop
@@ -197,24 +200,23 @@ class ConnectionManager:
                             await asyncio.sleep(0.1)
                         except RuntimeError as e:
                             if "Event loop stopped before Future completed" in str(e):
-                                logger.debug("Event loop stopped signal received")
+                                connection_logger.debug("Event loop stopped signal received")
                                 break
                             raise
-                except Exception as e:
-                    logger.error(f"Connection loop error: {e}")
                 finally:
-                    self.connected = False
                     # 不在这里批量取消任务，避免递归取消；仅记录日志
-                    logger.info("IBKR connection loop ended")
-                    
+                    connection_logger.info("IBKR connection loop ended")
+            
             except Exception as e:
-                logger.error(f"Failed to connect to IBKR: {e}")
+                connection_logger.error(f"Failed to connect to IBKR: {e}")
                 self.connected = False
                 # 标记错误以便主线程快速返回
                 try:
                     self._last_connect_error = str(e)
                 except Exception:
                     self._last_connect_error = "Unknown connection error"
+                     
+                 
         
         def run_worker():
             # 在新线程中创建新的事件循环
@@ -230,7 +232,7 @@ class ConnectionManager:
                 task = loop.create_task(connect_worker())
                 loop.run_forever()
             except Exception as e:
-                logger.error(f"Event loop error: {e}")
+                connection_logger.error(f"Event loop error: {e}")
             finally:
                 # 确保任务能够正确完成，避免 "Task was destroyed but it is pending" 警告
                 try:
@@ -243,13 +245,13 @@ class ConnectionManager:
                             # 任务被取消或超时是正常的
                             pass
                 except Exception as e:
-                    logger.debug(f"Error during task cleanup: {e}")
+                    connection_logger.debug(f"Error during task cleanup: {e}")
                 finally:
                     try:
                         if not loop.is_closed():
                             loop.close()
                     except Exception as e:
-                        logger.debug(f"Error closing loop: {e}")
+                        connection_logger.debug(f"Error closing loop: {e}")
         
         # 重置最近错误
         self._last_connect_error = None
@@ -266,14 +268,14 @@ class ConnectionManager:
             wait_time += 0.2
             # 若连接成功
             if self.connected:
-                logger.info("IBKR connection established successfully")
+                connection_logger.info("IBKR connection established successfully")
                 return True
             # 若出现错误则立即失败返回
             if self._last_connect_error:
-                logger.error(f"IBKR connection failed fast: {self._last_connect_error}")
+                connection_logger.error(f"IBKR connection failed fast: {self._last_connect_error}")
                 return False
         
-        logger.error("IBKR connection timeout")
+        connection_logger.error("IBKR connection timeout")
         return False
     
     def connect(self) -> bool:
@@ -285,13 +287,13 @@ class ConnectionManager:
             current_port = getattr(self.ib, 'port', None)
             if (current_host == self.config.host and 
                 current_port == self.config.port):
-                logger.info("Already connected to IBKR with same configuration")
+                connection_logger.info("Already connected to IBKR with same configuration")
                 return True
             else:
-                logger.info("Configuration changed, reconnecting...")
+                connection_logger.info("Configuration changed, reconnecting...")
                 self.disconnect()
         
-        logger.info("Connecting to IBKR...")
+        connection_logger.info("Connecting to IBKR...")
         return self._connect_in_thread()
     
     def disconnect(self) -> None:
@@ -304,9 +306,9 @@ class ConnectionManager:
             if self.ib and self.ib.isConnected():
                 try:
                     self.ib.disconnect()
-                    logger.info("Disconnected from IBKR")
+                    connection_logger.info("Disconnected from IBKR")
                 except Exception as e:
-                    logger.warning(f"Error while disconnecting IB: {e}")
+                    connection_logger.warning(f"Error while disconnecting IB: {e}")
             
             # 关闭事件循环
             if self._loop and not self._loop.is_closed():
@@ -315,7 +317,7 @@ class ConnectionManager:
                     self._loop.call_soon_threadsafe(self._loop.stop)
                     # 等待线程结束时再做最终清理
                 except Exception as e:
-                    logger.debug(f"Error closing loop: {e}")
+                    connection_logger.debug(f"Error closing loop: {e}")
             
             # 等待线程结束
             if self._connection_thread and self._connection_thread.is_alive():
@@ -330,7 +332,7 @@ class ConnectionManager:
             self._loop = None
             self._connection_thread = None
         except Exception as e:
-            logger.error(f"Disconnect error: {e}")
+            connection_logger.error(f"Disconnect error: {e}")
 
     def is_connected(self) -> bool:
         """检查连接状态"""
@@ -392,7 +394,7 @@ class ConnectionManager:
             return info
             
         except Exception as e:
-            logger.error(f"Failed to get account info: {e}")
+            connection_logger.error(f"Failed to get account info: {e}")
             raise
     
     def get_config(self) -> ConnectionConfig:
@@ -404,10 +406,10 @@ class ConnectionManager:
         try:
             loop = self._loop
             if not loop or loop.is_closed():
-                logger.warning("Connection event loop not available")
+                connection_logger.warning("Connection event loop not available")
                 return None
             if not self.ib or not self.ib.isConnected():
-                logger.warning("IBKR connection not available")
+                connection_logger.warning("IBKR connection not available")
                 return None
 
             # 如果已在连接线程，直接执行
@@ -415,7 +417,7 @@ class ConnectionManager:
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    logger.error(f"Error executing function in connection thread: {e}")
+                    connection_logger.error(f"Error executing function in connection thread: {e}")
                     raise
 
             import concurrent.futures
@@ -431,19 +433,19 @@ class ConnectionManager:
             try:
                 loop.call_soon_threadsafe(runner)
             except Exception as e:
-                logger.error(f"Failed to schedule function on connection loop: {e}")
+                connection_logger.error(f"Failed to schedule function on connection loop: {e}")
                 return None
 
             try:
                 return result_future.result(timeout=60)
             except concurrent.futures.TimeoutError:
-                logger.error("Execution in connection thread timed out after 60 seconds")
+                connection_logger.error("Execution in connection thread timed out after 60 seconds")
                 return None
             except Exception as e:
-                logger.error(f"Execution in connection thread raised error: {e}")
+                connection_logger.error(f"Execution in connection thread raised error: {e}")
                 raise
         except Exception as e:
-            logger.error(f"Failed to execute function in connection thread: {e}")
+            connection_logger.error(f"Failed to execute function in connection thread: {e}")
             return None
 
     def run_async_in_connection_thread(self, coro, timeout: float = 60):
@@ -464,10 +466,10 @@ class ConnectionManager:
                 loop = self._loop
 
             if not loop or loop.is_closed():
-                logger.warning("Connection event loop not available")
+                connection_logger.warning("Connection event loop not available")
                 return None
             if not self.ib or not self.ib.isConnected():
-                logger.warning("IBKR connection not available")
+                connection_logger.warning("IBKR connection not available")
                 return None
 
             import concurrent.futures
@@ -475,13 +477,13 @@ class ConnectionManager:
             try:
                 return future.result(timeout=timeout)
             except concurrent.futures.TimeoutError:
-                logger.error(f"Execution in connection thread timed out after {timeout} seconds")
+                connection_logger.error(f"Execution in connection thread timed out after {timeout} seconds")
                 return None
             except Exception as e:
-                logger.error(f"Execution in connection thread raised error: {e}")
+                connection_logger.error(f"Execution in connection thread raised error: {e}")
                 raise
         except Exception as e:
-            logger.error(f"Failed to execute coroutine in connection thread: {e}")
+            connection_logger.error(f"Failed to execute coroutine in connection thread: {e}")
             return None
 
 

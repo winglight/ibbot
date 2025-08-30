@@ -6,6 +6,9 @@ from telegram.error import TelegramError
 from loguru import logger
 from dotenv import load_dotenv
 
+# 为Telegram通知模块绑定日志记录器
+telegram_logger = logger.bind(module="telegram_notifier", request_id="-")
+
 load_dotenv()
 
 class TelegramNotifier:
@@ -16,25 +19,25 @@ class TelegramNotifier:
         
         if self.bot_token and self.chat_id:
             self.bot = Bot(token=self.bot_token)
-            logger.info("Telegram notifier initialized")
+            telegram_logger.info("Telegram notifier initialized")
         else:
-            logger.warning("Telegram credentials not found. Notifications disabled.")
+            telegram_logger.warning("Telegram credentials not found. Notifications disabled.")
     
     async def send_message(self, message: str) -> bool:
         """发送Telegram消息"""
         if not self.bot or not self.chat_id:
-            logger.warning("Telegram not configured. Message not sent.")
+            telegram_logger.warning("Telegram not configured. Message not sent.")
             return False
         
         try:
             await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode='HTML')
-            logger.info("Telegram message sent successfully")
+            telegram_logger.info("Telegram message sent successfully")
             return True
         except TelegramError as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+            telegram_logger.error(f"Failed to send Telegram message: {e}")
             return False
         except Exception as e:
-            logger.error(f"Unexpected error sending Telegram message: {e}")
+            telegram_logger.error(f"Unexpected error sending Telegram message: {e}")
             return False
     
     async def send_loss_alert(self, symbol: str, position: float, current_price: float, 

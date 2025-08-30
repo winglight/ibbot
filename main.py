@@ -24,6 +24,7 @@ import uuid
 import contextvars
 import time
 import re
+from contextlib import asynccontextmanager
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request
@@ -53,9 +54,6 @@ from src.websocket_manager import websocket_manager  # 新增导入
 # Global variables
 load_dotenv()
 
-# FastAPI app
-app = FastAPI(title="IBKR Trading Bot", version="1.0.0")
-
 # Mock server configuration
 MOCK_HOST = os.getenv('MOCK_HOST', '127.0.0.1')
 MOCK_PORT = int(os.getenv('MOCK_PORT', '18080'))
@@ -83,6 +81,9 @@ def resolve_module(path: str) -> str:
     if any(p in path for p in ["/connect", "/disconnect", "/connection"]):
         return "connection"
     return "general"
+
+# 临时创建FastAPI应用实例（稍后会用lifespan重新创建）
+app = FastAPI()
 
 
 @app.middleware("http")
@@ -333,6 +334,11 @@ def print_banner():
     print(banner)
 
 
+def get_module_logger(module_name: str):
+    """Get a logger with a specific module name."""
+    return logger.bind(module=module_name, request_id="-")
+
+
 def setup_logging():
     """Configure loguru to log to console and file.
     确保 logs/trading_bot.log 存在，并设置合理的滚动与保留策略。
@@ -353,11 +359,15 @@ def setup_logging():
     # 设置默认 extra，确保格式化时不会缺失
     logger.configure(extra={"request_id": "-", "module": "-"})
 
-    logger = logger.patch(
-        lambda record: record["extra"].update(
-            request_id=request_id_ctx.get(), module=module_ctx.get()
-        )
-    )
+    def _inject_ctx(record):
+        extra = record["extra"]
+        rid = request_id_ctx.get()
+        mod = module_ctx.get()
+        if rid and (not extra.get("request_id") or extra.get("request_id") == "-"):
+            extra["request_id"] = rid
+        if mod and (not extra.get("module") or extra.get("module") == "-"):
+            extra["module"] = mod
+    logger = logger.patch(_inject_ctx)
 
     # 统一格式，便于 /api/logs 按等级过滤：会匹配 "| LEVEL |"
     log_format = (
@@ -502,6 +512,59 @@ except Exception as _rm_dep_err:
 # 添加：全局任务引用用于定期广播账户与持仓（实时PnL展示）
 pnl_broadcast_task = None
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    main_logger = get_module_logger("main")
+    
+    # 启动时的初始化
+    try:
+        # 在事件循环中启动 risk_manager
+        risk_manager.start()
+        main_logger.info("Risk manager started during application startup")
+    except Exception as e:
+        main_logger.warning(f"Risk manager startup warning: {e}")
+
+    # 启动定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
+    try:
+        global pnl_broadcast_task
+        if pnl_broadcast_task is None:
+            pnl_broadcast_task = asyncio.create_task(_pnl_broadcast_loop())
+            main_logger.info("Started PnL broadcast loop task")
+    except Exception as e:
+        main_logger.warning(f"Failed to start PnL broadcast loop: {e}")
+    
+    yield
+    
+    # 关闭时的清理
+    try:
+        if hasattr(risk_manager, 'scheduler') and risk_manager.scheduler.running:
+            risk_manager.scheduler.shutdown()
+            main_logger.info("Risk manager scheduler shutdown")
+    except Exception as e:
+        main_logger.warning(f"Risk manager shutdown warning: {e}")
+
+# 重新创建带有lifespan的FastAPI应用
+app = FastAPI(title="IBKR Trading Bot", version="1.0.0", lifespan=lifespan)
+
+# Re-attach middleware, static, and docs routes to the new app instance
+app.middleware("http")(request_id_middleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
+app.add_api_route("/", index_page)
+app.add_api_route("/api-docs.json", get_api_docs_main, include_in_schema=False)
+app.add_api_route("/rapidoc", rapidoc_html_main, include_in_schema=False)
+# Ensure /api/login is registered on the re-created app instance
+app.add_api_route("/api/login", login, methods=["POST"])
+# Re-apply custom OpenAPI generator
+app.openapi = custom_openapi
+
 # 添加：定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
 async def _pnl_broadcast_loop():
     try:
@@ -579,35 +642,7 @@ async def _pnl_broadcast_loop():
     except Exception as e:
         logger.warning(f"PnL broadcast loop error: {e}")
 
-# FastAPI 启动和关闭事件
-@app.on_event("startup")
-async def startup_event():
-    """应用启动时的初始化"""
-    try:
-        # 在事件循环中启动 risk_manager
-        risk_manager.start()
-        logger.info("Risk manager started during application startup")
-    except Exception as e:
-        logger.warning(f"Risk manager startup warning: {e}")
-
-    # 启动定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
-    try:
-        global pnl_broadcast_task
-        if pnl_broadcast_task is None:
-            pnl_broadcast_task = asyncio.create_task(_pnl_broadcast_loop())
-            logger.info("Started PnL broadcast loop task")
-    except Exception as e:
-        logger.warning(f"Failed to start PnL broadcast loop: {e}")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭时的清理"""
-    try:
-        if hasattr(risk_manager, 'scheduler') and risk_manager.scheduler.running:
-            risk_manager.scheduler.shutdown()
-            logger.info("Risk manager scheduler shutdown")
-    except Exception as e:
-        logger.warning(f"Risk manager shutdown warning: {e}")
+# FastAPI 生命周期事件已移至 lifespan 函数中
 
     # 关闭PnL广播任务
     try:
@@ -1397,6 +1432,114 @@ async def get_orders(user: Optional[str] = Depends(get_current_user)):
         logger.error(f"Get orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/orders/{order_id}")
+async def get_order_detail(order_id: int, user: Optional[str] = Depends(get_current_user)):
+    """获取单个订单详情"""
+    if is_mock_mode():
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{MOCK_BASE}/orders")
+                if response.status_code == 200:
+                    data = response.json()
+                    orders = data.get("orders", [])
+                    for o in orders:
+                        try:
+                            if int(o.get("order_id")) == order_id:
+                                return {"success": True, "order": o}
+                        except Exception:
+                            continue
+                    raise HTTPException(status_code=404, detail="Order not found")
+                else:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+
+    try:
+        # 同步 IBKR 最新订单状态（若已连接），与列表接口保持一致
+        try:
+            if ibkr_client and connection_manager.is_connected():
+                loop = asyncio.get_event_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
+                    ),
+                    timeout=3.0
+                )
+        except Exception as sync_err:
+            logger.debug(f"Order sync skipped: {sync_err}")
+
+        if 'order_manager' not in globals() or not order_manager:
+            raise HTTPException(status_code=500, detail="Order manager not initialized")
+
+        o = order_manager.get_order(str(order_id))
+        if not o:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        # 字段映射，与 /api/orders 保持一致，并补充更多详情字段
+        raw_type = (o.order_type or '').upper()
+        if raw_type in ('MARKET', 'MKT'):
+            order_type = 'MKT'
+        elif raw_type in ('LIMIT', 'LMT'):
+            order_type = 'LMT'
+        else:
+            order_type = raw_type or 'MKT'
+
+        price_val = 0.0
+        try:
+            if o.price is not None:
+                price_val = float(o.price)
+        except Exception:
+            price_val = 0.0
+
+        trigger_type = None
+        try:
+            if getattr(o, 'order_source', 'manual') == 'auto':
+                rule_id = getattr(o, 'rule_id', None)
+                symbol = getattr(o, 'symbol', None)
+                if rule_id and rule_id != symbol:
+                    trigger_type = 'strategy'
+                else:
+                    trigger_type = 'risk_rule'
+        except Exception:
+            trigger_type = None
+
+        converted_order = {
+            'order_id': o.order_id,
+            'symbol': o.symbol,
+            'action': o.action,
+            'quantity': o.quantity,
+            'order_type': order_type,
+            'limit_price': price_val if order_type == 'LMT' and price_val > 0 else None,
+            'avg_fill_price': (o.fill_price if o.fill_price is not None else (price_val if order_type == 'MKT' and price_val > 0 else 0)),
+            'status': o.status,
+            'filled': o.quantity if o.status == 'Filled' else 0,
+            'remaining': 0 if o.status == 'Filled' else o.quantity,
+            'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
+            'order_source': getattr(o, 'order_source', 'manual'),
+            'trigger_type': trigger_type,
+            # 详情字段
+            'price': price_val if price_val > 0 else None,
+            'executed_at': (o.executed_at.isoformat() if getattr(o, 'executed_at', None) else None),
+            'updated_at': (o.updated_at.isoformat() if getattr(o, 'updated_at', None) else None),
+            'strategy_name': getattr(o, 'strategy_name', None),
+            'rule_id': getattr(o, 'rule_id', None),
+            'parent_order_id': getattr(o, 'parent_order_id', None),
+            'exchange': getattr(o, 'exchange', 'SMART'),
+            'sec_type': getattr(o, 'sec_type', 'STK'),
+            'notes': getattr(o, 'notes', None),
+            'commission': getattr(o, 'commission', None),
+        }
+
+        return {"success": True, "order": converted_order}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get order detail error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Account endpoints
 @app.get("/api/account_info")
 async def get_account_info(user: Optional[str] = Depends(get_current_user)):
@@ -1582,9 +1725,20 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
         stop_loss_ratio = float(os.getenv('STOP_LOSS_RATIO', '0.05'))
         take_profit_ratio = float(os.getenv('TAKE_PROFIT_RATIO', '0.05'))
         
+        leverage = {}
+        try:
+            default_mnq_lev = int(os.getenv('LEVERAGE_MNQ', 20))
+            if 'risk_manager' in globals() and risk_manager is not None:
+                leverage["MNQ"] = int(getattr(risk_manager, "leverage_mnq", default_mnq_lev))
+            else:
+                leverage["MNQ"] = default_mnq_lev
+        except Exception:
+            leverage["MNQ"] = 20
+
         return {
             "stop_loss_ratio": stop_loss_ratio,
-            "take_profit_ratio": take_profit_ratio
+            "take_profit_ratio": take_profit_ratio,
+            "leverage": leverage
         }
     except Exception as e:
         logger.error(f"Get risk config error: {e}")
@@ -2092,37 +2246,38 @@ def main():
     setup_logging()
     create_directories()
     
-    logger.info("Starting IBKR Trading Bot...")
+    main_logger = get_module_logger("main")
+    main_logger.info("Starting IBKR Trading Bot...")
     
     # Check environment
     if not check_environment():
-        logger.error("Environment check failed. Please configure .env file.")
+        main_logger.error("Environment check failed. Please configure .env file.")
         return
     
     # Auto connect if enabled in .env and not in mock mode
     auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
     if auto_connect and not is_mock_mode():
-        logger.info("Auto-connect enabled, attempting to connect to IBKR...")
+        main_logger.info("Auto-connect enabled, attempting to connect to IBKR...")
         try:
             # Use the connection manager directly for synchronous connection test
             success = connection_manager.connect()
             if not success:
-                logger.warning("IBKR auto-connection failed. Continuing without connection...")
-                logger.info("You can connect later through the web interface.")
+                main_logger.warning("IBKR auto-connection failed. Continuing without connection...")
+                main_logger.info("You can connect later through the web interface.")
             else:
-                logger.info("IBKR auto-connection successful!")
+                main_logger.info("IBKR auto-connection successful!")
                 # Initialize ibkr_client when auto-connect succeeds
                 global ibkr_client
                 if ibkr_client is None:
                     ibkr_client = IBKRClient()
-                    logger.info("IBKRClient initialized after auto-connect")
+                    main_logger.info("IBKRClient initialized after auto-connect")
                     
                     # Update risk_manager with ibkr_client
                     try:
                         risk_manager.ibkr_client = ibkr_client
-                        logger.info("Risk manager ibkr_client updated with auto-connected client")
+                        main_logger.info("Risk manager ibkr_client updated with auto-connected client")
                     except Exception as re_err:
-                        logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
+                        main_logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
                     
                     # Update queue_manager dependencies
                     try:
@@ -2134,24 +2289,24 @@ def main():
                             websocket_manager=websocket_manager,
                             order_manager=order_manager
                         )
-                        logger.info("Queue manager dependencies updated after auto-connect")
+                        main_logger.info("Queue manager dependencies updated after auto-connect")
                     except Exception as dep_err:
-                        logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
+                        main_logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
         except Exception as e:
-            logger.warning(f"Auto-connection failed: {e}")
-            logger.info("You can connect later through the web interface.")
+            main_logger.warning(f"Auto-connection failed: {e}")
+            main_logger.info("You can connect later through the web interface.")
     elif auto_connect and is_mock_mode():
-        logger.info("Auto-connect enabled but running in mock mode - skipping real IBKR connection")
+        main_logger.info("Auto-connect enabled but running in mock mode - skipping real IBKR connection")
     else:
-        logger.info("Auto-connect disabled. You can connect later through the web interface.")
+        main_logger.info("Auto-connect disabled. You can connect later through the web interface.")
     
     # Start web server
-    logger.info("Starting web server...")
+    main_logger.info("Starting web server...")
     web_host = os.getenv('WEB_HOST', '0.0.0.0')
     web_port = int(os.getenv('WEB_PORT', '8000'))
     display_host = 'localhost' if web_host in ('0.0.0.0', '::') else web_host
-    logger.info(f"Web UI available at: http://{display_host}:{web_port}")
-    logger.info("Press Ctrl+C to stop the application")
+    main_logger.info(f"Web UI available at: http://{display_host}:{web_port}")
+    main_logger.info("Press Ctrl+C to stop the application")
     
     try:
         import uvicorn
@@ -2163,11 +2318,11 @@ def main():
         )
         
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        main_logger.info("Shutting down...")
     except Exception as e:
-        logger.error(f"Application error: {e}")
+        main_logger.error(f"Application error: {e}")
     finally:
-        logger.info("Application stopped")
+        main_logger.info("Application stopped")
 
 if __name__ == "__main__":
     try:

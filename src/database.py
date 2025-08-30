@@ -12,10 +12,13 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from loguru import logger
 
+# 为数据库模块绑定日志记录器
+database_logger = logger.bind(module="database", request_id="-")
+
 
 @dataclass
-class AutoOrder:
-    """自动订单数据类"""
+class Order:
+    """订单数据类（由原 AutoOrder 重命名）"""
     order_id: str
     symbol: str
     quantity: int
@@ -29,6 +32,9 @@ class AutoOrder:
     executed_at: Optional[str] = None
     rule_id: Optional[str] = None
     order_source: str = "auto"
+
+# 兼容旧代码：保留 AutoOrder 名称
+AutoOrder = Order
 
 
 @dataclass
@@ -76,64 +82,95 @@ class DatabaseManager:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(exist_ok=True)
         self._init_database()
-        logger.info(f"Database initialized at: {self.db_path}")
+        database_logger.info(f"Database initialized at: {self.db_path}")
     
     def _init_database(self):
         """初始化数据库表结构"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
-            # 创建自动订单表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS auto_orders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    order_id TEXT NOT NULL,
+            # 创建订单表（替代原 auto_orders）——与 OrderManager 保持一致
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS orders (
+                    order_id TEXT PRIMARY KEY,
                     symbol TEXT NOT NULL,
-                    quantity INTEGER NOT NULL,
                     action TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
                     order_type TEXT NOT NULL,
                     price REAL,
-                    timestamp TEXT NOT NULL,
+                    status TEXT DEFAULT 'Submitted',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    executed_at TEXT,
+                    fill_price REAL,
+                    order_source TEXT DEFAULT 'manual',
+                    strategy_name TEXT,
+                    rule_id TEXT,
+                    parent_order_id TEXT,
                     exchange TEXT DEFAULT 'SMART',
                     sec_type TEXT DEFAULT 'STK',
-                    status TEXT DEFAULT 'pending',
-                    executed_at TEXT,
-                    rule_id TEXT,
-                    order_source TEXT DEFAULT 'auto'
+                    notes TEXT,
+                    commission REAL,
+                    is_deleted INTEGER DEFAULT 0
                 )
-            """)
+                """
+            )
             
-            # 检查并添加新字段（用于现有数据库的迁移）
-            try:
-                cursor.execute("SELECT status FROM auto_orders LIMIT 1")
-            except sqlite3.OperationalError:
-                # status字段不存在，添加它
-                cursor.execute("ALTER TABLE auto_orders ADD COLUMN status TEXT DEFAULT 'pending'")
-                logger.info("Added status column to auto_orders table")
-            
-            try:
-                cursor.execute("SELECT executed_at FROM auto_orders LIMIT 1")
-            except sqlite3.OperationalError:
-                # executed_at字段不存在，添加它
-                cursor.execute("ALTER TABLE auto_orders ADD COLUMN executed_at TEXT")
-                logger.info("Added executed_at column to auto_orders table")
-            
-            try:
-                cursor.execute("SELECT rule_id FROM auto_orders LIMIT 1")
-            except sqlite3.OperationalError:
-                # rule_id字段不存在，添加它
-                cursor.execute("ALTER TABLE auto_orders ADD COLUMN rule_id TEXT")
-                logger.info("Added rule_id column to auto_orders table")
-            
-            try:
-                cursor.execute("SELECT order_source FROM auto_orders LIMIT 1")
-            except sqlite3.OperationalError:
-                # order_source字段不存在，添加它
-                cursor.execute("ALTER TABLE auto_orders ADD COLUMN order_source TEXT DEFAULT 'auto'")
-                logger.info("Added order_source column to auto_orders table")
+            # 兼容老库：缺失 is_deleted 列则补齐
+            cursor.execute("PRAGMA table_info('orders')")
+            cols = [row[1] for row in cursor.fetchall()]
+            if 'is_deleted' not in cols:
+                cursor.execute("ALTER TABLE orders ADD COLUMN is_deleted INTEGER DEFAULT 0")
+                database_logger.info("Added is_deleted column to orders table")
+            # 兼容旧库：缺失 created_at/updated_at 列则补齐并回填
+            if 'created_at' not in cols:
+                cursor.execute("ALTER TABLE orders ADD COLUMN created_at TEXT")
+                if 'timestamp' in cols:
+                    cursor.execute("UPDATE orders SET created_at = COALESCE(timestamp, datetime('now'))")
+                else:
+                    cursor.execute("UPDATE orders SET created_at = datetime('now')")
+                database_logger.info("Added created_at column to orders table and backfilled")
+            if 'updated_at' not in cols:
+                cursor.execute("ALTER TABLE orders ADD COLUMN updated_at TEXT")
+                cursor.execute("UPDATE orders SET updated_at = COALESCE(updated_at, created_at)")
+                database_logger.info("Added updated_at column to orders table and backfilled")
+
+            # 如存在旧表 auto_orders，则迁移数据至 orders（当 orders 为空时）
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='auto_orders'")
+            if cursor.fetchone():
+                cursor.execute("SELECT COUNT(*) FROM orders")
+                orders_count = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM auto_orders")
+                legacy_count = cursor.fetchone()[0]
+                if legacy_count > 0:
+                    if orders_count == 0:
+                        cursor.execute(
+                            """
+                            INSERT INTO orders (
+                                order_id, symbol, action, quantity, order_type, price,
+                                status, created_at, updated_at, executed_at, order_source, rule_id, exchange, sec_type
+                            )
+                            SELECT 
+                                order_id, symbol, action, quantity, order_type, price,
+                                COALESCE(status, 'Submitted') as status,
+                                timestamp as created_at,
+                                timestamp as updated_at,
+                                executed_at,
+                                COALESCE(order_source, 'auto') as order_source,
+                                rule_id,
+                                COALESCE(exchange, 'SMART') as exchange,
+                                COALESCE(sec_type, 'STK') as sec_type
+                            FROM auto_orders
+                            """
+                        )
+                        database_logger.info("Migrated legacy auto_orders data into orders table")
+                    else:
+                        database_logger.warning("orders table already has data; skipped migrating from auto_orders")
 
             # 创建风险规则表
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS risk_rules (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     symbol TEXT UNIQUE NOT NULL,
@@ -143,13 +180,14 @@ class DatabaseManager:
                     enabled BOOLEAN DEFAULT 1,
                     timestamp TEXT NOT NULL
                 )
-            """)
+                """
+            )
             # 迁移：为已有表添加 enabled 列
             try:
                 cursor.execute("SELECT enabled FROM risk_rules LIMIT 1")
             except sqlite3.OperationalError:
                 cursor.execute("ALTER TABLE risk_rules ADD COLUMN enabled BOOLEAN DEFAULT 1")
-                logger.info("Added enabled column to risk_rules table")
+                database_logger.info("Added enabled column to risk_rules table")
             
             # 创建策略表
             cursor.execute("""
@@ -209,93 +247,102 @@ class DatabaseManager:
             """)
             
             conn.commit()
-    
-    # 自动订单相关方法
-    def save_auto_order(self, order: AutoOrder):
-        """保存自动订单"""
+
+    # 自动订单相关方法 -> 重命名为订单相关方法（保留兼容包装）
+    def save_order(self, order: Order):
+        """保存订单（新）"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO auto_orders 
-                (order_id, symbol, quantity, action, order_type, price, timestamp, exchange, sec_type, status, executed_at, rule_id, order_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                order.order_id, order.symbol, order.quantity, order.action,
-                order.order_type, order.price, order.timestamp, order.exchange, order.sec_type,
-                order.status, order.executed_at, order.rule_id, order.order_source
-            ))
+            created = order.timestamp or datetime.now().isoformat()
+            status = order.status or 'Submitted'
+            cursor.execute(
+                """
+                INSERT INTO orders 
+                (order_id, symbol, action, quantity, order_type, price, status, created_at, updated_at, executed_at, order_source, rule_id, exchange, sec_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    order.order_id, order.symbol, order.action, order.quantity,
+                    order.order_type, order.price, status, created, created, order.executed_at,
+                    order.order_source, order.rule_id, order.exchange, order.sec_type,
+                ),
+            )
             conn.commit()
-            logger.debug(f"Auto order saved: {order.order_id}")
-    
-    def update_auto_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None):
-        """更新自动订单状态和价格"""
+            database_logger.debug(f"Order saved: {order.order_id}")
+
+
+    def load_orders_legacy(self) -> List[Order]:
+        """[兼容] 旧实现，已弃用，请使用 load_orders"""
+        database_logger.warning("load_orders_legacy() is deprecated; use load_orders()")
+        return self.load_orders()
+
+    def save_auto_order(self, order: AutoOrder):
+        """[兼容] 保存自动订单，已弃用，请使用 save_order"""
+        database_logger.warning("save_auto_order() is deprecated; use save_order()")
+        return self.save_order(order)  # type: ignore[arg-type]
+
+    def update_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None):
+        """更新订单状态和价格（新）"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
-            # 构建动态更新语句
             update_fields = []
             values = []
             
             if status is not None:
                 update_fields.append("status = ?")
                 values.append(status)
-            
             if price is not None:
                 update_fields.append("price = ?")
                 values.append(price)
-            
             if executed_at is not None:
                 update_fields.append("executed_at = ?")
                 values.append(executed_at)
             
             if update_fields:
+                # 总是更新 updated_at
+                update_fields.append("updated_at = ?")
+                values.append(datetime.now().isoformat())
                 values.append(order_id)
-                update_sql = f"UPDATE auto_orders SET {', '.join(update_fields)} WHERE order_id = ?"
+                update_sql = f"UPDATE orders SET {', '.join(update_fields)} WHERE order_id = ?"
                 cursor.execute(update_sql, values)
                 conn.commit()
-                logger.debug(f"Auto order {order_id} updated: {dict(zip([f.split(' = ')[0] for f in update_fields], values[:-1]))}")
-    
-    def load_auto_orders(self) -> List[AutoOrder]:
-        """加载所有自动订单"""
+                database_logger.debug(
+                    f"Order {order_id} updated: {dict(zip([f.split(' = ')[0] for f in update_fields], values[:-1]))}"
+                )
+
+    def update_auto_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None):
+        """[兼容] 更新自动订单，已弃用，请使用 update_order"""
+        database_logger.warning("update_auto_order() is deprecated; use update_order()")
+        return self.update_order(order_id, status=status, price=price, executed_at=executed_at)
+
+    def load_orders(self) -> List[Order]:
+        """加载所有订单（新）"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT order_id, symbol, quantity, action, order_type, price, timestamp, exchange, sec_type, 
-                       COALESCE(status, 'pending') as status,
+            cursor.execute(
+                """
+                SELECT order_id, symbol, quantity, action, order_type, price, 
+                       created_at as timestamp, exchange, sec_type, 
+                       COALESCE(status, 'Submitted') as status,
                        executed_at,
                        rule_id,
                        COALESCE(order_source, 'auto') as order_source
-                FROM auto_orders ORDER BY timestamp DESC
-            """)
+                FROM orders ORDER BY created_at DESC
+                """
+            )
             rows = cursor.fetchall()
-            
-            orders = []
+            orders: List[Order] = []
             for row in rows:
-                order = AutoOrder(*row)
-                orders.append(order)
-            
-            logger.debug(f"Loaded {len(orders)} auto orders")
+                orders.append(Order(*row))
+            database_logger.debug(f"Loaded {len(orders)} orders")
             return orders
-    
-    # 风险规则相关方法
-    def save_risk_rule(self, rule: RiskRule):
-        """保存风险规则"""
-        if not rule.timestamp:
-            rule.timestamp = datetime.now().isoformat()
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO risk_rules 
-                (symbol, stop_loss_price, take_profit_price, max_loss_percent, enabled, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                rule.symbol, rule.stop_loss_price, rule.take_profit_price,
-                rule.max_loss_percent, int(rule.enabled), rule.timestamp
-            ))
-            conn.commit()
-            logger.debug(f"Risk rule saved for symbol: {rule.symbol}")
-    
+
+    def load_auto_orders(self) -> List[AutoOrder]:
+        """[兼容] 加载所有自动订单，已弃用，请使用 load_orders"""
+        database_logger.warning("load_auto_orders() is deprecated; use load_orders()")
+        return self.load_orders()  # type: ignore[return-value]
+
     def load_risk_rules(self) -> List[RiskRule]:
         """加载所有风险规则"""
         with sqlite3.connect(self.db_path) as conn:
@@ -316,8 +363,37 @@ class DatabaseManager:
                 )
                 rules.append(rule)
             
-            logger.debug(f"Loaded {len(rules)} risk rules")
+            database_logger.debug(f"Loaded {len(rules)} risk rules")
             return rules
+
+    def save_risk_rule(self, rule: RiskRule):
+        """保存风险规则（按 symbol 幂等：存在则更新，不存在则插入）"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            ts = rule.timestamp or datetime.now().isoformat()
+            enabled_val = 1 if getattr(rule, 'enabled', True) else 0
+            cursor.execute(
+                """
+                INSERT INTO risk_rules (symbol, stop_loss_price, take_profit_price, max_loss_percent, enabled, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    stop_loss_price=excluded.stop_loss_price,
+                    take_profit_price=excluded.take_profit_price,
+                    max_loss_percent=excluded.max_loss_percent,
+                    enabled=excluded.enabled,
+                    timestamp=excluded.timestamp
+                """,
+                (
+                    rule.symbol,
+                    rule.stop_loss_price,
+                    rule.take_profit_price,
+                    rule.max_loss_percent,
+                    enabled_val,
+                    ts,
+                ),
+            )
+            conn.commit()
+            database_logger.debug(f"Risk rule saved: {rule.symbol}")
     
     def delete_risk_rule(self, symbol: str):
         """删除风险规则"""
@@ -325,7 +401,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM risk_rules WHERE symbol = ?", (symbol,))
             conn.commit()
-            logger.debug(f"Risk rule deleted for symbol: {symbol}")
+            database_logger.debug(f"Risk rule deleted for symbol: {symbol}")
     
     # 策略相关方法
     def save_strategy(self, strategy: Strategy):
@@ -347,7 +423,7 @@ class DatabaseManager:
                 strategy.created_at, strategy.updated_at
             ))
             conn.commit()
-            logger.debug(f"Strategy saved: {strategy.name}")
+            database_logger.debug(f"Strategy saved: {strategy.name}")
     
     def load_strategies(self) -> List[Strategy]:
         """加载所有策略"""
@@ -361,7 +437,7 @@ class DatabaseManager:
                 strategy = Strategy(*row)
                 strategies.append(strategy)
             
-            logger.debug(f"Loaded {len(strategies)} strategies")
+            database_logger.debug(f"Loaded {len(strategies)} strategies")
             return strategies
     
     def get_strategy(self, name: str) -> Optional[Strategy]:
@@ -381,7 +457,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM strategies WHERE name = ?", (name,))
             conn.commit()
-            logger.debug(f"Strategy deleted: {name}")
+            database_logger.debug(f"Strategy deleted: {name}")
     
     # 策略执行相关方法
     def save_strategy_execution(self, execution: StrategyExecution):
@@ -409,7 +485,7 @@ class DatabaseManager:
 
                     # 如果没有需要更新的字段，则直接返回
                     if not update_fields:
-                        logger.debug(f"Strategy execution exists (no changes) for: {execution.name}")
+                        database_logger.debug(f"Strategy execution exists (no changes) for: {execution.name}")
                         return
 
                     params.append(execution.order_id)
@@ -419,7 +495,7 @@ class DatabaseManager:
                         WHERE order_id = ?
                     """, params)
                     conn.commit()
-                    logger.debug(f"Strategy execution updated for: {execution.name}")
+                    database_logger.debug(f"Strategy execution updated for: {execution.name}")
                     return
 
             # 默认插入
@@ -432,12 +508,12 @@ class DatabaseManager:
                 execution.price, execution.timestamp, execution.order_id, execution.profit, execution.status
             ))
             conn.commit()
-            logger.debug(f"Strategy execution saved for: {execution.name}")
+            database_logger.debug(f"Strategy execution saved for: {execution.name}")
     
     def update_strategy_execution(self, order_id: str, price: Optional[float] = None, profit: Optional[float] = None, status: Optional[str] = None):
         """更新策略执行记录"""
         if not order_id:
-            logger.warning("Cannot update strategy execution without order_id")
+            database_logger.warning("Cannot update strategy execution without order_id")
             return False
             
         with sqlite3.connect(self.db_path) as conn:
@@ -460,7 +536,7 @@ class DatabaseManager:
                 params.append(status)
                 
             if not update_fields:
-                logger.warning("No fields to update for strategy execution")
+                database_logger.warning("No fields to update for strategy execution")
                 return False
                 
             params.append(order_id)
@@ -475,10 +551,10 @@ class DatabaseManager:
             conn.commit()
             
             if updated_rows > 0:
-                logger.debug(f"Strategy execution updated for order_id: {order_id}")
+                database_logger.debug(f"Strategy execution updated for order_id: {order_id}")
                 return True
             else:
-                logger.warning(f"No strategy execution found with order_id: {order_id}")
+                database_logger.warning(f"No strategy execution found with order_id: {order_id}")
                 return False
     
     def load_strategy_executions(self, strategy_name: Optional[str] = None, limit: int = 100) -> List[StrategyExecution]:
@@ -509,7 +585,7 @@ class DatabaseManager:
                 execution = StrategyExecution(*row)
                 executions.append(execution)
             
-            logger.debug(f"Loaded {len(executions)} strategy executions")
+            database_logger.debug(f"Loaded {len(executions)} strategy executions")
             return executions
 
     def delete_strategy_executions(self, strategy_name: str) -> int:
@@ -520,10 +596,10 @@ class DatabaseManager:
                 cursor.execute("DELETE FROM strategy_executions WHERE name = ?", (strategy_name,))
                 deleted = cursor.rowcount
                 conn.commit()
-                logger.info(f"Deleted {deleted} executions for strategy: {strategy_name}")
+                database_logger.info(f"Deleted {deleted} executions for strategy: {strategy_name}")
                 return deleted or 0
         except Exception as e:
-            logger.error(f"Failed to delete executions for {strategy_name}: {e}")
+            database_logger.error(f"Failed to delete executions for {strategy_name}: {e}")
             return 0
     
     # 历史数据相关方法
@@ -541,7 +617,7 @@ class DatabaseManager:
             # 确保列名正确
             required_columns = ['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'bar_size']
             if not all(col in data.columns for col in required_columns):
-                logger.error(f"Historical data missing required columns: {required_columns}")
+                database_logger.error(f"Historical data missing required columns: {required_columns}")
                 return
             
             # 使用INSERT OR IGNORE避免重复数据
@@ -561,7 +637,7 @@ class DatabaseManager:
                 ))
             
             conn.commit()
-            logger.debug(f"Historical data saved for {symbol}: {len(data)} records")
+            database_logger.debug(f"Historical data saved for {symbol}: {len(data)} records")
     
     def load_historical_data(self, symbol: str, bar_size: str = "1 day") -> pd.DataFrame:
         """加载历史数据"""
@@ -578,7 +654,7 @@ class DatabaseManager:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df.set_index('timestamp', inplace=True)
             
-            logger.debug(f"Loaded historical data for {symbol}: {len(df)} records")
+            database_logger.debug(f"Loaded historical data for {symbol}: {len(df)} records")
             return df
     
     # 策略设置相关方法
@@ -596,7 +672,7 @@ class DatabaseManager:
                 """, (key, json.dumps(value), now))
             
             conn.commit()
-            logger.debug(f"Strategy settings saved: {list(settings.keys())}")
+            database_logger.debug(f"Strategy settings saved: {list(settings.keys())}")
     
     def load_strategy_settings(self) -> Dict[str, Any]:
         """加载策略设置"""
@@ -612,7 +688,7 @@ class DatabaseManager:
                 except json.JSONDecodeError:
                     settings[key] = value
             
-            logger.debug(f"Loaded strategy settings: {list(settings.keys())}")
+            database_logger.debug(f"Loaded strategy settings: {list(settings.keys())}")
             return settings
     
     # 数据迁移方法
@@ -620,10 +696,10 @@ class DatabaseManager:
         """从CSV和JSON文件迁移数据到SQLite"""
         data_path = Path(data_dir)
         if not data_path.exists():
-            logger.warning(f"Data directory not found: {data_dir}")
+            database_logger.warning(f"Data directory not found: {data_dir}")
             return
         
-        logger.info("Starting data migration from CSV/JSON to SQLite...")
+        database_logger.info("Starting data migration from CSV/JSON to SQLite...")
         
         # 迁移订单数据
         orders_file = data_path / "orders.csv"
@@ -655,14 +731,14 @@ class DatabaseManager:
             symbol = csv_file.name.replace("_historical.csv", "")
             self._migrate_historical_csv(csv_file, symbol)
         
-        logger.info("Data migration completed successfully!")
+        database_logger.info("Data migration completed successfully!")
     
     def _migrate_orders_csv(self, file_path: Path):
         """迁移订单CSV文件"""
         try:
             df = pd.read_csv(file_path)
             for _, row in df.iterrows():
-                order = AutoOrder(
+                order = Order(
                     order_id=str(row.get('order_id', '')),
                     symbol=row.get('symbol', ''),
                     quantity=int(row.get('quantity', 0)),
@@ -673,10 +749,10 @@ class DatabaseManager:
                     exchange=row.get('exchange', 'SMART'),
                     sec_type=row.get('sec_type', 'STK')
                 )
-                self.save_auto_order(order)
-            logger.info(f"Migrated {len(df)} orders from {file_path}")
+                self.save_order(order)
+            database_logger.info(f"Migrated {len(df)} orders from {file_path}")
         except Exception as e:
-            logger.error(f"Failed to migrate orders from {file_path}: {e}")
+            database_logger.error(f"Failed to migrate orders from {file_path}: {e}")
     
     def _migrate_risk_rules_csv(self, file_path: Path):
         """迁移风险规则CSV文件"""
@@ -691,9 +767,9 @@ class DatabaseManager:
                     timestamp=row.get('timestamp', datetime.now().isoformat())
                 )
                 self.save_risk_rule(rule)
-            logger.info(f"Migrated {len(df)} risk rules from {file_path}")
+            database_logger.info(f"Migrated {len(df)} risk rules from {file_path}")
         except Exception as e:
-            logger.error(f"Failed to migrate risk rules from {file_path}: {e}")
+            database_logger.error(f"Failed to migrate risk rules from {file_path}: {e}")
     
     def _migrate_strategies_csv(self, file_path: Path):
         """迁移策略CSV文件"""
@@ -711,9 +787,9 @@ class DatabaseManager:
                     updated_at=row.get('updated_at', datetime.now().isoformat())
                 )
                 self.save_strategy(strategy)
-            logger.info(f"Migrated {len(df)} strategies from {file_path}")
+            database_logger.info(f"Migrated {len(df)} strategies from {file_path}")
         except Exception as e:
-            logger.error(f"Failed to migrate strategies from {file_path}: {e}")
+            database_logger.error(f"Failed to migrate strategies from {file_path}: {e}")
     
     def _migrate_strategy_executions_csv(self, file_path: Path):
         """迁移策略执行CSV文件"""
@@ -732,9 +808,9 @@ class DatabaseManager:
                     status=row.get('status', 'pending')
                 )
                 self.save_strategy_execution(execution)
-            logger.info(f"Migrated {len(df)} strategy executions from {file_path}")
+            database_logger.info(f"Migrated {len(df)} strategy executions from {file_path}")
         except Exception as e:
-            logger.error(f"Failed to migrate strategy executions from {file_path}: {e}")
+            database_logger.error(f"Failed to migrate strategy executions from {file_path}: {e}")
     
     def _migrate_strategy_settings_json(self, file_path: Path):
         """迁移策略设置JSON文件"""
@@ -742,9 +818,9 @@ class DatabaseManager:
             with open(file_path, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
             self.save_strategy_settings(settings)
-            logger.info(f"Migrated strategy settings from {file_path}")
+            database_logger.info(f"Migrated strategy settings from {file_path}")
         except Exception as e:
-            logger.error(f"Failed to migrate strategy settings from {file_path}: {e}")
+            database_logger.error(f"Failed to migrate strategy settings from {file_path}: {e}")
     
     def _migrate_historical_csv(self, file_path: Path, symbol: str):
         """迁移历史数据CSV文件"""
@@ -769,11 +845,11 @@ class DatabaseManager:
             
             if all(col in df.columns for col in required_columns):
                 self.save_historical_data(symbol, df)
-                logger.info(f"Migrated {len(df)} historical records for {symbol} from {file_path}")
+                database_logger.info(f"Migrated {len(df)} historical records for {symbol} from {file_path}")
             else:
-                logger.warning(f"Historical data file {file_path} missing required columns")
+                database_logger.warning(f"Historical data file {file_path} missing required columns")
         except Exception as e:
-            logger.error(f"Failed to migrate historical data from {file_path}: {e}")
+            database_logger.error(f"Failed to migrate historical data from {file_path}: {e}")
 
 
 # 全局数据库实例

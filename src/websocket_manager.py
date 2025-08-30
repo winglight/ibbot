@@ -9,6 +9,9 @@ from typing import Set, Dict, Any
 from fastapi import WebSocket
 from loguru import logger
 
+# 为websocket模块创建专用logger
+websocket_logger = logger.bind(module="websocket", request_id="-")
+
 
 class WebSocketManager:
     """WebSocket连接管理器"""
@@ -20,12 +23,12 @@ class WebSocketManager:
         """接受WebSocket连接"""
         await websocket.accept()
         self.connections.add(websocket)
-        logger.info(f"WebSocket连接已建立，当前连接数: {len(self.connections)}")
+        websocket_logger.info(f"WebSocket连接已建立，当前连接数: {len(self.connections)}")
     
     def disconnect(self, websocket: WebSocket):
         """断开WebSocket连接"""
         self.connections.discard(websocket)
-        logger.info(f"WebSocket连接已断开，当前连接数: {len(self.connections)}")
+        websocket_logger.info(f"WebSocket连接已断开，当前连接数: {len(self.connections)}")
     
     async def broadcast(self, message: Dict[str, Any]):
         """向所有连接的客户端广播消息"""
@@ -36,7 +39,7 @@ class WebSocketManager:
         try:
             message_str = json.dumps(message)
         except (TypeError, ValueError) as e:
-            logger.error(f"无法序列化广播消息: {e}")
+            websocket_logger.error(f"无法序列化广播消息: {e}")
             return
         
         # 收集断开的连接
@@ -47,7 +50,7 @@ class WebSocketManager:
             try:
                 await connection.send_text(message_str)
             except Exception as e:
-                logger.warning(f"向WebSocket连接发送消息失败: {e}")
+                websocket_logger.warning(f"向WebSocket连接发送消息失败: {e}")
                 disconnected.add(connection)
         
         # 清理断开的连接
@@ -55,9 +58,9 @@ class WebSocketManager:
             self.connections.discard(connection)
         
         if disconnected:
-            logger.info(f"清理了 {len(disconnected)} 个断开的WebSocket连接")
+            websocket_logger.info(f"清理了 {len(disconnected)} 个断开的WebSocket连接")
         
-        logger.debug(f"广播消息到 {len(self.connections)} 个连接: {message}")
+        websocket_logger.debug(f"广播消息到 {len(self.connections)} 个连接: {message}")
 
 
 # 全局WebSocket管理器实例

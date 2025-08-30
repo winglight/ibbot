@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 from ib_insync import IB, Stock, Future, Order, MarketOrder, LimitOrder, Contract
 from loguru import logger
+# Module-specific logger for ibkr_client
+ibkr_logger = logger.bind(module="ibkr_client", request_id="-")
 import time
 import threading
 import asyncio
@@ -54,18 +56,18 @@ class IBKRClient:
         """
         import threading
         current_thread = threading.current_thread()
-        logger.info(f"_place_order_in_thread called for {symbol} in thread: {current_thread.name}")
+        ibkr_logger.info(f"_place_order_in_thread called for {symbol} in thread: {current_thread.name}")
 
         try:
             # 检查连接状态
             if not self.connection_manager.is_connected():
-                logger.error("IBKR connection is not active")
+                ibkr_logger.error("IBKR connection is not active")
                 return None
 
             # 获取IB实例
             ib_instance = self.connection_manager.get_ib_instance()
             if not ib_instance:
-                logger.error("No active IB instance for placing order")
+                ibkr_logger.error("No active IB instance for placing order")
                 return None
 
             # 构建异步下单流程
@@ -80,7 +82,7 @@ class IBKRClient:
                     # 使用异步方式确认合约，避免在运行中事件循环上使用同步阻塞方法
                     qualified_contracts = await ib_instance.qualifyContractsAsync(contract)
                     if not qualified_contracts:
-                        logger.error(f"Failed to qualify contract for {symbol}")
+                        ibkr_logger.error(f"Failed to qualify contract for {symbol}")
                         return None
 
                     qualified_contract = qualified_contracts[0]
@@ -93,24 +95,24 @@ class IBKRClient:
 
                     # 提交订单（placeOrder 为同步非阻塞方法，安全在事件循环线程调用）
                     trade = ib_instance.placeOrder(qualified_contract, order)
-                    logger.info(
+                    ibkr_logger.info(
                         f"{order_type} order placed: {action} {quantity} {symbol} ({sec_type}) on {qualified_contract.exchange}, "
                         f"conId={getattr(qualified_contract, 'conId', 'N/A')}"
                     )
                     return trade
                 except Exception as e:
-                    logger.error(f"Failed to place order in async execution: {e}")
+                    ibkr_logger.error(f"Failed to place order in async execution: {e}")
                     return None
 
             # 使用连接管理器的方法在正确的事件循环中执行
             try:
                 return self.connection_manager.run_async_in_connection_thread(execute_order_async(), timeout=45)
             except Exception as e:
-                logger.error(f"Failed to place {order_type.lower()} order via connection manager: {e}")
+                ibkr_logger.error(f"Failed to place {order_type.lower()} order via connection manager: {e}")
                 return None
 
         except Exception as e:
-            logger.error(f"Failed to place {order_type.lower()} order in thread: {e}")
+            ibkr_logger.error(f"Failed to place {order_type.lower()} order in thread: {e}")
             return None
     
     def get_stock_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD') -> Stock:
@@ -195,13 +197,13 @@ class IBKRClient:
             # 确保连接
             if not self.is_connected():
                 if not self.connect():
-                    logger.error(f"Cannot connect to IBKR for historical data: {symbol}")
+                    ibkr_logger.error(f"Cannot connect to IBKR for historical data: {symbol}")
                     return pd.DataFrame()
 
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
-                logger.error(f"IBKR connection lost for historical data: {symbol}")
+                ibkr_logger.error(f"IBKR connection lost for historical data: {symbol}")
                 return pd.DataFrame()
 
             # MNQ是期货合约
@@ -215,7 +217,7 @@ class IBKRClient:
                     # 使用异步版本确认合约，确保拿到有效的 conId
                     qualified = await ib.qualifyContractsAsync(contract)
                     if not qualified:
-                        logger.error(f"Failed to qualify contract for {symbol}")
+                        ibkr_logger.error(f"Failed to qualify contract for {symbol}")
                         return None
                     qc = qualified[0]
                     # 使用异步版本请求历史数据
@@ -224,14 +226,14 @@ class IBKRClient:
                         barSizeSetting=bar_size, whatToShow='TRADES', useRTH=False
                     )
                 except Exception as e:
-                    logger.error(f"reqHistoricalDataAsync failed in connection thread: {e}")
+                    ibkr_logger.error(f"reqHistoricalDataAsync failed in connection thread: {e}")
                     return None
 
             # 在连接线程事件循环中执行异步操作，避免事件循环冲突
             bars = self.connection_manager.run_async_in_connection_thread(_fetch_async())
 
             if not bars:
-                logger.warning(f"No historical data returned for {symbol}")
+                ibkr_logger.warning(f"No historical data returned for {symbol}")
                 return pd.DataFrame()
 
             data = []
@@ -246,10 +248,10 @@ class IBKRClient:
                 })
 
             df = pd.DataFrame(data)
-            logger.info(f"Retrieved {len(df)} historical data points for {symbol}")
+            ibkr_logger.info(f"Retrieved {len(df)} historical data points for {symbol}")
             return df
         except Exception as e:
-            logger.error(f"Failed to get historical data for {symbol}: {e}")
+            ibkr_logger.error(f"Failed to get historical data for {symbol}: {e}")
             return pd.DataFrame()
     
     def _ensure_backup_directory(self):
@@ -286,7 +288,7 @@ class IBKRClient:
         #             'status': 'PENDING'
         #         })
         # except Exception as e:
-        #     logger.error(f"Error backing up order: {e}")
+        #     ibkr_logger.error(f"Error backing up order: {e}")
 
     def _update_order_status(self, symbol: str, action: str, quantity: int, status: str):
         """更新备份文件中的订单状态（已禁用）"""
@@ -314,7 +316,7 @@ class IBKRClient:
         #             writer.writeheader()
         #             writer.writerows(rows)
         # except Exception as e:
-        #     logger.error(f"Error updating order status: {e}")
+        #     ibkr_logger.error(f"Error updating order status: {e}")
 
     def get_order_backup_history(self, days: int = 7) -> List[Dict]:
         """获取订单备份历史（已禁用）"""
@@ -336,7 +338,7 @@ class IBKRClient:
         #     
         #     return orders
         # except Exception as e:
-        #     logger.error(f"Error reading backup history: {e}")
+        #     ibkr_logger.error(f"Error reading backup history: {e}")
         #     return []
 
     def restore_pending_orders(self) -> List[Dict]:
@@ -359,7 +361,7 @@ class IBKRClient:
         #     
         #     return pending_orders
         # except Exception as e:
-        #     logger.error(f"Error restoring pending orders: {e}")
+        #     ibkr_logger.error(f"Error restoring pending orders: {e}")
         #     return []
 
     def save_historical_data(self, df: pd.DataFrame, symbol: str, filename: str = None):
@@ -370,35 +372,35 @@ class IBKRClient:
             
             # 保存到数据库
             db_manager.save_historical_data(symbol, df)
-            logger.info(f"Historical data for {symbol} saved to database")
+            ibkr_logger.info(f"Historical data for {symbol} saved to database")
             
             # 保留文件保存作为备份（可选）
             if filename:
                 os.makedirs(os.path.dirname(filename), exist_ok=True)
                 df.to_csv(filename, index=False)
-                logger.info(f"Historical data also saved to {filename}")
+                ibkr_logger.info(f"Historical data also saved to {filename}")
         except Exception as e:
-            logger.error(f"Error saving historical data to database: {e}")
+            ibkr_logger.error(f"Error saving historical data to database: {e}")
             # 回退到文件保存
             if filename is None:
                 filename = f"data/{symbol}_historical.csv"
             
             os.makedirs(os.path.dirname(filename), exist_ok=True)
             df.to_csv(filename, index=False)
-            logger.info(f"Historical data saved to {filename} (fallback)")
+            ibkr_logger.info(f"Historical data saved to {filename} (fallback)")
     
     def get_real_time_data(self, symbol: str, exchange: str = 'SMART'):
         """获取实时数据 - 优化版本避免阻塞"""
         import threading
         current_thread = threading.current_thread()
-        logger.debug(f"get_real_time_data called for {symbol} in thread: {current_thread.name}")
+        ibkr_logger.debug(f"get_real_time_data called for {symbol} in thread: {current_thread.name}")
         
         try:
             # 1. 首先检查缓存，提供快速响应
             if symbol in self.price_cache:
                 cached_time = self.price_cache_timestamp.get(symbol)
                 if cached_time and (datetime.now() - cached_time).total_seconds() < self.price_cache_ttl_seconds:
-                    logger.debug(f"Returning cached data for {symbol}")
+                    ibkr_logger.debug(f"Returning cached data for {symbol}")
                     return {
                         'symbol': symbol,
                         'last': self.price_cache[symbol],
@@ -410,25 +412,25 @@ class IBKRClient:
                     }
             
             # 2. 确保连接
-            logger.debug(f"Checking IBKR connection for {symbol}")
+            ibkr_logger.debug(f"Checking IBKR connection for {symbol}")
             if not self.is_connected():
-                logger.warning(f"IBKR not connected, attempting to connect for {symbol}")
+                ibkr_logger.warning(f"IBKR not connected, attempting to connect for {symbol}")
                 if not self.connect():
-                    logger.error(f"Cannot connect to IBKR for real-time data: {symbol}")
+                    ibkr_logger.error(f"Cannot connect to IBKR for real-time data: {symbol}")
                     return None
             
             # 3. 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
-                logger.error(f"IBKR connection lost for real-time data: {symbol}")
+                ibkr_logger.error(f"IBKR connection lost for real-time data: {symbol}")
                 return None
             
             # 4. 创建合约
             if symbol == 'MNQ':
-                logger.debug(f"Creating future contract for {symbol}")
+                ibkr_logger.debug(f"Creating future contract for {symbol}")
                 contract = self.get_future_contract(symbol, 'CME')
             else:
-                logger.debug(f"Creating stock contract for {symbol}")
+                ibkr_logger.debug(f"Creating stock contract for {symbol}")
                 contract = self.get_stock_contract(symbol, exchange)
             
             # 5. 在连接线程请求市场数据（快速返回ticker对象，不阻塞连接线程）
@@ -436,12 +438,12 @@ class IBKRClient:
                 try:
                     return ib.reqMktData(contract, '', False, False)
                 except Exception as e:
-                    logger.error(f"Error requesting market data for {symbol} in connection thread: {e}")
+                    ibkr_logger.error(f"Error requesting market data for {symbol} in connection thread: {e}")
                     return None
             
             ticker = self.connection_manager.run_in_connection_thread(_req_ticker)
             if not ticker:
-                logger.error(f"Failed to obtain ticker for {symbol}")
+                ibkr_logger.error(f"Failed to obtain ticker for {symbol}")
                 return None
             
             # 6. 在当前调用线程等待数据更新，避免阻塞连接线程
@@ -460,7 +462,7 @@ class IBKRClient:
                 volume = getattr(ticker, 'volume', 0) or 0
                 
                 if last and last > 0:
-                    logger.debug(f"Retrieved real-time data for {symbol}: last={last} (waited {waited:.1f}s)")
+                    ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (waited {waited:.1f}s)")
                     self.price_cache[symbol] = last
                     self.price_cache_timestamp[symbol] = datetime.now()
                     result_payload = {
@@ -475,7 +477,7 @@ class IBKRClient:
                 
                 if bid and ask and bid > 0 and ask > 0:
                     mid = (bid + ask) / 2
-                    logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (waited {waited:.1f}s)")
+                    ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (waited {waited:.1f}s)")
                     self.price_cache[symbol] = mid
                     self.price_cache_timestamp[symbol] = datetime.now()
                     result_payload = {
@@ -493,17 +495,18 @@ class IBKRClient:
                 try:
                     ib.cancelMktData(contract)
                 except Exception as e:
-                    logger.warning(f"Failed to cancel market data for {symbol}: {e}")
+                    ibkr_logger.warning(f"Failed to cancel market data for {symbol}: {e}")
+                    ibkr_logger.warning(f"Failed to cancel market data for {symbol}: {e}")
             self.connection_manager.run_in_connection_thread(_cancel_mkt_data)
             
             if result_payload:
                 return result_payload
             
-            logger.warning(f"No market data received for {symbol} after {max_wait}s")
+            ibkr_logger.warning(f"No market data received for {symbol} after {max_wait}s")
             # 7b. fallback 返回缓存
             if symbol in self.price_cache:
                 cached_price = self.price_cache[symbol]
-                logger.info(f"No fresh data for {symbol}, returning cached: {cached_price}")
+                ibkr_logger.info(f"No fresh data for {symbol}, returning cached: {cached_price}")
                 return {
                     'symbol': symbol,
                     'last': cached_price,
@@ -517,11 +520,11 @@ class IBKRClient:
             return None
             
         except Exception as e:
-            logger.error(f"Exception in get_real_time_data for {symbol}: {e}")
+            ibkr_logger.error(f"Exception in get_real_time_data for {symbol}: {e}")
             # 最后的fallback
             if symbol in self.price_cache:
                 cached_price = self.price_cache[symbol]
-                logger.info(f"Exception occurred for {symbol}, returning cached: {cached_price}")
+                ibkr_logger.info(f"Exception occurred for {symbol}, returning cached: {cached_price}")
                 return {
                     'symbol': symbol,
                     'last': cached_price,
@@ -552,7 +555,7 @@ class IBKRClient:
             
             return trade
         except Exception as e:
-            logger.error(f"Failed to place market order: {e}")
+            ibkr_logger.error(f"Failed to place market order: {e}")
             return None
 
     def place_limit_order(self, symbol: str, quantity: int, price: float,
@@ -573,14 +576,14 @@ class IBKRClient:
             
             return trade
         except Exception as e:
-            logger.error(f"Failed to place limit order: {e}")
+            ibkr_logger.error(f"Failed to place limit order: {e}")
             return None
 
     def refresh_orders(self) -> bool:
         """刷新IBKR订单数据，使用异步API避免事件循环冲突"""
         ib = self.ib
         if not ib or not ib.isConnected():
-            logger.error("IBKR connection lost for order refresh")
+            ibkr_logger.error("IBKR connection lost for order refresh")
             return False
 
         async def _refresh():
@@ -588,10 +591,10 @@ class IBKRClient:
                 await ib.reqOpenOrdersAsync()
                 await ib.reqAllOpenOrdersAsync()
                 await asyncio.sleep(0.5)
-                logger.debug("Requested order refresh from IBKR (async)")
+                ibkr_logger.debug("Requested order refresh from IBKR (async)")
                 return True
             except Exception as e:
-                logger.warning(f"Failed to refresh orders: {e}")
+                ibkr_logger.warning(f"Failed to refresh orders: {e}")
                 return False
 
         result = self.connection_manager.run_async_in_connection_thread(_refresh())
@@ -603,13 +606,13 @@ class IBKRClient:
             # 确保连接
             if not self.is_connected():
                 if not self.connect():
-                    logger.error(f"Cannot connect to IBKR for cancel order: {order_id}")
+                    ibkr_logger.error(f"Cannot connect to IBKR for cancel order: {order_id}")
                     return False, "Connection failed"
 
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
-                logger.error(f"IBKR connection lost for cancel order")
+                ibkr_logger.error(f"IBKR connection lost for cancel order")
                 return False, "Connection lost"
 
             # 刷新订单数据，使用异步API避免事件循环冲突
@@ -623,24 +626,24 @@ class IBKRClient:
                     break
             
             if not target_trade:
-                logger.warning(f"Order {order_id} not found in active trades")
+                ibkr_logger.warning(f"Order {order_id} not found in active trades")
                 # 检查订单是否可能已经完成或取消
                 return False, f"Order {order_id} not found or already completed"
             
             current_status = target_trade.orderStatus.status
-            logger.info(f"Order {order_id} current status: {current_status}")
+            ibkr_logger.info(f"Order {order_id} current status: {current_status}")
             
             # 检查订单状态是否可以取消
             if current_status in ['Filled', 'Cancelled', 'Inactive']:
-                logger.warning(f"Order {order_id} cannot be cancelled, status: {current_status}")
+                ibkr_logger.warning(f"Order {order_id} cannot be cancelled, status: {current_status}")
                 return False, f"Order cannot be cancelled, current status: {current_status}"
             
             # 如果已经是PendingCancel状态，直接等待确认
             if current_status == 'PendingCancel':
-                logger.info(f"Order {order_id} already in PendingCancel status, waiting for confirmation...")
+                ibkr_logger.info(f"Order {order_id} already in PendingCancel status, waiting for confirmation...")
             else:
                 # 发送取消请求
-                logger.info(f"Sending cancel request for order {order_id}")
+                ibkr_logger.info(f"Sending cancel request for order {order_id}")
                 ib.cancelOrder(target_trade.order)
             
             # 等待取消确认，增加等待时间到15秒以应对Paper Trading延迟
@@ -657,22 +660,22 @@ class IBKRClient:
                     if updated_trade.order.orderId == order_id:
                         new_status = updated_trade.orderStatus.status
                         if new_status in ['Cancelled', 'Inactive']:
-                            logger.info(f"Order {order_id} successfully cancelled, final status: {new_status}")
+                            ibkr_logger.info(f"Order {order_id} successfully cancelled, final status: {new_status}")
                             return True, f"Order cancelled successfully, status: {new_status}"
                         elif new_status == 'PendingCancel':
                             # 继续等待，但记录等待时间
                             elapsed = time.time() - start_time
-                            logger.info(f"Order {order_id} still pending cancellation... (elapsed: {elapsed:.1f}s)")
+                            ibkr_logger.info(f"Order {order_id} still pending cancellation... (elapsed: {elapsed:.1f}s)")
                             continue
                         else:
                             # 状态变化，记录日志
                             if new_status != current_status:
-                                logger.info(f"Order {order_id} status changed from {current_status} to {new_status}")
+                                ibkr_logger.info(f"Order {order_id} status changed from {current_status} to {new_status}")
                                 current_status = new_status
                             break
                 # 如果订单不在trades中了，需要再次确认
                 else:
-                    logger.debug(f"Order {order_id} not found in current trades, rechecking...")
+                    ibkr_logger.debug(f"Order {order_id} not found in current trades, rechecking...")
                     # 不立即返回True，继续等待以确认状态
             
             # 超时，检查最终状态
@@ -681,22 +684,22 @@ class IBKRClient:
                 if final_trade.order.orderId == order_id:
                     final_status = final_trade.orderStatus.status
                     if final_status in ['Cancelled', 'Inactive']:
-                        logger.info(f"Order {order_id} finally cancelled, status: {final_status}")
+                        ibkr_logger.info(f"Order {order_id} finally cancelled, status: {final_status}")
                         return True, f"Order cancelled successfully, status: {final_status}"
                     elif final_status == 'PendingCancel':
                         # Paper Trading环境中PendingCancel可能持续很久，但实际上订单已经被标记为取消
-                        logger.warning(f"Order {order_id} still in PendingCancel after {max_wait_time}s - this may be normal in Paper Trading")
+                        ibkr_logger.warning(f"Order {order_id} still in PendingCancel after {max_wait_time}s - this may be normal in Paper Trading")
                         return True, f"Order cancellation initiated (Paper Trading may take longer)"
                     else:
-                        logger.warning(f"Order {order_id} cancellation timeout, final status: {final_status}")
+                        ibkr_logger.warning(f"Order {order_id} cancellation timeout, final status: {final_status}")
                         return False, f"Cancellation timeout, order status: {final_status}"
             
             # 订单不在列表中，在Paper Trading中这通常意味着已取消
-            logger.info(f"Order {order_id} no longer in trades list after timeout - likely cancelled in Paper Trading")
+            ibkr_logger.info(f"Order {order_id} no longer in trades list after timeout - likely cancelled in Paper Trading")
             return True, "Order likely cancelled (no longer in active trades)"
             
         except Exception as e:
-            logger.error(f"Failed to cancel order {order_id}: {e}")
+            ibkr_logger.error(f"Failed to cancel order {order_id}: {e}")
             return False, f"Error: {str(e)}"
     
     def cancel_all_orders(self) -> int:
@@ -707,7 +710,7 @@ class IBKRClient:
                 # 获取IB实例
                 ib = self.ib
                 if not ib or not ib.isConnected():
-                    logger.error(f"IBKR connection lost for cancel all orders")
+                    ibkr_logger.error(f"IBKR connection lost for cancel all orders")
                     return 0
 
                 # 优先使用openTrades()获取活跃订单，降级到trades()
@@ -726,31 +729,31 @@ class IBKRClient:
                     order_id = trade.order.orderId
                     
                     # 记录所有活跃订单的状态以便调试
-                    logger.debug(f"Order {order_id} status: {order_status}")
+                    ibkr_logger.debug(f"Order {order_id} status: {order_status}")
                     
                     # 检查订单是否可取消
                     if order_status in cancellable_statuses:
                         cancellable_orders.append(trade)
-                        logger.info(f"Order {order_id} marked for cancellation (status: {order_status})")
+                        ibkr_logger.info(f"Order {order_id} marked for cancellation (status: {order_status})")
                     elif order_status not in ['Filled', 'Cancelled', 'Inactive']:
                         # 处理未知状态，保守地尝试取消
-                        logger.warning(f"Order {order_id} has unknown status '{order_status}', attempting to cancel")
+                        ibkr_logger.warning(f"Order {order_id} has unknown status '{order_status}', attempting to cancel")
                         cancellable_orders.append(trade)
                 
                 if not cancellable_orders:
-                    logger.info("No cancellable orders found")
+                    ibkr_logger.info("No cancellable orders found")
                     return 0
                 
-                logger.info(f"Found {len(cancellable_orders)} orders to cancel")
+                ibkr_logger.info(f"Found {len(cancellable_orders)} orders to cancel")
                 
                 # 发送取消请求
                 for trade in cancellable_orders:
                     try:
                         order_id = trade.order.orderId
                         ib.cancelOrder(trade.order)
-                        logger.info(f"Sent cancel request for order {order_id}")
+                        ibkr_logger.info(f"Sent cancel request for order {order_id}")
                     except Exception as e:
-                        logger.error(f"Failed to send cancel request for order {trade.order.orderId}: {e}")
+                        ibkr_logger.error(f"Failed to send cancel request for order {trade.order.orderId}: {e}")
                 
                 # 等待取消确认
                 max_wait_time = 20
@@ -789,7 +792,7 @@ class IBKRClient:
                     # 更新已取消数量
                     if current_cancelled > cancelled_count:
                         cancelled_count = current_cancelled
-                        logger.info(f"Progress: {cancelled_count}/{len(cancellable_orders)} orders cancelled")
+                        ibkr_logger.info(f"Progress: {cancelled_count}/{len(cancellable_orders)} orders cancelled")
                 
                 # 最终检查
                 if cancelled_count < len(cancellable_orders):
@@ -813,18 +816,18 @@ class IBKRClient:
                     
                     cancelled_count = final_cancelled
                 
-                logger.info(f"Successfully cancelled {cancelled_count}/{len(cancellable_orders)} orders")
+                ibkr_logger.info(f"Successfully cancelled {cancelled_count}/{len(cancellable_orders)} orders")
                 return cancelled_count
                 
             except Exception as e:
-                logger.error(f"Error in cancel orders operation: {e}")
+                ibkr_logger.error(f"Error in cancel orders operation: {e}")
                 return 0
         
         try:
             # 确保连接
             if not self.is_connected():
                 if not self.connect():
-                    logger.error(f"Cannot connect to IBKR for cancel all orders")
+                    ibkr_logger.error(f"Cannot connect to IBKR for cancel all orders")
                     return 0
 
             # 刷新订单，使用异步API避免事件循环冲突
@@ -837,11 +840,11 @@ class IBKRClient:
                 return result
             else:
                 # 回退到直接执行
-                logger.warning("Failed to use connection thread, falling back to direct execution")
+                ibkr_logger.warning("Failed to use connection thread, falling back to direct execution")
                 return _cancel_orders_operation()
                 
         except Exception as e:
-            logger.error(f"Failed to cancel all orders: {e}")
+            ibkr_logger.error(f"Failed to cancel all orders: {e}")
             return 0
     
     def get_orders(self, risk_manager=None, strategy_manager=None, order_manager=None) -> List[Dict]:
@@ -850,12 +853,12 @@ class IBKRClient:
             # 确保连接
             if not self.is_connected():
                 if not self.connect():
-                    logger.error(f"Cannot connect to IBKR for get orders")
+                    ibkr_logger.error(f"Cannot connect to IBKR for get orders")
                     return []
             
             ib = self.ib
             if not ib or not ib.isConnected():
-                logger.error(f"IBKR connection lost for get orders")
+                ibkr_logger.error(f"IBKR connection lost for get orders")
                 return []
 
             # 添加去抖逻辑 - 避免在短时间内重复刷新
@@ -866,7 +869,7 @@ class IBKRClient:
             # 如果距离上次刷新不足1秒，直接返回缓存的trades数据
             time_since_last_refresh = current_time - self._last_order_refresh_time
             if time_since_last_refresh < 1.0:
-                logger.debug(f"Skipping order refresh, last refresh was {time_since_last_refresh:.1f}s ago")
+                ibkr_logger.debug(f"Skipping order refresh, last refresh was {time_since_last_refresh:.1f}s ago")
                 # 直接使用缓存的trades，不重复请求
                 trades = ib.trades()
             else:
@@ -928,11 +931,11 @@ class IBKRClient:
                                 if strategy_manager and current_avg_fill_price and current_avg_fill_price > 0:
                                     strategy_manager.update_execution_price_and_pnl(order_id_str, current_avg_fill_price, ibkr_client=self)
                             except Exception as sm_err:
-                                logger.warning(f"Failed to update strategy execution for order {order_id_str}: {sm_err}")
+                                ibkr_logger.warning(f"Failed to update strategy execution for order {order_id_str}: {sm_err}")
                             
                             updated_orders = True
                             changed_orders.append((order_id_str, current_status))
-                            logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")
+                            ibkr_logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")
                             
                     else:
                         # 如果在auto_orders中找不到记录，可能是历史订单，默认为人工
@@ -965,23 +968,16 @@ class IBKRClient:
                                     fill_price=current_avg_fill_price if current_avg_fill_price and current_avg_fill_price > 0 else None,
                                     executed_at=executed_at
                                 )
-                                logger.debug(f"OrderManager: Updated order {order_id_str} status to {current_status}")
-                                # 同步订单来源到 OrderManager（如有变化）
-                                try:
-                                    if detected_source_code and existing_order.order_source != detected_source_code:
-                                        existing_order.order_source = detected_source_code
-                                        if hasattr(order_manager, "_update_order_in_database"):
-                                            order_manager._update_order_in_database(existing_order)
-                                        logger.debug(f"OrderManager: Synced order_source for {order_id_str} -> {detected_source_code}")
-                                except Exception as om_src_err:
-                                    logger.warning(f"Failed to sync order_source for order {order_id_str}: {om_src_err}")
+                                ibkr_logger.debug(f"OrderManager: Updated order {order_id_str} status to {current_status}")
+                                # 不再从 IB 同步覆盖 order_source，避免覆盖用户/策略设置，仅更新状态/成交价/时间
+                                ibkr_logger.debug(f"Skip syncing order_source for {order_id_str}; keep existing value: {existing_order.order_source}")
                             except Exception as om_err:
-                                logger.warning(f"Failed to update order {order_id_str} in OrderManager: {om_err}")
+                                ibkr_logger.warning(f"Failed to update order {order_id_str} in OrderManager: {om_err}")
                     else:
                         # 若该订单此前被软删除，则跳过创建，防止从IBKR重新同步
                         try:
                             if hasattr(order_manager, 'was_order_deleted') and order_manager.was_order_deleted(order_id_str):
-                                logger.info(f"Skip re-creating soft-deleted order {order_id_str} from IBKR sync")
+                                ibkr_logger.info(f"Skip re-creating soft-deleted order {order_id_str} from IBKR sync")
                             else:
                                 # 为从 IBKR 获取的历史订单创建记录（如果不存在）
                                 # 尝试根据 IBKR 的订单信息推断订单类型
@@ -1025,12 +1021,12 @@ class IBKRClient:
                                         executed_at=executed_at
                                     )
                                 
-                                logger.info(f"OrderManager: Created historical order {order_id_str} from IBKR sync")
+                                ibkr_logger.info(f"OrderManager: Created historical order {order_id_str} from IBKR sync")
                         except Exception as create_err:
-                            logger.warning(f"Failed to create historical order {order_id_str} in OrderManager: {create_err}")
+                            ibkr_logger.warning(f"Failed to create historical order {order_id_str} in OrderManager: {create_err}")
                 
                 # Add debug logging for order data
-                logger.debug(f"Processing order {trade.order.orderId}: totalQuantity={trade.order.totalQuantity}, action={trade.order.action}, orderType={trade.order.orderType}, status={trade.orderStatus.status}")
+                ibkr_logger.debug(f"Processing order {trade.order.orderId}: totalQuantity={trade.order.totalQuantity}, action={trade.order.action}, orderType={trade.order.orderType}, status={trade.orderStatus.status}")
                 
                 orders.append({
                     'order_id': trade.order.orderId,
@@ -1053,13 +1049,13 @@ class IBKRClient:
                     try:
                         risk_manager.update_order_status(oid, new_status)
                     except Exception as e:
-                        logger.warning(f"Failed to persist updated order {oid}: {e}")
-                logger.info("Updated order data saved to database through RiskManager")
+                        ibkr_logger.warning(f"Failed to persist updated order {oid}: {e}")
+                ibkr_logger.info("Updated order data saved to database through RiskManager")
             
             return orders
 
         except Exception as e:
-            logger.error(f"Failed to get orders: {e}")
+            ibkr_logger.error(f"Failed to get orders: {e}")
             return []
 
     def get_account_info(self) -> Dict:
@@ -1068,13 +1064,13 @@ class IBKRClient:
             # 确保连接
             if not self.is_connected():
                 if not self.connect():
-                    logger.error(f"Cannot connect to IBKR for get account info")
+                    ibkr_logger.error(f"Cannot connect to IBKR for get account info")
                     return {}
             
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
-                logger.error(f"IBKR connection lost for get account info")
+                ibkr_logger.error(f"IBKR connection lost for get account info")
                 return {}
             
             # Use synchronous methods to avoid event loop issues
@@ -1110,7 +1106,7 @@ class IBKRClient:
             
             return info
         except Exception as e:
-            logger.error(f"Failed to get account info: {e}")
+            ibkr_logger.error(f"Failed to get account info: {e}")
             return {}
     
     def get_positions(self, fast: bool = True) -> List[Dict]:
@@ -1120,13 +1116,13 @@ class IBKRClient:
             # 确保连接
             if not self.is_connected():
                 if not self.connect():
-                    logger.error(f"Cannot connect to IBKR for get positions")
+                    ibkr_logger.error(f"Cannot connect to IBKR for get positions")
                     return []
             
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
-                logger.error(f"IBKR connection lost for get positions")
+                ibkr_logger.error(f"IBKR connection lost for get positions")
                 return []
             
             # Use portfolio() to get current market data snapshot
@@ -1149,7 +1145,7 @@ class IBKRClient:
                     if cached_price and cached_price > 0:
                         current_price = cached_price
                         price_source = "cache"
-                        logger.debug(f"Using cached price for {sym}: {current_price}")
+                        ibkr_logger.debug(f"Using cached price for {sym}: {current_price}")
                 
                 # 2) 如果缓存无效，尝试获取实时价格（仅在非快速模式下）
                 if current_price is None and not fast:
@@ -1166,34 +1162,34 @@ class IBKRClient:
                                 price_source = "realtime"
                         else:
                             # 在ThreadPoolExecutor中，尝试快速获取实时价格
-                            logger.debug(f"Attempting quick real-time fetch for {sym} in ThreadPoolExecutor")
+                            ibkr_logger.debug(f"Attempting quick real-time fetch for {sym} in ThreadPoolExecutor")
                             data = self.get_real_time_data(sym)
                             if data and data.get('last'):
                                 current_price = data['last']
                                 price_source = "realtime_thread"
                     except Exception as e:
-                        logger.debug(f"Realtime price fetch error for {sym}: {e}")
+                        ibkr_logger.debug(f"Realtime price fetch error for {sym}: {e}")
                 
                 # 3) 如果实时获取失败或为快速模式，尝试使用 marketPrice
                 if current_price is None:
                     if item.marketPrice and item.marketPrice == item.marketPrice and item.marketPrice > 0:
                         current_price = item.marketPrice
                         price_source = "marketPrice"
-                        logger.debug(f"Using marketPrice for {sym}: {current_price}")
+                        ibkr_logger.debug(f"Using marketPrice for {sym}: {current_price}")
                 
                 # 4) 最后兜底 averageCost
                 if current_price is None:
                     if item.averageCost and item.averageCost > 0:
                         current_price = item.averageCost
                         price_source = "averageCost"
-                        logger.debug(f"Using averageCost as fallback for {sym}: {current_price}")
+                        ibkr_logger.debug(f"Using averageCost as fallback for {sym}: {current_price}")
                     else:
                         current_price = 0
                         price_source = "unknown"
-                        logger.warning(f"No valid price source found for {sym}")
+                        ibkr_logger.warning(f"No valid price source found for {sym}")
                 
-                logger.debug(f"Portfolio data for {sym}: marketPrice={item.marketPrice}, averageCost={item.averageCost}, position={item.position}")
-                logger.debug(f"Price for {sym}: {current_price} (source: {price_source})")
+                ibkr_logger.debug(f"Portfolio data for {sym}: marketPrice={item.marketPrice}, averageCost={item.averageCost}, position={item.position}")
+                ibkr_logger.debug(f"Price for {sym}: {current_price} (source: {price_source})")
                 
                 # Adjust average cost for futures by contract multiplier to get entry price
                 avg_cost_adjusted = item.averageCost
@@ -1203,9 +1199,9 @@ class IBKRClient:
                 }
                 if sym in futures_multipliers and item.averageCost:
                     avg_cost_adjusted = item.averageCost / futures_multipliers[sym]
-                    logger.debug(f"Futures multiplier adjustment for {sym}: {item.averageCost} / {futures_multipliers[sym]} = {avg_cost_adjusted}")
+                    ibkr_logger.debug(f"Futures multiplier adjustment for {sym}: {item.averageCost} / {futures_multipliers[sym]} = {avg_cost_adjusted}")
                 else:
-                    logger.debug(f"No futures multiplier adjustment for {sym}, using original averageCost: {avg_cost_adjusted}")
+                    ibkr_logger.debug(f"No futures multiplier adjustment for {sym}, using original averageCost: {avg_cost_adjusted}")
 
                 market_value = item.position * current_price
                 
@@ -1224,7 +1220,7 @@ class IBKRClient:
             
             return position_list
         except Exception as e:
-            logger.error(f"Failed to get positions: {e}")
+            ibkr_logger.error(f"Failed to get positions: {e}")
             return []
 
 if __name__ == "__main__":

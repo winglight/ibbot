@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 from enum import Enum
 from loguru import logger
+# Module-specific logger for order_manager
+order_logger = logger.bind(module="order_manager", request_id="-")
 
 from .database import get_db_manager
 
@@ -87,7 +89,8 @@ class OrderManager:
         # 从数据库加载现有订单
         self._load_orders_from_database()
         
-        logger.info(f"OrderManager initialized with {len(self.orders)} orders")
+        # 初始化完成日志
+        order_logger.info(f"OrderManager initialized with {len(self.orders)} orders")
 
     def _initialize_database(self):
         """初始化数据库表结构"""
@@ -126,7 +129,7 @@ class OrderManager:
                 cols = [row[1] for row in cursor.fetchall()]
                 if 'is_deleted' not in cols:
                     cursor.execute("ALTER TABLE orders ADD COLUMN is_deleted INTEGER DEFAULT 0")
-                    logger.info("Added is_deleted column to orders table")
+                    order_logger.info("Added is_deleted column to orders table")
                 
                 # 检查是否需要从 auto_orders 迁移数据
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='auto_orders'")
@@ -139,7 +142,7 @@ class OrderManager:
                     
                     if orders_count == 0:
                         # 从 auto_orders 迁移数据到 orders
-                        logger.info("Migrating data from auto_orders to orders table...")
+                        order_logger.info("Migrating data from auto_orders to orders table...")
                         cursor.execute("""
                             INSERT INTO orders (
                                 order_id, symbol, action, quantity, order_type, price,
@@ -158,13 +161,13 @@ class OrderManager:
                             FROM auto_orders
                         """)
                         migrated_count = cursor.rowcount
-                        logger.info(f"Migrated {migrated_count} orders from auto_orders to orders")
+                        order_logger.info(f"Migrated {migrated_count} orders from auto_orders to orders")
                 
                 conn.commit()
-                logger.info("Orders table initialized successfully")
+                order_logger.info("Orders table initialized successfully")
                 
         except Exception as e:
-            logger.error(f"Error initializing orders database: {e}")
+            order_logger.error(f"Error initializing orders database: {e}")
             raise
 
     def _load_orders_from_database(self):
@@ -212,10 +215,10 @@ class OrderManager:
                     )
                     self.orders[order.order_id] = order
                 
-                logger.info(f"Loaded {len(self.orders)} orders from database")
+                order_logger.info(f"Loaded {len(self.orders)} orders from database")
                 
         except Exception as e:
-            logger.error(f"Error loading orders from database: {e}")
+            order_logger.error(f"Error loading orders from database: {e}")
 
     def create_order(self, 
                     order_id: str,
@@ -258,12 +261,12 @@ class OrderManager:
             self._save_order_to_database(order)
             
             # 记录日志
-            logger.info(f"📋 订单创建: {order_id} | {symbol} {action} {quantity} @ {price or 'MKT'} | 来源: {order_source}")
+            order_logger.info(f"📋 订单创建: {order_id} | {symbol} {action} {quantity} @ {price or 'MKT'} | 来源: {order_source}")
             
             return order
             
         except Exception as e:
-            logger.error(f"Error creating order {order_id}: {e}")
+            order_logger.error(f"Error creating order {order_id}: {e}")
             raise
 
     def update_order_status(self, 
@@ -275,7 +278,7 @@ class OrderManager:
         """更新订单状态"""
         try:
             if order_id not in self.orders:
-                logger.warning(f"Order {order_id} not found for status update")
+                order_logger.warning(f"Order {order_id} not found for status update")
                 return False
             
             order = self.orders[order_id]
@@ -296,7 +299,7 @@ class OrderManager:
             new_priority = status_priority.get(status, 0)
             
             if new_priority < old_priority:
-                logger.warning(f"🚫 防止订单状态回退: {order_id} | {old_status} (优先级{old_priority}) → {status} (优先级{new_priority}) | 跳过更新")
+                order_logger.warning(f"🚫 防止订单状态回退: {order_id} | {old_status} (优先级{old_priority}) → {status} (优先级{new_priority}) | 跳过更新")
                 return False
             
             # 更新订单状态
@@ -320,26 +323,26 @@ class OrderManager:
             self._update_order_in_database(order)
             
             # 记录日志
-            logger.info(f"📊 订单状态更新: {order_id} | {old_status} → {status} | 成交价: {fill_price or 'N/A'}")
+            order_logger.info(f"📊 订单状态更新: {order_id} | {old_status} → {status} | 成交价: {fill_price or 'N/A'}")
             
             return True
             
         except Exception as e:
-            logger.error(f"Error updating order {order_id} status: {e}")
+            order_logger.error(f"Error updating order {order_id} status: {e}")
             return False
 
     def cancel_order(self, order_id: str, reason: Optional[str] = None) -> bool:
         """取消订单"""
         try:
             if order_id not in self.orders:
-                logger.warning(f"Order {order_id} not found for cancellation")
+                order_logger.warning(f"Order {order_id} not found for cancellation")
                 return False
             
             order = self.orders[order_id]
             
             # 检查订单是否可以取消
             if order.status in [OrderStatus.FILLED.value, OrderStatus.CANCELLED.value]:
-                logger.warning(f"Order {order_id} cannot be cancelled (status: {order.status})")
+                order_logger.warning(f"Order {order_id} cannot be cancelled (status: {order.status})")
                 return False
             
             # 更新状态
@@ -352,12 +355,12 @@ class OrderManager:
             self._update_order_in_database(order)
             
             # 记录日志
-            logger.info(f"❌ 订单取消: {order_id} | 原因: {reason or '用户请求'}")
+            order_logger.info(f"❌ 订单取消: {order_id} | 原因: {reason or '用户请求'}")
             
             return True
             
         except Exception as e:
-            logger.error(f"Error cancelling order {order_id}: {e}")
+            order_logger.error(f"Error cancelling order {order_id}: {e}")
             return False
 
     def modify_order(self, 
@@ -367,14 +370,14 @@ class OrderManager:
         """修改订单"""
         try:
             if order_id not in self.orders:
-                logger.warning(f"Order {order_id} not found for modification")
+                order_logger.warning(f"Order {order_id} not found for modification")
                 return False
             
             order = self.orders[order_id]
             
             # 检查订单是否可以修改
             if order.status not in [OrderStatus.SUBMITTED.value, OrderStatus.PENDING.value]:
-                logger.warning(f"Order {order_id} cannot be modified (status: {order.status})")
+                order_logger.warning(f"Order {order_id} cannot be modified (status: {order.status})")
                 return False
             
             # 记录修改前的值
@@ -394,12 +397,12 @@ class OrderManager:
             self._update_order_in_database(order)
             
             # 记录日志
-            logger.info(f"✏️ 订单修改: {order_id} | 价格: {old_price} → {order.price}, 数量: {old_quantity} → {order.quantity}")
+            order_logger.info(f"✏️ 订单修改: {order_id} | 价格: {old_price} → {order.price}, 数量: {old_quantity} → {order.quantity}")
             
             return True
             
         except Exception as e:
-            logger.error(f"Error modifying order {order_id}: {e}")
+            order_logger.error(f"Error modifying order {order_id}: {e}")
             return False
 
     def get_order(self, order_id: str) -> Optional[Order]:
@@ -471,7 +474,7 @@ class OrderManager:
                 conn.commit()
                 
         except Exception as e:
-            logger.error(f"Error saving order {order.order_id} to database: {e}")
+            order_logger.error(f"Error saving order {order.order_id} to database: {e}")
             raise
 
     def _update_order_in_database(self, order: Order):
@@ -497,7 +500,7 @@ class OrderManager:
                 conn.commit()
                 
         except Exception as e:
-            logger.error(f"Error updating order {order.order_id} in database: {e}")
+            order_logger.error(f"Error updating order {order.order_id} in database: {e}")
             raise
 
     def get_order_statistics(self) -> Dict[str, Any]:
@@ -564,10 +567,10 @@ class OrderManager:
                     )
                     conn.commit()
                 
-                logger.info(f"Soft-deleted {len(orders_to_mark)} old orders")
+                order_logger.info(f"Soft-deleted {len(orders_to_mark)} old orders")
                 
         except Exception as e:
-            logger.error(f"Error cleaning up old orders: {e}")
+            order_logger.error(f"Error cleaning up old orders: {e}")
 
     def mark_order_deleted(self, order_id: str) -> bool:
         """软删除订单，防止被IBKR重新同步创建"""
@@ -591,10 +594,10 @@ class OrderManager:
             
             # 记录到已删除集合，防止 IBKR 重新同步
             self.deleted_order_ids.add(order_id)
-            logger.info(f"🗑️ 订单软删除: {order_id}")
+            order_logger.info(f"🗑️ 订单软删除: {order_id}")
             return True
         except Exception as e:
-            logger.error(f"Error soft-deleting order {order_id}: {e}")
+            order_logger.error(f"Error soft-deleting order {order_id}: {e}")
             return False
 
     def was_order_deleted(self, order_id: str) -> bool:

@@ -17,6 +17,9 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from loguru import logger
 
+# Module-specific logger for strategy_manager
+strategy_logger = logger.bind(module="strategy_manager", request_id="-")
+
 from .database import DatabaseManager, get_db_manager, Strategy as DatabaseStrategy, StrategyExecution as DatabaseStrategyExecution
 
 
@@ -88,8 +91,7 @@ class StrategyManager:
     def set_dependencies(self, risk_manager=None):
         """Set dependency objects for strategy manager"""
         self.risk_manager = risk_manager
-        logger.info(f"Dependencies set for StrategyManager: risk_manager={'initialized' if risk_manager else 'None'}")
-
+        strategy_logger.info(f"Dependencies set for StrategyManager: risk_manager={'initialized' if risk_manager else 'None'}")
 
     def _load_from_database(self):
         """从数据库加载策略设置、策略和执行记录"""
@@ -161,16 +163,14 @@ class StrategyManager:
                 )
                 self.executions.append(execution)
             
-            logger.info(f"Loaded {len(self.strategies)} strategies and {len(self.executions)} executions from database")
-            
+            strategy_logger.info(f"Loaded {len(self.strategies)} strategies and {len(self.executions)} executions from database")
         except Exception as e:
-            logger.error(f"Error loading from database: {e}")
-            # 如果数据库加载失败，尝试从文件加载并迁移
+            strategy_logger.error(f"Error loading from database: {e}")
             self._load_from_files_and_migrate()
     
     def _load_from_files_and_migrate(self):
         """从文件加载数据并迁移到数据库（向后兼容）"""
-        logger.info("Loading from legacy files and migrating to database...")
+        strategy_logger.info("Loading from legacy files and migrating to database...")
         
         # 加载设置
         self._load_settings()
@@ -215,10 +215,10 @@ class StrategyManager:
                 )
                 self.db_manager.save_strategy_execution(db_execution)
             
-            logger.info("Successfully migrated data from files to database")
+            strategy_logger.info("Successfully migrated data from files to database")
             
         except Exception as e:
-            logger.error(f"Error migrating data to database: {e}")
+            strategy_logger.error(f"Error migrating data to database: {e}")
         
     def _load_settings(self):
         """Load strategy settings - 兼容性方法，现在从数据库加载"""
@@ -227,7 +227,7 @@ class StrategyManager:
                 with open(self.settings_file, 'r') as f:
                     data = json.load(f)
             except Exception as e:
-                logger.warning(f"Failed to load settings: {e}")
+                strategy_logger.warning(f"Failed to load settings: {e}")
                 data = {}
         else:
             data = {}
@@ -266,9 +266,9 @@ class StrategyManager:
         """Save strategy settings - 现在保存到数据库"""
         try:
             self.db_manager.save_strategy_settings(self.settings)
-            logger.info("Strategy settings saved to database")
+            strategy_logger.info("Strategy settings saved to database")
         except Exception as e:
-            logger.error(f"Failed to save settings to database: {e}")
+            strategy_logger.error(f"Failed to save settings to database: {e}")
             
     def _load_strategies(self):
         """Load strategies from CSV file - 兼容性方法"""
@@ -295,9 +295,9 @@ class StrategyManager:
                         
                         self.strategies[row['name']] = Strategy(**row)
                         
-                logger.info(f"Loaded {len(self.strategies)} strategies from CSV")
+                strategy_logger.info(f"Loaded {len(self.strategies)} strategies from CSV")
             except Exception as e:
-                logger.error(f"Failed to load strategies: {e}")
+                strategy_logger.error(f"Failed to load strategies: {e}")
                 self.strategies = {}
                 
     def _save_strategies(self):
@@ -314,9 +314,9 @@ class StrategyManager:
                     created_at=strategy.created_at.isoformat() if strategy.created_at else datetime.now().isoformat()
                 )
                 self.db_manager.save_strategy(db_strategy)
-            logger.info("Strategies saved to database")
+            strategy_logger.info("Strategies saved to database")
         except Exception as e:
-            logger.error(f"Failed to save strategies to database: {e}")
+            strategy_logger.error(f"Failed to save strategies to database: {e}")
             
     def _load_executions(self):
         """Load strategy executions from CSV - 兼容性方法"""
@@ -336,9 +336,9 @@ class StrategyManager:
                         
                         self.executions.append(StrategyExecution(**row))
                         
-                logger.info(f"Loaded {len(self.executions)} strategy executions from CSV")
+                strategy_logger.info(f"Loaded {len(self.executions)} strategy executions from CSV")
             except Exception as e:
-                logger.error(f"Failed to load executions: {e}")
+                strategy_logger.error(f"Failed to load executions: {e}")
                 self.executions = []
                 
     def _save_executions(self):
@@ -369,11 +369,11 @@ class StrategyManager:
                     saved_count += 1
             
             if saved_count > 0:
-                logger.info(f"Strategy executions saved to database: {saved_count} new records")
+                strategy_logger.info(f"Strategy executions saved to database: {saved_count} new records")
             else:
-                logger.debug("No new strategy executions to save")
+                strategy_logger.debug("No new strategy executions to save")
         except Exception as e:
-            logger.error(f"Failed to save executions to database: {e}")
+            strategy_logger.error(f"Failed to save executions to database: {e}")
 
     def get_settings(self) -> Dict[str, Any]:
         """Get current settings"""
@@ -389,7 +389,7 @@ class StrategyManager:
             self._load_from_database()  # 重新加载以更新实例变量
             return True
         except Exception as e:
-            logger.error(f"Failed to update settings: {e}")
+            strategy_logger.error(f"Failed to update settings: {e}")
             return False
             
     def add_strategy(self, strategy_data: Dict[str, Any]) -> bool:
@@ -397,7 +397,7 @@ class StrategyManager:
         try:
             name = strategy_data['name']
             if name in self.strategies:
-                logger.warning(f"Strategy {name} already exists")
+                strategy_logger.warning(f"Strategy {name} already exists")
                 return False
             
             # 处理内部策略的文件选择逻辑
@@ -471,13 +471,13 @@ class StrategyManager:
                 self.db_manager.save_strategy_settings(sl_tp_settings)
                 # 同步到内存中的 settings，确保后续 get_strategy 能直接读取
                 self.settings.update(sl_tp_settings)
-                logger.info(f"Saved SL/TP settings for strategy {name}")
+                strategy_logger.info(f"Saved SL/TP settings for strategy {name}")
                 
-            logger.info(f"Strategy {name} added successfully")
+            strategy_logger.info(f"Strategy {name} added successfully")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to add strategy: {e}")
+            strategy_logger.error(f"Failed to add strategy: {e}")
             return False
 
     def get_strategy(self, name: str) -> Optional[Dict[str, Any]]:
@@ -544,10 +544,10 @@ class StrategyManager:
                 # 更新内存
                 self.settings.update(settings_to_save)
             
-            logger.info(f"Updated strategy: {name}")
+            strategy_logger.info(f"Updated strategy: {name}")
             return True
         except Exception as e:
-            logger.error(f"Failed to update strategy {name}: {e}")
+            strategy_logger.error(f"Failed to update strategy {name}: {e}")
             return False
 
     def _create_strategy_template(self, strategy_name: str, file_path: Optional[str] = None):
@@ -566,6 +566,10 @@ class {strategy_name.replace(' ', '').replace('-', '').replace('_', '')}Strategy
     {strategy_name} Strategy Implementation
     """
     
+    def __init__(self):
+        self.name = "{strategy_name}"
+        self.description = "Strategy template for {strategy_name}"
+        
     def __init__(self):
         self.name = "{strategy_name}"
         self.description = "Strategy template for {strategy_name}"
@@ -614,9 +618,9 @@ if __name__ == "__main__":
         try:
             with open(strategy_file, 'w') as f:
                 f.write(template_content)
-            logger.info(f"Created strategy template: {strategy_file}")
+            strategy_logger.info(f"Created strategy template: {strategy_file}")
         except Exception as e:
-            logger.error(f"Failed to create strategy template: {e}")
+            strategy_logger.error(f"Failed to create strategy template: {e}")
             
 
 
@@ -660,10 +664,10 @@ if __name__ == "__main__":
             # Clean from memory executions
             self.executions = [e for e in self.executions if e.strategy_name != name]
             
-            logger.info(f"Deleted strategy: {name}")
+            strategy_logger.info(f"Deleted strategy: {name}")
             return True
         except Exception as e:
-            logger.error(f"Failed to delete strategy {name}: {e}")
+            strategy_logger.error(f"Failed to delete strategy {name}: {e}")
             return False
 
     def record_execution(self, execution: StrategyExecution):
@@ -692,9 +696,9 @@ if __name__ == "__main__":
                 strategy.last_triggered = execution.execution_time
                 # Do not save strategies here just for derived fields
 
-            logger.info(f"Recorded execution for strategy: {execution.strategy_name}")
+            strategy_logger.info(f"Recorded execution for strategy: {execution.strategy_name}")
         except Exception as e:
-            logger.error(f"Failed to record execution: {e}")
+            strategy_logger.error(f"Failed to record execution: {e}")
             
     def update_execution_price_and_pnl(self, order_id: str, fill_price: float, ibkr_client=None):
         """Update strategy execution price and recalculate PnL after order fills"""
@@ -708,7 +712,7 @@ if __name__ == "__main__":
             
             # If not found in memory, try to load from database and add to memory
             if not execution:
-                logger.info(f"Execution record not found in memory for order_id: {order_id}, checking database...")
+                strategy_logger.info(f"Execution record not found in memory for order_id: {order_id}, checking database...")
                 try:
                     # Load all executions from database to find the missing one
                     db_executions = self.db_manager.load_strategy_executions()
@@ -727,13 +731,13 @@ if __name__ == "__main__":
                                 pnl=db_exec.profit
                             )
                             self.executions.append(execution)
-                            logger.info(f"Loaded execution record from database and added to memory: {order_id}")
+                            strategy_logger.info(f"Loaded execution record from database and added to memory: {order_id}")
                             break
                 except Exception as db_err:
-                    logger.error(f"Failed to load execution from database for order_id {order_id}: {db_err}")
+                    strategy_logger.error(f"Failed to load execution from database for order_id {order_id}: {db_err}")
             
             if not execution:
-                logger.warning(f"No execution record found for order_id: {order_id} in memory or database")
+                strategy_logger.warning(f"No execution record found for order_id: {order_id} in memory or database")
                 return
             
             # Update execution price
@@ -827,14 +831,14 @@ if __name__ == "__main__":
                             if remaining_qty > 0:
                                 sell_queue.append((price, remaining_qty, exec_rec))
                     
-                    logger.info(f"Updated PnL for {execution.strategy_name}/{execution.symbol} executions using FIFO matching")
+                    strategy_logger.info(f"Updated PnL for {execution.strategy_name}/{execution.symbol} executions using FIFO matching")
                     
                 except Exception as calc_err:
-                    logger.warning(f"Failed to calculate PnL using FIFO matching: {calc_err}")
+                    strategy_logger.warning(f"Failed to calculate PnL using FIFO matching: {calc_err}")
                     execution.pnl = 0.0
             else:
                 execution.pnl = 0.0
-                logger.info(f"Updated execution {order_id}: price={fill_price}, PnL=0 (missing data)")
+                strategy_logger.info(f"Updated execution {order_id}: price={fill_price}, PnL=0 (missing data)")
             
             # Save updated executions
             # 优先根据 order_id 更新数据库中的记录，避免重复插入
@@ -847,34 +851,34 @@ if __name__ == "__main__":
                     if target_exec:
                         total_profit = target_exec.pnl
                 self.db_manager.update_strategy_execution(order_id, price=fill_price, profit=total_profit)
-                logger.info(f"Strategy execution updated in database for order {order_id}")
+                strategy_logger.info(f"Strategy execution updated in database for order {order_id}")
             except Exception as db_upd_err:
-                logger.warning(f"Failed to update strategy execution in DB, fallback to batch save: {db_upd_err}")
+                strategy_logger.warning(f"Failed to update strategy execution in DB, fallback to batch save: {db_upd_err}")
                 self._save_executions()
-                logger.info(f"Strategy execution updated and saved for order {order_id}")
+                strategy_logger.info(f"Strategy execution updated and saved for order {order_id}")
             
         except Exception as e:
-            logger.error(f"Failed to update execution price and PnL: {e}")
+            strategy_logger.error(f"Failed to update execution price and PnL: {e}")
             
     def _check_and_create_auto_risk_rules(self, execution: StrategyExecution, fill_price: float):
         """Check if this is an opening position and create auto risk rules for internal strategies"""
         try:
             if not self.risk_manager:
-                logger.debug("RiskManager not available, skipping auto risk rule creation")
+                strategy_logger.debug("RiskManager not available, skipping auto risk rule creation")
                 return
             
             if not execution.strategy_name or not execution.symbol or not execution.action:
-                logger.debug("Missing execution data for auto risk rule creation")
+                strategy_logger.debug("Missing execution data for auto risk rule creation")
                 return
             
             # Check if this strategy exists and is internal
             strategy = self.strategies.get(execution.strategy_name)
             if not strategy:
-                logger.debug(f"Strategy {execution.strategy_name} not found in local strategies")
+                strategy_logger.debug(f"Strategy {execution.strategy_name} not found in local strategies")
                 return
             
             if strategy.strategy_type != "internal":
-                logger.debug(f"Strategy {execution.strategy_name} is not internal, skipping auto risk rules")
+                strategy_logger.debug(f"Strategy {execution.strategy_name} is not internal, skipping auto risk rules")
                 return
             
             # Get strategy SL/TP settings from settings cache
@@ -883,7 +887,7 @@ if __name__ == "__main__":
             tp_enabled = settings.get(f"{execution.strategy_name}_tp_enabled", False)
             
             if not sl_enabled and not tp_enabled:
-                logger.debug(f"No SL/TP enabled for strategy {execution.strategy_name}")
+                strategy_logger.debug(f"No SL/TP enabled for strategy {execution.strategy_name}")
                 return
             
             # Check if this is an opening position by calculating net position
@@ -913,14 +917,14 @@ if __name__ == "__main__":
             
             # Only create risk rules when opening a new position (previous position was 0)
             if previous_net_position != 0:
-                logger.debug(f"Not an opening position for {execution.strategy_name}/{execution.symbol}, previous position: {previous_net_position}")
+                strategy_logger.debug(f"Not an opening position for {execution.strategy_name}/{execution.symbol}, previous position: {previous_net_position}")
                 return
             
             if net_position == 0:
-                logger.debug(f"Net position is 0 after execution for {execution.strategy_name}/{execution.symbol}")
+                strategy_logger.debug(f"Net position is 0 after execution for {execution.strategy_name}/{execution.symbol}")
                 return
             
-            logger.info(f"Opening position detected for {execution.strategy_name}/{execution.symbol}, creating auto risk rules")
+            strategy_logger.info(f"Opening position detected for {execution.strategy_name}/{execution.symbol}, creating auto risk rules")
             
             # Calculate SL/TP prices
             sl_price = None
@@ -980,14 +984,14 @@ if __name__ == "__main__":
                 )
                 
                 if success:
-                    logger.info(f"Auto risk rule created for {execution.strategy_name}/{execution.symbol}: SL=${sl_price}, TP=${tp_price}")
+                    strategy_logger.info(f"Auto risk rule created for {execution.strategy_name}/{execution.symbol}: SL=${sl_price}, TP=${tp_price}")
                 else:
-                    logger.warning(f"Failed to create auto risk rule for {execution.strategy_name}/{execution.symbol}")
+                    strategy_logger.warning(f"Failed to create auto risk rule for {execution.strategy_name}/{execution.symbol}")
             else:
-                logger.debug(f"No valid SL/TP prices calculated for {execution.strategy_name}/{execution.symbol}")
+                strategy_logger.debug(f"No valid SL/TP prices calculated for {execution.strategy_name}/{execution.symbol}")
             
         except Exception as e:
-            logger.error(f"Error creating auto risk rules: {e}")
+            strategy_logger.error(f"Error creating auto risk rules: {e}")
 
             
     def get_executions(self, strategy_name: str, limit: int = 100) -> List[StrategyExecution]:
@@ -1015,7 +1019,7 @@ if __name__ == "__main__":
             
             return result
         except Exception as e:
-            logger.error(f"Failed to get executions for {strategy_name}: {e}")
+            strategy_logger.error(f"Failed to get executions for {strategy_name}: {e}")
             return []
             
     def get_strategy_performance(self, strategy_name: str, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> Dict[str, Any]:
@@ -1092,7 +1096,7 @@ if __name__ == "__main__":
                 'avg_trade_duration': avg_trade_duration
             }
         except Exception as e:
-            logger.error(f"Failed to get performance for {strategy_name}: {e}")
+            strategy_logger.error(f"Failed to get performance for {strategy_name}: {e}")
             return {}
             
     def generate_auth_token(self) -> str:
@@ -1107,7 +1111,7 @@ if __name__ == "__main__":
         self.auth_token = token
         self._save_settings()
         
-        logger.info("Generated new auth token")
+        strategy_logger.info("Generated new auth token")
         return token
         
     def validate_auth_token(self, token: str) -> bool:

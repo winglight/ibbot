@@ -953,12 +953,11 @@ class TradingApp {
             let adjustedStopLossRatio = stopLossRatio;
             let adjustedTakeProfitRatio = takeProfitRatio;
             
-            if (symbol === 'MNQ') {
-                // For MNQ futures, typical leverage is 1:20
-                // Divide the ratios by leverage to reflect actual risk
-                const leverageRatio = 20;
-                adjustedStopLossRatio = stopLossRatio / leverageRatio;
-                adjustedTakeProfitRatio = takeProfitRatio / leverageRatio;
+            const leverageMap = (config && config.leverage) ? config.leverage : {};
+            const lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || (symbol === 'MNQ' ? (leverageMap['MNQ'] || 20) : null);
+            if (lev && !isNaN(lev) && lev > 0) {
+                adjustedStopLossRatio = stopLossRatio / lev;
+                adjustedTakeProfitRatio = takeProfitRatio / lev;
             }
             
             let stopLoss, takeProfit;
@@ -1012,18 +1011,26 @@ class TradingApp {
             const symEl = document.getElementById('monitorSymbol');
             if (!symEl) return;
             symEl.textContent = symbol || '—';
-            const qtyEl = document.getElementById('monitorPositionQty');
-            if (qtyEl) qtyEl.textContent = (positionQty || 0).toString();
+            const combinedEl = document.getElementById('monitorPositionCombined');
+            if (combinedEl) combinedEl.textContent = `${(positionQty || 0)} ($${this.formatNumber((Math.abs(positionQty) || 0) * (currentPrice || 0))})`;
             const curEl = document.getElementById('monitorCurrentPrice');
             if (curEl) curEl.textContent = `$${this.formatNumber(currentPrice || 0)}`;
             const avgEl = document.getElementById('monitorAvgCost');
             if (avgEl) avgEl.textContent = `$${this.formatNumber(avgCost || 0)}`;
             const pnlEl = document.getElementById('monitorPnL');
-            if (pnlEl) pnlEl.textContent = `$${this.formatNumber(pnl || 0)}`;
+            if (pnlEl) {
+                pnlEl.textContent = `$${this.formatNumber(pnl || 0)}`;
+                pnlEl.classList.remove('text-success', 'text-danger');
+                if ((pnl || 0) > 1e-8) pnlEl.classList.add('text-success');
+                else if ((pnl || 0) < -1e-8) pnlEl.classList.add('text-danger');
+            }
             const pnlPctEl = document.getElementById('monitorPnLPercent');
-            if (pnlPctEl) pnlPctEl.textContent = `(${this.formatNumber(pnlPercent || 0)}%)`;
-            const valueEl = document.getElementById('monitorPositionValue');
-            if (valueEl) valueEl.textContent = `$${this.formatNumber((avgCost || 0) * (positionQty || 0))}`;
+            if (pnlPctEl) {
+                pnlPctEl.textContent = `(${this.formatNumber(pnlPercent || 0)}%)`;
+                pnlPctEl.classList.remove('text-success', 'text-danger');
+                if ((pnl || 0) > 1e-8) pnlPctEl.classList.add('text-success');
+                else if ((pnl || 0) < -1e-8) pnlPctEl.classList.add('text-danger');
+            }
 
             // 保存当前监控上下文
             this.currentMonitor = {
@@ -1049,19 +1056,82 @@ class TradingApp {
                     this.riskRules = riskResp.rules || {};
                     rule = this.riskRules[symbol];
                 }
-                if (rule) {
-                    if (slInput) slInput.value = rule.stop_loss_price ?? '';
-                    if (tpInput) tpInput.value = rule.take_profit_price ?? '';
-                    const toggle = document.getElementById('monitorRiskToggle');
-                    if (toggle) toggle.checked = !!rule.enabled;
+                const toggle = document.getElementById('monitorRiskToggle');
+                if (toggle) toggle.checked = !!(rule && rule.enabled);
+
+                const slInputRef = document.getElementById('monitorStopLoss');
+                const tpInputRef = document.getElementById('monitorTakeProfit');
+
+                const posQty = Number(positionQty) || 0;
+                const avg = Number(avgCost) || 0;
+                const setFromAvg = async () => {
+                    if (!slInputRef || !tpInputRef) return;
+                    if (avg > 0 && posQty !== 0) {
+                        let stopLossRatio = 0.05, takeProfitRatio = 0.05, lev = null;
+                        try {
+                            const cfg = await this.apiCall('/risk-config');
+                            stopLossRatio = cfg.stop_loss_ratio || 0.05;
+                            takeProfitRatio = cfg.take_profit_ratio || 0.05;
+                            const leverageMap = (cfg && cfg.leverage) ? cfg.leverage : {};
+                            lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || null;
+                        } catch (e) { /* keep defaults */ }
+                        const adjSL = lev && lev > 0 ? (stopLossRatio / lev) : stopLossRatio;
+                        const adjTP = lev && lev > 0 ? (takeProfitRatio / lev) : takeProfitRatio;
+                        if (posQty > 0) {
+                            // 多头：SL低于成本、TP高于成本
+                            slInputRef.value = this.correctPriceStep(avg * (1 - adjSL), symbol);
+                            tpInputRef.value = this.correctPriceStep(avg * (1 + adjTP), symbol);
+                        } else {
+                            // 空头：SL高于成本、TP低于成本
+                            slInputRef.value = this.correctPriceStep(avg * (1 + adjSL), symbol);
+                            tpInputRef.value = this.correctPriceStep(avg * (1 - adjTP), symbol);
+                        }
+                    } else {
+                        slInputRef.value = '';
+                        tpInputRef.value = '';
+                    }
+                };
+
+                if (rule && rule.enabled) {
+                    if (slInputRef) slInputRef.value = rule.stop_loss_price ?? '';
+                    if (tpInputRef) tpInputRef.value = rule.take_profit_price ?? '';
                 } else {
-                    const toggle = document.getElementById('monitorRiskToggle');
-                    if (toggle) toggle.checked = false;
+                    await setFromAvg();
                 }
+                
+                // 预填充后立即更新差值显示
+                this.updateExpectedPnL();
             } catch (prefillErr) {
                 console.warn('Prefill risk rule failed:', prefillErr);
                 const toggle = document.getElementById('monitorRiskToggle');
                 if (toggle) toggle.checked = false;
+                // 读取失败时亦按成本价设置默认值
+                const slInputRef = document.getElementById('monitorStopLoss');
+                const tpInputRef = document.getElementById('monitorTakeProfit');
+                const posQty = Number(positionQty) || 0;
+                const avg = Number(avgCost) || 0;
+                if (slInputRef && tpInputRef && avg > 0 && posQty !== 0) {
+                    let stopLossRatio = 0.05, takeProfitRatio = 0.05, lev = null;
+                    try {
+                        const cfg = await this.apiCall('/risk-config');
+                        stopLossRatio = cfg.stop_loss_ratio || 0.05;
+                        takeProfitRatio = cfg.take_profit_ratio || 0.05;
+                        const leverageMap = (cfg && cfg.leverage) ? cfg.leverage : {};
+                        lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || null;
+                    } catch (e) { /* keep defaults */ }
+                    const adjSL = lev && lev > 0 ? (stopLossRatio / lev) : stopLossRatio;
+                    const adjTP = lev && lev > 0 ? (takeProfitRatio / lev) : takeProfitRatio;
+                    if (posQty > 0) {
+                        slInputRef.value = this.correctPriceStep(avg * (1 - adjSL), symbol);
+                        tpInputRef.value = this.correctPriceStep(avg * (1 + adjTP), symbol);
+                    } else {
+                        slInputRef.value = this.correctPriceStep(avg * (1 + adjSL), symbol);
+                        tpInputRef.value = this.correctPriceStep(avg * (1 - adjTP), symbol);
+                    }
+                    
+                    // 预填充后立即更新差值显示
+                    this.updateExpectedPnL();
+                }
             }
 
             // 显示模态框
@@ -1200,6 +1270,87 @@ class TradingApp {
         }
     }
 
+    async openOrderDetails(orderId) {
+        try {
+            // 获取订单详情
+            let result = await this.apiCall(`/orders/${orderId}`);
+            const orderData = result.order;
+            
+            // 填充模态框内容
+            const modalBody = document.getElementById('orderDetailsModalBody');
+            if (!modalBody) {
+                this.showAlert('danger', '订单详情模态框未找到');
+                return;
+            }
+            
+            // 格式化时间显示
+            const formatDateTime = (dateStr) => {
+                if (!dateStr) return '—';
+                try {
+                    return new Date(dateStr).toLocaleString('zh-CN');
+                } catch {
+                    return dateStr;
+                }
+            };
+            
+            // 格式化价格显示
+            const formatPrice = (price) => {
+                return price && price > 0 ? `$${this.formatNumber(price)}` : '—';
+            };
+            
+            // 构建详情HTML
+            modalBody.innerHTML = `
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header"><strong>基本信息</strong></div>
+                            <div class="card-body">
+                                <p><strong>订单ID:</strong> ${orderData.order_id}</p>
+                                <p><strong>股票代码:</strong> ${orderData.symbol}</p>
+                                <p><strong>操作:</strong> ${orderData.action}</p>
+                                <p><strong>数量:</strong> ${orderData.quantity}</p>
+                                <p><strong>订单类型:</strong> ${orderData.order_type}</p>
+                                <p><strong>状态:</strong> <span class="badge bg-${this.getStatusColor(orderData.status)}">${orderData.status}</span></p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header"><strong>价格信息</strong></div>
+                            <div class="card-body">
+                                <p><strong>限价:</strong> ${formatPrice(orderData.limit_price)}</p>
+                                <p><strong>平均成交价:</strong> ${formatPrice(orderData.avg_fill_price)}</p>
+                                <p><strong>已成交:</strong> ${orderData.filled || 0}</p>
+                                <p><strong>剩余:</strong> ${orderData.remaining || 0}</p>
+                                <p><strong>佣金:</strong> ${formatPrice(orderData.commission)}</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-header"><strong>其他信息</strong></div>
+                            <div class="card-body">
+                                <p><strong>提交时间:</strong> ${formatDateTime(orderData.submit_time)}</p>
+                                <p><strong>执行时间:</strong> ${formatDateTime(orderData.executed_at)}</p>
+                                <p><strong>订单来源:</strong> ${orderData.order_source || '—'}</p>
+                                <p><strong>备注:</strong> ${orderData.notes || '—'}</p>
+                                <p><strong>策略:</strong> ${orderData.strategy || '—'}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // 显示模态框
+            const modal = new bootstrap.Modal(document.getElementById('orderDetailsModal'));
+            modal.show();
+            
+        } catch (error) {
+            console.error('Failed to load order details:', error);
+            this.showAlert('danger', `获取订单详情失败: ${error.message || error}`);
+        }
+    }
+
     async loadMonitorChart(symbol) {
         try {
             const chartContainer = document.getElementById('monitorChartContainer');
@@ -1235,18 +1386,17 @@ class TradingApp {
 
                 // Prepare data for Chart.js
                 const labels = response.data.map(bar => {
-                    // Handle different date formats from API
+                    // Prefer bar.time, fallback to bar.date
+                    const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
                     let date;
-                    if (typeof bar.date === 'string') {
-                        // Try parsing ISO format or timestamp
-                        date = new Date(bar.date);
+                    if (typeof raw === 'string') {
+                        date = new Date(raw);
                         if (isNaN(date.getTime())) {
-                            // Try parsing as timestamp in seconds
-                            date = new Date(parseFloat(bar.date) * 1000);
+                            const num = parseFloat(raw);
+                            date = new Date(num > 1e10 ? num : num * 1000);
                         }
-                    } else if (typeof bar.date === 'number') {
-                        // Handle timestamp (assume seconds, convert to milliseconds if needed)
-                        date = new Date(bar.date > 1e10 ? bar.date : bar.date * 1000);
+                    } else if (typeof raw === 'number') {
+                        date = new Date(raw > 1e10 ? raw : raw * 1000);
                     } else {
                         date = new Date();
                     }
@@ -1692,8 +1842,8 @@ class TradingApp {
             const curEl = document.getElementById('monitorCurrentPrice');
             if (curEl) curEl.textContent = `$${this.formatNumber(price)}`;
 
-            const valueEl = document.getElementById('monitorPositionValue');
-            if (valueEl) valueEl.textContent = `$${this.formatNumber(Math.abs(qty) * price)}`;
+            const combinedEl = document.getElementById('monitorPositionCombined');
+            if (combinedEl) combinedEl.textContent = `${qty} ($${this.formatNumber(Math.abs(qty) * price)})`;
 
             const pnl = (price - avgCost) * qty;
             const pnlEl = document.getElementById('monitorPnL');
@@ -1739,8 +1889,14 @@ class TradingApp {
             const expectedSection = document.getElementById('expectedPnLSection');
             const expectedStopLossPnL = document.getElementById('expectedStopLossPnL');
             const expectedTakeProfitPnL = document.getElementById('expectedTakeProfitPnL');
+            const slDeltaEl = document.getElementById('monitorStopLossDelta');
+            const tpDeltaEl = document.getElementById('monitorTakeProfitDelta');
             
             if (!expectedSection || !expectedStopLossPnL || !expectedTakeProfitPnL) return;
+            
+            // 默认小字Δ显示
+            if (slDeltaEl) slDeltaEl.textContent = 'Δ — / —%';
+            if (tpDeltaEl) tpDeltaEl.textContent = 'Δ — / —%';
             
             const stopLossPrice = stopLossInput?.value ? parseFloat(stopLossInput.value) : null;
             const takeProfitPrice = takeProfitInput?.value ? parseFloat(takeProfitInput.value) : null;
@@ -1751,27 +1907,51 @@ class TradingApp {
             if (positionQty !== 0 && (stopLossPrice || takeProfitPrice)) {
                 expectedSection.style.display = 'block';
                 
-                // 计算止损预期PnL
+                // 计算止损预期PnL & Δ
                 if (stopLossPrice && avgCost > 0) {
-                    const stopLossPnL = (stopLossPrice - avgCost) * positionQty;
+                    const deltaSL = stopLossPrice - avgCost;
+                    const pctSL = avgCost ? (deltaSL / avgCost) * 100 : 0;
+                    const stopLossPnL = deltaSL * positionQty;
+                    
+                    // 仅显示金额
                     expectedStopLossPnL.textContent = `$${this.formatNumber(stopLossPnL)}`;
                     expectedStopLossPnL.className = stopLossPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
+                    
+                    // 小字Δ/百分比（颜色保持 text-muted）
+                    if (slDeltaEl) {
+                        const sign = deltaSL >= 0 ? '+' : '';
+                        slDeltaEl.textContent = `Δ ${sign}${this.formatNumber(deltaSL)} / ${this.formatNumber(pctSL)}%`;
+                    }
                 } else {
                     expectedStopLossPnL.textContent = '$0.00';
                     expectedStopLossPnL.className = 'fw-bold text-muted';
+                    if (slDeltaEl) slDeltaEl.textContent = 'Δ — / —%';
                 }
                 
-                // 计算止盈预期PnL
+                // 计算止盈预期PnL & Δ
                 if (takeProfitPrice && avgCost > 0) {
-                    const takeProfitPnL = (takeProfitPrice - avgCost) * positionQty;
+                    const deltaTP = takeProfitPrice - avgCost;
+                    const pctTP = avgCost ? (deltaTP / avgCost) * 100 : 0;
+                    const takeProfitPnL = deltaTP * positionQty;
+                    
+                    // 仅显示金额
                     expectedTakeProfitPnL.textContent = `$${this.formatNumber(takeProfitPnL)}`;
                     expectedTakeProfitPnL.className = takeProfitPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
+                    
+                    // 小字Δ/百分比（颜色保持 text-muted）
+                    if (tpDeltaEl) {
+                        const sign = deltaTP >= 0 ? '+' : '';
+                        tpDeltaEl.textContent = `Δ ${sign}${this.formatNumber(deltaTP)} / ${this.formatNumber(pctTP)}%`;
+                    }
                 } else {
                     expectedTakeProfitPnL.textContent = '$0.00';
                     expectedTakeProfitPnL.className = 'fw-bold text-muted';
+                    if (tpDeltaEl) tpDeltaEl.textContent = 'Δ — / —%';
                 }
             } else {
                 expectedSection.style.display = 'none';
+                if (slDeltaEl) slDeltaEl.textContent = 'Δ — / —%';
+                if (tpDeltaEl) tpDeltaEl.textContent = 'Δ — / —%';
             }
         } catch (err) {
             console.error('updateExpectedPnL failed:', err);
@@ -1948,6 +2128,9 @@ class TradingApp {
                         <td><span class="badge bg-${this.getStatusColor(displayStatus)}">${displayStatus}</span></td>
                         <td>${sourceDisplay}</td>
                         <td>
+                            <button class="btn btn-sm btn-info me-1" onclick="app.openOrderDetails(${order.order_id})" title="Details">
+                                <i class="fas fa-info-circle"></i>
+                            </button>
                             ${canEdit ? 
                                 `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${order.order_id}, '${order.symbol}', '${order.action}', ${order.quantity}, '${order.order_type}', ${order.limit_price || 0})" title="Edit">
                                     <i class="fas fa-edit"></i>
@@ -2134,12 +2317,44 @@ class TradingApp {
 
     async toggleRiskRule(symbol, enabled) {
         try {
+            // If enabling but rule doesn't exist yet, try to create it from current monitor inputs
+            if (enabled && (!this.riskRules || !this.riskRules[symbol])) {
+                const slInputEl = document.getElementById('monitorStopLoss');
+                const tpInputEl = document.getElementById('monitorTakeProfit');
+                const sl = slInputEl && slInputEl.value ? parseFloat(slInputEl.value) : null;
+                const tp = tpInputEl && tpInputEl.value ? parseFloat(tpInputEl.value) : null;
+
+                if ((!sl || sl <= 0) && (!tp || tp <= 0)) {
+                    throw new Error('未找到该品种的风险规则，请先输入止损或止盈，并点击“保存规则”后再启用。');
+                }
+
+                await this.apiCall('/risk_rules', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        symbol,
+                        stop_loss_price: sl || undefined,
+                        take_profit_price: tp || undefined
+                    })
+                });
+
+                // update local cache for better UX
+                if (!this.riskRules) this.riskRules = {};
+                this.riskRules[symbol] = Object.assign({}, this.riskRules[symbol] || {}, {
+                    symbol,
+                    stop_loss_price: sl ?? this.riskRules[symbol]?.stop_loss_price,
+                    take_profit_price: tp ?? this.riskRules[symbol]?.take_profit_price,
+                    enabled: true
+                });
+            }
+
             await this.apiCall(`/risk_rules/${symbol}?enabled=${enabled}`, { method: 'PUT' });
             this.showAlert('success', `Risk rule for ${symbol} ${enabled ? 'enabled' : 'disabled'} successfully`);
             await this.loadRiskRules();
         } catch (error) {
             console.error('Failed to update risk rule:', error);
-            this.showAlert('danger', `Failed to ${enabled ? 'enable' : 'disable'} risk rule`);
+            const msg = error && error.message ? error.message : `Failed to ${enabled ? 'enable' : 'disable'} risk rule`;
+            this.showAlert('danger', msg);
+            throw error;
         }
     }
 
@@ -3700,6 +3915,8 @@ class TradingApp {
 
 // Initialize the app
 const app = new TradingApp();
+// expose for inline onclick handlers
+window.app = app;
 
 // Auto-refresh data every 30 seconds when connected
 setInterval(() => {

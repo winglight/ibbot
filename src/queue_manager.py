@@ -5,6 +5,9 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 from loguru import logger
 import json
+
+# 为队列管理器绑定模块日志记录器
+queue_logger = logger.bind(module="queue_manager", request_id="-")
 from pathlib import Path
 import os
 import httpx
@@ -58,7 +61,7 @@ class QueueManager:
         self.connection_manager = connection_manager
         self.websocket_manager = websocket_manager
         self.order_manager = order_manager
-        logger.info("Dependencies set for QueueManager")
+        queue_logger.info("Dependencies set for QueueManager")
     
     def add_task(self, task_type: str, payload: Dict[str, Any], max_retries: int = 3) -> str:
         """添加任务到队列"""
@@ -78,7 +81,7 @@ class QueueManager:
         # 持久化任务
         self._save_tasks()
         
-        logger.info(f"Task {task_id} added to queue, type: {task_type}")
+        queue_logger.info(f"Task {task_id} added to queue, type: {task_type}")
         return task_id
     
     def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -142,7 +145,7 @@ class QueueManager:
         
         self.is_running = True
         self._worker_task = asyncio.create_task(self._worker_loop())
-        logger.info("Queue worker started")
+        queue_logger.info("Queue worker started")
     
     async def stop_worker(self):
         """停止队列工作器"""
@@ -159,7 +162,7 @@ class QueueManager:
             except asyncio.CancelledError:
                 pass
         
-        logger.info("Queue worker stopped")
+        queue_logger.info("Queue worker stopped")
     
     async def _worker_loop(self):
         """队列工作器主循环"""
@@ -193,7 +196,7 @@ class QueueManager:
                 await asyncio.sleep(0.1)
                 
             except Exception as e:
-                logger.error(f"Worker loop error: {e}")
+                queue_logger.error(f"Worker loop error: {e}")
                 await asyncio.sleep(1)
     
     async def _process_task(self, task: QueueTask):
@@ -202,7 +205,7 @@ class QueueManager:
         task.started_at = datetime.now()
         self._save_tasks()
         
-        logger.info(f"Processing task {task.task_id}, type: {task.task_type}")
+        queue_logger.info(f"Processing task {task.task_id}, type: {task.task_type}")
         
         try:
             # 根据任务类型调用相应的处理器
@@ -213,25 +216,25 @@ class QueueManager:
             
             task.status = "completed"
             task.completed_at = datetime.now()
-            logger.info(f"Task {task.task_id} completed successfully")
+            queue_logger.info(f"Task {task.task_id} completed successfully")
             
         except Exception as e:
             task.retry_count += 1
             error_msg = str(e)
             task.error_message = error_msg
             
-            logger.error(f"Task {task.task_id} failed: {error_msg}, retry {task.retry_count}/{task.max_retries}")
+            queue_logger.error(f"Task {task.task_id} failed: {error_msg}, retry {task.retry_count}/{task.max_retries}")
             
             if task.retry_count < task.max_retries:
                 # 重新加入队列
                 task.status = "pending"
                 task.started_at = None
                 self.pending_queue.append(task.task_id)
-                logger.info(f"Task {task.task_id} requeued for retry")
+                queue_logger.info(f"Task {task.task_id} requeued for retry")
             else:
                 task.status = "failed"
                 task.completed_at = datetime.now()
-                logger.error(f"Task {task.task_id} failed permanently after {task.max_retries} retries")
+                queue_logger.error(f"Task {task.task_id} failed permanently after {task.max_retries} retries")
         
         finally:
             self._save_tasks()
@@ -364,7 +367,7 @@ class QueueManager:
                     sec_type=sec_type
                 )
             except Exception as e:
-                logger.warning(f"Failed to create order via OrderManager: {e}, falling back to RiskManager")
+                queue_logger.warning(f"Failed to create order via OrderManager: {e}, falling back to RiskManager")
                 if self.risk_manager:
                     from src.risk_manager import AutoOrder
                     auto_order = AutoOrder(
@@ -424,9 +427,9 @@ class QueueManager:
                 "quantity": payload['qty']
             })
         else:
-            logger.debug("websocket_manager 未注入，跳过广播")
+            queue_logger.debug("websocket_manager 未注入，跳过广播")
         
-        logger.info(f"Strategy order placed successfully: {order_id}")
+        queue_logger.info(f"Strategy order placed successfully: {order_id}")
     
     def _save_tasks(self):
         """持久化任务到文件"""
@@ -451,7 +454,7 @@ class QueueManager:
                 json.dump(data, f, indent=2, ensure_ascii=False)
                 
         except Exception as e:
-            logger.error(f"Failed to save tasks: {e}")
+            queue_logger.error(f"Failed to save tasks: {e}")
     
     def _load_tasks(self):
         """从文件加载任务"""
@@ -480,10 +483,10 @@ class QueueManager:
                 if task_id in self.tasks and self.tasks[task_id].status == 'pending'
             ]
             
-            logger.info(f"Loaded {len(self.tasks)} tasks from persistence, {len(self.pending_queue)} pending")
+            queue_logger.info(f"Loaded {len(self.tasks)} tasks from persistence, {len(self.pending_queue)} pending")
             
         except Exception as e:
-            logger.error(f"Failed to load tasks: {e}")
+            queue_logger.error(f"Failed to load tasks: {e}")
 
 # 全局队列管理器实例
 queue_manager = QueueManager()
