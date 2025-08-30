@@ -71,6 +71,20 @@
 #monitorChartContainer {
     background-color: #fff;
     border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+    min-height: 460px;
+    /* 支持触摸设备的滚动 */
+    touch-action: pan-x pan-y;
+}
+
+#monitorChartContainer canvas {
+    /* 确保canvas能够响应触摸事件 */
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
 }
 #monitorModal .card {
     box-shadow: none;

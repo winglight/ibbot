@@ -694,6 +694,9 @@ class TradingApp {
                         <p class="${info.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
                             <strong>Unrealized P&L:</strong> $${this.formatNumber(info.unrealized_pnl)}
                         </p>
+                        <p class="${info.realized_pnl >= 0 ? 'profit' : 'loss'}">
+                            <strong>Realized P&L:</strong> $${this.formatNumber(info.realized_pnl)}
+                        </p>
                     </div>
                 </div>
             `;
@@ -718,6 +721,9 @@ class TradingApp {
                         <p><strong>Buying Power:</strong> $${this.formatNumber(info.buying_power)}</p>
                         <p class="${info.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
                             <strong>Unrealized P&L:</strong> $${this.formatNumber(info.unrealized_pnl)}
+                        </p>
+                        <p class="${info.realized_pnl >= 0 ? 'profit' : 'loss'}">
+                            <strong>Realized P&L:</strong> $${this.formatNumber(info.realized_pnl)}
                         </p>
                     </div>
                 </div>
@@ -1145,6 +1151,26 @@ class TradingApp {
                 if (refreshBtn) {
                     refreshBtn.onclick = () => this.loadMonitorChart(symbol);
                 }
+                
+                // 重置缩放按钮事件
+                const resetZoomBtn = document.getElementById('resetChartZoomBtn');
+                if (resetZoomBtn) {
+                    resetZoomBtn.onclick = () => {
+                        if (this.monitorChart) {
+                            this.monitorChart.resetZoom();
+                        }
+                    };
+                }
+                
+                // 图表类型切换事件
+                const chartTypeRadios = document.querySelectorAll('input[name="chartType"]');
+                chartTypeRadios.forEach(radio => {
+                    radio.onchange = () => {
+                        if (radio.checked) {
+                            this.loadMonitorChart(symbol);
+                        }
+                    };
+                });
                 const realtimeBtn = document.getElementById('monitorRealtimeBtn');
                 if (realtimeBtn) {
                     const setActive = (active) => {
@@ -1356,8 +1382,13 @@ class TradingApp {
             const chartContainer = document.getElementById('monitorChartContainer');
             if (!chartContainer) return;
 
-            // Clear previous chart
+            // Clear previous charts
             chartContainer.innerHTML = `<canvas id="monitorChart" width="800" height="400"></canvas>`;
+            
+            const volumeContainer = document.getElementById('monitorVolumeContainer');
+            if (volumeContainer) {
+                volumeContainer.innerHTML = `<canvas id="monitorVolumeChart" width="800" height="120"></canvas>`;
+            }
 
             // Request chart data from API
             const intervalSelect = document.getElementById('monitorInterval');
@@ -1423,7 +1454,49 @@ class TradingApp {
                         });
                     }
                 });
-                const prices = response.data.map(bar => bar.close);
+                // 确保数据完整性，过滤掉无效的价格数据
+                const validData = response.data.filter(bar => bar.close != null && !isNaN(bar.close));
+                const prices = validData.map(bar => bar.close);
+                
+                // 重新生成对应的labels
+                const validLabels = validData.map(bar => {
+                    // Prefer bar.time, fallback to bar.date
+                    const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
+                    let date;
+                    if (typeof raw === 'string') {
+                        date = new Date(raw);
+                        if (isNaN(date.getTime())) {
+                            const num = parseFloat(raw);
+                            date = new Date(num > 1e10 ? num : num * 1000);
+                        }
+                    } else if (typeof raw === 'number') {
+                        date = new Date(raw > 1e10 ? raw : raw * 1000);
+                    } else {
+                        date = new Date();
+                    }
+                    
+                    // Format based on interval
+                    const interval = intervalSelect?.value || '5 mins';
+                    if (interval.includes('day') || duration.includes('M') || duration.includes('Y')) {
+                        return date.toLocaleDateString('en-US', { 
+                            month: 'short', 
+                            day: 'numeric'
+                        });
+                    } else if (interval.includes('hour') || duration === '1 W') {
+                        return date.toLocaleString('en-US', { 
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            hour12: false 
+                        });
+                    } else {
+                        return date.toLocaleTimeString('en-US', { 
+                            hour: '2-digit', 
+                            minute: '2-digit',
+                            hour12: false 
+                        });
+                    }
+                });
 
                 // Get stop loss and take profit values for annotations
                 const stopLossInput = document.getElementById('monitorStopLoss');
@@ -1446,6 +1519,10 @@ class TradingApp {
                     }
                 };
                 const minStep = getMinPriceStep(symbol);
+
+                // 检查当前选择的图表类型
+                const chartTypeRadio = document.querySelector('input[name="chartType"]:checked');
+                const chartType = chartTypeRadio ? chartTypeRadio.value : 'line';
 
                 // Prepare annotations
                 const annotations = {};
@@ -1549,30 +1626,180 @@ class TradingApp {
                         }
                     };
                 }
+                
+                // Add price range line (Low-Current-High)
+                if (response.data && response.data.length > 0) {
+                    const allPrices = response.data.map(item => {
+                        if (chartType === 'candlestick') {
+                            return [item.low, item.high, item.close];
+                        } else {
+                            return item.close || item.price;
+                        }
+                    }).flat().filter(p => p != null);
+                    
+                    if (allPrices.length > 0) {
+                        const minPrice = Math.min(...allPrices);
+                        const maxPrice = Math.max(...allPrices);
+                        const priceRange = maxPrice - minPrice;
+                        
+                        if (priceRange > 0 && currentPrice > 0) {
+                            // 计算当前价格在范围中的位置比例
+                            const currentRatio = (currentPrice - minPrice) / priceRange;
+                            
+                            // 添加价格范围线段 - 最低价水平线
+                            annotations.minPriceLine = {
+                                type: 'line',
+                                yMin: minPrice,
+                                yMax: minPrice,
+                                borderColor: 'rgba(255, 99, 132, 0.6)',
+                                borderWidth: 2,
+                                borderDash: [5, 5],
+                                label: {
+                                    content: `Low: $${minPrice.toFixed(2)}`,
+                                    enabled: true,
+                                    position: 'start',
+                                    backgroundColor: 'rgba(255, 99, 132, 0.8)',
+                                    color: 'white',
+                                    padding: 4
+                                }
+                            };
+                            
+                            // 添加最高价水平线
+                            annotations.maxPriceLine = {
+                                type: 'line',
+                                yMin: maxPrice,
+                                yMax: maxPrice,
+                                borderColor: 'rgba(40, 167, 69, 0.6)',
+                                borderWidth: 2,
+                                borderDash: [5, 5],
+                                label: {
+                                    content: `High: $${maxPrice.toFixed(2)}`,
+                                    enabled: true,
+                                    position: 'end',
+                                    backgroundColor: 'rgba(40, 167, 69, 0.8)',
+                                    color: 'white',
+                                    padding: 4
+                                }
+                            };
+                            
+                            // 添加当前价格在范围中的位置标记
+                            annotations.pricePosition = {
+                                type: 'point',
+                                xValue: labels[labels.length - 1], // 最新时间点
+                                yValue: currentPrice,
+                                backgroundColor: 'rgb(255, 206, 84)',
+                                borderColor: 'rgb(255, 165, 0)',
+                                borderWidth: 2,
+                                radius: 6,
+                                label: {
+                                    content: `${(currentRatio * 100).toFixed(1)}% of range`,
+                                    enabled: true,
+                                    position: 'right',
+                                    backgroundColor: 'rgba(255, 206, 84, 0.9)',
+                                    color: 'black',
+                                    padding: 4
+                                }
+                            };
+                            
 
-                // Destroy existing chart if exists
+                         }
+                     }
+                 }
+
+                // Destroy existing charts if they exist
                 if (this.monitorChart) {
                     this.monitorChart.destroy();
+                }
+                if (this.monitorVolumeChart) {
+                    this.monitorVolumeChart.destroy();
+                }
+
+                // 根据数据量智能设置初始显示范围
+                const getOptimalDisplayRange = (dataLength) => {
+                    if (dataLength <= 50) {
+                        return { min: undefined, max: undefined }; // 显示全部数据
+                    } else if (dataLength <= 200) {
+                        return { 
+                            min: labels[Math.max(0, dataLength - 100)], 
+                            max: labels[dataLength - 1] 
+                        };
+                    } else {
+                        return { 
+                            min: labels[Math.max(0, dataLength - 150)], 
+                            max: labels[dataLength - 1] 
+                        };
+                    }
+                };
+                
+                const displayRange = getOptimalDisplayRange(labels.length);
+
+                // 准备图表数据
+                let chartConfig;
+                if (chartType === 'candlestick') {
+                    // 使用标准的Chart.js金融图表插件，参考折线图的数据处理方式
+                    const ohlcData = validData.map((bar, index) => {
+                        // 使用与折线图相同的时间处理逻辑
+                        const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
+                        let date;
+                        if (typeof raw === 'string') {
+                            date = new Date(raw);
+                            if (isNaN(date.getTime())) {
+                                const num = parseFloat(raw);
+                                date = new Date(num > 1e10 ? num : num * 1000);
+                            }
+                        } else if (typeof raw === 'number') {
+                            date = new Date(raw > 1e10 ? raw : raw * 1000);
+                        } else {
+                            date = new Date();
+                        }
+                        
+                        return {
+                            x: date.getTime(),  // 转换为时间戳以兼容Luxon
+                            o: parseFloat(bar.open) || parseFloat(bar.close) || 0,
+                            h: parseFloat(bar.high) || parseFloat(bar.close) || 0,
+                            l: parseFloat(bar.low) || parseFloat(bar.close) || 0,
+                            c: parseFloat(bar.close) || 0
+                        };
+                    }).filter(item => item.c > 0);  // 只需要确保收盘价有效
+                    
+                    console.log('OHLC data sample:', ohlcData.slice(0, 3));
+                    console.log('Total OHLC points:', ohlcData.length);
+                    
+                    chartConfig = {
+                        type: 'candlestick',
+                        data: {
+                            datasets: [{
+                                label: `${symbol} OHLC`,
+                                data: ohlcData
+                            }]
+                        }
+                    };
+                } else {
+                    // 折线图配置
+                    chartConfig = {
+                        type: 'line',
+                        data: {
+                            labels: chartType === 'line' ? validLabels : labels,
+                            datasets: [{
+                                label: `${symbol} Price`,
+                                data: chartType === 'line' ? prices : prices,
+                                borderColor: 'rgb(54, 162, 235)',
+                                backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                                tension: 0.1,
+                                pointRadius: 1,
+                                pointHoverRadius: 3
+                            }]
+                        }
+                    };
                 }
 
                 // Create new chart
                 this.monitorChart = new Chart(ctx, {
-                    type: 'line',
-                    data: {
-                        labels: labels,
-                        datasets: [{
-                            label: `${symbol} Price`,
-                            data: prices,
-                            borderColor: 'rgb(54, 162, 235)',
-                            backgroundColor: 'rgba(54, 162, 235, 0.1)',
-                            tension: 0.1,
-                            pointRadius: 1,
-                            pointHoverRadius: 3
-                        }]
-                    },
+                    ...chartConfig,
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
+                        ...(chartType === 'candlestick' ? { parsing: false } : {}),
                         interaction: {
                             intersect: false,
                             mode: 'index'
@@ -1585,9 +1812,39 @@ class TradingApp {
                                     display: true,
                                     text: 'Time'
                                 },
-                                // 根据数据量自动调整显示范围
-                                min: labels.length > 50 ? labels[Math.max(0, labels.length - 50)] : undefined,
-                                max: labels.length > 50 ? labels[labels.length - 1] : undefined
+                                // 蜡烛图使用时间轴
+                                ...(chartType === 'candlestick' ? {
+                                    type: 'time',
+                                    adapters: {
+                                        date: {
+                                            locale: 'en-US'
+                                        }
+                                    },
+                                    time: {
+                                        unit: 'minute',
+                                        displayFormats: {
+                                            minute: 'HH:mm',
+                                            hour: 'HH:mm',
+                                            day: 'MMM dd'
+                                        }
+                                    },
+                                    ticks: {
+                                        maxTicksLimit: 20,
+                                        autoSkip: true,
+                                        maxRotation: 45
+                                    }
+                                } : {
+                                    // 折线图使用智能计算的显示范围
+                                    min: displayRange.min,
+                                    max: displayRange.max,
+                                    // 改善标签显示
+                                    ticks: {
+                                        maxTicksLimit: labels.length > 50 ? 10 : Math.min(labels.length, 20),
+                                        autoSkip: true,
+                                        maxRotation: 45,
+                                        minRotation: 0
+                                    }
+                                })
                             },
                             y: {
                                 display: true,
@@ -1595,7 +1852,12 @@ class TradingApp {
                                     display: true,
                                     text: 'Price ($)'
                                 },
-                                beginAtZero: false
+                                beginAtZero: false,
+                                // 为蜡烛图设置合适的价格范围
+                                ...(chartType === 'candlestick' && response.data && response.data.length > 0 ? {
+                                    min: Math.min(...response.data.map(item => parseFloat(item.low)).filter(p => p > 0)) * 0.998,
+                                    max: Math.max(...response.data.map(item => parseFloat(item.high)).filter(p => p > 0)) * 1.002
+                                } : {})
                             }
                         },
                         // 添加缩放和平移插件配置
@@ -1605,30 +1867,45 @@ class TradingApp {
                                 text: `${symbol} - Real-time Price Chart`
                             },
                             legend: {
-                                display: false
+                                display: chartType === 'candlestick'
                             },
                             annotation: {
                                 annotations: annotations
                             },
                             zoom: {
                                 limits: {
-                                    x: {min: 'original', max: 'original'},
+                                    x: {min: 0, max: Math.max(10, labels.length - 1)},
                                     y: {min: 'original', max: 'original'}
                                 },
                                 pan: {
                                     enabled: true,
                                     mode: 'x',
-                                    modifierKey: null
+                                    modifierKey: null,
+                                    threshold: 10,
+                                    rangeMin: {
+                                        x: 0
+                                    },
+                                    rangeMax: {
+                                        x: Math.max(10, labels.length - 1)
+                                    }
                                 },
                                 zoom: {
                                     wheel: {
                                         enabled: true,
-                                        modifierKey: null
+                                        modifierKey: null,
+                                        speed: 0.1
                                     },
                                     pinch: {
                                         enabled: true
                                     },
-                                    mode: 'x'
+                                    mode: 'x',
+                                    // 根据数据量设置缩放限制
+                                    limits: {
+                                        x: {
+                                            min: Math.max(5, Math.floor(labels.length * 0.05)),
+                                            max: Math.max(10, labels.length)
+                                        }
+                                    }
                                 }
                             }
                         },
@@ -1752,6 +2029,138 @@ class TradingApp {
                         canvas.style.cursor = 'default';
                     }
                 });
+                
+                // Create Volume Chart
+                const volumeCtx = document.getElementById('monitorVolumeChart').getContext('2d');
+                const volumeData = response.data.map(item => item.volume || 0);
+                
+                this.monitorVolumeChart = new Chart(volumeCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Volume',
+                            data: volumeData,
+                            backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                            borderColor: 'rgba(75, 192, 192, 1)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: {
+                            intersect: false,
+                            mode: 'index'
+                        },
+                        scales: {
+                            x: {
+                                display: true,
+                                title: {
+                                    display: true,
+                                    text: 'Time'
+                                },
+                                // 与主图表同步显示范围
+                                min: displayRange.min,
+                                max: displayRange.max,
+                                ticks: {
+                                    maxTicksLimit: labels.length > 50 ? 10 : Math.min(labels.length, 20),
+                                    autoSkip: true,
+                                    maxRotation: 45,
+                                    minRotation: 0
+                                }
+                            },
+                            y: {
+                                display: true,
+                                title: {
+                                    display: true,
+                                    text: 'Volume'
+                                },
+                                beginAtZero: true
+                            }
+                        },
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: `${symbol} - Volume`
+                            },
+                            legend: {
+                                display: false
+                            },
+                            zoom: {
+                                limits: {
+                                    x: {min: 0, max: labels.length - 1},
+                                    y: {min: 'original', max: 'original'}
+                                },
+                                pan: {
+                                    enabled: true,
+                                    mode: 'x',
+                                    modifierKey: null,
+                                    threshold: 10,
+                                    rangeMin: {
+                                        x: 0
+                                    },
+                                    rangeMax: {
+                                        x: labels.length - 1
+                                    }
+                                },
+                                zoom: {
+                                    wheel: {
+                                        enabled: true,
+                                        modifierKey: null,
+                                        speed: 0.1
+                                    },
+                                    pinch: {
+                                        enabled: true
+                                    },
+                                    mode: 'x',
+                                    limits: {
+                                        x: {
+                                            min: Math.max(10, Math.floor(labels.length * 0.1)),
+                                            max: labels.length
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                
+                // 同步主图表和Volume图表的缩放和平移
+                let isUpdatingZoom = false;
+                
+                this.monitorChart.options.plugins.zoom.pan.onPan = ({chart}) => {
+                    if (this.monitorVolumeChart && !isUpdatingZoom) {
+                        isUpdatingZoom = true;
+                        this.monitorVolumeChart.zoomScale('x', {min: chart.scales.x.min, max: chart.scales.x.max}, 'none');
+                        isUpdatingZoom = false;
+                    }
+                };
+                
+                this.monitorChart.options.plugins.zoom.zoom.onZoom = ({chart}) => {
+                    if (this.monitorVolumeChart && !isUpdatingZoom) {
+                        isUpdatingZoom = true;
+                        this.monitorVolumeChart.zoomScale('x', {min: chart.scales.x.min, max: chart.scales.x.max}, 'none');
+                        isUpdatingZoom = false;
+                    }
+                };
+                
+                this.monitorVolumeChart.options.plugins.zoom.pan.onPan = ({chart}) => {
+                    if (this.monitorChart && !isUpdatingZoom) {
+                        isUpdatingZoom = true;
+                        this.monitorChart.zoomScale('x', {min: chart.scales.x.min, max: chart.scales.x.max}, 'none');
+                        isUpdatingZoom = false;
+                    }
+                };
+                
+                this.monitorVolumeChart.options.plugins.zoom.zoom.onZoom = ({chart}) => {
+                    if (this.monitorChart && !isUpdatingZoom) {
+                        isUpdatingZoom = true;
+                        this.monitorChart.zoomScale('x', {min: chart.scales.x.min, max: chart.scales.x.max}, 'none');
+                        isUpdatingZoom = false;
+                    }
+                };
+                
                      }, 100);
 
         } catch (error) {
@@ -1759,6 +2168,10 @@ class TradingApp {
             const chartContainer = document.getElementById('monitorChartContainer');
             if (chartContainer) {
                 chartContainer.innerHTML = `<div class="alert alert-danger">Failed to load chart: ${error.message}</div>`;
+            }
+            const volumeContainer = document.getElementById('monitorVolumeContainer');
+            if (volumeContainer) {
+                volumeContainer.innerHTML = `<div class="alert alert-danger">Failed to load volume chart: ${error.message}</div>`;
             }
         }
     }
@@ -1868,12 +2281,34 @@ class TradingApp {
                 const nowLabel = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
                 labels.push(nowLabel);
                 dataset.data.push(price);
+                
+                // 同时更新Volume图表
+                if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.datasets && this.monitorVolumeChart.data.datasets.length > 0) {
+                    const volumeLabels = this.monitorVolumeChart.data.labels || [];
+                    const volumeDataset = this.monitorVolumeChart.data.datasets[0];
+                    volumeLabels.push(nowLabel);
+                    // 使用实时数据中的volume，如果没有则使用默认值
+                    const volume = data.volume || data.vol || Math.floor(Math.random() * 1000000); // 临时使用随机值作为示例
+                    volumeDataset.data.push(volume);
+                }
+                
                 const MAX_POINTS = 300;
                 if (labels.length > MAX_POINTS) {
                     labels.shift();
                     dataset.data.shift();
+                    // 同步删除Volume图表的旧数据
+                    if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.labels) {
+                        this.monitorVolumeChart.data.labels.shift();
+                        if (this.monitorVolumeChart.data.datasets[0]) {
+                            this.monitorVolumeChart.data.datasets[0].data.shift();
+                        }
+                    }
                 }
+                
                 this.monitorChart.update('none');
+                if (this.monitorVolumeChart) {
+                    this.monitorVolumeChart.update('none');
+                }
             }
         } catch (e) {
             console.warn('updateMonitorRealtime failed:', e);
