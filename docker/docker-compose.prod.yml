@@ -71,10 +71,8 @@ services:
       - ./.env
     environment:
       - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}
-    # Prefer token mode; if using config.yml, ensure it is mounted below
+    # Token mode only
     command: ["tunnel", "--no-autoupdate", "run"]
-    volumes:
-      - ../tunnel:/etc/cloudflared:ro
     depends_on:
       - ibbot
     networks:

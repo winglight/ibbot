@@ -19,10 +19,6 @@ services:
       - IBKR_HOST=ib-gateway
       - IBKR_PORT=4002
       
-      # Mock Configuration
-      - MOCK_HOST=mock-gateway
-      - MOCK_PORT=18080
-      
       # Authentication
       - ADMIN_USERNAME=${ADMIN_USERNAME}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
@@ -50,29 +46,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
-  # Mock IB Gateway
-  mock-gateway:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    container_name: ibbot-mock
-    command: ["mock"]
-    ports:
-      - "18080:18080"
-    environment:
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
-    networks:
-      - ibbot-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:18080/api/connection_status"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    profiles: ["mock"]
 
   # IB Gateway (gnzsnz)
   ib-gateway:
@@ -124,7 +97,8 @@ services:
 
     networks:
       - ibbot-network
-  # Cloudflare Tunnel (cloudflared)
+
+  # Cloudflare Tunnel (cloudflared) - token mode only
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: ibbot-cloudflared
@@ -135,9 +109,6 @@ services:
       # Token-based mode: set CF_TUNNEL_TOKEN in docker/.env
       - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}
     command: ["tunnel", "--no-autoupdate", "run"]
-    volumes:
-      # Config-based mode: mount config/credentials under ../tunnel
-      - ../tunnel:/etc/cloudflared:ro
     depends_on:
       - ibbot
     networks:
