@@ -124,6 +124,24 @@ services:
 
     networks:
       - ibbot-network
+  # Cloudflare Tunnel (cloudflared)
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ibbot-cloudflared
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      # Token-based mode: set CF_TUNNEL_TOKEN in docker/.env
+      - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}
+    command: ["tunnel", "--no-autoupdate", "run"]
+    volumes:
+      # Config-based mode: mount config/credentials under ../tunnel
+      - ../tunnel:/etc/cloudflared:ro
+    depends_on:
+      - ibbot
+    networks:
+      - ibbot-network
 
 networks:
   ibbot-network:

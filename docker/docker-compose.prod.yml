@@ -63,6 +63,23 @@ services:
       retries: 3
       start_period: 40s
 
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ibbot-cloudflared
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}
+    # Prefer token mode; if using config.yml, ensure it is mounted below
+    command: ["tunnel", "--no-autoupdate", "run"]
+    volumes:
+      - ../tunnel:/etc/cloudflared:ro
+    depends_on:
+      - ibbot
+    networks:
+      - ibbot-network
+
 networks:
   ibbot-network:
     driver: bridge

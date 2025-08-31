@@ -94,3 +94,80 @@ IB Gateway 内需完成以下设置：
   - readme.md（本文）
 
 如需进一步个性化部署（例如启用/禁用 mock、加入反向代理、TLS 等），请按需调整 compose 文件并测试后再用于生产。
+
+## 6. 通过 Cloudflare Tunnel 暴露外网访问（可选）
+
+本项目提供 cloudflared 容器，便捷地将 ibbot Web 服务（容器内 ibbot:8000）通过 Cloudflare 的 Zero Trust Tunnel 安全暴露到公网域名。
+
+支持两种模式：
+- 令牌模式（推荐，简单快捷）：在 Cloudflare Zero Trust 后台创建隧道，复制其 TOKEN，放入 docker/.env 的 CF_TUNNEL_TOKEN。
+- 配置文件模式（高级）：在项目 tunnel/ 目录维护 cloudflared 的 config.yml 与凭据 JSON，compose 将其挂载到 /etc/cloudflared。
+
+### 6.1 目录与文件
+- docker/.env：包含 CF_TUNNEL_TOKEN 等变量
+- tunnel/config.yaml：示例 config（如使用配置文件模式）
+- tunnel/<TunnelID>.json：Cloudflare 提供的凭据文件（创建隧道后下载）
+
+### 6.2 Compose 服务
+docker/docker-compose.yml 与 docker/docker-compose.prod.yml 已包含 cloudflared 服务：
+- 使用 env_file: docker/.env
+- 令牌模式：读取 CF_TUNNEL_TOKEN 并执行 `cloudflared tunnel run`
+- 配置文件模式：将 ../tunnel 挂载到 /etc/cloudflared（只读）
+
+### 6.3 令牌模式（推荐）
+1) 在 Cloudflare Dashboard -> Zero Trust -> Networks -> Tunnels 创建隧道
+2) 选择 Docker 部署，复制生成的 Token（或 docker run 命令中的 token）
+3) 在 docker/.env 设置：
+```
+CF_TUNNEL_TOKEN=eyJ...your-token
+```
+4) 启动或重启 compose：
+```
+# 开发/测试
+docker compose -f docker/docker-compose.yml up -d cloudflared
+# 生产
+docker compose -f docker/docker-compose.prod.yml up -d cloudflared
+```
+5) 在 Cloudflare 隧道的 Public Hostname 中添加一条路由：
+- Hostname: your.domain.com
+- Service: http://ibbot:8000
+- No TLS Verify: 可选（内部 HTTP）
+说明：cloudflared 与 ibbot 在同一 docker 网络 ibbot-network 内，主机名 ibbot 即服务名。
+
+### 6.4 配置文件模式（高级）
+1) 在项目根目录 tunnel/ 放置以下文件：
+- config.yml（或 config.yaml），示例内容参见 tunnel/config.yaml：
+```
+ingress:
+  - hostname: your.domain.com
+    service: http://ibbot:8000
+  - service: http_status:404
+```
+- <TunnelID>.json 凭据文件（从 Cloudflare 下载）
+- 在 config.yml 顶部可指定：
+```
+tunnel: <your-tunnel-name>
+credentials-file: /etc/cloudflared/<TunnelID>.json
+```
+2) 启动 cloudflared：
+```
+# 开发/测试
+docker compose -f docker/docker-compose.yml up -d cloudflared
+# 生产
+docker compose -f docker/docker-compose.prod.yml up -d cloudflared
+```
+3) 如需自定义其他参数，可在 docker/.env 中加入 CF_TUNNEL_ADDITIONAL_ARGS，并修改 compose 中 cloudflared 的 command 行以拼接参数。
+
+### 6.5 访问与验证
+- 浏览器访问：https://your.domain.com
+- 验证：
+  - Web UI 正常加载与登录
+  - 日志面板：首次访问需要登录，否则报 “Authentication required”
+  - 容器日志：
+    - cloudflared：`docker compose -f docker/docker-compose.yml logs -f cloudflared`
+    - ibbot：`docker compose -f docker/docker-compose.yml logs -f ibbot`
+
+### 6.6 常见问题
+- 访问 4xx：确认 Cloudflare 隧道已联通，Public Hostname 指向 http://ibbot:8000，且 ibbot 容器在同一网络 ibbot-network。
+- 证书/凭据：令牌模式无需本地凭据文件；配置文件模式需同时提供 config.yml 与 <TunnelID>.json。
+- 安全：外网开放后请务必设置强管理员密码、启用 HTTPS（Cloudflare 边缘），并考虑启用 Cloudflare Access 进行零信任访问控制。
