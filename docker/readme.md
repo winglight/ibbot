@@ -81,6 +81,8 @@ IB Gateway 内需完成以下设置：
 - ibbot 无法连接 IB：确认 IB Gateway 已登录、API 已启用、端口与 IBKR_HOST/IBKR_PORT 一致。
 - 端口冲突：修改 compose 中左侧的主机端口映射（如 5801:5800）。
 - 安全：生产环境务必覆盖默认 ADMIN_PASSWORD 和 JWT_SECRET，并限制 5800/5900 的访问范围。
+- 访问日志面板提示 “Authentication required”：先在 Web UI 登录（右上角），或通过 /api/login 获取 JWT 后再访问受保护接口。
+- 日志文件位置：宿主机 ./logs/trading_bot.log（通过 compose 的卷映射），可用于排查问题。
 
 ## 5. 目录结构（节选）
 

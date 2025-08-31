@@ -401,6 +401,47 @@
                                 </div>
                             </div>
                         </div>
+                        
+                        <!-- Risk Rule Section for Limit Orders -->
+                        <div id="riskRuleSection" class="border rounded p-3 mb-3" style="display: none; background-color: #f8f9fa;">
+                            <h6 class="mb-3"><i class="fas fa-shield-alt"></i> Risk Management (Auto-created for new assets)</h6>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">Stop Loss Price</label>
+                                        <input type="number" class="form-control" id="stopLossPrice" step="0.01" placeholder="Auto-calculated">
+                                        <div class="form-text">Default: -2% from limit price</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">Take Profit Price</label>
+                                        <input type="number" class="form-control" id="takeProfitPrice" step="0.01" placeholder="Auto-calculated">
+                                        <div class="form-text">Default: +4% from limit price</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">Expected Loss (SL)</label>
+                                        <input type="text" class="form-control" id="expectedLoss" readonly placeholder="Calculated automatically">
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">Expected Profit (TP)</label>
+                                        <input type="text" class="form-control" id="expectedProfit" readonly placeholder="Calculated automatically">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="enableRiskRule" checked>
+                                <label class="form-check-label" for="enableRiskRule">
+                                    Enable automatic risk rule creation for this order
+                                </label>
+                            </div>
+                        </div>
                     </form>
                 </div>
                 <div class="modal-footer">
@@ -628,11 +669,11 @@
                         </div>
                         <div class="mb-3">
                             <label class="form-label">Stop Loss Price</label>
-                            <input type="number" class="form-control" id="stopLossPrice" step="0.01">
+                            <input type="number" class="form-control" id="riskStopLossPrice" step="0.01">
                         </div>
                         <div class="mb-3">
                             <label class="form-label">Take Profit Price</label>
-                            <input type="number" class="form-control" id="takeProfitPrice" step="0.01">
+                            <input type="number" class="form-control" id="riskTakeProfitPrice" step="0.01">
                         </div>
                         
                         <!-- PnL Preview Section -->
@@ -672,7 +713,7 @@
 
     <!-- Chart Modal -->
     <div class="modal fade" id="chartModal" tabindex="-1">
-        <div class="modal-dialog modal-xl">
+        <div class="modal-dialog" style="max-width: 95%; width: 95%;">
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title"><i class="fas fa-chart-line"></i> <span id="chartSymbol">Chart</span></h5>
@@ -773,18 +814,36 @@
                     </div>
                     <div class="row g-3">
                         <div class="col-lg-8">
-                            <div id="monitorChartContainer" style="height: 360px; border: 1px solid #ddd;">
+                            <div id="monitorChartContainer" style="height: 420px; border: 1px solid #ddd;">
                                 <div class="d-flex justify-content-center align-items-center h-100">
                                     <p class="text-muted">图表加载中...</p>
                                 </div>
                             </div>
-                            <div id="monitorVolumeContainer" style="height: 120px; border: 1px solid #ddd; border-top: none; margin-top: 0;">
+                            <div id="monitorVolumeContainer" style="height: 240px; border: 1px solid #ddd; border-top: none; margin-top: 0;">
                                 <div class="d-flex justify-content-center align-items-center h-100">
                                     <p class="text-muted">Volume加载中...</p>
                                 </div>
                             </div>
                         </div>
                         <div class="col-lg-4">
+                            <div class="card mb-3">
+                                <div class="card-body p-3">
+                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                        <small class="text-muted">今日涨跌</small>
+                                        <div>
+                                            <span id="monitorAssetChange" class="fw-bold">$0.00</span>
+                                            <small id="monitorAssetChangePercent">(0.00%)</small>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2">
+                                        <div class="text-muted small mb-1">日内价格分布（L - O - C - H）</div>
+                                        <div id="monitorOhlcStrip" class="w-100" style="height: 14px;">
+                                            <!-- JS 将在此渲染一段高度10px的水平线段与四个点 -->
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
                             <div class="card mb-3">
                                 <div class="card-body p-3">
                                     <div class="d-flex justify-content-between">
@@ -848,6 +907,14 @@
                                     </div>
                                     <div class="d-grid gap-2 mt-3">
                                         <button class="btn btn-sm btn-warning" id="saveMonitorRiskBtn"><i class="fas fa-save"></i> 保存规则</button>
+                                        <div class="row g-2 mt-2">
+                                            <div class="col-6">
+                                                <button class="btn btn-sm btn-danger w-100" id="closePositionBtn"><i class="fas fa-times-circle"></i> 平仓</button>
+                                            </div>
+                                            <div class="col-6">
+                                                <button class="btn btn-sm btn-info w-100" id="reversePositionBtn"><i class="fas fa-exchange-alt"></i> 反向下单</button>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -874,7 +941,7 @@
                 </div>
                 <div class="card-body">
                     <div class="row g-2 mb-2">
-                        <div class="col-md-3">
+                        <div class="col-md-2">
                             <select class="form-select form-select-sm" id="logModule">
                                 <option value="all">All Modules</option>
                                 <option value="internal_strategy">内部策略</option>
@@ -885,10 +952,20 @@
                                 <option value="connection">connection</option>
                             </select>
                         </div>
-                        <div class="col-md-3">
+                        <div class="col-md-2">
                             <select class="form-select form-select-sm" id="logRange">
                                 <option value="today">Today</option>
                                 <option value="week">This Week</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <select class="form-select form-select-sm" id="logLevel">
+                                <option value="all">All Levels</option>
+                                <option value="debug">DEBUG</option>
+                                <option value="info">INFO</option>
+                                <option value="warning">WARNING</option>
+                                <option value="error">ERROR</option>
+                                <option value="critical">CRITICAL</option>
                             </select>
                         </div>
                         <div class="col-md-4">

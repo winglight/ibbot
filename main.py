@@ -25,6 +25,7 @@ import contextvars
 import time
 import re
 from contextlib import asynccontextmanager
+import pandas as pd
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request
@@ -114,6 +115,40 @@ def is_mock_mode() -> bool:
     except Exception:
         port = MOCK_PORT
     return port == MOCK_PORT
+
+
+def _parse_duration_to_minutes(duration: str) -> int:
+    """解析duration字符串为分钟数，支持D/day, H/hour, min/minute, W/week"""
+    if not duration:
+        return 0
+    s = str(duration).strip().lower()
+    parts = s.split()
+    if not parts:
+        return 0
+    try:
+        n = float(parts[0])
+    except Exception:
+        # 尝试从前缀解析数字，如 "30min"
+        import re as _re
+        m = _re.match(r"(\d+(?:\.\d+)?)([a-zA-Z]+)", s)
+        if m:
+            n = float(m.group(1))
+            unit = m.group(2)
+        else:
+            return 0
+    else:
+        unit = parts[1] if len(parts) > 1 else 'min'
+    unit = unit.strip().lower()
+    if unit in ('d', 'day', 'days'):
+        return int(n * 1440)
+    if unit in ('h', 'hour', 'hours'):
+        return int(n * 60)
+    if unit in ('w', 'week', 'weeks'):
+        return int(n * 7 * 1440)
+    if unit in ('m', 'min', 'mins', 'minute', 'minutes'):
+        return int(n)
+    # 默认按分钟处理
+    return int(n)
 
 # 挂载静态资源目录
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
@@ -861,6 +896,38 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
+        # 先查数据库缓存
+        db_manager = get_db_manager()
+        interval = db_manager._normalize_interval(request.bar_size)
+        now = datetime.now()
+        minutes = _parse_duration_to_minutes(request.duration)
+        start_dt = now - timedelta(minutes=minutes)
+        
+        # 读取缓存
+        cache_df = db_manager.query_historical_cache(
+            request.symbol,
+            interval=interval,
+            start_dt=start_dt.isoformat(timespec='seconds'),
+            end_dt=now.isoformat(timespec='seconds')
+        )
+        
+        # 检查缓存是否满足需求
+        if not db_manager.detect_missing_ranges(cache_df, start_dt.isoformat(), now.isoformat(), interval):
+            # 缓存足够，直接返回
+            filename = f"data/{request.symbol}_historical.csv"
+            try:
+                os.makedirs(os.path.dirname(filename), exist_ok=True)
+                cache_df.to_csv(filename, index=False)
+            except Exception as e:
+                logger.warning(f"Failed to write CSV backup for historical data (cache): {e}")
+            return {
+                "success": True,
+                "data": cache_df.to_dict('records'),
+                "filename": filename,
+                "rows": len(cache_df)
+            }
+
+        # 缓存不完整，从IB获取数据
         # Run in executor to avoid blocking event loop
         loop = asyncio.get_event_loop()
         try:
@@ -881,10 +948,17 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
             raise HTTPException(status_code=408, detail="Historical data request timed out")
         
         if df.empty:
+            # 即使IB无数据，也返回缓存（若有）
+            if cache_df is not None and not cache_df.empty:
+                return {
+                    "success": True,
+                    "data": cache_df.to_dict('records'),
+                    "filename": None,
+                    "rows": len(cache_df)
+                }
             raise HTTPException(status_code=404, detail="No data found")
         
         # 保存到数据库
-        db_manager = get_db_manager()
         db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
         
         # 可选：同时保存CSV作为备份
@@ -941,6 +1015,60 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
+        # 先查数据库缓存
+        db_manager = get_db_manager()
+        interval = db_manager._normalize_interval(request.bar_size)
+        now = datetime.now()
+        minutes = _parse_duration_to_minutes(request.duration)
+        start_dt = now - timedelta(minutes=minutes)
+
+        # 查询缓存
+        cached_df = db_manager.query_historical_cache(
+            request.symbol,
+            interval=interval,
+            start_dt=start_dt.isoformat(timespec='seconds'),
+            end_dt=now.isoformat(timespec='seconds')
+        )
+        
+        # 检查缓存是否满足需求
+        if not db_manager.detect_missing_ranges(cached_df, start_dt.isoformat(), now.isoformat(), interval):
+            # 缓存足够，根据interval构造图表数据
+            chart_data = []
+            if interval.endswith('d'):
+                # 日级数据，只使用date字段
+                for _, row in cached_df.iterrows():
+                    t = str(row['date'])
+                    chart_data.append({
+                        "time": t,
+                        "open": float(row['open']),
+                        "high": float(row['high']),
+                        "low": float(row['low']),
+                        "close": float(row['close']),
+                        "volume": int(row['volume']) if 'volume' in row else 0
+                    })
+            else:
+                # 分钟级数据，使用date+time字段
+                for _, row in cached_df.iterrows():
+                    d = str(row['date'])
+                    tm = str(row['time']) if row.get('time') is not None else '00:00:00'
+                    t = f"{d}T{tm}"
+                    chart_data.append({
+                        "time": t,
+                        "open": float(row['open']),
+                        "high": float(row['high']),
+                        "low": float(row['low']),
+                        "close": float(row['close']),
+                        "volume": int(row['volume']) if 'volume' in row else 0
+                    })
+            return {
+                "success": True,
+                "data": chart_data,
+                "symbol": request.symbol,
+                "duration": request.duration,
+                "bar_size": request.bar_size
+            }
+
+        # 缓存不完整，从IB获取数据
         # Run in executor to avoid blocking event loop
         try:
             loop = asyncio.get_running_loop()
@@ -965,13 +1093,59 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
             raise HTTPException(status_code=408, detail="Chart data request timed out")
         
         if df.empty:
+            # 如果IB无数据，尝试返回已有缓存
+            if cached_df is not None and not cached_df.empty:
+                chart_data = []
+                if interval.endswith('d'):
+                    for _, row in cached_df.iterrows():
+                        t = str(row['date'])
+                        chart_data.append({
+                            "time": t,
+                            "open": float(row['open']),
+                            "high": float(row['high']),
+                            "low": float(row['low']),
+                            "close": float(row['close']),
+                            "volume": int(row['volume']) if 'volume' in row else 0
+                        })
+                else:
+                    for _, row in cached_df.iterrows():
+                        d = str(row['date'])
+                        tm = str(row['time']) if row.get('time') is not None else '00:00:00'
+                        t = f"{d}T{tm}"
+                        chart_data.append({
+                            "time": t,
+                            "open": float(row['open']),
+                            "high": float(row['high']),
+                            "low": float(row['low']),
+                            "close": float(row['close']),
+                            "volume": int(row['volume']) if 'volume' in row else 0
+                        })
+                return {
+                    "success": True,
+                    "data": chart_data,
+                    "symbol": request.symbol,
+                    "duration": request.duration,
+                    "bar_size": request.bar_size
+                }
             raise HTTPException(status_code=404, detail="No chart data found")
         
-        # Format data for chart display
+        # 保存到数据库
+        db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
+        
+        # 使用最新数据构造图表
         chart_data = []
         for _, row in df.iterrows():
+            # df['date'] 可能为 datetime/date 或字符串
+            if hasattr(row['date'], 'isoformat'):
+                t = row['date'].isoformat()
+            else:
+                # 分钟级可能包含 time 列
+                if 'time' in df.columns and not pd.isna(row.get('time')):
+                    t = f"{str(row['date'])}T{str(row['time'])}"
+                else:
+                    t = str(row['date'])
             chart_data.append({
-                "time": row['date'].isoformat() if hasattr(row['date'], 'isoformat') else str(row['date']),
+                "time": t,
                 "open": float(row['open']),
                 "high": float(row['high']),
                 "low": float(row['low']),
@@ -1143,6 +1317,22 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
             try:
                 if 'order_manager' in globals() and order_manager:
                     normalized_order_type = "MKT" if order.order_type.upper() == "MARKET" else "LMT"
+                    
+                    # 准备订单备注，包含风险规则信息
+                    notes_parts = []
+                    if user:
+                        notes_parts.append(f"submitted_by={user}")
+                    
+                    # 如果是限价单且包含风险规则，预设风险规则信息到备注中
+                    if (order.order_type.upper() == "LIMIT" and order.risk_rule and 
+                        (order.risk_rule.stop_loss_price or order.risk_rule.take_profit_price)):
+                        risk_info = []
+                        if order.risk_rule.stop_loss_price:
+                            risk_info.append(f"SL={order.risk_rule.stop_loss_price}")
+                        if order.risk_rule.take_profit_price:
+                            risk_info.append(f"TP={order.risk_rule.take_profit_price}")
+                        notes_parts.append(f"pending_risk_rule:{','.join(risk_info)}")
+                    
                     order_manager.create_order(
                         order_id=str(trade.order.orderId),
                         symbol=order.symbol,
@@ -1156,7 +1346,7 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
                         parent_order_id=None,
                         exchange=order.exchange,
                         sec_type=order.sec_type,
-                        notes=(f"submitted_by={user}" if user else None)
+                        notes="; ".join(notes_parts) if notes_parts else None
                     )
                 else:
                     logger.warning("OrderManager is not initialized; order will not be recorded in OrderManager")
@@ -1300,6 +1490,206 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
     except Exception as e:
         logger.error(f"Order cancellation error: {e}")
         return {"success": False, "error": str(e)}
+
+@app.post("/api/close_position")
+async def close_position(request: dict, user: Optional[str] = Depends(get_current_user)):
+    """平仓接口 - 根据持仓情况自动计算平仓订单"""
+    symbol = request.get("symbol")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+    
+    if is_mock_mode():
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{MOCK_BASE}/close_position", json={"symbol": symbol})
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    error_detail = response.text if response.text else f"Mock server error: {response.status_code}"
+                    raise HTTPException(status_code=response.status_code, detail=error_detail)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+    
+    if not ibkr_client or not connection_manager.is_connected():
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    
+    try:
+        # 获取当前持仓
+        positions = ibkr_client.get_positions()
+        target_position = None
+        
+        for pos in positions:
+            if pos.get('symbol') == symbol:
+                target_position = pos
+                break
+        
+        if not target_position:
+            raise HTTPException(status_code=400, detail=f"No position found for symbol {symbol}")
+        
+        position_qty = float(target_position.get('position', 0))
+        if position_qty == 0:
+            raise HTTPException(status_code=400, detail=f"No position to close for symbol {symbol}")
+        
+        # 计算平仓参数
+        action = "SELL" if position_qty > 0 else "BUY"
+        quantity = abs(int(position_qty))
+        
+        # 执行平仓市价单
+        trade = ibkr_client.place_market_order(
+            symbol=symbol,
+            quantity=quantity,
+            action=action,
+            exchange=target_position.get('exchange', 'SMART'),
+            sec_type=target_position.get('secType', 'STK')
+        )
+        
+        if trade:
+            # 记录订单
+            try:
+                if 'order_manager' in globals() and order_manager:
+                    order_manager.create_order(
+                        order_id=str(trade.order.orderId),
+                        symbol=symbol,
+                        action=action,
+                        quantity=quantity,
+                        order_type="MKT",
+                        price=None,
+                        order_source="close_position",
+                        strategy_name=None,
+                        rule_id="close_position",
+                        parent_order_id=None,
+                        exchange=target_position.get('exchange', 'SMART'),
+                        sec_type=target_position.get('secType', 'STK'),
+                        notes=f"close_position_by={user}" if user else "close_position"
+                    )
+            except Exception as rec_err:
+                logger.warning(f"Failed to record close position order: {rec_err}")
+            
+            await websocket_manager.broadcast({
+                "type": "position_closed",
+                "symbol": symbol,
+                "order_id": trade.order.orderId,
+                "action": action,
+                "quantity": quantity
+            })
+            
+            return {
+                "success": True,
+                "order_id": trade.order.orderId,
+                "action": action,
+                "quantity": quantity,
+                "message": f"Position closed successfully for {symbol}"
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to place close position order")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Close position error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/reverse_position")
+async def reverse_position(request: dict, user: Optional[str] = Depends(get_current_user)):
+    """反向下单接口 - 根据持仓情况自动计算反向订单"""
+    symbol = request.get("symbol")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+    
+    if is_mock_mode():
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{MOCK_BASE}/reverse_position", json={"symbol": symbol})
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    error_detail = response.text if response.text else f"Mock server error: {response.status_code}"
+                    raise HTTPException(status_code=response.status_code, detail=error_detail)
+        except httpx.RequestError as e:
+            logger.error(f"Mock server request failed: {e}")
+            raise HTTPException(status_code=503, detail="Mock server unavailable")
+    
+    if not ibkr_client or not connection_manager.is_connected():
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    
+    try:
+        # 获取当前持仓
+        positions = ibkr_client.get_positions()
+        target_position = None
+        
+        for pos in positions:
+            if pos.get('symbol') == symbol:
+                target_position = pos
+                break
+        
+        if not target_position:
+            raise HTTPException(status_code=400, detail=f"No position found for symbol {symbol}")
+        
+        position_qty = float(target_position.get('position', 0))
+        if position_qty == 0:
+            raise HTTPException(status_code=400, detail=f"No position to reverse for symbol {symbol}")
+        
+        # 计算反向订单参数（2倍持仓量的反向操作）
+        action = "SELL" if position_qty > 0 else "BUY"
+        quantity = abs(int(position_qty)) * 2
+        
+        # 执行反向市价单
+        trade = ibkr_client.place_market_order(
+            symbol=symbol,
+            quantity=quantity,
+            action=action,
+            exchange=target_position.get('exchange', 'SMART'),
+            sec_type=target_position.get('secType', 'STK')
+        )
+        
+        if trade:
+            # 记录订单
+            try:
+                if 'order_manager' in globals() and order_manager:
+                    order_manager.create_order(
+                        order_id=str(trade.order.orderId),
+                        symbol=symbol,
+                        action=action,
+                        quantity=quantity,
+                        order_type="MKT",
+                        price=None,
+                        order_source="reverse_position",
+                        strategy_name=None,
+                        rule_id="reverse_position",
+                        parent_order_id=None,
+                        exchange=target_position.get('exchange', 'SMART'),
+                        sec_type=target_position.get('secType', 'STK'),
+                        notes=f"reverse_position_by={user}" if user else "reverse_position"
+                    )
+            except Exception as rec_err:
+                logger.warning(f"Failed to record reverse position order: {rec_err}")
+            
+            await websocket_manager.broadcast({
+                "type": "position_reversed",
+                "symbol": symbol,
+                "order_id": trade.order.orderId,
+                "action": action,
+                "quantity": quantity,
+                "original_position": position_qty
+            })
+            
+            return {
+                "success": True,
+                "order_id": trade.order.orderId,
+                "action": action,
+                "quantity": quantity,
+                "original_position": position_qty,
+                "message": f"Position reversed successfully for {symbol}"
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to place reverse position order")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Reverse position error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/cancel_all_orders")
 async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
@@ -1744,21 +2134,6 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
         logger.error(f"Get risk config error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/auto_orders")
-async def get_auto_orders(user: Optional[str] = Depends(get_current_user)):
-    """获取自动订单记录（只返回自动订单，不包含手动订单）"""
-    if not risk_manager:
-        raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    
-    try:
-        all_orders = risk_manager.get_auto_orders()
-        # 只返回自动订单，过滤掉手动订单
-        auto_orders = [order for order in all_orders if order.get('order_source') == 'auto']
-        return {"success": True, "orders": auto_orders}
-        
-    except Exception as e:
-        logger.error(f"Get auto orders error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # WebSocket endpoint
@@ -2159,7 +2534,23 @@ async def get_logs(
             content = filtered
 
         if level.lower() != "all":
-            content = [line for line in content if f"| {level.upper()} |" in line]
+            # Inclusive level filtering: warning -> WARNING, ERROR, CRITICAL
+            levels_order = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+            try:
+                idx = levels_order.index(level.upper())
+                allowed = set(levels_order[idx:])
+            except ValueError:
+                allowed = set(levels_order)  # fallback to all
+            def extract_level(line: str):
+                try:
+                    parts = line.split('|')
+                    # Expected format: | YYYY-mm-dd HH:MM:SS | LEVEL | MODULE | ...
+                    if len(parts) >= 3:
+                        return parts[2].strip().upper()
+                except Exception:
+                    return None
+                return None
+            content = [line for line in content if extract_level(line) in allowed]
 
         if module != "all":
             content = [line for line in content if f"| {module} |" in line]

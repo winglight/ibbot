@@ -299,7 +299,7 @@ class OrderManager:
             new_priority = status_priority.get(status, 0)
             
             if new_priority < old_priority:
-                order_logger.warning(f"🚫 防止订单状态回退: {order_id} | {old_status} (优先级{old_priority}) → {status} (优先级{new_priority}) | 跳过更新")
+                # order_logger.warning(f"🚫 防止订单状态回退: {order_id} | {old_status} (优先级{old_priority}) → {status} (优先级{new_priority}) | 跳过更新")
                 return False
             
             # 更新订单状态
@@ -603,3 +603,104 @@ class OrderManager:
     def was_order_deleted(self, order_id: str) -> bool:
         """查询订单是否曾被标记为删除（避免IBKR重新创建）"""
         return order_id in self.deleted_order_ids
+
+    def check_and_create_auto_risk_rule(self, order_id: str, fill_price: float, ibkr_client=None, risk_manager=None) -> bool:
+        """检查订单是否需要自动创建风险规则（针对新资产的市价单和限价单）"""
+        try:
+            if order_id not in self.orders:
+                order_logger.warning(f"Order {order_id} not found for auto risk rule creation")
+                return False
+            
+            order = self.orders[order_id]
+            
+            # 只处理手动下单
+            if order.order_source != OrderSource.MANUAL.value:
+                return False
+            
+            # 检查是否为新资产（portfolio中不包含的资产）
+            if ibkr_client and hasattr(ibkr_client, 'get_portfolio'):
+                try:
+                    portfolio = ibkr_client.get_portfolio()
+                    # 检查该资产是否已在portfolio中
+                    symbol_in_portfolio = any(pos.get('symbol') == order.symbol for pos in portfolio)
+                    
+                    if symbol_in_portfolio:
+                        order_logger.debug(f"Symbol {order.symbol} already in portfolio, skipping auto risk rule creation")
+                        return False
+                except Exception as e:
+                    order_logger.warning(f"Failed to get portfolio for auto risk rule check: {e}")
+                    return False
+            
+            stop_loss_price = None
+            take_profit_price = None
+            rule_source = "default"
+            
+            # 检查是否有预设的风险规则（限价单）
+            if order.notes and "pending_risk_rule:" in order.notes:
+                try:
+                    # 解析预设的风险规则
+                    risk_part = order.notes.split("pending_risk_rule:")[1].split(";")[0].strip()
+                    for item in risk_part.split(","):
+                        if item.startswith("SL="):
+                            stop_loss_price = float(item.replace("SL=", ""))
+                        elif item.startswith("TP="):
+                            take_profit_price = float(item.replace("TP=", ""))
+                    rule_source = "preset"
+                except Exception as parse_err:
+                    order_logger.warning(f"Failed to parse preset risk rule for order {order_id}: {parse_err}")
+            
+            # 如果没有预设风险规则，使用默认值（仅对市价单）
+            if not stop_loss_price and not take_profit_price and order.order_type == "MKT":
+                # 基于成交价格计算默认的止损止盈价格
+                # 默认止损：-2%，止盈：+4%
+                stop_loss_percent = 0.02
+                take_profit_percent = 0.04
+                
+                if order.action == "BUY":
+                    stop_loss_price = fill_price * (1 - stop_loss_percent)
+                    take_profit_price = fill_price * (1 + take_profit_percent)
+                else:  # SELL
+                    stop_loss_price = fill_price * (1 + stop_loss_percent)
+                    take_profit_price = fill_price * (1 - take_profit_percent)
+                
+                rule_source = "default"
+            
+            # 如果有风险规则需要创建
+            if (stop_loss_price or take_profit_price) and risk_manager and hasattr(risk_manager, 'add_risk_rule'):
+                try:
+                    # 创建风险规则
+                    success = risk_manager.add_risk_rule(
+                        symbol=order.symbol,
+                        stop_loss_price=stop_loss_price,
+                        take_profit_price=take_profit_price,
+                        max_loss_percent=None
+                    )
+                    
+                    if success:
+                        risk_info = []
+                        if stop_loss_price:
+                            risk_info.append(f"SL={stop_loss_price:.2f}")
+                        if take_profit_price:
+                            risk_info.append(f"TP={take_profit_price:.2f}")
+                        
+                        order_logger.info(f"🛡️ 自动创建{rule_source}风险规则: {order.symbol} | {','.join(risk_info)} | 基于成交价: {fill_price:.2f}")
+                        
+                        # 更新订单备注
+                        order.notes = (order.notes or "") + f" | 自动创建{rule_source}风险规则: {','.join(risk_info)}"
+                        order.updated_at = datetime.now()
+                        self._update_order_in_database(order)
+                        
+                        return True
+                    else:
+                        order_logger.warning(f"Failed to create auto risk rule for {order.symbol}")
+                        return False
+                        
+                except Exception as e:
+                    order_logger.error(f"Error creating auto risk rule for {order.symbol}: {e}")
+                    return False
+            
+            return False
+            
+        except Exception as e:
+            order_logger.error(f"Error in check_and_create_auto_risk_rule for order {order_id}: {e}")
+            return False

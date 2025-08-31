@@ -22,6 +22,17 @@ class ChartDataRequest(BaseModel):
     exchange: str = "SMART"
     data_type: str = "TRADES"  # 添加data_type支持
 
+class RiskRuleRequest(BaseModel):
+    """风险规则请求模型"""
+    stop_loss_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    
+    @validator('stop_loss_price', 'take_profit_price')
+    def prices_must_be_positive(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError('risk rule prices must be greater than 0 when provided')
+        return v
+
 class OrderRequest(BaseModel):
     """订单请求模型 - 与 API 端点保持一致"""
     symbol: str
@@ -33,6 +44,7 @@ class OrderRequest(BaseModel):
     price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    risk_rule: Optional[RiskRuleRequest] = None  # 新增风险规则字段
 
     # 校验：数量必须大于0
     @validator('quantity')

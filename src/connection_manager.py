@@ -472,10 +472,21 @@ class ConnectionManager:
                 connection_logger.warning("IBKR connection not available")
                 return None
 
+            # 检查事件循环是否正在运行
+            if not loop.is_running():
+                connection_logger.warning("Connection event loop is not running")
+                return None
+
             import concurrent.futures
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
             try:
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
                 return future.result(timeout=timeout)
+            except RuntimeError as e:
+                if "no current event loop" in str(e).lower():
+                    connection_logger.error(f"No current event loop in thread: {e}")
+                    return None
+                else:
+                    raise
             except concurrent.futures.TimeoutError:
                 connection_logger.error(f"Execution in connection thread timed out after {timeout} seconds")
                 return None

@@ -586,19 +586,37 @@ class IBKRClient:
             ibkr_logger.error("IBKR connection lost for order refresh")
             return False
 
-        async def _refresh():
-            try:
-                await ib.reqOpenOrdersAsync()
-                await ib.reqAllOpenOrdersAsync()
-                await asyncio.sleep(0.5)
-                ibkr_logger.debug("Requested order refresh from IBKR (async)")
-                return True
-            except Exception as e:
-                ibkr_logger.warning(f"Failed to refresh orders: {e}")
-                return False
+        try:
+            async def _refresh():
+                try:
+                    await ib.reqOpenOrdersAsync()
+                    await ib.reqAllOpenOrdersAsync()
+                    await asyncio.sleep(0.5)
+                    ibkr_logger.debug("Requested order refresh from IBKR (async)")
+                    return True
+                except Exception as e:
+                    ibkr_logger.warning(f"Failed to refresh orders: {e}")
+                    return False
 
-        result = self.connection_manager.run_async_in_connection_thread(_refresh())
-        return bool(result)
+            result = self.connection_manager.run_async_in_connection_thread(_refresh())
+            if result is not None:
+                return bool(result)
+            else:
+                # 如果异步方法失败，回退到同步方法
+                ibkr_logger.warning("Async order refresh failed, falling back to sync method")
+                try:
+                    ib.reqOpenOrders()
+                    ib.reqAllOpenOrders()
+                    import time
+                    time.sleep(0.5)
+                    ibkr_logger.debug("Requested order refresh from IBKR (sync fallback)")
+                    return True
+                except Exception as e:
+                    ibkr_logger.error(f"Sync order refresh also failed: {e}")
+                    return False
+        except Exception as e:
+            ibkr_logger.error(f"Order refresh failed: {e}")
+            return False
 
     def cancel_order(self, order_id: int) -> tuple[bool, str]:
         """取消指定订单"""
@@ -609,95 +627,109 @@ class IBKRClient:
                     ibkr_logger.error(f"Cannot connect to IBKR for cancel order: {order_id}")
                     return False, "Connection failed"
 
-            # 获取IB实例
-            ib = self.ib
-            if not ib or not ib.isConnected():
-                ibkr_logger.error(f"IBKR connection lost for cancel order")
-                return False, "Connection lost"
-
             # 刷新订单数据，使用异步API避免事件循环冲突
-            self.refresh_orders()
+            try:
+                self.refresh_orders()
+            except Exception as refresh_error:
+                ibkr_logger.warning(f"Failed to refresh orders before cancel: {refresh_error}")
+                # 继续执行取消操作，不因刷新失败而中断
 
-            trades = ib.trades()
-            target_trade = None
-            for trade in trades:
-                if trade.order.orderId == order_id:
-                    target_trade = trade
-                    break
-            
-            if not target_trade:
-                ibkr_logger.warning(f"Order {order_id} not found in active trades")
-                # 检查订单是否可能已经完成或取消
-                return False, f"Order {order_id} not found or already completed"
-            
-            current_status = target_trade.orderStatus.status
-            ibkr_logger.info(f"Order {order_id} current status: {current_status}")
-            
-            # 检查订单状态是否可以取消
-            if current_status in ['Filled', 'Cancelled', 'Inactive']:
-                ibkr_logger.warning(f"Order {order_id} cannot be cancelled, status: {current_status}")
-                return False, f"Order cannot be cancelled, current status: {current_status}"
-            
-            # 如果已经是PendingCancel状态，直接等待确认
-            if current_status == 'PendingCancel':
-                ibkr_logger.info(f"Order {order_id} already in PendingCancel status, waiting for confirmation...")
-            else:
-                # 发送取消请求
-                ibkr_logger.info(f"Sending cancel request for order {order_id}")
-                ib.cancelOrder(target_trade.order)
-            
-            # 等待取消确认，增加等待时间到15秒以应对Paper Trading延迟
-            import time
-            max_wait_time = 15
-            start_time = time.time()
-            check_interval = 0.5  # 减少检查频率以避免过度查询
-            
-            while time.time() - start_time < max_wait_time:
-                time.sleep(check_interval)
-                # 重新获取订单状态
-                updated_trades = ib.trades()
-                for updated_trade in updated_trades:
-                    if updated_trade.order.orderId == order_id:
-                        new_status = updated_trade.orderStatus.status
-                        if new_status in ['Cancelled', 'Inactive']:
-                            ibkr_logger.info(f"Order {order_id} successfully cancelled, final status: {new_status}")
-                            return True, f"Order cancelled successfully, status: {new_status}"
-                        elif new_status == 'PendingCancel':
-                            # 继续等待，但记录等待时间
-                            elapsed = time.time() - start_time
-                            ibkr_logger.info(f"Order {order_id} still pending cancellation... (elapsed: {elapsed:.1f}s)")
-                            continue
-                        else:
-                            # 状态变化，记录日志
-                            if new_status != current_status:
-                                ibkr_logger.info(f"Order {order_id} status changed from {current_status} to {new_status}")
-                                current_status = new_status
+            # 在连接线程事件循环中执行取消逻辑，避免跨线程事件循环错误
+            async def _cancel_op():
+                try:
+                    ib_local = self.ib
+                    if not ib_local or not ib_local.isConnected():
+                        ibkr_logger.error("IBKR connection lost for cancel order")
+                        return False, "Connection lost"
+
+                    trades = ib_local.trades()
+                    target_trade = None
+                    for trade in trades:
+                        if trade.order.orderId == order_id:
+                            target_trade = trade
                             break
-                # 如果订单不在trades中了，需要再次确认
-                else:
-                    ibkr_logger.debug(f"Order {order_id} not found in current trades, rechecking...")
-                    # 不立即返回True，继续等待以确认状态
-            
-            # 超时，检查最终状态
-            final_trades = ib.trades()
-            for final_trade in final_trades:
-                if final_trade.order.orderId == order_id:
-                    final_status = final_trade.orderStatus.status
-                    if final_status in ['Cancelled', 'Inactive']:
-                        ibkr_logger.info(f"Order {order_id} finally cancelled, status: {final_status}")
-                        return True, f"Order cancelled successfully, status: {final_status}"
-                    elif final_status == 'PendingCancel':
-                        # Paper Trading环境中PendingCancel可能持续很久，但实际上订单已经被标记为取消
-                        ibkr_logger.warning(f"Order {order_id} still in PendingCancel after {max_wait_time}s - this may be normal in Paper Trading")
-                        return True, f"Order cancellation initiated (Paper Trading may take longer)"
-                    else:
-                        ibkr_logger.warning(f"Order {order_id} cancellation timeout, final status: {final_status}")
-                        return False, f"Cancellation timeout, order status: {final_status}"
-            
-            # 订单不在列表中，在Paper Trading中这通常意味着已取消
-            ibkr_logger.info(f"Order {order_id} no longer in trades list after timeout - likely cancelled in Paper Trading")
-            return True, "Order likely cancelled (no longer in active trades)"
-            
+
+                    if not target_trade:
+                        ibkr_logger.warning(f"Order {order_id} not found in active trades")
+                        return False, f"Order {order_id} not found or already completed"
+
+                    current_status = target_trade.orderStatus.status
+                    ibkr_logger.info(f"Order {order_id} current status: {current_status}")
+
+                    # 检查订单状态是否可以取消
+                    if current_status in ['Filled', 'Cancelled', 'Inactive']:
+                        ibkr_logger.warning(f"Order {order_id} cannot be cancelled, status: {current_status}")
+                        return False, f"Order cannot be cancelled, current status: {current_status}"
+
+                    # 如果已经是PendingCancel状态，直接等待确认；否则发送取消请求
+                    if current_status != 'PendingCancel':
+                        ibkr_logger.info(f"Sending cancel request for order {order_id}")
+                        try:
+                            ib_local.cancelOrder(target_trade.order)
+                        except Exception as send_err:
+                            ibkr_logger.error(f"Error sending cancel request for order {order_id}: {send_err}")
+                            return False, f"Error sending cancel request: {send_err}"
+
+                    # 等待取消确认，使用异步睡眠避免阻塞事件循环
+                    max_wait_time = 15.0
+                    check_interval = 0.5
+                    start_time = asyncio.get_event_loop().time()
+
+                    while True:
+                        elapsed = asyncio.get_event_loop().time() - start_time
+                        if elapsed >= max_wait_time:
+                            break
+                        await asyncio.sleep(check_interval)
+
+                        updated_trades = ib_local.trades()
+                        found = False
+                        for updated_trade in updated_trades:
+                            if updated_trade.order.orderId == order_id:
+                                found = True
+                                new_status = updated_trade.orderStatus.status
+                                if new_status in ['Cancelled', 'Inactive']:
+                                    ibkr_logger.info(f"Order {order_id} successfully cancelled, final status: {new_status}")
+                                    return True, f"Order cancelled successfully, status: {new_status}"
+                                elif new_status == 'PendingCancel':
+                                    ibkr_logger.info(f"Order {order_id} still pending cancellation... (elapsed: {elapsed:.1f}s)")
+                                else:
+                                    if new_status != current_status:
+                                        ibkr_logger.info(f"Order {order_id} status changed from {current_status} to {new_status}")
+                                        current_status = new_status
+                                break
+                        if not found:
+                            # 订单不在trades中了，在Paper Trading中通常意味着已取消
+                            ibkr_logger.debug(f"Order {order_id} not found in current trades, rechecking...")
+
+                    # 超时后最终检查
+                    final_trades = ib_local.trades()
+                    for final_trade in final_trades:
+                        if final_trade.order.orderId == order_id:
+                            final_status = final_trade.orderStatus.status
+                            if final_status in ['Cancelled', 'Inactive']:
+                                ibkr_logger.info(f"Order {order_id} finally cancelled, status: {final_status}")
+                                return True, f"Order cancelled successfully, status: {final_status}"
+                            elif final_status == 'PendingCancel':
+                                ibkr_logger.warning(f"Order {order_id} still in PendingCancel after {max_wait_time}s - may be normal in Paper Trading")
+                                return True, f"Order cancellation initiated (Paper Trading may take longer)"
+                            else:
+                                ibkr_logger.warning(f"Order {order_id} cancellation timeout, final status: {final_status}")
+                                return False, f"Cancellation timeout, order status: {final_status}"
+
+                    # 订单不在列表中，在Paper Trading中这通常意味着已取消
+                    ibkr_logger.info(f"Order {order_id} no longer in trades list after timeout - likely cancelled in Paper Trading")
+                    return True, "Order likely cancelled (no longer in active trades)"
+                except Exception as inner_e:
+                    ibkr_logger.error(f"Error during cancellation operation for order {order_id}: {inner_e}")
+                    return False, f"Error during cancellation: {inner_e}"
+
+            result = self.connection_manager.run_async_in_connection_thread(_cancel_op(), timeout=20)
+            if result is not None:
+                return result
+            else:
+                ibkr_logger.warning("Failed to execute cancel operation in connection thread")
+                return False, "Failed to dispatch cancel operation"
+
         except Exception as e:
             ibkr_logger.error(f"Failed to cancel order {order_id}: {e}")
             return False, f"Error: {str(e)}"
@@ -831,7 +863,11 @@ class IBKRClient:
                     return 0
 
             # 刷新订单，使用异步API避免事件循环冲突
-            self.refresh_orders()
+            try:
+                self.refresh_orders()
+            except Exception as refresh_error:
+                ibkr_logger.warning(f"Failed to refresh orders before cancel all: {refresh_error}")
+                # 继续执行取消操作，不因刷新失败而中断
 
             # 尝试使用连接管理器在正确的线程中执行操作
             result = self.connection_manager.run_in_connection_thread(_cancel_orders_operation)
@@ -969,6 +1005,20 @@ class IBKRClient:
                                     executed_at=executed_at
                                 )
                                 ibkr_logger.debug(f"OrderManager: Updated order {order_id_str} status to {current_status}")
+                                
+                                # 检查是否需要自动创建风险规则（针对新资产的市价单）
+                                if (current_status == "Filled" and current_avg_fill_price and current_avg_fill_price > 0 and 
+                                    hasattr(order_manager, 'check_and_create_auto_risk_rule')):
+                                    try:
+                                        order_manager.check_and_create_auto_risk_rule(
+                                            order_id=order_id_str,
+                                            fill_price=current_avg_fill_price,
+                                            ibkr_client=self,
+                                            risk_manager=risk_manager
+                                        )
+                                    except Exception as risk_err:
+                                        ibkr_logger.warning(f"Failed to create auto risk rule for order {order_id_str}: {risk_err}")
+                                
                                 # 不再从 IB 同步覆盖 order_source，避免覆盖用户/策略设置，仅更新状态/成交价/时间
                                 ibkr_logger.debug(f"Skip syncing order_source for {order_id_str}; keep existing value: {existing_order.order_source}")
                             except Exception as om_err:

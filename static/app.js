@@ -9,6 +9,7 @@ class TradingApp {
             totalItems: 0,
             allExecutions: []
         };
+        this.cancellingOrders = new Set();
         this.init();
     }
 
@@ -83,7 +84,6 @@ class TradingApp {
                 this.loadPortfolio();
                 this.loadRiskRules();
                 this.loadLogs();
-                // this.loadAutoOrders();
             }
         } catch (e) {}
     }
@@ -123,7 +123,6 @@ class TradingApp {
                         this.loadOrders();
                         this.loadPortfolio();
                         this.loadRiskRules();
-                        // this.loadAutoOrders();
                         this.loadStrategies();
                         this.loadLogs();
                     } catch (e) {
@@ -232,6 +231,9 @@ class TradingApp {
 
         const logRange = document.getElementById('logRange');
         if (logRange) logRange.addEventListener('change', () => this.loadLogs());
+
+        const logLevel = document.getElementById('logLevel');
+        if (logLevel) logLevel.addEventListener('change', () => this.loadLogs());
 
         const logStatsBtn = document.getElementById('logStatsBtn');
         if (logStatsBtn) logStatsBtn.addEventListener('click', () => this.showLogStats());
@@ -398,10 +400,42 @@ class TradingApp {
         // Order type change
         document.getElementById('orderType').addEventListener('change', (e) => {
             const priceInput = document.getElementById('orderPrice');
+            const riskRuleSection = document.getElementById('riskRuleSection');
+            
             priceInput.disabled = e.target.value === 'MARKET';
             if (e.target.value === 'MARKET') {
                 priceInput.value = '';
+                riskRuleSection.style.display = 'none';
+            } else {
+                // Show risk rule section for limit orders
+                riskRuleSection.style.display = 'block';
+                // Auto-calculate risk prices when switching to limit order
+                this.updateRiskPrices();
             }
+        });
+        
+        // Order price change - auto-calculate risk prices
+        document.getElementById('orderPrice').addEventListener('input', () => {
+            this.updateRiskPrices();
+        });
+        
+        // Stop loss and take profit price changes - calculate expected PnL
+        document.getElementById('stopLossPrice').addEventListener('input', () => {
+            this.updateExpectedPnL();
+        });
+        
+        document.getElementById('takeProfitPrice').addEventListener('input', () => {
+            this.updateExpectedPnL();
+        });
+        
+        // Order quantity change - update expected PnL
+        document.getElementById('orderQuantity').addEventListener('input', () => {
+            this.updateExpectedPnL();
+        });
+        
+        // Order action change - update expected PnL
+        document.getElementById('orderAction').addEventListener('change', () => {
+            this.updateExpectedPnL();
         });
         
         // Market data
@@ -467,10 +501,16 @@ class TradingApp {
                 this.updateConnectionStatus(data.connected, data.account_type);
                 break;
             case 'order_placed':
+                this.loadOrders();
+                this.showAlert('success', `订单${data.order_id ? ' ' + data.order_id : ''} 下单成功`);
+                break;
             case 'order_cancelled':
+                this.loadOrders();
+                this.showAlert('success', `订单 ${data.order_id} 已取消`);
+                break;
             case 'all_orders_cancelled':
                 this.loadOrders();
-                this.showAlert('success', 'Order updated successfully');
+                this.showAlert('success', `已取消 ${typeof data.count === 'number' ? data.count : ''} 个订单`);
                 break;
             case 'account_update':
                 if (data.account_info) {
@@ -610,7 +650,6 @@ class TradingApp {
             this.loadOrders();
             this.loadPortfolio();
             this.loadRiskRules();
-            // this.loadAutoOrders();
             this.loadStrategies();
             // this.loadLogs();
         } catch (error) {
@@ -642,7 +681,6 @@ class TradingApp {
                 this.loadOrders();
                 this.loadPortfolio();
                 this.loadRiskRules();
-                this.loadAutoOrders();
                 this.loadStrategies();
             }
         } catch (error) {
@@ -764,6 +802,57 @@ class TradingApp {
         }
     }
 
+    // Update risk prices based on limit price
+    updateRiskPrices() {
+        const orderPrice = parseFloat(document.getElementById('orderPrice').value);
+        if (!orderPrice || orderPrice <= 0) {
+            document.getElementById('stopLossPrice').value = '';
+            document.getElementById('takeProfitPrice').value = '';
+            this.updateExpectedPnL();
+            return;
+        }
+        
+        // Calculate default stop loss (-2%) and take profit (+4%)
+        const stopLoss = (orderPrice * 0.98).toFixed(2);
+        const takeProfit = (orderPrice * 1.04).toFixed(2);
+        
+        document.getElementById('stopLossPrice').value = stopLoss;
+        document.getElementById('takeProfitPrice').value = takeProfit;
+        
+        this.updateExpectedPnL();
+    }
+    
+    // Update expected PnL based on current inputs
+    updateExpectedPnL() {
+        const orderPrice = parseFloat(document.getElementById('orderPrice').value);
+        const stopLossPrice = parseFloat(document.getElementById('stopLossPrice').value);
+        const takeProfitPrice = parseFloat(document.getElementById('takeProfitPrice').value);
+        const quantity = parseInt(document.getElementById('orderQuantity').value);
+        const action = document.getElementById('orderAction').value;
+        
+        if (!orderPrice || !quantity) {
+            document.getElementById('expectedLoss').value = '';
+            document.getElementById('expectedProfit').value = '';
+            return;
+        }
+        
+        let expectedLoss = '';
+        let expectedProfit = '';
+        
+        if (stopLossPrice && stopLossPrice > 0) {
+            const lossDiff = action === 'BUY' ? (stopLossPrice - orderPrice) : (orderPrice - stopLossPrice);
+            expectedLoss = `$${(lossDiff * quantity).toFixed(2)}`;
+        }
+        
+        if (takeProfitPrice && takeProfitPrice > 0) {
+            const profitDiff = action === 'BUY' ? (takeProfitPrice - orderPrice) : (orderPrice - takeProfitPrice);
+            expectedProfit = `$${(profitDiff * quantity).toFixed(2)}`;
+        }
+        
+        document.getElementById('expectedLoss').value = expectedLoss;
+        document.getElementById('expectedProfit').value = expectedProfit;
+    }
+
     async placeOrder() {
         const symbol = document.getElementById('orderSymbol').value.toUpperCase();
         
@@ -780,6 +869,19 @@ class TradingApp {
             price: document.getElementById('orderPrice').value ? parseFloat(document.getElementById('orderPrice').value) : null,
             sec_type: secType
         };
+        
+        // Add risk rule data for limit orders
+        if (order.order_type === 'LIMIT' && document.getElementById('enableRiskRule').checked) {
+            const stopLossPrice = parseFloat(document.getElementById('stopLossPrice').value);
+            const takeProfitPrice = parseFloat(document.getElementById('takeProfitPrice').value);
+            
+            if (stopLossPrice > 0 || takeProfitPrice > 0) {
+                order.risk_rule = {
+                    stop_loss_price: stopLossPrice > 0 ? stopLossPrice : null,
+                    take_profit_price: takeProfitPrice > 0 ? takeProfitPrice : null
+                };
+            }
+        }
         
         if (!order.symbol || !order.quantity) {
             this.showAlert('warning', 'Please fill in all required fields');
@@ -833,8 +935,8 @@ class TradingApp {
 
     openRiskRuleModal(symbol = '', stopLoss = '', takeProfit = '', position = 0, currentPrice = 0, avgCost = 0, isEditMode = false) {
         document.getElementById('riskSymbol').value = symbol;
-        document.getElementById('stopLossPrice').value = stopLoss;
-        document.getElementById('takeProfitPrice').value = takeProfit;
+        document.getElementById('riskStopLossPrice').value = stopLoss;
+        document.getElementById('riskTakeProfitPrice').value = takeProfit;
         
         // Store position data for PnL calculations
         this.currentRiskRuleData = {
@@ -874,8 +976,8 @@ class TradingApp {
         if (!this.currentRiskRuleData) return;
         
         const { position, currentPrice, avgCost } = this.currentRiskRuleData;
-        const stopLossPrice = parseFloat(document.getElementById('stopLossPrice').value) || 0;
-        const takeProfitPrice = parseFloat(document.getElementById('takeProfitPrice').value) || 0;
+        const stopLossPrice = parseFloat(document.getElementById('riskStopLossPrice').value) || 0;
+        const takeProfitPrice = parseFloat(document.getElementById('riskTakeProfitPrice').value) || 0;
         
         // Check if we have valid position data
         if (position === 0 || !avgCost) {
@@ -909,7 +1011,7 @@ class TradingApp {
         // Remove existing listeners to avoid duplicates
         this.removePnLUpdateListeners();
         
-        const symbol = document.getElementById('riskRuleSymbol').value;
+        const symbol = document.getElementById('riskSymbol').value;
         
         // Add new listeners with price correction
         this.stopLossListener = (e) => {
@@ -928,16 +1030,16 @@ class TradingApp {
             this.updatePnLPreview();
         };
         
-        document.getElementById('stopLossPrice').addEventListener('input', this.stopLossListener);
-        document.getElementById('takeProfitPrice').addEventListener('input', this.takeProfitListener);
+        document.getElementById('riskStopLossPrice').addEventListener('input', this.stopLossListener);
+        document.getElementById('riskTakeProfitPrice').addEventListener('input', this.takeProfitListener);
     }
 
     removePnLUpdateListeners() {
         if (this.stopLossListener) {
-            document.getElementById('stopLossPrice').removeEventListener('input', this.stopLossListener);
+            document.getElementById('riskStopLossPrice').removeEventListener('input', this.stopLossListener);
         }
         if (this.takeProfitListener) {
-            document.getElementById('takeProfitPrice').removeEventListener('input', this.takeProfitListener);
+            document.getElementById('riskTakeProfitPrice').removeEventListener('input', this.takeProfitListener);
         }
     }
 
@@ -946,8 +1048,8 @@ class TradingApp {
             // Get risk configuration from API
             const config = await this.apiCall('/risk-config');
             
-            const stopLossRatio = config.stop_loss_ratio || 0.05;
-            const takeProfitRatio = config.take_profit_ratio || 0.05;
+            const stopLossRatio = config.stop_loss_ratio || 0.025;
+            const takeProfitRatio = config.take_profit_ratio || 0.025;
             
             // Determine if this is a short position (negative position)
             const isShortPosition = position < 0;
@@ -1076,8 +1178,8 @@ class TradingApp {
                         let stopLossRatio = 0.05, takeProfitRatio = 0.05, lev = null;
                         try {
                             const cfg = await this.apiCall('/risk-config');
-                            stopLossRatio = cfg.stop_loss_ratio || 0.05;
-                            takeProfitRatio = cfg.take_profit_ratio || 0.05;
+                            stopLossRatio = cfg.stop_loss_ratio || 0.025;
+            takeProfitRatio = cfg.take_profit_ratio || 0.025;
                             const leverageMap = (cfg && cfg.leverage) ? cfg.leverage : {};
                             lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || null;
                         } catch (e) { /* keep defaults */ }
@@ -1120,8 +1222,8 @@ class TradingApp {
                     let stopLossRatio = 0.05, takeProfitRatio = 0.05, lev = null;
                     try {
                         const cfg = await this.apiCall('/risk-config');
-                        stopLossRatio = cfg.stop_loss_ratio || 0.05;
-                        takeProfitRatio = cfg.take_profit_ratio || 0.05;
+                        stopLossRatio = cfg.stop_loss_ratio || 0.025;
+            takeProfitRatio = cfg.take_profit_ratio || 0.025;
                         const leverageMap = (cfg && cfg.leverage) ? cfg.leverage : {};
                         lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || null;
                     } catch (e) { /* keep defaults */ }
@@ -1276,6 +1378,70 @@ class TradingApp {
                     };
                 }
 
+                // 平仓按钮事件
+                const closePositionBtn = document.getElementById('closePositionBtn');
+                if (closePositionBtn) {
+                    closePositionBtn.onclick = async () => {
+                        if (!this.currentMonitor || this.currentMonitor.positionQty === 0) {
+                            this.showAlert('warning', '当前无持仓，无法平仓');
+                            return;
+                        }
+                        
+                        const confirmed = confirm(`确认平仓 ${symbol}？\n持仓量: ${this.currentMonitor.positionQty}\n将以市价单全部平仓`);
+                        if (!confirmed) return;
+                        
+                        try {
+                            const response = await this.apiCall('/close_position', 'POST', {
+                                symbol: symbol
+                            });
+                            
+                            if (response.success) {
+                                this.showAlert('success', `平仓订单已提交: ${response.action} ${response.quantity} ${symbol} (订单ID: ${response.order_id})`);
+                                // 刷新持仓和订单数据
+                                this.loadPortfolio();
+                                this.loadOrders();
+                            } else {
+                                this.showAlert('danger', `平仓失败: ${response.message || '未知错误'}`);
+                            }
+                        } catch (err) {
+                            console.error('平仓失败:', err);
+                            this.showAlert('danger', `平仓失败: ${err.message || err}`);
+                        }
+                    };
+                }
+                
+                // 反向下单按钮事件
+                const reversePositionBtn = document.getElementById('reversePositionBtn');
+                if (reversePositionBtn) {
+                    reversePositionBtn.onclick = async () => {
+                        if (!this.currentMonitor || this.currentMonitor.positionQty === 0) {
+                            this.showAlert('warning', '当前无持仓，无法反向下单');
+                            return;
+                        }
+                        
+                        const confirmed = confirm(`确认反向下单 ${symbol}？\n当前持仓: ${this.currentMonitor.positionQty}\n将执行反向操作（2倍持仓量）`);
+                        if (!confirmed) return;
+                        
+                        try {
+                            const response = await this.apiCall('/reverse_position', 'POST', {
+                                symbol: symbol
+                            });
+                            
+                            if (response.success) {
+                                this.showAlert('success', `反向订单已提交: ${response.action} ${response.quantity} ${symbol} (订单ID: ${response.order_id})`);
+                                // 刷新持仓和订单数据
+                                this.loadPortfolio();
+                                this.loadOrders();
+                            } else {
+                                this.showAlert('danger', `反向下单失败: ${response.message || '未知错误'}`);
+                            }
+                        } catch (err) {
+                            console.error('反向下单失败:', err);
+                            this.showAlert('danger', `反向下单失败: ${err.message || err}`);
+                        }
+                    };
+                }
+
                 // 关闭时清理实时定时器
                 modalEl.addEventListener('hidden.bs.modal', () => {
                     if (this.monitorRealtimeTimer) {
@@ -1382,12 +1548,12 @@ class TradingApp {
             const chartContainer = document.getElementById('monitorChartContainer');
             if (!chartContainer) return;
 
-            // Clear previous charts
-            chartContainer.innerHTML = `<canvas id="monitorChart" width="800" height="400"></canvas>`;
+            // Clear previous charts - 增加canvas大小以解决数据点显示不完整问题
+            chartContainer.innerHTML = `<canvas id="monitorChart" width="900" height="450"></canvas>`;
             
             const volumeContainer = document.getElementById('monitorVolumeContainer');
             if (volumeContainer) {
-                volumeContainer.innerHTML = `<canvas id="monitorVolumeChart" width="800" height="120"></canvas>`;
+                volumeContainer.innerHTML = `<canvas id="monitorVolumeChart" width="900" height="270"></canvas>`;
             }
 
             // Request chart data from API
@@ -1682,24 +1848,24 @@ class TradingApp {
                                 }
                             };
                             
-                            // 添加当前价格在范围中的位置标记
-                            annotations.pricePosition = {
-                                type: 'point',
-                                xValue: labels[labels.length - 1], // 最新时间点
-                                yValue: currentPrice,
-                                backgroundColor: 'rgb(255, 206, 84)',
-                                borderColor: 'rgb(255, 165, 0)',
-                                borderWidth: 2,
-                                radius: 6,
-                                label: {
-                                    content: `${(currentRatio * 100).toFixed(1)}% of range`,
-                                    enabled: true,
-                                    position: 'right',
-                                    backgroundColor: 'rgba(255, 206, 84, 0.9)',
-                                    color: 'black',
-                                    padding: 4
-                                }
-                            };
+                            // 添加当前价格在范围中的位置标记 - 已移除黄色点
+                            // annotations.pricePosition = {
+                            //     type: 'point',
+                            //     xValue: labels[labels.length - 1], // 最新时间点
+                            //     yValue: currentPrice,
+                            //     backgroundColor: 'rgb(255, 206, 84)',
+                            //     borderColor: 'rgb(255, 165, 0)',
+                            //     borderWidth: 2,
+                            //     radius: 6,
+                            //     label: {
+                            //         content: `${(currentRatio * 100).toFixed(1)}% of range`,
+                            //         enabled: true,
+                            //         position: 'right',
+                            //         backgroundColor: 'rgba(255, 206, 84, 0.9)',
+                            //         color: 'black',
+                            //         padding: 4
+                            //     }
+                            // };
                             
 
                          }
@@ -1708,36 +1874,50 @@ class TradingApp {
 
                 // Destroy existing charts if they exist
                 if (this.monitorChart) {
+                    // 清理键盘事件监听器
+                    if (this.monitorChart._keyboardHandler) {
+                        document.removeEventListener('keydown', this.monitorChart._keyboardHandler);
+                    }
                     this.monitorChart.destroy();
                 }
                 if (this.monitorVolumeChart) {
                     this.monitorVolumeChart.destroy();
                 }
 
-                // 根据数据量智能设置初始显示范围
-                const getOptimalDisplayRange = (dataLength) => {
-                    if (dataLength <= 50) {
-                        return { min: undefined, max: undefined }; // 显示全部数据
-                    } else if (dataLength <= 200) {
-                        return { 
-                            min: labels[Math.max(0, dataLength - 100)], 
+                // 根据图表宽度和数据量智能设置初始显示范围
+                const getOptimalDisplayRange = (dataLength, chartType) => {
+                    // 获取图表容器宽度
+                    const chartContainer = document.getElementById('monitorChart')?.parentElement;
+                    const containerWidth = chartContainer ? chartContainer.offsetWidth : 800;
+                    
+                    // 根据图表宽度计算合适的显示数据量
+                    // 蜡烛图和折线图使用相同的像素间距，保持一致的显示数据量
+                    const pixelsPerDataPoint = 10; // 统一像素间距
+                    const optimalDataCount = Math.floor(containerWidth / pixelsPerDataPoint);
+                    // 减少显示数据量，为右边数据点留出空间
+                    const maxDisplayCount = Math.min(Math.floor(optimalDataCount * 0.9), Math.max(15, Math.min(80, dataLength)));
+                    
+                    // 始终计算显示范围，确保蜡烛图和折线图使用相同的数据量
+                    const actualDisplayCount = Math.min(maxDisplayCount, dataLength);
+                    const startIndex = Math.max(0, dataLength - actualDisplayCount);
+                    
+                    return chartType === 'candlestick' ? 
+                        { minIndex: startIndex, maxIndex: dataLength - 1 } :
+                        { 
+                            min: labels[startIndex], 
                             max: labels[dataLength - 1] 
                         };
-                    } else {
-                        return { 
-                            min: labels[Math.max(0, dataLength - 150)], 
-                            max: labels[dataLength - 1] 
-                        };
-                    }
                 };
                 
-                const displayRange = getOptimalDisplayRange(labels.length);
+                const displayRange = getOptimalDisplayRange(labels.length, chartType);
 
                 // 准备图表数据
                 let chartConfig;
+                let ohlcData; // 声明在外层作用域
+                
                 if (chartType === 'candlestick') {
                     // 使用标准的Chart.js金融图表插件，参考折线图的数据处理方式
-                    const ohlcData = validData.map((bar, index) => {
+                    ohlcData = validData.map((bar, index) => {
                         // 使用与折线图相同的时间处理逻辑
                         const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
                         let date;
@@ -1758,7 +1938,8 @@ class TradingApp {
                             o: parseFloat(bar.open) || parseFloat(bar.close) || 0,
                             h: parseFloat(bar.high) || parseFloat(bar.close) || 0,
                             l: parseFloat(bar.low) || parseFloat(bar.close) || 0,
-                            c: parseFloat(bar.close) || 0
+                            c: parseFloat(bar.close) || 0,
+                            volume: parseFloat(bar.volume) || 0
                         };
                     }).filter(item => item.c > 0);  // 只需要确保收盘价有效
                     
@@ -1770,7 +1951,11 @@ class TradingApp {
                         data: {
                             datasets: [{
                                 label: `${symbol} OHLC`,
-                                data: ohlcData
+                                data: ohlcData,
+                                // 添加hover配置以确保事件能正确触发
+                                hoverBackgroundColor: 'rgba(255, 99, 132, 0.8)',
+                                hoverBorderColor: 'rgba(255, 99, 132, 1)',
+                                hoverBorderWidth: 2
                             }]
                         }
                     };
@@ -1786,8 +1971,14 @@ class TradingApp {
                                 borderColor: 'rgb(54, 162, 235)',
                                 backgroundColor: 'rgba(54, 162, 235, 0.1)',
                                 tension: 0.1,
-                                pointRadius: 1,
-                                pointHoverRadius: 3
+                                pointRadius: 3,
+                                pointHoverRadius: 5,
+                                pointBackgroundColor: 'white',
+                                pointBorderColor: 'rgb(54, 162, 235)',
+                                pointBorderWidth: 2,
+                                pointHoverBackgroundColor: 'white',
+                                pointHoverBorderColor: 'rgb(54, 162, 235)',
+                                pointHoverBorderWidth: 3
                             }]
                         }
                     };
@@ -1801,8 +1992,8 @@ class TradingApp {
                         maintainAspectRatio: false,
                         ...(chartType === 'candlestick' ? { parsing: false } : {}),
                         interaction: {
-                            intersect: false,
-                            mode: 'index'
+                            intersect: chartType === 'candlestick' ? true : false,
+                            mode: chartType === 'candlestick' ? 'nearest' : 'index'
                         },
 
                         scales: {
@@ -1832,7 +2023,12 @@ class TradingApp {
                                         maxTicksLimit: 20,
                                         autoSkip: true,
                                         maxRotation: 45
-                                    }
+                                    },
+                                    // 蜡烛图的显示范围控制
+                                    min: validData[displayRange.minIndex]?.x,
+                                    max: validData[displayRange.maxIndex]?.x,
+                                    // 为右边数据点添加空间
+                                    grace: '10%'
                                 } : {
                                     // 折线图使用智能计算的显示范围
                                     min: displayRange.min,
@@ -1843,7 +2039,9 @@ class TradingApp {
                                         autoSkip: true,
                                         maxRotation: 45,
                                         minRotation: 0
-                                    }
+                                    },
+                                    // 为右边数据点添加空间
+                                     grace: '10%'
                                 })
                             },
                             y: {
@@ -1874,33 +2072,39 @@ class TradingApp {
                             },
                             zoom: {
                                 limits: {
-                                    x: {min: 0, max: Math.max(10, labels.length - 1)},
+                                    x: chartType === 'candlestick' ? 
+                                        {min: validData[0]?.x, max: validData[validData.length - 1]?.x} :
+                                        {min: 0, max: Math.max(10, labels.length - 1)},
                                     y: {min: 'original', max: 'original'}
                                 },
                                 pan: {
                                     enabled: true,
                                     mode: 'x',
                                     modifierKey: null,
-                                    threshold: 10,
-                                    rangeMin: {
-                                        x: 0
-                                    },
-                                    rangeMax: {
-                                        x: Math.max(10, labels.length - 1)
-                                    }
+                                    threshold: 5,
+                                    rangeMin: chartType === 'candlestick' ? 
+                                        {x: validData[0]?.x} : {x: 0},
+                                    rangeMax: chartType === 'candlestick' ? 
+                                        {x: validData[validData.length - 1]?.x} : {x: Math.max(10, labels.length - 1)}
                                 },
                                 zoom: {
                                     wheel: {
                                         enabled: true,
                                         modifierKey: null,
-                                        speed: 0.1
+                                        speed: chartType === 'candlestick' ? 0.05 : 0.1
                                     },
                                     pinch: {
                                         enabled: true
                                     },
                                     mode: 'x',
-                                    // 根据数据量设置缩放限制
-                                    limits: {
+                                    // 根据图表类型设置不同的缩放限制
+                                    limits: chartType === 'candlestick' ? {
+                                        x: {
+                                            // 蜡烛图使用计算的最佳显示数据量作为最小值
+                                            min: Math.max(10, displayRange.maxIndex - displayRange.minIndex + 1) * (validData[1]?.x - validData[0]?.x || 60000),
+                                            max: validData[validData.length - 1]?.x - validData[0]?.x // 全部数据的时间跨度
+                                        }
+                                    } : {
                                         x: {
                                             min: Math.max(5, Math.floor(labels.length * 0.05)),
                                             max: Math.max(10, labels.length)
@@ -1909,8 +2113,52 @@ class TradingApp {
                                 }
                             }
                         },
-                        // 添加拖动事件监听器
+                        // 移除padding以解决数据点显示不完整问题
+                        // layout: {
+                        //     padding: {
+                        //         left: 15,
+                        //         right: 15,
+                        //         top: 15,
+                        //         bottom: 15
+                        //     }
+                        // },
+                        // 添加拖动事件监听器和Volume图表联动高亮
                         onHover: (event, activeElements, chart) => {
+                            // Volume图表联动高亮
+                            if (this.monitorVolumeChart && activeElements.length > 0) {
+                                const activeIndex = activeElements[0].index;
+                                
+                                // 高亮Volume图表对应的柱子
+                                const volumeDataset = this.monitorVolumeChart.data.datasets[0];
+                                
+                                // 保存原始颜色（如果还没保存）
+                                if (!volumeDataset._originalColors) {
+                                    const originalBg = volumeDataset.backgroundColor;
+                                    if (Array.isArray(originalBg)) {
+                                        volumeDataset._originalColors = [...originalBg];
+                                    } else {
+                                        volumeDataset._originalColors = new Array(volumeDataset.data.length).fill(originalBg);
+                                    }
+                                }
+                                
+                                // 重置所有颜色
+                                volumeDataset.backgroundColor = [...volumeDataset._originalColors];
+                                
+                                // 高亮当前索引的柱子
+                                if (activeIndex < volumeDataset.backgroundColor.length) {
+                                    volumeDataset.backgroundColor[activeIndex] = 'rgba(255, 99, 132, 0.8)';
+                                }
+                                
+                                this.monitorVolumeChart.update('none');
+                            } else if (this.monitorVolumeChart && activeElements.length === 0) {
+                                // 恢复Volume图表原始颜色
+                                const volumeDataset = this.monitorVolumeChart.data.datasets[0];
+                                if (volumeDataset._originalColors) {
+                                    volumeDataset.backgroundColor = [...volumeDataset._originalColors];
+                                    this.monitorVolumeChart.update('none');
+                                }
+                            }
+                            
                             // 检查是否悬停在可拖动的annotation线上（只有SL/TP线可拖动）
                             const annotations = chart.options.plugins.annotation.annotations;
                             if (annotations) {
@@ -1937,6 +2185,37 @@ class TradingApp {
                         // 图表大小改变时的处理
                     }
                 });
+
+                // 添加键盘事件监听器支持左右箭头键平移
+                const addKeyboardNavigation = () => {
+                    const handleKeyDown = (event) => {
+                        if (!this.monitorChart) return;
+                        
+                        const panAmount = chartType === 'candlestick' ? 
+                            (validData[1]?.x - validData[0]?.x || 60000) * 5 : // 5个数据点的时间跨度
+                            5; // 折线图移动5个索引
+                        
+                        if (event.key === 'ArrowLeft') {
+                            event.preventDefault();
+                            this.monitorChart.pan({x: panAmount}, undefined, 'default');
+                        } else if (event.key === 'ArrowRight') {
+                            event.preventDefault();
+                            this.monitorChart.pan({x: -panAmount}, undefined, 'default');
+                        }
+                    };
+                    
+                    // 移除之前的监听器（如果存在）
+                    if (this.monitorChart._keyboardHandler) {
+                        document.removeEventListener('keydown', this.monitorChart._keyboardHandler);
+                    }
+                    
+                    // 添加新的监听器
+                    this.monitorChart._keyboardHandler = handleKeyDown;
+                    document.addEventListener('keydown', handleKeyDown);
+                };
+                
+                // 启用键盘导航
+                addKeyboardNavigation();
 
                 // 添加鼠标事件监听器实现正确的拖动逻辑
                 const canvas = this.monitorChart.canvas;
@@ -2032,15 +2311,29 @@ class TradingApp {
                 
                 // Create Volume Chart
                 const volumeCtx = document.getElementById('monitorVolumeChart').getContext('2d');
-                const volumeData = response.data.map(item => item.volume || 0);
+                
+                // 为蜡烛图和折线图准备不同的Volume数据格式
+                let volumeChartData, volumeLabels;
+                if (chartType === 'candlestick') {
+                    // 蜡烛图：使用与主图表相同的ohlcData和时间格式
+                    volumeChartData = ohlcData.map((item) => ({
+                        x: item.x, // 使用相同的时间戳
+                        y: parseFloat(item.volume || 0)
+                    }));
+                    volumeLabels = undefined; // 时间轴图表不需要labels
+                } else {
+                    // 折线图：使用传统的labels和data数组
+                    volumeChartData = validData.map((item) => parseFloat(item.volume || 0));
+                    volumeLabels = validLabels;
+                }
                 
                 this.monitorVolumeChart = new Chart(volumeCtx, {
                     type: 'bar',
                     data: {
-                        labels: labels,
+                        labels: volumeLabels,
                         datasets: [{
                             label: 'Volume',
-                            data: volumeData,
+                            data: volumeChartData,
                             backgroundColor: 'rgba(75, 192, 192, 0.6)',
                             borderColor: 'rgba(75, 192, 192, 1)',
                             borderWidth: 1
@@ -2049,6 +2342,7 @@ class TradingApp {
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
+                        ...(chartType === 'candlestick' ? { parsing: false } : {}),
                         interaction: {
                             intersect: false,
                             mode: 'index'
@@ -2060,15 +2354,41 @@ class TradingApp {
                                     display: true,
                                     text: 'Time'
                                 },
-                                // 与主图表同步显示范围
-                                min: displayRange.min,
-                                max: displayRange.max,
-                                ticks: {
-                                    maxTicksLimit: labels.length > 50 ? 10 : Math.min(labels.length, 20),
-                                    autoSkip: true,
-                                    maxRotation: 45,
-                                    minRotation: 0
-                                }
+                                // 蜡烛图使用时间轴，折线图使用索引
+                                ...(chartType === 'candlestick' ? {
+                                    type: 'time',
+                                    adapters: {
+                                        date: {
+                                            locale: 'en-US'
+                                        }
+                                    },
+                                    time: {
+                                        unit: 'minute',
+                                        displayFormats: {
+                                            minute: 'HH:mm',
+                                            hour: 'HH:mm',
+                                            day: 'MMM dd'
+                                        }
+                                    },
+                                    ticks: {
+                                        maxTicksLimit: 20,
+                                        autoSkip: true,
+                                        maxRotation: 45
+                                    },
+                                    // 蜡烛图的显示范围控制
+                                    min: validData[displayRange.minIndex]?.x,
+                                    max: validData[displayRange.maxIndex]?.x
+                                } : {
+                                    // 折线图使用智能计算的显示范围
+                                    min: displayRange.min,
+                                    max: displayRange.max,
+                                    ticks: {
+                                        maxTicksLimit: labels.length > 50 ? 10 : Math.min(labels.length, 20),
+                                        autoSkip: true,
+                                        maxRotation: 45,
+                                        minRotation: 0
+                                    }
+                                })
                             },
                             y: {
                                 display: true,
@@ -2079,6 +2399,15 @@ class TradingApp {
                                 beginAtZero: true
                             }
                         },
+                        // 移除padding以解决数据点显示不完整问题
+                        // layout: {
+                        //     padding: {
+                        //         left: 15,
+                        //         right: 15,
+                        //         top: 15,
+                        //         bottom: 15
+                        //     }
+                        // },
                         plugins: {
                             title: {
                                 display: true,
@@ -2089,37 +2418,100 @@ class TradingApp {
                             },
                             zoom: {
                                 limits: {
-                                    x: {min: 0, max: labels.length - 1},
+                                    x: chartType === 'candlestick' ? 
+                                        {min: validData[0]?.x, max: validData[validData.length - 1]?.x} :
+                                        {min: 0, max: Math.max(10, labels.length - 1)},
                                     y: {min: 'original', max: 'original'}
                                 },
                                 pan: {
                                     enabled: true,
                                     mode: 'x',
                                     modifierKey: null,
-                                    threshold: 10,
-                                    rangeMin: {
-                                        x: 0
-                                    },
-                                    rangeMax: {
-                                        x: labels.length - 1
-                                    }
+                                    threshold: 5,
+                                    rangeMin: chartType === 'candlestick' ? 
+                                        {x: validData[0]?.x} : {x: 0},
+                                    rangeMax: chartType === 'candlestick' ? 
+                                        {x: validData[validData.length - 1]?.x} : {x: Math.max(10, labels.length - 1)}
                                 },
                                 zoom: {
                                     wheel: {
                                         enabled: true,
                                         modifierKey: null,
-                                        speed: 0.1
+                                        speed: chartType === 'candlestick' ? 0.05 : 0.1
                                     },
                                     pinch: {
                                         enabled: true
                                     },
                                     mode: 'x',
-                                    limits: {
+                                    // 根据图表类型设置不同的缩放限制
+                                    limits: chartType === 'candlestick' ? {
+                                        x: {
+                                            // 蜡烛图使用计算的最佳显示数据量作为最小值
+                                            min: Math.max(10, displayRange.maxIndex - displayRange.minIndex + 1) * (validData[1]?.x - validData[0]?.x || 60000),
+                                            max: validData[validData.length - 1]?.x - validData[0]?.x // 全部数据的时间跨度
+                                        }
+                                    } : {
                                         x: {
                                             min: Math.max(10, Math.floor(labels.length * 0.1)),
                                             max: labels.length
                                         }
                                     }
+                                }
+                            }
+                        },
+                        onHover: (event, elements) => {
+                            // Volume图表的鼠标悬停联动
+                            if (this.monitorChart && this.monitorChart.data && this.monitorChart.data.datasets) {
+                                const mainDataset = this.monitorChart.data.datasets[0];
+                                if (mainDataset && mainDataset.backgroundColor) {
+                                    // 重置主图表所有点的颜色
+                                    if (chartType === 'line') {
+                                        // 折线图重置点的颜色
+                                        if (Array.isArray(mainDataset.pointBackgroundColor)) {
+                                            mainDataset.pointBackgroundColor = mainDataset.pointBackgroundColor.map(() => 'white');
+                                        }
+                                        if (Array.isArray(mainDataset.pointBorderColor)) {
+                                            mainDataset.pointBorderColor = mainDataset.pointBorderColor.map(() => '#007bff');
+                                        }
+                                    } else {
+                                        // 蜡烛图重置颜色
+                                        if (Array.isArray(mainDataset.backgroundColor)) {
+                                            mainDataset.backgroundColor = mainDataset.backgroundColor.map((color, index) => {
+                                                const data = validData[index];
+                                                return data && data.c >= data.o ? '#00ff00' : '#ff0000';
+                                            });
+                                        }
+                                        if (Array.isArray(mainDataset.borderColor)) {
+                                            mainDataset.borderColor = mainDataset.borderColor.map((color, index) => {
+                                                const data = validData[index];
+                                                return data && data.c >= data.o ? '#00aa00' : '#aa0000';
+                                            });
+                                        }
+                                    }
+                                    
+                                    // 如果有悬停的元素，高亮对应的主图表点
+                                    if (elements.length > 0) {
+                                        const elementIndex = elements[0].index;
+                                        if (chartType === 'line') {
+                                            // 折线图高亮点
+                                            if (Array.isArray(mainDataset.pointBackgroundColor) && elementIndex < mainDataset.pointBackgroundColor.length) {
+                                                mainDataset.pointBackgroundColor[elementIndex] = '#ff6b6b';
+                                            }
+                                            if (Array.isArray(mainDataset.pointBorderColor) && elementIndex < mainDataset.pointBorderColor.length) {
+                                                mainDataset.pointBorderColor[elementIndex] = '#ff4757';
+                                            }
+                                        } else {
+                                            // 蜡烛图高亮
+                                            if (Array.isArray(mainDataset.backgroundColor) && elementIndex < mainDataset.backgroundColor.length) {
+                                                mainDataset.backgroundColor[elementIndex] = '#ffff00';
+                                            }
+                                            if (Array.isArray(mainDataset.borderColor) && elementIndex < mainDataset.borderColor.length) {
+                                                mainDataset.borderColor[elementIndex] = '#ffaa00';
+                                            }
+                                        }
+                                    }
+                                    
+                                    this.monitorChart.update('none');
                                 }
                             }
                         }
@@ -2402,7 +2794,7 @@ class TradingApp {
          if (!chartContainer) return;
          
          // Clear previous chart
-         chartContainer.innerHTML = `<canvas id="priceChart" width="800" height="400"></canvas>`;
+         chartContainer.innerHTML = `<canvas id="priceChart" width="900" height="450"></canvas>`; // 增加canvas大小以解决数据点显示不完整问题
          
          modal.show();
          
@@ -2449,8 +2841,8 @@ class TradingApp {
     async addRiskRule() {
         const rule = {
             symbol: document.getElementById('riskSymbol').value.toUpperCase(),
-            stop_loss_price: document.getElementById('stopLossPrice').value ? parseFloat(document.getElementById('stopLossPrice').value) : null,
-            take_profit_price: document.getElementById('takeProfitPrice').value ? parseFloat(document.getElementById('takeProfitPrice').value) : null
+            stop_loss_price: document.getElementById('riskStopLossPrice').value ? parseFloat(document.getElementById('riskStopLossPrice').value) : null,
+            take_profit_price: document.getElementById('riskTakeProfitPrice').value ? parseFloat(document.getElementById('riskTakeProfitPrice').value) : null
         };
         
         if (!rule.symbol) {
@@ -2571,7 +2963,7 @@ class TradingApp {
                                     <i class="fas fa-edit"></i>
                                 </button>` : ''}
                             ${canCancel ? 
-                                `<button class="btn btn-sm btn-danger" onclick="app.cancelOrder(${order.order_id})" title="Cancel">
+                                `<button class="btn btn-sm btn-danger" onclick="app.cancelOrder(${order.order_id}, this)" title="Cancel">
                                     <i class="fas fa-times"></i>
                                 </button>` : ''}
                         </td>
@@ -2879,29 +3271,6 @@ class TradingApp {
         }
     }
 
-    clearData() {
-        document.getElementById('accountInfo').innerHTML = '<p class="text-muted">Connect to view account information</p>';
-        document.querySelector('#ordersTable tbody').innerHTML = '';
-        document.querySelector('#positionsTable tbody').innerHTML = '';
-        document.querySelector('#autoOrdersTable tbody').innerHTML = '';
-        document.querySelector('#riskRulesTable tbody').innerHTML = '';
-
-
-    }
-
-    getStatusColor(status) {
-        switch (status.toLowerCase()) {
-            case 'filled': return 'success';
-            case 'cancelled': case 'canceled': return 'danger';
-            case 'submitted': case 'presubmitted': return 'primary';
-            case 'pendingsubmit': return 'warning';
-            case 'pendingcancel': return 'info';
-            case 'inactive': return 'secondary';
-            case 'apiwaiting': return 'warning';
-            case 'apipending': return 'warning';
-            default: return 'secondary';
-        }
-    }
 
     formatNumber(num) {
         if (num === null || num === undefined) return 'N/A';
@@ -3129,41 +3498,6 @@ class TradingApp {
             dropdown.innerHTML = '<div class="dropdown-item-text text-danger">Search failed</div>';
         }
     }
-
-    getHistoricalSymbols() {
-        const stored = localStorage.getItem('historicalSymbols');
-        return stored ? JSON.parse(stored) : [];
-    }
-
-    addToHistoricalSymbols(symbol) {
-        let historical = this.getHistoricalSymbols();
-        
-        // Remove if already exists
-        historical = historical.filter(s => s !== symbol);
-        
-        // Add to beginning
-        historical.unshift(symbol);
-        
-        // Keep only last 10
-        historical = historical.slice(0, 10);
-        
-        localStorage.setItem('historicalSymbols', JSON.stringify(historical));
-    }
-
-    async loadAutoOrders() {
-        try {
-            const data = await this.apiCall('/auto_orders');
-            
-            if (data.success) {
-                this.displayAutoOrders(data.orders);
-            } else {
-                console.error('Failed to load auto orders:', data.message);
-            }
-        } catch (error) {
-            console.error('Error loading auto orders:', error);
-        }
-    }
-
     displayAutoOrders(orders) {
         // Auto Orders panel removed - method kept for compatibility
         console.log('Auto orders display skipped - panel removed');
@@ -3196,27 +3530,6 @@ class TradingApp {
         
         this.showAlert('info', `正在编辑订单 ${orderId}，原订单已取消，请重新提交`);
     }
-
-    // 取消订单
-    async cancelOrder(orderId) {
-        try {
-            const result = await this.apiCall('/cancel_order', {
-                method: 'POST',
-                body: JSON.stringify({ order_id: orderId })
-            });
-            
-            if (result.success) {
-                this.showAlert('success', `订单 ${orderId} 已成功取消`);
-                this.loadOrders(); // 刷新订单列表
-            } else {
-                this.showAlert('danger', `取消订单失败: ${result.error}`);
-            }
-        } catch (error) {
-            console.error('Cancel order error:', error);
-            this.showAlert('danger', '取消订单时发生错误');
-        }
-    }
-
     async loadStrategies() {
         try {
             const data = await this.apiCall('/strategies');
@@ -4028,75 +4341,6 @@ class TradingApp {
         localStorage.setItem('historicalSymbols', JSON.stringify(historical));
     }
 
-    async loadAutoOrders() {
-        try {
-            const data = await this.apiCall('/auto_orders');
-            
-            if (data.success) {
-                this.displayAutoOrders(data.orders);
-            } else {
-                console.error('Failed to load auto orders:', data.message);
-            }
-        } catch (error) {
-            console.error('Error loading auto orders:', error);
-        }
-    }
-
-    displayAutoOrders(orders) {
-        const tbody = document.querySelector('#autoOrdersTable tbody');
-        if (!tbody) {
-            console.log('autoOrdersTable not found - panel has been removed');
-            return;
-        }
-        tbody.innerHTML = '';
-        
-        if (!orders || orders.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No auto orders today</td></tr>';
-            return;
-        }
-        
-        orders.forEach(order => {
-            const row = document.createElement('tr');
-            
-            const createdAt = new Date(order.created_at).toLocaleString();
-            const price = order.price > 0 ? order.price.toFixed(2) : 'Market';
-            
-            // 来源显示逻辑
-            let sourceDisplay = '—';
-            if (order.order_source) {
-                if (order.order_source === 'manual' || order.order_source.startsWith('manual_') || order.order_source === '人工') {
-                    // 手动单直接显示字段值
-                    sourceDisplay = order.order_source;
-                } else if (order.order_source === 'sl') {
-                    sourceDisplay = '<span class="badge bg-danger">止损</span>';
-                } else if (order.order_source === 'tp') {
-                    sourceDisplay = '<span class="badge bg-success">止盈</span>';
-                } else if (order.order_source === 'strategy') {
-                    sourceDisplay = '<span class="badge bg-info">策略</span>';
-                } else if (order.order_source === '机器人' || order.order_source === 'auto') {
-                    sourceDisplay = '<span class="badge bg-secondary">自动</span>';
-                } else {
-                    // 其他情况直接显示字段值
-                    sourceDisplay = order.order_source;
-                }
-            }
-            
-            row.innerHTML = `
-                <td>${order.order_id}</td>
-                <td>${order.symbol}</td>
-                <td><span class="badge ${order.action === 'BUY' ? 'bg-success' : 'bg-danger'}">${order.action}</span></td>
-                <td>${order.quantity}</td>
-                <td>${order.order_type}</td>
-                <td>${price}</td>
-                <td>${order.status}</td>
-                <td>${sourceDisplay}</td>
-                <td>${order.rule_id}</td>
-                <td>${createdAt}</td>
-            `;
-            
-            tbody.appendChild(row);
-        });
-    }
 
     // 编辑订单
     editOrder(orderId, symbol, action, quantity, orderType, limitPrice) {
@@ -4126,22 +4370,38 @@ class TradingApp {
     }
 
     // 取消订单
-    async cancelOrder(orderId) {
+    async cancelOrder(orderId, btn) {
+        if (!orderId && orderId !== 0) return;
+        if (!this.cancellingOrders) this.cancellingOrders = new Set();
+        if (this.cancellingOrders.has(orderId)) {
+            return; // 已在处理中，避免重复请求
+        }
+        this.cancellingOrders.add(orderId);
+        const originalDisabled = btn ? btn.disabled : undefined;
         try {
+            if (btn) {
+                btn.disabled = true;
+                btn.classList.add('disabled');
+            }
             const result = await this.apiCall('/cancel_order', {
                 method: 'POST',
                 body: JSON.stringify({ order_id: orderId })
             });
-            
             if (result.success) {
                 this.showAlert('success', `订单 ${orderId} 已成功取消`);
-                this.loadOrders(); // 刷新订单列表
             } else {
-                this.showAlert('danger', `取消订单失败: ${result.error}`);
+                this.showAlert('danger', `取消订单失败: ${result.error || '未知错误'}`);
             }
+            await this.loadOrders(); // 刷新订单列表
         } catch (error) {
             console.error('Cancel order error:', error);
             this.showAlert('danger', '取消订单时发生错误');
+        } finally {
+            this.cancellingOrders.delete(orderId);
+            if (btn) {
+                btn.disabled = !!originalDisabled;
+                btn.classList.remove('disabled');
+            }
         }
     }
 
@@ -4149,8 +4409,10 @@ class TradingApp {
         try {
             const module = document.getElementById('logModule')?.value || 'all';
             const range = document.getElementById('logRange')?.value || 'today';
+            const level = document.getElementById('logLevel')?.value || 'all';
             const requestId = document.getElementById('logRequestId')?.value.trim();
             let url = `/logs?lines=200&range=${range}`;
+            if (level !== 'all') url += `&level=${encodeURIComponent(level)}`;
             if (module !== 'all') url += `&module=${module}`;
             if (requestId) url += `&request_id=${encodeURIComponent(requestId)}`;
             const res = await this.apiCall(url);
@@ -4360,7 +4622,6 @@ setInterval(() => {
         app.loadPortfolio();
         app.loadOrders();
         app.loadRiskRules();
-        app.loadAutoOrders();
         app.loadStrategies();
     }
 }, 30000);

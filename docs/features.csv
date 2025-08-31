@@ -60,8 +60,9 @@ Web界面,日志查看,Web端系统日志查看,已完成,中,HTML + JavaScript,
 系统管理,错误处理,全局异常处理和错误恢复,已完成,高,Python try-catch,全局
 系统管理,性能监控,系统性能指标监控,部分完成,中,Python,全局
 系统管理,健康检查,系统组件健康状态检查,部分完成,中,FastAPI,main.py
-部署运维,Docker支持,容器化部署支持,未完成,中,Docker,无
+部署运维,Docker支持,容器化部署支持,已完成,中,Docker,Dockerfile; docker/
 部署运维,自动化脚本,启动和安装自动化脚本,已完成,中,Shell,start.sh
+部署运维,Compose编排,开发与生产编排文件,已完成,中,Docker Compose,docker/docker-compose.yml; docker/docker-compose.prod.yml
 部署运维,IB Gateway安装,自动安装IB Gateway脚本,已完成,低,Shell,install_ib_gateway.sh
 部署运维,网络隧道,支持网络隧道配置,已完成,低,YAML,tunnel/config.yaml
 安全性,API认证,所有API端点的认证保护,已完成,高,JWT,main.py

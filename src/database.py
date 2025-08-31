@@ -225,16 +225,44 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS historical_data (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     symbol TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    time TEXT,
                     open REAL NOT NULL,
                     high REAL NOT NULL,
                     low REAL NOT NULL,
                     close REAL NOT NULL,
                     volume INTEGER NOT NULL,
-                    bar_size TEXT NOT NULL,
-                    UNIQUE(symbol, timestamp, bar_size)
+                    interval TEXT NOT NULL,
+                    adj_close REAL,
+                    UNIQUE(symbol, date, time, interval)
                 )
             """)
+            
+            # 检查是否需要迁移旧数据和添加新字段
+            cursor.execute("PRAGMA table_info('historical_data')")
+            cols = [row[1] for row in cursor.fetchall()]
+            
+            # 如果没有date字段，表示需要迁移
+            if 'date' not in cols:
+                # 添加新字段
+                for field in ['date', 'time', 'interval', 'adj_close']:
+                    if field not in cols:
+                        field_type = 'TEXT' if field in ['date', 'time', 'interval'] else 'REAL'
+                        cursor.execute(f"ALTER TABLE historical_data ADD COLUMN {field} {field_type}")
+                
+                # 迁移现有数据：从timestamp提取date，设置默认interval
+                cursor.execute("""
+                    UPDATE historical_data 
+                    SET date = date(timestamp),
+                        time = CASE 
+                            WHEN bar_size LIKE '%min%' OR bar_size LIKE '%hour%' THEN time(timestamp)
+                            ELSE NULL 
+                        END,
+                        interval = COALESCE(bar_size, '1d'),
+                        adj_close = close
+                    WHERE date IS NULL
+                """)
+                database_logger.info("Migrated existing historical_data to new schema")
             
             # 创建策略设置表
             cursor.execute("""
@@ -310,11 +338,6 @@ class DatabaseManager:
                 database_logger.debug(
                     f"Order {order_id} updated: {dict(zip([f.split(' = ')[0] for f in update_fields], values[:-1]))}"
                 )
-
-    def update_auto_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None):
-        """[兼容] 更新自动订单，已弃用，请使用 update_order"""
-        database_logger.warning("update_auto_order() is deprecated; use update_order()")
-        return self.update_order(order_id, status=status, price=price, executed_at=executed_at)
 
     def load_orders(self) -> List[Order]:
         """加载所有订单（新）"""
@@ -606,38 +629,163 @@ class DatabaseManager:
     def save_historical_data(self, symbol: str, data: pd.DataFrame, bar_size: str = "1 day"):
         """保存历史数据"""
         with sqlite3.connect(self.db_path) as conn:
-            # 重置索引确保timestamp列存在
-            if 'timestamp' not in data.columns and data.index.name == 'timestamp':
+            # 重置索引确保存在 date/time 或 timestamp
+            if 'date' not in data.columns and 'timestamp' in data.columns:
+                try:
+                    data['date'] = pd.to_datetime(data['timestamp']).dt.date.astype(str)
+                    data['time'] = pd.to_datetime(data['timestamp']).dt.time.astype(str)
+                except Exception:
+                    data = data.reset_index()
+            elif 'date' in data.columns and 'time' not in data.columns and 'timestamp' in data.columns:
+                try:
+                    data['time'] = pd.to_datetime(data['timestamp']).dt.time.astype(str)
+                except Exception:
+                    pass
+            elif 'date' not in data.columns and 'timestamp' not in data.columns and data.index.name in ('date', 'timestamp'):
                 data = data.reset_index()
+                if 'date' in data.columns and 'time' not in data.columns:
+                    data['time'] = None
             
-            # 添加symbol和bar_size列
+            # 规范列：将 bar_size 映射为 interval（如 '1 day' -> '1d'，'1 min' -> '1m' 等）
+            interval = self._normalize_interval(bar_size)
+            
+            # 确保date字段只包含日期，time字段只包含时间
+            if 'date' in data.columns:
+                try:
+                    # 如果date字段包含时间信息，分离出日期和时间
+                    dt_series = pd.to_datetime(data['date'])
+                    data['date'] = dt_series.dt.date.astype(str)
+                    if 'time' not in data.columns or data['time'].isna().all():
+                        data['time'] = dt_series.dt.time.astype(str)
+                        # 如果是日级数据（没有具体时间），time设为None
+                        if interval.endswith('d'):
+                            data['time'] = None
+                except Exception:
+                    # 如果转换失败，保持原样
+                    pass
             data['symbol'] = symbol
-            data['bar_size'] = bar_size
-            
-            # 确保列名正确
-            required_columns = ['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'bar_size']
-            if not all(col in data.columns for col in required_columns):
-                database_logger.error(f"Historical data missing required columns: {required_columns}")
-                return
-            
-            # 使用INSERT OR IGNORE避免重复数据
-            data_to_insert = data[required_columns].copy()
-            data_to_insert.to_sql('historical_data', conn, if_exists='append', index=False, method='multi')
-            
-            # 手动处理UNIQUE约束冲突
-            cursor = conn.cursor()
-            for _, row in data_to_insert.iterrows():
-                cursor.execute("""
-                    INSERT OR IGNORE INTO historical_data 
-                    (symbol, timestamp, open, high, low, close, volume, bar_size)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    row['symbol'], row['timestamp'], row['open'], row['high'],
-                    row['low'], row['close'], row['volume'], row['bar_size']
-                ))
-            
+            data['interval'] = interval
+            if 'adj_close' not in data.columns:
+                data['adj_close'] = data.get('close')
+
+            # 兼容来源列名
+            rename_map = {}
+            if 'Date' in data.columns:
+                rename_map['Date'] = 'date'
+            if 'Open' in data.columns:
+                rename_map['Open'] = 'open'
+            if 'High' in data.columns:
+                rename_map['High'] = 'high'
+            if 'Low' in data.columns:
+                rename_map['Low'] = 'low'
+            if 'Close' in data.columns:
+                rename_map['Close'] = 'close'
+            if 'Volume' in data.columns:
+                rename_map['Volume'] = 'volume'
+            data = data.rename(columns=rename_map)
+
+            # 若仅有 'date' 字段而非 'time'，则置空 time
+            if 'time' not in data.columns:
+                data['time'] = None
+
+            required_columns = ['symbol', 'date', 'time', 'open', 'high', 'low', 'close', 'volume', 'interval', 'adj_close']
+            for col in required_columns:
+                if col not in data.columns:
+                    data[col] = None
+
+            cols = required_columns
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info('historical_data')")
+            table_cols = [row[1] for row in cur.fetchall()]
+            missing = [c for c in cols if c not in table_cols]
+            if missing:
+                # 在极端情况下，按需添加缺失列
+                for c in missing:
+                    coltype = 'TEXT' if c in ['symbol','date','time','interval'] else 'REAL'
+                    if c in ['volume']:
+                        coltype = 'INTEGER'
+                    cur.execute(f"ALTER TABLE historical_data ADD COLUMN {c} {coltype}")
+
+            # 使用插入或忽略的方式写入，利用UNIQUE(symbol,date,time,interval)
+            insert_sql = (
+                "INSERT OR IGNORE INTO historical_data "
+                "(symbol, date, time, open, high, low, close, volume, interval, adj_close) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            rows = [(
+                row['symbol'], str(row['date']), (None if pd.isna(row['time']) else str(row['time'])),
+                float(row['open']) if pd.notna(row['open']) else None,
+                float(row['high']) if pd.notna(row['high']) else None,
+                float(row['low']) if pd.notna(row['low']) else None,
+                float(row['close']) if pd.notna(row['close']) else None,
+                int(row['volume']) if pd.notna(row['volume']) else 0,
+                row['interval'],
+                float(row['adj_close']) if pd.notna(row['adj_close']) else None
+            ) for _, row in data.iterrows()]
+            cur.executemany(insert_sql, rows)
             conn.commit()
-            database_logger.debug(f"Historical data saved for {symbol}: {len(data)} records")
+            database_logger.debug(f"Historical data saved for {symbol}: {len(rows)} records (interval={interval})")
+
+    def _normalize_interval(self, bar_size: str) -> str:
+        bs = (bar_size or '').lower().strip()
+        if 'day' in bs:
+            n = bs.split()[0]
+            return f"{n}d" if n.isdigit() else '1d'
+        if 'min' in bs:
+            n = bs.split()[0]
+            return f"{n}m" if n.replace('.', '').isdigit() else '1m'
+        if 'hour' in bs:
+            n = bs.split()[0]
+            try:
+                n = int(float(n) * 60)
+            except Exception:
+                n = 60
+            return f"{n}m"
+        return '1d'
+
+    def query_historical_cache(self, symbol: str, interval: str, start_dt: Optional[str] = None, end_dt: Optional[str] = None) -> pd.DataFrame:
+        """按interval查询缓存。interval: '1d'或'1m'等。start_dt/end_dt为ISO字符串。"""
+        with sqlite3.connect(self.db_path) as conn:
+            where = ["symbol = ?", "interval = ?"]
+            params: list = [symbol, interval]
+            if interval.endswith('d'):
+                if start_dt:
+                    where.append("date >= ?")
+                    params.append(start_dt[:10])
+                if end_dt:
+                    where.append("date <= ?")
+                    params.append(end_dt[:10])
+                order_by = "date"
+                select_cols = "date, open, high, low, close, volume, adj_close"
+            else:
+                # 分钟级，使用date+time
+                if start_dt:
+                    where.append("(date || 'T' || COALESCE(time,'')) >= ?")
+                    params.append(start_dt[:19])
+                if end_dt:
+                    where.append("(date || 'T' || COALESCE(time,'')) <= ?")
+                    params.append(end_dt[:19])
+                order_by = "date, time"
+                select_cols = "date, time, open, high, low, close, volume, adj_close"
+            query = f"SELECT {select_cols} FROM historical_data WHERE {' AND '.join(where)} ORDER BY {order_by}"
+            df = pd.read_sql_query(query, conn, params=params)
+            return df
+
+    def detect_missing_ranges(self, have_df: pd.DataFrame, start_dt: str, end_dt: str, interval: str) -> bool:
+        """简单判断是否有数据缺口：为空或范围不足，则视为缺失。可后续细化。"""
+        if have_df is None or have_df.empty:
+            return True
+        # 粗略检查首尾
+        if interval.endswith('d'):
+            have_start = pd.to_datetime(have_df['date'].iloc[0])
+            have_end = pd.to_datetime(have_df['date'].iloc[-1])
+        else:
+            have_start = pd.to_datetime(have_df['date'].iloc[0] + 'T' + (have_df['time'].iloc[0] or '00:00:00'))
+            have_end = pd.to_datetime(have_df['date'].iloc[-1] + 'T' + (have_df['time'].iloc[-1] or '23:59:59'))
+        need_start = pd.to_datetime(start_dt)
+        need_end = pd.to_datetime(end_dt)
+        # 若需求范围不在已有范围内，则认为缺失
+        return need_start < have_start or need_end > have_end
     
     def load_historical_data(self, symbol: str, bar_size: str = "1 day") -> pd.DataFrame:
         """加载历史数据"""

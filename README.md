@@ -115,7 +115,7 @@ WEB_PORT=8000
 5. 设置 `Socket port` 为 `7497`（模拟）或 `7496`（真实）
 6. 添加可信IP地址：`127.0.0.1`
 
-#### 设置
+#### IB Gateway设置
 1. 启动IB Gateway
 2. 登录您的账户
 3. 设置API端口为 `4001`（模拟）或 `4000`（真实）
@@ -166,6 +166,12 @@ python main.py
 #### 风险管理
 - 设置止损价格和止盈价格
 - 系统将自动监控并执行风险管理规则
+
+#### 查看系统日志
+- 打开“日志”面板，支持按日期范围、模块和等级筛选
+- 日志等级筛选为包容式：选择 warning 显示 warning、error、critical；选择 error 显示 error、critical；选择 all 显示全部
+- 如遇 Authentication required，请先在右上角使用管理员账号登录（默认来自 .env 的 ADMIN_USERNAME/ADMIN_PASSWORD）
+- 后端日志文件默认保存在 logs/trading_bot.log，可用前端面板或直接查看文件进行验证
 
 ## 🐳 Docker使用
 
