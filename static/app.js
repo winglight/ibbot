@@ -11,6 +11,8 @@ class TradingApp {
         };
         this.cancellingOrders = new Set();
         this.strategiesLoaded = false;
+        this.startReminderTimeout = null;
+        this.endReminderTimeout = null;
         this.init();
     }
 
@@ -32,6 +34,7 @@ class TradingApp {
         await this.checkConnectionStatus();
         await this.loadStrategies();
         await this.loadLogs();
+        this.scheduleTradingReminders();
     }
 
     // Show login modal
@@ -170,11 +173,15 @@ class TradingApp {
             const clientIdEl = document.getElementById('clientId');
             const accountTypeEl = document.getElementById('accountType');
             const autoEl = document.getElementById('enableAutoLogin');
+            const startEl = document.getElementById('startTradingTime');
+            const endEl = document.getElementById('endTradingTime');
             if (hostEl) hostEl.value = localStorage.getItem('conn_host') || hostEl.value || '127.0.0.1';
             if (portEl) portEl.value = localStorage.getItem('conn_port') || portEl.value || '4002';
             if (clientIdEl) clientIdEl.value = localStorage.getItem('conn_clientId') || clientIdEl.value || '1';
             if (accountTypeEl) accountTypeEl.value = localStorage.getItem('conn_accountType') || accountTypeEl.value || 'paper';
             if (autoEl) autoEl.checked = localStorage.getItem('enableAutoLogin') === '1';
+            if (startEl) startEl.value = localStorage.getItem('startTradingTime') || startEl.value || '20:30';
+            if (endEl) endEl.value = localStorage.getItem('endTradingTime') || endEl.value || '22:30';
             const modal = new bootstrap.Modal(document.getElementById('connectionModal'));
             modal.show();
         });
@@ -198,11 +205,16 @@ class TradingApp {
                 const clientId = document.getElementById('clientId')?.value || '';
                 const accountType = document.getElementById('accountType')?.value || '';
                 const auto = !!document.getElementById('enableAutoLogin')?.checked;
+                const startTime = document.getElementById('startTradingTime')?.value || '';
+                const endTime = document.getElementById('endTradingTime')?.value || '';
                 if (host) localStorage.setItem('conn_host', host);
                 if (port) localStorage.setItem('conn_port', port);
                 if (clientId) localStorage.setItem('conn_clientId', clientId);
                 if (accountType) localStorage.setItem('conn_accountType', accountType);
                 localStorage.setItem('enableAutoLogin', auto ? '1' : '0');
+                if (startTime) localStorage.setItem('startTradingTime', startTime);
+                if (endTime) localStorage.setItem('endTradingTime', endTime);
+                this.scheduleTradingReminders();
                 this.showAlert('success', 'Connection settings saved');
                 const modalEl = document.getElementById('connectionModal');
                 const modal = bootstrap.Modal.getInstance(modalEl);
@@ -589,6 +601,70 @@ class TradingApp {
             default:
                 console.log('Unknown WebSocket message:', data);
         }
+    }
+
+    scheduleTradingReminders() {
+        if (typeof window === 'undefined' || !('Notification' in window)) return;
+
+        const startTime = localStorage.getItem('startTradingTime') || '20:30';
+        const endTime = localStorage.getItem('endTradingTime') || '22:30';
+
+        const now = new Date();
+
+        const schedule = (timeStr, type) => {
+            const target = this.getNextReminderDate(timeStr, now);
+            const delay = target.getTime() - now.getTime();
+            return setTimeout(() => {
+                this.fireTradingReminder(type);
+                this.scheduleTradingReminders();
+            }, delay);
+        };
+
+        if (Notification.permission === 'default') {
+            try { Notification.requestPermission(); } catch (e) {}
+        }
+
+        if (this.startReminderTimeout) clearTimeout(this.startReminderTimeout);
+        if (this.endReminderTimeout) clearTimeout(this.endReminderTimeout);
+
+        this.startReminderTimeout = schedule(startTime, 'start');
+        this.endReminderTimeout = schedule(endTime, 'end');
+    }
+
+    fireTradingReminder(type) {
+        const message = type === 'start' ? '开始交易' : '结束交易';
+        try {
+            if ('Notification' in window && Notification.permission === 'granted') {
+                new Notification(message);
+            }
+        } catch (e) {}
+        this.apiCall('/notify', { method: 'POST', body: JSON.stringify({ message }) }).catch(() => {});
+    }
+
+    getNextReminderDate(timeStr, reference) {
+        const [hour, minute] = timeStr.split(':').map(n => parseInt(n, 10));
+        let date = new Date(reference);
+        date.setHours(hour, minute, 0, 0);
+        while (date <= reference || !this.isWorkingDay(date) || this.isNasdaqHoliday(date)) {
+            date.setDate(date.getDate() + 1);
+            date.setHours(hour, minute, 0, 0);
+        }
+        return date;
+    }
+
+    isWorkingDay(date) {
+        const day = date.getDay();
+        return day >= 1 && day <= 5;
+    }
+
+    isNasdaqHoliday(date) {
+        const holidays = [
+            '2024-01-01', '2024-01-15', '2024-02-19', '2024-03-29',
+            '2024-05-27', '2024-06-19', '2024-07-04', '2024-09-02',
+            '2024-11-28', '2024-12-25'
+        ];
+        const d = date.toISOString().split('T')[0];
+        return holidays.includes(d);
     }
 
     async apiCall(endpoint, options = {}) {
