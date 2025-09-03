@@ -718,6 +718,19 @@ async def get_connection_status(user: Optional[str] = Depends(get_current_user))
         "account_type": "Paper" if connection_manager.config.paper_trading else "Live"
     }
 
+
+class NotificationRequest(BaseModel):
+    message: str
+
+
+@app.post("/api/notify")
+async def send_notification(req: NotificationRequest, user: Optional[str] = Depends(get_current_user)):
+    """发送Telegram通知"""
+    success = await telegram_notifier.send_message(req.message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send Telegram message")
+    return {"success": True}
+
 # Market data endpoints
 @app.post("/api/historical_data")
 async def get_historical_data(request: HistoricalDataRequest, user: Optional[str] = Depends(get_current_user)):
