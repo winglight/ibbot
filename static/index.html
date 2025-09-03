@@ -245,7 +245,6 @@
                                 <div class="mb-3">
                                     <label class="form-label">Port</label>
                                     <select class="form-control" id="port">
-                                        <option value="18080">Mock Server (18080)</option>
                                         <option value="4002" selected>IB Gateway Paper (4002)</option>
                                         <option value="4001">IB Gateway Live (4001)</option>
                                         <option value="7497">TWS Paper (7497)</option>
@@ -366,6 +365,9 @@
                                     <!-- Search results will be populated here -->
                                 </div>
                             </div>
+                            <div id="currentPriceDisplay" class="mt-2" style="display: none;">
+                                <small class="text-muted">当前价格: <span id="currentPriceValue" class="fw-bold text-primary">--</span></small>
+                            </div>
                         </div>
                         <div class="row">
                             <div class="col-md-6">
@@ -410,14 +412,14 @@
                                     <div class="mb-3">
                                         <label class="form-label">Stop Loss Price</label>
                                         <input type="number" class="form-control" id="stopLossPrice" step="0.01" placeholder="Auto-calculated">
-                                        <div class="form-text">Default: -2% from limit price</div>
+                                        <div class="form-text">Default: -2.5% from limit price</div>
                                     </div>
                                 </div>
                                 <div class="col-md-6">
                                     <div class="mb-3">
                                         <label class="form-label">Take Profit Price</label>
                                         <input type="number" class="form-control" id="takeProfitPrice" step="0.01" placeholder="Auto-calculated">
-                                        <div class="form-text">Default: +4% from limit price</div>
+                                        <div class="form-text">Default: +2.5% from limit price</div>
                                     </div>
                                 </div>
                             </div>
@@ -766,7 +768,7 @@
 
     <!-- Monitor Modal -->
     <div class="modal fade" id="monitorModal" tabindex="-1">
-        <div class="modal-dialog modal-xl">
+        <div class="modal-dialog" style="max-width: 95%; width: 95%;">
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title"><i class="fas fa-eye"></i> 监控 - <span id="monitorSymbol">SYMBOL</span></h5>
@@ -877,6 +879,23 @@
                                             <label class="form-check-label" for="monitorRiskToggle">激活</label>
                                         </div>
                                     </div>
+                                    <!-- Active Risk Rule Display -->
+                                    <div class="mt-2 p-2 bg-success bg-opacity-10 border border-success rounded" id="activeRiskRuleDisplay" style="display: none;">
+                                        <div class="d-flex align-items-center">
+                                            <i class="fas fa-shield-alt text-success me-2"></i>
+                                            <small class="text-success fw-bold">激活的风险规则</small>
+                                        </div>
+                                        <div class="row g-1 mt-1">
+                                            <div class="col-6">
+                                                <small class="text-muted d-block">止损价格</small>
+                                                <span class="fw-bold text-danger" id="activeStopLossPrice">$0.00</span>
+                                            </div>
+                                            <div class="col-6">
+                                                <small class="text-muted d-block">止盈价格</small>
+                                                <span class="fw-bold text-success" id="activeTakeProfitPrice">$0.00</span>
+                                            </div>
+                                        </div>
+                                    </div>
                                     <div class="row g-2 mt-2">
                                         <div class="col-6">
                                             <div class="input-group input-group-sm">
@@ -914,6 +933,26 @@
                                             <div class="col-6">
                                                 <button class="btn btn-sm btn-info w-100" id="reversePositionBtn"><i class="fas fa-exchange-alt"></i> 反向下单</button>
                                             </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Orders List -->
+                            <div class="card">
+                                <div class="card-body p-3">
+                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                        <small class="text-muted">订单列表</small>
+                                        <div class="btn-group btn-group-sm" role="group">
+                                            <input type="radio" class="btn-check" name="orderStatusFilter" id="orderStatusWorking" value="working" checked>
+                                            <label class="btn btn-outline-primary" for="orderStatusWorking">Working</label>
+                                            <input type="radio" class="btn-check" name="orderStatusFilter" id="orderStatusFilled" value="filled">
+                                            <label class="btn btn-outline-primary" for="orderStatusFilled">Filled</label>
+                                        </div>
+                                    </div>
+                                    <div id="monitorOrdersList" class="" style="max-height: 200px; overflow-y: auto;">
+                                        <div class="text-center text-muted py-2">
+                                            <small>加载中...</small>
                                         </div>
                                     </div>
                                 </div>

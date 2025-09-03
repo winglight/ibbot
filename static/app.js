@@ -10,6 +10,7 @@ class TradingApp {
             allExecutions: []
         };
         this.cancellingOrders = new Set();
+        this.strategiesLoaded = false;
         this.init();
     }
 
@@ -368,6 +369,24 @@ class TradingApp {
 
         // Place order button
         document.getElementById('placeOrderBtn').addEventListener('click', () => {
+            // Reset order form to default state
+            document.getElementById('orderType').value = 'MARKET';
+            document.getElementById('orderPrice').value = '';
+            document.getElementById('orderPrice').disabled = true;
+            document.getElementById('riskRuleSection').style.display = 'none';
+            
+            // Clear SL/TP inputs
+            document.getElementById('stopLossPrice').value = '';
+            document.getElementById('takeProfitPrice').value = '';
+            document.getElementById('expectedLoss').value = '';
+            document.getElementById('expectedProfit').value = '';
+            
+            // 隐藏价格显示
+            const priceDisplay = document.getElementById('currentPriceDisplay');
+            if (priceDisplay) {
+                priceDisplay.style.display = 'none';
+            }
+            
             const lastQuantity = localStorage.getItem('lastOrderQuantity');
             if (lastQuantity) {
                 document.getElementById('orderQuantity').value = lastQuantity;
@@ -407,16 +426,25 @@ class TradingApp {
                 priceInput.value = '';
                 riskRuleSection.style.display = 'none';
             } else {
-                // Show risk rule section for limit orders
-                riskRuleSection.style.display = 'block';
-                // Auto-calculate risk prices when switching to limit order
-                this.updateRiskPrices();
+                // Check if symbol exists in portfolio
+                const symbol = document.getElementById('orderSymbol').value.toUpperCase();
+                const symbolInPortfolio = this.positions && this.positions.some(pos => pos.symbol === symbol);
+                
+                if (symbolInPortfolio) {
+                    // Hide risk rule section if symbol exists in portfolio
+                    riskRuleSection.style.display = 'none';
+                } else {
+                    // Show risk rule section for limit orders only when symbol not in portfolio
+                    riskRuleSection.style.display = 'block';
+                    // Auto-calculate risk prices when switching to limit order
+                    this.updateRiskPrices().catch(console.error);
+                }
             }
         });
         
         // Order price change - auto-calculate risk prices
         document.getElementById('orderPrice').addEventListener('input', () => {
-            this.updateRiskPrices();
+            this.updateRiskPrices().catch(console.error);
         });
         
         // Stop loss and take profit price changes - calculate expected PnL
@@ -436,6 +464,42 @@ class TradingApp {
         // Order action change - update expected PnL
         document.getElementById('orderAction').addEventListener('change', () => {
             this.updateExpectedPnL();
+        });
+        
+        // Order symbol change - check portfolio status and update risk rule visibility
+        document.getElementById('orderSymbol').addEventListener('input', () => {
+            const orderType = document.getElementById('orderType').value;
+            const riskRuleSection = document.getElementById('riskRuleSection');
+            const symbol = document.getElementById('orderSymbol').value.toUpperCase().trim();
+            
+            // 获取当前价格（如果输入的标的长度>=2）
+            if (symbol.length >= 2) {
+                // 使用防抖避免频繁调用
+                clearTimeout(this.priceUpdateTimeout);
+                this.priceUpdateTimeout = setTimeout(() => {
+                    this.fetchCurrentPrice(symbol);
+                }, 500);
+            } else {
+                // 隐藏价格显示
+                const priceDisplay = document.getElementById('currentPriceDisplay');
+                if (priceDisplay) {
+                    priceDisplay.style.display = 'none';
+                }
+            }
+            
+            if (orderType === 'LIMIT') {
+                const symbolInPortfolio = this.positions && this.positions.some(pos => pos.symbol === symbol);
+                
+                if (symbolInPortfolio) {
+                    // Hide risk rule section if symbol exists in portfolio
+                    riskRuleSection.style.display = 'none';
+                } else {
+                    // Show risk rule section for limit orders when symbol not in portfolio
+                    riskRuleSection.style.display = 'block';
+                    // Auto-calculate risk prices
+                    this.updateRiskPrices().catch(console.error);
+                }
+            }
         });
         
         // Market data
@@ -803,7 +867,7 @@ class TradingApp {
     }
 
     // Update risk prices based on limit price
-    updateRiskPrices() {
+    async updateRiskPrices() {
         const orderPrice = parseFloat(document.getElementById('orderPrice').value);
         if (!orderPrice || orderPrice <= 0) {
             document.getElementById('stopLossPrice').value = '';
@@ -812,12 +876,51 @@ class TradingApp {
             return;
         }
         
-        // Calculate default stop loss (-2%) and take profit (+4%)
-        const stopLoss = (orderPrice * 0.98).toFixed(2);
-        const takeProfit = (orderPrice * 1.04).toFixed(2);
+        // Get order symbol
+        const orderSymbol = document.getElementById('orderSymbol').value;
+        if (!orderSymbol) {
+            document.getElementById('stopLossPrice').value = '';
+            document.getElementById('takeProfitPrice').value = '';
+            this.updateExpectedPnL();
+            return;
+        }
         
-        document.getElementById('stopLossPrice').value = stopLoss;
-        document.getElementById('takeProfitPrice').value = takeProfit;
+        // Get configuration from backend
+        let stopLossRatio = 0.025; // Default 2.5%
+        let takeProfitRatio = 0.025; // Default 2.5%
+        
+        try {
+            const config = await this.apiCall('/risk-config');
+            stopLossRatio = config.stop_loss_ratio || 0.025;
+            takeProfitRatio = config.take_profit_ratio || 0.025;
+            
+            // Apply leverage adjustment for leveraged assets
+            let adjustedStopLossRatio = stopLossRatio;
+            let adjustedTakeProfitRatio = takeProfitRatio;
+            
+            const leverageMap = (config && config.leverage) ? config.leverage : {};
+            const lev = leverageMap[orderSymbol] || leverageMap[orderSymbol?.toUpperCase?.()] || (orderSymbol === 'MNQ' ? (leverageMap['MNQ'] || 20) : null);
+            if (lev && !isNaN(lev) && lev > 0) {
+                adjustedStopLossRatio = stopLossRatio / lev;
+                adjustedTakeProfitRatio = takeProfitRatio / lev;
+            }
+            
+            // Calculate stop loss and take profit using leverage-adjusted ratios
+            const stopLoss = (orderPrice * (1 - adjustedStopLossRatio)).toFixed(2);
+            const takeProfit = (orderPrice * (1 + adjustedTakeProfitRatio)).toFixed(2);
+            
+            document.getElementById('stopLossPrice').value = stopLoss;
+            document.getElementById('takeProfitPrice').value = takeProfit;
+            
+        } catch (error) {
+            console.warn('Failed to get risk config, using defaults:', error);
+            // Use default ratios without leverage adjustment
+            const stopLoss = (orderPrice * (1 - stopLossRatio)).toFixed(2);
+            const takeProfit = (orderPrice * (1 + takeProfitRatio)).toFixed(2);
+            
+            document.getElementById('stopLossPrice').value = stopLoss;
+            document.getElementById('takeProfitPrice').value = takeProfit;
+        }
         
         this.updateExpectedPnL();
     }
@@ -854,6 +957,18 @@ class TradingApp {
     }
 
     async placeOrder() {
+        // 如果是编辑订单，先取消原订单
+        if (this.editingOrderId) {
+            try {
+                await this.cancelOrder(this.editingOrderId);
+                this.showAlert('info', `原订单 ${this.editingOrderId} 已取消，正在提交新订单...`);
+            } catch (error) {
+                console.error('Failed to cancel original order:', error);
+                this.showAlert('warning', '取消原订单失败，但将继续提交新订单');
+            }
+            this.editingOrderId = null; // 清除编辑状态
+        }
+        
         const symbol = document.getElementById('orderSymbol').value.toUpperCase();
         
         // 自动检测证券类型
@@ -870,8 +985,9 @@ class TradingApp {
             sec_type: secType
         };
         
-        // Add risk rule data for limit orders
-        if (order.order_type === 'LIMIT' && document.getElementById('enableRiskRule').checked) {
+        // Add risk rule data for limit orders only if symbol not in portfolio
+        const symbolInPortfolio = this.positions && this.positions.some(pos => pos.symbol === symbol);
+        if (order.order_type === 'LIMIT' && document.getElementById('enableRiskRule').checked && !symbolInPortfolio) {
             const stopLossPrice = parseFloat(document.getElementById('stopLossPrice').value);
             const takeProfitPrice = parseFloat(document.getElementById('takeProfitPrice').value);
             
@@ -1090,7 +1206,7 @@ class TradingApp {
             this.openRiskRuleModal(symbol, stopLoss, takeProfit, position, currentPrice, avgCost, true);
         } catch (error) {
             console.error('Failed to get risk config:', error);
-            // Fallback to preset values or default calculated values
+            // Fallback to preset values or default calculated values with leverage consideration
             let stopLoss, takeProfit;
             const isShortPosition = position < 0;
             
@@ -1098,14 +1214,31 @@ class TradingApp {
                 stopLoss = presetStopLoss;
                 takeProfit = presetTakeProfit;
             } else {
+                // Use default ratios with leverage adjustment
+                let stopLossRatio = 0.025; // Default 2.5%
+                let takeProfitRatio = 0.025; // Default 2.5%
+                
+                // Try to get leverage info even if risk config failed
+                try {
+                    const config = await this.apiCall('/risk-config');
+                    const leverageMap = (config && config.leverage) ? config.leverage : {};
+                    const lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || (symbol === 'MNQ' ? (leverageMap['MNQ'] || 20) : null);
+                    if (lev && !isNaN(lev) && lev > 0) {
+                        stopLossRatio = stopLossRatio / lev;
+                        takeProfitRatio = takeProfitRatio / lev;
+                    }
+                } catch (leverageError) {
+                    console.warn('Failed to get leverage info, using default ratios:', leverageError);
+                }
+                
                 if (isShortPosition) {
-                    // For short positions: stop loss above current price, take profit below
-                    stopLoss = presetStopLoss || (currentPrice * 1.05).toFixed(2);
-                    takeProfit = presetTakeProfit || (currentPrice * 0.95).toFixed(2);
+                    // For short positions: stop loss above avg cost, take profit below avg cost
+                    stopLoss = presetStopLoss || (avgCost * (1 + stopLossRatio)).toFixed(2);
+                    takeProfit = presetTakeProfit || (avgCost * (1 - takeProfitRatio)).toFixed(2);
                 } else {
-                    // For long positions: stop loss below current price, take profit above
-                    stopLoss = presetStopLoss || (currentPrice * 0.95).toFixed(2);
-                    takeProfit = presetTakeProfit || (currentPrice * 1.05).toFixed(2);
+                    // For long positions: stop loss below avg cost, take profit above avg cost
+                    stopLoss = presetStopLoss || (avgCost * (1 - stopLossRatio)).toFixed(2);
+                    takeProfit = presetTakeProfit || (avgCost * (1 + takeProfitRatio)).toFixed(2);
                 }
             }
             
@@ -1203,8 +1336,13 @@ class TradingApp {
                 if (rule && rule.enabled) {
                     if (slInputRef) slInputRef.value = rule.stop_loss_price ?? '';
                     if (tpInputRef) tpInputRef.value = rule.take_profit_price ?? '';
+                    
+                    // 显示激活的风险规则信息
+                    this.showActiveRiskRule(rule);
                 } else {
                     await setFromAvg();
+                    // 隐藏激活风险规则显示
+                    this.hideActiveRiskRule();
                 }
                 
                 // 预填充后立即更新差值显示
@@ -1251,7 +1389,12 @@ class TradingApp {
                 // 绑定按钮与输入事件
                 const refreshBtn = document.getElementById('refreshMonitorChartBtn');
                 if (refreshBtn) {
-                    refreshBtn.onclick = () => this.loadMonitorChart(symbol);
+                    refreshBtn.onclick = async () => {
+                        // 先刷新弹窗右侧数据，获取最新价格
+                        await this.syncMonitorModalData(symbol);
+                        // 然后更新图表，使用最新的价格数据
+                        this.loadMonitorChart(symbol);
+                    };
                 }
                 
                 // 重置缩放按钮事件
@@ -1391,8 +1534,9 @@ class TradingApp {
                         if (!confirmed) return;
                         
                         try {
-                            const response = await this.apiCall('/close_position', 'POST', {
-                                symbol: symbol
+                            const response = await this.apiCall('/close_position', {
+                                method: 'POST',
+                                body: JSON.stringify({ symbol })
                             });
                             
                             if (response.success) {
@@ -1400,6 +1544,8 @@ class TradingApp {
                                 // 刷新持仓和订单数据
                                 this.loadPortfolio();
                                 this.loadOrders();
+                                // 刷新监控弹窗数据
+                                await this.syncMonitorModalData(symbol);
                             } else {
                                 this.showAlert('danger', `平仓失败: ${response.message || '未知错误'}`);
                             }
@@ -1423,8 +1569,9 @@ class TradingApp {
                         if (!confirmed) return;
                         
                         try {
-                            const response = await this.apiCall('/reverse_position', 'POST', {
-                                symbol: symbol
+                            const response = await this.apiCall('/reverse_position', {
+                                method: 'POST',
+                                body: JSON.stringify({ symbol })
                             });
                             
                             if (response.success) {
@@ -1432,6 +1579,9 @@ class TradingApp {
                                 // 刷新持仓和订单数据
                                 this.loadPortfolio();
                                 this.loadOrders();
+                                
+                                // 同步弹窗右侧区域数据
+                                await this.syncMonitorModalData(symbol);
                             } else {
                                 this.showAlert('danger', `反向下单失败: ${response.message || '未知错误'}`);
                             }
@@ -1450,15 +1600,210 @@ class TradingApp {
                     }
                 }, { once: true });
 
+                // 订单状态过滤器事件绑定
+                const orderStatusRadios = document.querySelectorAll('input[name="orderStatusFilter"]');
+                orderStatusRadios.forEach(radio => {
+                    radio.onchange = () => {
+                        if (radio.checked) {
+                            this.loadMonitorOrdersList(symbol, radio.value);
+                        }
+                    };
+                });
+                
                 // 初次载入图表
                 this.loadMonitorChart(symbol);
                 
                 // 初始化预期PnL显示
                 this.updateExpectedPnL();
+                
+                // 初次加载订单列表
+                this.loadMonitorOrdersList(symbol, 'working');
             }
         } catch (e) {
             console.error('openMonitorModal failed:', e);
             this.showAlert('danger', `打开监控失败: ${e.message || e}`);
+        }
+    }
+
+    async syncMonitorModalData(symbol) {
+        try {
+            // 重新获取持仓数据
+            const portfolioResult = await this.apiCall('/positions');
+            const positions = portfolioResult.positions || [];
+            const position = positions.find(p => p.symbol === symbol);
+            
+            // 更新持仓信息（无论是否有持仓）
+            const positionQtyEl = document.getElementById('monitorPositionQty');
+            const avgCostEl = document.getElementById('monitorAvgCost');
+            const currentPriceEl = document.getElementById('monitorCurrentPrice');
+            const pnlEl = document.getElementById('monitorPnL');
+            
+            if (position) {
+                // 有持仓时更新持仓信息
+                if (positionQtyEl) positionQtyEl.textContent = position.position || '0';
+                if (avgCostEl) avgCostEl.textContent = `$${parseFloat(position.avgCost || 0).toFixed(2)}`;
+                if (currentPriceEl) currentPriceEl.textContent = `$${parseFloat(position.marketPrice || 0).toFixed(2)}`;
+                
+                // 更新PnL
+                const pnl = parseFloat(position.unrealizedPNL || 0);
+                if (pnlEl) {
+                    pnlEl.textContent = `$${pnl.toFixed(2)}`;
+                    pnlEl.className = pnl >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
+                }
+                
+                // 更新监控上下文（保持现有对象引用，只更新属性）
+                if (!this.currentMonitor) {
+                    this.currentMonitor = {};
+                }
+                this.currentMonitor.symbol = symbol;
+                this.currentMonitor.positionQty = parseFloat(position.position || 0);
+                this.currentMonitor.avgCost = parseFloat(position.avgCost || 0);
+                this.currentMonitor.currentPrice = parseFloat(position.marketPrice || 0);
+                
+                // 保留现有的止损止盈设置，不清空
+                // const riskRuleSwitch = document.getElementById('monitorRiskRuleSwitch');
+                // const stopLossInput = document.getElementById('monitorStopLoss');
+                // const takeProfitInput = document.getElementById('monitorTakeProfit');
+                
+                // if (riskRuleSwitch) {
+                //     riskRuleSwitch.checked = false;
+                //     riskRuleSwitch.dispatchEvent(new Event('change'));
+                // }
+                
+                // if (stopLossInput) stopLossInput.value = '';
+                // if (takeProfitInput) takeProfitInput.value = '';
+                
+                // 重新计算推荐的SL/TP价格
+                await this.updateRiskPrices();
+                
+                // 更新预期PnL显示
+                this.updateExpectedPnL();
+            } else {
+                // 平仓后没有持仓时，清零显示
+                if (positionQtyEl) positionQtyEl.textContent = '0';
+                if (avgCostEl) avgCostEl.textContent = '$0.00';
+                if (pnlEl) {
+                    pnlEl.textContent = '$0.00';
+                    pnlEl.className = 'fw-bold text-muted';
+                }
+                
+                // 更新监控上下文
+                if (!this.currentMonitor) {
+                    this.currentMonitor = {};
+                }
+                this.currentMonitor.symbol = symbol;
+                this.currentMonitor.positionQty = 0;
+                this.currentMonitor.avgCost = 0;
+                
+                // 保留现有的止损止盈设置，不清空
+                // const riskRuleSwitch = document.getElementById('monitorRiskRuleSwitch');
+                // const stopLossInput = document.getElementById('monitorStopLoss');
+                // const takeProfitInput = document.getElementById('monitorTakeProfit');
+                
+                // if (riskRuleSwitch) {
+                //     riskRuleSwitch.checked = false;
+                //     riskRuleSwitch.dispatchEvent(new Event('change'));
+                // }
+                
+                // if (stopLossInput) stopLossInput.value = '';
+                // if (takeProfitInput) takeProfitInput.value = '';
+                
+                // 隐藏激活的风险规则显示
+                this.hideActiveRiskRule();
+            }
+            
+            // 刷新订单列表
+            const checkedRadio = document.querySelector('input[name="orderStatusFilter"]:checked');
+            const currentStatus = checkedRadio ? checkedRadio.value : 'working';
+            await this.loadMonitorOrdersList(symbol, currentStatus);
+            
+        } catch (error) {
+            console.error('同步监控弹窗数据失败:', error);
+        }
+    }
+
+    async loadMonitorOrdersList(symbol, status = 'working') {
+        try {
+            const ordersList = document.getElementById('monitorOrdersList');
+            if (!ordersList) return;
+            
+            // 显示加载状态
+            ordersList.innerHTML = '<div class="text-center text-muted py-2"><small>加载中...</small></div>';
+            
+            // 获取订单数据
+            const result = await this.apiCall('/orders');
+            let orders = result.orders || [];
+            // 仅保留当天创建的订单
+            orders = orders.filter(order => this.isSameDay(order.submit_time || order.created_at));
+            
+            // 过滤当前资产的订单
+            const filteredOrders = orders.filter(order => {
+                const matchSymbol = order.symbol === symbol;
+                
+                // 市价单应该总是显示在filled中，因为它们会立即成交
+                if (order.order_type === 'MKT') {
+                    return matchSymbol && status === 'filled';
+                }
+                
+                // 限价单根据状态分类
+                const matchStatus = status === 'working' ? 
+                    ['PendingSubmit', 'Submitted', 'PreSubmitted', 'ApiPending'].includes(order.status) :
+                    ['Filled'].includes(order.status);
+                return matchSymbol && matchStatus;
+            });
+            
+            if (filteredOrders.length === 0) {
+                ordersList.innerHTML = '<div class="text-center text-muted py-2"><small>暂无订单</small></div>';
+                return;
+            }
+            
+            // 构建订单列表HTML
+            let html = '';
+            filteredOrders.forEach(order => {
+                const side = order.action === 'BUY' ? '买入' : '卖出';
+                const sideClass = order.action === 'BUY' ? 'text-success' : 'text-danger';
+                const quantity = Math.abs(parseFloat(order.quantity || 0));
+                // 检查订单类型和价格
+                const orderType = order.order_type || 'MKT';
+                const limitPrice = parseFloat(order.limit_price || 0);
+                const avgFillPrice = parseFloat(order.avg_fill_price || 0);
+                
+                let priceText;
+                if (orderType === 'LMT' && limitPrice > 0) {
+                    priceText = `$${limitPrice.toFixed(2)} (限价)`;
+                } else if (avgFillPrice > 0) {
+                    priceText = `$${avgFillPrice.toFixed(2)} (成交)`;
+                } else {
+                    priceText = '市价';
+                }
+                
+                // 判断是否需要显示同步按钮（限价单且状态为Submitted）
+                const needSyncButton = orderType === 'LMT' && order.status === 'Submitted';
+                
+                html += `
+                    <div class="border-bottom py-1">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <span class="badge ${sideClass === 'text-success' ? 'bg-success' : 'bg-danger'} me-1">${side}</span>
+                                <small class="text-muted">${quantity}</small>
+                            </div>
+                            <div class="text-end d-flex align-items-center">
+                                <small class="${sideClass} me-2">${priceText}</small>
+                                ${needSyncButton ? `<button class="btn btn-outline-primary btn-sm" onclick="app.syncLimitOrder('${order.order_id}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            ordersList.innerHTML = html;
+            
+        } catch (error) {
+            console.error('加载订单列表失败:', error);
+            const ordersList = document.getElementById('monitorOrdersList');
+            if (ordersList) {
+                ordersList.innerHTML = '<div class="text-center text-muted py-2"><small>加载失败</small></div>';
+            }
         }
     }
 
@@ -1670,9 +2015,52 @@ class TradingApp {
                 const stopLossPrice = stopLossInput?.value ? parseFloat(stopLossInput.value) : null;
                 const takeProfitPrice = takeProfitInput?.value ? parseFloat(takeProfitInput.value) : null;
 
-                // Get current price and average cost from monitor context
-                const currentPrice = this.currentMonitor?.currentPrice || 0;
+                // Get current price from chart data (latest price) and average cost from monitor context
+                const latestChartPrice = prices.length > 0 ? prices[prices.length - 1] : 0;
+                const currentPrice = latestChartPrice || this.currentMonitor?.currentPrice || 0;
                 const avgCost = this.currentMonitor?.avgCost || 0;
+                
+                // Update monitor context with latest chart price
+                if (this.currentMonitor && latestChartPrice > 0) {
+                    this.currentMonitor.currentPrice = latestChartPrice;
+                    // Update the display element as well
+                    const currentPriceEl = document.getElementById('monitorCurrentPrice');
+                    if (currentPriceEl) {
+                        currentPriceEl.textContent = `$${latestChartPrice.toFixed(2)}`;
+                    }
+                }
+
+                // Calculate and display asset change (daily change)
+                if (validData.length > 0) {
+                    const todayOpenPrice = validData[0].open; // First bar's open price
+                    const currentClosePrice = latestChartPrice;
+                    
+                    // Store today's open price in currentMonitor for real-time updates
+                    if (this.currentMonitor) {
+                        this.currentMonitor.todayOpenPrice = todayOpenPrice;
+                    }
+                    
+                    if (todayOpenPrice && currentClosePrice) {
+                        const assetChange = currentClosePrice - todayOpenPrice;
+                        const assetChangePercent = (assetChange / todayOpenPrice) * 100;
+                        
+                        // Update asset change display
+                        const assetChangeEl = document.getElementById('monitorAssetChange');
+                        const assetChangePercentEl = document.getElementById('monitorAssetChangePercent');
+                        
+                        if (assetChangeEl) {
+                            const changeText = assetChange >= 0 ? `+$${assetChange.toFixed(2)}` : `-$${Math.abs(assetChange).toFixed(2)}`;
+                            assetChangeEl.textContent = changeText;
+                            assetChangeEl.className = assetChange >= 0 ? 'text-success' : 'text-danger';
+                        }
+                        
+                        if (assetChangePercentEl) {
+                            const percentText = assetChangePercent >= 0 ? `+${assetChangePercent.toFixed(2)}%` : `${assetChangePercent.toFixed(2)}%`;
+                            assetChangePercentEl.textContent = percentText;
+                            assetChangePercentEl.className = assetChangePercent >= 0 ? 'text-success' : 'text-danger';
+                        }
+                    }
+                }
 
                 // 获取标的最小价格单位（根据symbol类型确定）
                 const getMinPriceStep = (symbol) => {
@@ -1793,84 +2181,7 @@ class TradingApp {
                     };
                 }
                 
-                // Add price range line (Low-Current-High)
-                if (response.data && response.data.length > 0) {
-                    const allPrices = response.data.map(item => {
-                        if (chartType === 'candlestick') {
-                            return [item.low, item.high, item.close];
-                        } else {
-                            return item.close || item.price;
-                        }
-                    }).flat().filter(p => p != null);
-                    
-                    if (allPrices.length > 0) {
-                        const minPrice = Math.min(...allPrices);
-                        const maxPrice = Math.max(...allPrices);
-                        const priceRange = maxPrice - minPrice;
-                        
-                        if (priceRange > 0 && currentPrice > 0) {
-                            // 计算当前价格在范围中的位置比例
-                            const currentRatio = (currentPrice - minPrice) / priceRange;
-                            
-                            // 添加价格范围线段 - 最低价水平线
-                            annotations.minPriceLine = {
-                                type: 'line',
-                                yMin: minPrice,
-                                yMax: minPrice,
-                                borderColor: 'rgba(255, 99, 132, 0.6)',
-                                borderWidth: 2,
-                                borderDash: [5, 5],
-                                label: {
-                                    content: `Low: $${minPrice.toFixed(2)}`,
-                                    enabled: true,
-                                    position: 'start',
-                                    backgroundColor: 'rgba(255, 99, 132, 0.8)',
-                                    color: 'white',
-                                    padding: 4
-                                }
-                            };
-                            
-                            // 添加最高价水平线
-                            annotations.maxPriceLine = {
-                                type: 'line',
-                                yMin: maxPrice,
-                                yMax: maxPrice,
-                                borderColor: 'rgba(40, 167, 69, 0.6)',
-                                borderWidth: 2,
-                                borderDash: [5, 5],
-                                label: {
-                                    content: `High: $${maxPrice.toFixed(2)}`,
-                                    enabled: true,
-                                    position: 'end',
-                                    backgroundColor: 'rgba(40, 167, 69, 0.8)',
-                                    color: 'white',
-                                    padding: 4
-                                }
-                            };
-                            
-                            // 添加当前价格在范围中的位置标记 - 已移除黄色点
-                            // annotations.pricePosition = {
-                            //     type: 'point',
-                            //     xValue: labels[labels.length - 1], // 最新时间点
-                            //     yValue: currentPrice,
-                            //     backgroundColor: 'rgb(255, 206, 84)',
-                            //     borderColor: 'rgb(255, 165, 0)',
-                            //     borderWidth: 2,
-                            //     radius: 6,
-                            //     label: {
-                            //         content: `${(currentRatio * 100).toFixed(1)}% of range`,
-                            //         enabled: true,
-                            //         position: 'right',
-                            //         backgroundColor: 'rgba(255, 206, 84, 0.9)',
-                            //         color: 'black',
-                            //         padding: 4
-                            //     }
-                            // };
-                            
-
-                         }
-                     }
-                 }
+                // 移除了价格范围线段（最低价线和最高价线），只保留当前价格、平均成本、SL/TP价格线
 
                 // Destroy existing charts if they exist
                 if (this.monitorChart) {
@@ -1995,7 +2306,58 @@ class TradingApp {
                             intersect: chartType === 'candlestick' ? true : false,
                             mode: chartType === 'candlestick' ? 'nearest' : 'index'
                         },
-
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: `${symbol} - Real-time Price Chart`
+                            },
+                            legend: {
+                                display: chartType === 'candlestick'
+                            },
+                            annotation: {
+                                annotations: annotations
+                            },
+                            zoom: {
+                                limits: {
+                                    x: chartType === 'candlestick' ? 
+                                        {min: validData[0]?.x, max: validData[validData.length - 1]?.x} :
+                                        {min: 0, max: Math.max(10, labels.length - 1)},
+                                    y: {min: 'original', max: 'original'}
+                                },
+                                pan: {
+                                    enabled: true,
+                                    mode: 'x',
+                                    modifierKey: null,
+                                    threshold: 5,
+                                    rangeMin: chartType === 'candlestick' ? 
+                                        {x: validData[0]?.x} : {x: 0},
+                                    rangeMax: chartType === 'candlestick' ? 
+                                        {x: validData[validData.length - 1]?.x} : {x: Math.max(10, labels.length - 1)}
+                                },
+                                zoom: {
+                                    wheel: {
+                                        enabled: true,
+                                        modifierKey: null,
+                                        speed: chartType === 'candlestick' ? 0.05 : 0.1
+                                    },
+                                    pinch: {
+                                        enabled: true
+                                    },
+                                    mode: 'x',
+                                    limits: chartType === 'candlestick' ? {
+                                        x: {
+                                            min: Math.max(10, displayRange.maxIndex - displayRange.minIndex + 1) * (validData[1]?.x - validData[0]?.x || 60000),
+                                            max: validData[validData.length - 1]?.x - validData[0]?.x
+                                        }
+                                    } : {
+                                        x: {
+                                            min: Math.max(5, Math.floor(labels.length * 0.05)),
+                                            max: Math.max(10, labels.length)
+                                        }
+                                    }
+                                }
+                            }
+                        },
                         scales: {
                             x: {
                                 display: true,
@@ -2056,61 +2418,6 @@ class TradingApp {
                                     min: Math.min(...response.data.map(item => parseFloat(item.low)).filter(p => p > 0)) * 0.998,
                                     max: Math.max(...response.data.map(item => parseFloat(item.high)).filter(p => p > 0)) * 1.002
                                 } : {})
-                            }
-                        },
-                        // 添加缩放和平移插件配置
-                        plugins: {
-                            title: {
-                                display: true,
-                                text: `${symbol} - Real-time Price Chart`
-                            },
-                            legend: {
-                                display: chartType === 'candlestick'
-                            },
-                            annotation: {
-                                annotations: annotations
-                            },
-                            zoom: {
-                                limits: {
-                                    x: chartType === 'candlestick' ? 
-                                        {min: validData[0]?.x, max: validData[validData.length - 1]?.x} :
-                                        {min: 0, max: Math.max(10, labels.length - 1)},
-                                    y: {min: 'original', max: 'original'}
-                                },
-                                pan: {
-                                    enabled: true,
-                                    mode: 'x',
-                                    modifierKey: null,
-                                    threshold: 5,
-                                    rangeMin: chartType === 'candlestick' ? 
-                                        {x: validData[0]?.x} : {x: 0},
-                                    rangeMax: chartType === 'candlestick' ? 
-                                        {x: validData[validData.length - 1]?.x} : {x: Math.max(10, labels.length - 1)}
-                                },
-                                zoom: {
-                                    wheel: {
-                                        enabled: true,
-                                        modifierKey: null,
-                                        speed: chartType === 'candlestick' ? 0.05 : 0.1
-                                    },
-                                    pinch: {
-                                        enabled: true
-                                    },
-                                    mode: 'x',
-                                    // 根据图表类型设置不同的缩放限制
-                                    limits: chartType === 'candlestick' ? {
-                                        x: {
-                                            // 蜡烛图使用计算的最佳显示数据量作为最小值
-                                            min: Math.max(10, displayRange.maxIndex - displayRange.minIndex + 1) * (validData[1]?.x - validData[0]?.x || 60000),
-                                            max: validData[validData.length - 1]?.x - validData[0]?.x // 全部数据的时间跨度
-                                        }
-                                    } : {
-                                        x: {
-                                            min: Math.max(5, Math.floor(labels.length * 0.05)),
-                                            max: Math.max(10, labels.length)
-                                        }
-                                    }
-                                }
                             }
                         },
                         // 移除padding以解决数据点显示不完整问题
@@ -2555,6 +2862,10 @@ class TradingApp {
                 
                      }, 100);
 
+            // 渲染OHLC价格分布
+            const currentPrice = this.currentMonitor?.currentPrice || 0;
+            this.renderOhlcPriceStrip(response.data, currentPrice);
+
         } catch (error) {
             console.error('Failed to load monitor chart:', error);
             const chartContainer = document.getElementById('monitorChartContainer');
@@ -2564,6 +2875,96 @@ class TradingApp {
             const volumeContainer = document.getElementById('monitorVolumeContainer');
             if (volumeContainer) {
                 volumeContainer.innerHTML = `<div class="alert alert-danger">Failed to load volume chart: ${error.message}</div>`;
+            }
+        }
+    }
+
+    renderOhlcPriceStrip(data, currentPrice) {
+        try {
+            const container = document.getElementById('monitorOhlcStrip');
+            if (!container || !data || data.length === 0) return;
+
+            // 计算当日的OHLC数据
+            let low = Infinity, high = -Infinity, open = null, close = currentPrice;
+            
+            for (const item of data) {
+                if (item.low !== undefined && item.low < low) low = item.low;
+                if (item.high !== undefined && item.high > high) high = item.high;
+                if (open === null && item.open !== undefined) open = item.open;
+            }
+            
+            // 如果没有足够的数据，清空容器
+            if (low === Infinity || high === -Infinity || open === null) {
+                container.innerHTML = '<div class="text-muted small">暂无数据</div>';
+                return;
+            }
+            
+            // 确保当前价格在范围内
+            if (currentPrice < low) low = currentPrice;
+            if (currentPrice > high) high = currentPrice;
+            
+            const range = high - low;
+            if (range === 0) {
+                container.innerHTML = '<div class="text-muted small">价格无变化</div>';
+                return;
+            }
+            
+            // 计算各价格点的相对位置（百分比）
+            const lowPos = 0;
+            const openPos = ((open - low) / range) * 100;
+            const closePos = ((close - low) / range) * 100;
+            const highPos = 100;
+            
+            // 确定开盘价和当前价之间的颜色
+            const isRising = close >= open;
+            const segmentColor = isRising ? '#28a745' : '#dc3545'; // 绿色上涨，红色下跌
+            
+            // 创建SVG可视化
+            const svgHeight = 14;
+            const svgWidth = container.offsetWidth || 200;
+            
+            const svg = `
+                <svg width="${svgWidth}" height="${svgHeight}" style="display: block;">
+                    <!-- 背景线段 -->
+                    <line x1="0" y1="${svgHeight/2}" x2="${svgWidth}" y2="${svgHeight/2}" 
+                          stroke="#dee2e6" stroke-width="2"/>
+                    
+                    <!-- 开盘价到当前价的彩色线段 -->
+                    <line x1="${(openPos/100) * svgWidth}" y1="${svgHeight/2}" 
+                          x2="${(closePos/100) * svgWidth}" y2="${svgHeight/2}" 
+                          stroke="${segmentColor}" stroke-width="3"/>
+                    
+                    <!-- 最低价点 -->
+                    <circle cx="${(lowPos/100) * svgWidth}" cy="${svgHeight/2}" r="3" 
+                            fill="#6c757d" stroke="white" stroke-width="1"/>
+                    
+                    <!-- 开盘价点 -->
+                    <circle cx="${(openPos/100) * svgWidth}" cy="${svgHeight/2}" r="3" 
+                            fill="#007bff" stroke="white" stroke-width="1"/>
+                    
+                    <!-- 当前价点 -->
+                    <circle cx="${(closePos/100) * svgWidth}" cy="${svgHeight/2}" r="3" 
+                            fill="${segmentColor}" stroke="white" stroke-width="1"/>
+                    
+                    <!-- 最高价点 -->
+                    <circle cx="${(highPos/100) * svgWidth}" cy="${svgHeight/2}" r="3" 
+                            fill="#6c757d" stroke="white" stroke-width="1"/>
+                </svg>
+                <div class="d-flex justify-content-between mt-1" style="font-size: 10px; color: #6c757d;">
+                    <span>L: $${low.toFixed(2)}</span>
+                    <span>O: $${open.toFixed(2)}</span>
+                    <span style="color: ${segmentColor};">C: $${close.toFixed(2)}</span>
+                    <span>H: $${high.toFixed(2)}</span>
+                </div>
+            `;
+            
+            container.innerHTML = svg;
+            
+        } catch (error) {
+            console.error('Failed to render OHLC price strip:', error);
+            const container = document.getElementById('monitorOhlcStrip');
+            if (container) {
+                container.innerHTML = '<div class="text-muted small">渲染失败</div>';
             }
         }
     }
@@ -2643,6 +3044,9 @@ class TradingApp {
 
             const qty = Number(this.currentMonitor.positionQty || 0);
             const avgCost = Number(this.currentMonitor.avgCost || 0);
+            
+            // 更新当前价格到监控上下文
+            this.currentMonitor.currentPrice = price;
 
             const curEl = document.getElementById('monitorCurrentPrice');
             if (curEl) curEl.textContent = `$${this.formatNumber(price)}`;
@@ -2667,21 +3071,96 @@ class TradingApp {
                 pnlPctEl.classList.toggle('text-danger', pnl < 0);
             }
 
+            // Update asset change (daily change) in real-time
+            if (this.currentMonitor.todayOpenPrice && price) {
+                const assetChange = price - this.currentMonitor.todayOpenPrice;
+                const assetChangePercent = (assetChange / this.currentMonitor.todayOpenPrice) * 100;
+                
+                const assetChangeEl = document.getElementById('monitorAssetChange');
+                const assetChangePercentEl = document.getElementById('monitorAssetChangePercent');
+                
+                if (assetChangeEl) {
+                    const changeText = assetChange >= 0 ? `+$${assetChange.toFixed(2)}` : `-$${Math.abs(assetChange).toFixed(2)}`;
+                    assetChangeEl.textContent = changeText;
+                    assetChangeEl.className = assetChange >= 0 ? 'text-success' : 'text-danger';
+                }
+                
+                if (assetChangePercentEl) {
+                    const percentText = assetChangePercent >= 0 ? `+${assetChangePercent.toFixed(2)}%` : `${assetChangePercent.toFixed(2)}%`;
+                    assetChangePercentEl.textContent = percentText;
+                    assetChangePercentEl.className = assetChangePercent >= 0 ? 'text-success' : 'text-danger';
+                }
+            }
+
             if (this.monitorChart && this.monitorChart.data && this.monitorChart.data.datasets && this.monitorChart.data.datasets.length > 0) {
                 const labels = this.monitorChart.data.labels || [];
                 const dataset = this.monitorChart.data.datasets[0];
-                const nowLabel = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-                labels.push(nowLabel);
-                dataset.data.push(price);
+                
+                // 获取当前图表的interval设置
+                const intervalSelect = document.getElementById('monitorInterval');
+                const interval = intervalSelect ? intervalSelect.value : '1min';
+                
+                // 根据interval计算正确的时间点
+                const now = new Date();
+                let timeLabel;
+                let shouldUpdateLast = false;
+                
+                switch(interval) {
+                    case '1min':
+                        // 对于1分钟间隔，向下取整到分钟
+                        now.setSeconds(0, 0);
+                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                        break;
+                    case '5min':
+                        // 对于5分钟间隔，向下取整到5分钟边界
+                        const minutes5 = Math.floor(now.getMinutes() / 5) * 5;
+                        now.setMinutes(minutes5, 0, 0);
+                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                        break;
+                    case '15min':
+                        // 对于15分钟间隔，向下取整到15分钟边界
+                        const minutes15 = Math.floor(now.getMinutes() / 15) * 15;
+                        now.setMinutes(minutes15, 0, 0);
+                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                        break;
+                    case '1hour':
+                        // 对于1小时间隔，向下取整到小时
+                        now.setMinutes(0, 0, 0);
+                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                        break;
+                    default:
+                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+                }
+                
+                // 检查最后一个数据点是否是同一时间点
+                if (labels.length > 0 && labels[labels.length - 1] === timeLabel) {
+                    // 更新最后一个数据点的价格
+                    dataset.data[dataset.data.length - 1] = price;
+                    shouldUpdateLast = true;
+                    console.log(`[实时更新] 更新最后一个数据点: ${timeLabel}, 价格: ${price}`);
+                } else {
+                    // 添加新的数据点
+                    labels.push(timeLabel);
+                    dataset.data.push(price);
+                    shouldUpdateLast = false;
+                    console.log(`[实时更新] 添加新数据点: ${timeLabel}, 价格: ${price}`);
+                }
                 
                 // 同时更新Volume图表
                 if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.datasets && this.monitorVolumeChart.data.datasets.length > 0) {
                     const volumeLabels = this.monitorVolumeChart.data.labels || [];
                     const volumeDataset = this.monitorVolumeChart.data.datasets[0];
-                    volumeLabels.push(nowLabel);
                     // 使用实时数据中的volume，如果没有则使用默认值
                     const volume = data.volume || data.vol || Math.floor(Math.random() * 1000000); // 临时使用随机值作为示例
-                    volumeDataset.data.push(volume);
+                    
+                    if (shouldUpdateLast && volumeLabels.length > 0) {
+                        // 更新最后一个数据点的成交量
+                        volumeDataset.data[volumeDataset.data.length - 1] = volume;
+                    } else {
+                        // 添加新的数据点
+                        volumeLabels.push(timeLabel);
+                        volumeDataset.data.push(volume);
+                    }
                 }
                 
                 const MAX_POINTS = 300;
@@ -2702,6 +3181,9 @@ class TradingApp {
                     this.monitorVolumeChart.update('none');
                 }
             }
+            
+            // 更新预期PnL显示
+            this.updateExpectedPnL();
         } catch (e) {
             console.warn('updateMonitorRealtime failed:', e);
         }
@@ -2782,6 +3264,46 @@ class TradingApp {
             }
         } catch (err) {
             console.error('updateExpectedPnL failed:', err);
+        }
+    }
+
+    showActiveRiskRule(rule) {
+        try {
+            const activeRiskRuleDisplay = document.getElementById('activeRiskRuleDisplay');
+            const activeStopLossPrice = document.getElementById('activeStopLossPrice');
+            const activeTakeProfitPrice = document.getElementById('activeTakeProfitPrice');
+            
+            if (activeRiskRuleDisplay && activeStopLossPrice && activeTakeProfitPrice) {
+                // 显示止损价格
+                if (rule.stop_loss_price) {
+                    activeStopLossPrice.textContent = `$${this.formatNumber(rule.stop_loss_price)}`;
+                } else {
+                    activeStopLossPrice.textContent = '未设置';
+                }
+                
+                // 显示止盈价格
+                if (rule.take_profit_price) {
+                    activeTakeProfitPrice.textContent = `$${this.formatNumber(rule.take_profit_price)}`;
+                } else {
+                    activeTakeProfitPrice.textContent = '未设置';
+                }
+                
+                // 显示激活风险规则区域
+                activeRiskRuleDisplay.style.display = 'block';
+            }
+        } catch (err) {
+            console.error('showActiveRiskRule failed:', err);
+        }
+    }
+
+    hideActiveRiskRule() {
+        try {
+            const activeRiskRuleDisplay = document.getElementById('activeRiskRuleDisplay');
+            if (activeRiskRuleDisplay) {
+                activeRiskRuleDisplay.style.display = 'none';
+            }
+        } catch (err) {
+            console.error('hideActiveRiskRule failed:', err);
         }
     }
 
@@ -2892,9 +3414,11 @@ class TradingApp {
             const data = await this.apiCall('/orders');
             console.log('Orders data received:', data);
             
-            // 按创建时间反序排列（最新的在前）
-            if (data.orders && Array.isArray(data.orders)) {
-                data.orders.sort((a, b) => {
+            // 仅保留当天创建的订单，并按创建时间反序排列（最新的在前）
+            let orders = (data.orders && Array.isArray(data.orders)) ? data.orders : [];
+            orders = orders.filter(order => this.isSameDay(order.submit_time || order.created_at));
+            if (orders && Array.isArray(orders)) {
+                orders.sort((a, b) => {
                     const timeA = new Date(a.submit_time || 0).getTime();
                     const timeB = new Date(b.submit_time || 0).getTime();
                     return timeB - timeA; // 反序排列
@@ -2903,7 +3427,7 @@ class TradingApp {
             
             const tbody = document.querySelector('#ordersTable tbody');
             
-            tbody.innerHTML = data.orders.map(order => {
+            tbody.innerHTML = orders.map(order => {
                 // 计算价格显示
                 let priceDisplay = '';
                 if (order.order_type === 'MKT') {
@@ -2948,7 +3472,7 @@ class TradingApp {
                 return `
                     <tr>
                         <td>${order.order_id}</td>
-                        <td>${order.symbol}</td>
+                        <td><a href="#" class="text-decoration-none" onclick="app.openMonitorModal('${order.symbol}'); return false;">${order.symbol}</a></td>
                         <td>${order.action}</td>
                         <td>${order.quantity}</td>
                         <td>${priceDisplay}</td>
@@ -2961,6 +3485,10 @@ class TradingApp {
                             ${canEdit ? 
                                 `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${order.order_id}, '${order.symbol}', '${order.action}', ${order.quantity}, '${order.order_type}', ${order.limit_price || 0})" title="Edit">
                                     <i class="fas fa-edit"></i>
+                                </button>` : ''}
+                            ${(order.order_type === 'LMT' && order.status === 'Submitted') ? 
+                                `<button class="btn btn-sm btn-outline-primary me-1" onclick="app.syncLimitOrder('${order.order_id}', null, event)" title="同步订单状态">
+                                    <i class="fas fa-sync-alt"></i>
                                 </button>` : ''}
                             ${canCancel ? 
                                 `<button class="btn btn-sm btn-danger" onclick="app.cancelOrder(${order.order_id}, this)" title="Cancel">
@@ -3127,6 +3655,69 @@ class TradingApp {
             this.showAlert('danger', 'Error occurred while cancelling orders');
         }
     }
+    
+    async syncLimitOrder(orderId, buttonElement = null, event = null) {
+        try {
+            // 显示加载状态
+            let button = buttonElement;
+            if (!button && event && event.target) {
+                button = event.target.closest('button');
+            }
+            
+            let originalHtml = '<i class="fas fa-sync-alt"></i>';
+            if (button) {
+                originalHtml = button.innerHTML;
+                button.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+                button.disabled = true;
+            }
+            
+            const result = await this.apiCall(`/orders/${orderId}/sync`, {
+                method: 'POST'
+            });
+            
+            if (result.success) {
+                this.showAlert('success', '订单状态已同步');
+                // 刷新当前监控弹窗的订单列表
+                const modal = document.getElementById('monitorModal');
+                if (modal && modal.classList.contains('show')) {
+                    const symbolElement = modal.querySelector('.modal-title');
+                    if (symbolElement) {
+                        const symbol = symbolElement.textContent.replace('监控 - ', '');
+                        const activeRadio = modal.querySelector('input[name="orderStatusFilter"]:checked');
+                        if (activeRadio) {
+                            await this.loadMonitorOrdersList(symbol, activeRadio.value);
+                        }
+                    }
+                }
+                // 同时刷新主订单列表
+                this.loadOrders();
+            } else {
+                this.showAlert('danger', result.message || '同步订单失败');
+            }
+            
+            // 恢复按钮状态
+            if (button) {
+                button.innerHTML = originalHtml;
+                button.disabled = false;
+            }
+            
+        } catch (error) {
+            console.error('同步限价单失败:', error);
+            this.showAlert('danger', '同步订单失败');
+            
+            // 恢复按钮状态
+            if (buttonElement) {
+                buttonElement.innerHTML = '<i class="fas fa-sync-alt"></i>';
+                buttonElement.disabled = false;
+            } else if (event && event.target) {
+                const button = event.target.closest('button');
+                if (button) {
+                    button.innerHTML = '<i class="fas fa-sync-alt"></i>';
+                    button.disabled = false;
+                }
+            }
+        }
+    }
 
     async removeRiskRule(symbol) {
         if (!confirm(`Are you sure you want to remove the risk rule for ${symbol}?`)) {
@@ -3251,7 +3842,10 @@ class TradingApp {
             }
 
             // Place the order
-            const response = await this.apiCall('/place_order', 'POST', orderData);
+            const response = await this.apiCall('/place_order', {
+                method: 'POST',
+                body: JSON.stringify(orderData)
+            });
             
             let message = `${ruleType} order placed successfully for ${symbol}`;
             if (slippage > 0) {
@@ -3368,6 +3962,13 @@ class TradingApp {
             
             if (query.length === 0) {
                 this.showHistoricalSymbols(dropdownId);
+                // 隐藏价格显示
+                if (inputId === 'orderSymbol') {
+                    const priceDisplay = document.getElementById('currentPriceDisplay');
+                    if (priceDisplay) {
+                        priceDisplay.style.display = 'none';
+                    }
+                }
                 return;
             }
 
@@ -3375,6 +3976,14 @@ class TradingApp {
                 searchTimeout = setTimeout(() => {
                     this.searchSymbols(query, dropdownId);
                 }, 300);
+            }
+            
+            // 如果是下单弹窗且输入长度>=2，尝试获取价格
+            if (inputId === 'orderSymbol' && query.length >= 2) {
+                clearTimeout(this.priceTimeout);
+                this.priceTimeout = setTimeout(() => {
+                    this.fetchCurrentPrice(query);
+                }, 1000); // 1秒后获取价格
             }
         });
 
@@ -3443,6 +4052,11 @@ class TradingApp {
                 document.getElementById(inputId).value = symbol;
                 dropdown.classList.remove('show');
                 this.addToHistoricalSymbols(symbol);
+                
+                // 如果是下单弹窗的symbol选择，获取当前价格
+                if (inputId === 'orderSymbol') {
+                    this.fetchCurrentPrice(symbol);
+                }
             });
         });
     }
@@ -3490,6 +4104,11 @@ class TradingApp {
                     document.getElementById(inputId).value = symbol;
                     dropdown.classList.remove('show');
                     this.addToHistoricalSymbols(symbol);
+                    
+                    // 如果是下单弹窗的symbol选择，获取当前价格
+                    if (inputId === 'orderSymbol') {
+                        this.fetchCurrentPrice(symbol);
+                    }
                 });
             });
             
@@ -3510,10 +4129,19 @@ class TradingApp {
         document.getElementById('orderSymbol').value = symbol;
         document.getElementById('orderAction').value = action;
         document.getElementById('orderQuantity').value = quantity;
-        document.getElementById('orderType').value = orderType;
+        // 正确转换订单类型到HTML选项值
+        let normalizedType;
+        if (orderType === 'LMT') {
+            normalizedType = 'LIMIT';
+        } else if (orderType === 'MKT') {
+            normalizedType = 'MARKET';
+        } else {
+            normalizedType = orderType; // 保持原值
+        }
+        document.getElementById('orderType').value = normalizedType;
         
         const priceInput = document.getElementById('orderPrice');
-        if (orderType === 'LMT' && limitPrice) {
+        if ((normalizedType === 'LIMIT') && limitPrice) {
             priceInput.value = limitPrice;
             priceInput.disabled = false;
         } else {
@@ -3521,23 +4149,28 @@ class TradingApp {
             priceInput.disabled = true;
         }
         
+        // 获取当前价格
+        this.fetchCurrentPrice(symbol);
+        
         // 显示下单模态框
         const modal = new bootstrap.Modal(document.getElementById('orderModal'));
         modal.show();
         
-        // 先取消原订单
-        this.cancelOrder(orderId);
+        // 存储原订单ID，用于后续处理
+        this.editingOrderId = orderId;
         
-        this.showAlert('info', `正在编辑订单 ${orderId}，原订单已取消，请重新提交`);
+        this.showAlert('info', `正在编辑订单 ${orderId}，请修改后重新提交`);
     }
     async loadStrategies() {
         try {
             const data = await this.apiCall('/strategies');
             if (data.success) {
                 this.displayStrategies(data.strategies);
+                this.strategiesLoaded = true;
             }
         } catch (error) {
             console.error('Failed to load strategies:', error);
+            this.strategiesLoaded = true; // Mark as loaded even on error to avoid repeated calls
         }
     }
 
@@ -4084,7 +4717,10 @@ class TradingApp {
             }
 
             // Place the order
-            const response = await this.apiCall('/place_order', 'POST', orderData);
+            const response = await this.apiCall('/place_order', {
+                method: 'POST',
+                body: JSON.stringify(orderData)
+            });
             
             let message = `${ruleType} order placed successfully for ${symbol}`;
             if (slippage > 0) {
@@ -4134,6 +4770,17 @@ class TradingApp {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2
         });
+    }
+
+    // 判断传入日期是否为“今天”（按本地时区）
+    isSameDay(dateInput) {
+        if (!dateInput) return false;
+        const d = new Date(dateInput);
+        if (isNaN(d.getTime())) return false;
+        const now = new Date();
+        return d.getFullYear() === now.getFullYear() &&
+               d.getMonth() === now.getMonth() &&
+               d.getDate() === now.getDate();
     }
 
     showAlert(type, message) {
@@ -4265,6 +4912,11 @@ class TradingApp {
                 document.getElementById(inputId).value = symbol;
                 dropdown.classList.remove('show');
                 this.addToHistoricalSymbols(symbol);
+                
+                // 如果是下单弹窗的symbol选择，获取当前价格
+                if (inputId === 'orderSymbol') {
+                    this.fetchCurrentPrice(symbol);
+                }
             });
         });
     }
@@ -4312,6 +4964,11 @@ class TradingApp {
                     document.getElementById(inputId).value = symbol;
                     dropdown.classList.remove('show');
                     this.addToHistoricalSymbols(symbol);
+                    
+                    // 如果是下单弹窗的symbol选择，获取当前价格
+                    if (inputId === 'orderSymbol') {
+                        this.fetchCurrentPrice(symbol);
+                    }
                 });
             });
             
@@ -4341,21 +4998,76 @@ class TradingApp {
         localStorage.setItem('historicalSymbols', JSON.stringify(historical));
     }
 
+    async fetchCurrentPrice(symbol) {
+        const priceDisplay = document.getElementById('currentPriceDisplay');
+        const priceValue = document.getElementById('currentPriceValue');
+        
+        if (!priceDisplay || !priceValue) return;
+        
+        try {
+            // 显示加载状态
+            priceDisplay.style.display = 'block';
+            priceValue.textContent = '加载中...';
+            priceValue.className = 'fw-bold text-muted';
+            
+            // 获取最新的1分钟数据来获取当前价格
+            const response = await this.apiCall('/historical_data', {
+                method: 'POST',
+                body: JSON.stringify({
+                    symbol: symbol,
+                    duration: '1 D',
+                    bar_size: '1 min',
+                    exchange: 'SMART'
+                })
+            });
+            
+            if (response.success && response.data && response.data.length > 0) {
+                // 获取最新的收盘价作为当前价格
+                const latestData = response.data[response.data.length - 1];
+                const currentPrice = latestData.close || latestData.price;
+                
+                if (currentPrice && currentPrice > 0) {
+                    priceValue.textContent = `$${this.formatNumber(currentPrice)}`;
+                    priceValue.className = 'fw-bold text-primary';
+                } else {
+                    priceValue.textContent = '无数据';
+                    priceValue.className = 'fw-bold text-muted';
+                }
+            } else {
+                priceValue.textContent = '获取失败';
+                priceValue.className = 'fw-bold text-warning';
+            }
+        } catch (error) {
+            console.error('获取当前价格失败:', error);
+            priceValue.textContent = '获取失败';
+            priceValue.className = 'fw-bold text-danger';
+        }
+    }
+
 
     // 编辑订单
     editOrder(orderId, symbol, action, quantity, orderType, limitPrice) {
         // 填充下单表单
         document.getElementById('orderSymbol').value = symbol;
         document.getElementById('orderAction').value = action;
-        document.getElementById('orderQuantity').value = quantity;
-        document.getElementById('orderType').value = orderType;
-        
-        const priceInput = document.getElementById('orderPrice');
-        if (orderType === 'LMT' && limitPrice) {
-            priceInput.value = limitPrice;
-            priceInput.disabled = false;
-        } else {
-            priceInput.value = '';
+            document.getElementById('orderQuantity').value = quantity;
+            // 正确转换订单类型到HTML选项值
+            let normalizedType;
+            if (orderType === 'LMT') {
+                normalizedType = 'LIMIT';
+            } else if (orderType === 'MKT') {
+                normalizedType = 'MARKET';
+            } else {
+                normalizedType = orderType; // 保持原值
+            }
+            document.getElementById('orderType').value = normalizedType;
+            
+            const priceInput = document.getElementById('orderPrice');
+            if ((normalizedType === 'LIMIT') && limitPrice) {
+                priceInput.value = limitPrice;
+                priceInput.disabled = false;
+            } else {
+                priceInput.value = '';
             priceInput.disabled = true;
         }
         
@@ -4363,10 +5075,10 @@ class TradingApp {
         const modal = new bootstrap.Modal(document.getElementById('orderModal'));
         modal.show();
         
-        // 先取消原订单
-        this.cancelOrder(orderId);
+        // 存储原订单ID，用于后续处理
+        this.editingOrderId = orderId;
         
-        this.showAlert('info', `正在编辑订单 ${orderId}，原订单已取消，请重新提交`);
+        this.showAlert('info', `正在编辑订单 ${orderId}，请修改后重新提交`);
     }
 
     // 取消订单
@@ -4622,6 +5334,11 @@ setInterval(() => {
         app.loadPortfolio();
         app.loadOrders();
         app.loadRiskRules();
-        app.loadStrategies();
+        
+        // Only load strategies if strategies table has content or it's the first load
+        const strategiesTable = document.querySelector('#strategiesTable tbody');
+        if (!strategiesTable || strategiesTable.children.length > 0 || !app.strategiesLoaded) {
+            app.loadStrategies();
+        }
     }
 }, 30000);

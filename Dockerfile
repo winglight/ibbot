@@ -26,7 +26,7 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 # Expose ports
-EXPOSE 8000 18080
+EXPOSE 8000
 
 # Create entrypoint script
 RUN echo '#!/bin/bash\n\
@@ -59,9 +59,6 @@ fi\n\
 if [ "$#" -eq 0 ]; then\n\
     echo "Starting IBKR Trading Bot main application..."\n\
     exec python main.py\n\
-elif [ "$1" = "mock" ]; then\n\
-    echo "Starting Mock IB Gateway..."\n\
-    exec python mock_ib_gateway.py\n\
 elif [ "$1" = "test" ]; then\n\
     echo "Running tests..."\n\
     exec pytest test/ -v\n\

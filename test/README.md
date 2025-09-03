@@ -71,15 +71,9 @@ cd test
 python -m pytest -q test_strategy.py
 ```
 
-## 运行模式说明（Mock 与 IB Gateway）
+## 运行模式说明
 
-本项目支持两种运行模式：
-- Mock服务模式：用于本地快速联调和CI环境。
-  - Mock服务默认运行在 http://localhost:18080
-  - 仅Mock服务提供的维护接口（非主应用转发）：
-    - POST http://localhost:18080/api/mock/set_price 设置某标的最新价
-    - POST http://localhost:18080/api/mock/reset 重置内部状态
-- 直连IB Gateway模式：连接真实的IBKR TWS/Gateway（建议Paper账户）
+本项目默认连接真实的 IBKR TWS/Gateway（建议 Paper 账户）。
 
 切换方式：
 - 通过环境变量控制主应用行为：
@@ -99,8 +93,7 @@ python -m pytest -q test_strategy.py
 ## 注意事项
 
 - 所有测试默认在模拟交易环境下进行
-- 如果使用Mock模式，可借助上述Mock维护接口快速构造行情与初始状态
-- 若测试失败，请检查：主应用是否已启动、环境变量配置、Mock服务或Gateway连接状态
+- 若测试失败，请检查：主应用是否已启动、环境变量配置、Gateway 连接状态
 
 ## 手工测试用例
 - 详见 docs/tests.md，涵盖下单、风险规则与策略在真实IB数据下的手工验证步骤与期望结果。

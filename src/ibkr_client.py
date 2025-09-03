@@ -13,6 +13,7 @@ import os
 import csv
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
+import math
 from .connection_manager import connection_manager, ConnectionConfig
 from .database import get_db_manager
 
@@ -25,7 +26,18 @@ class IBKRClient:
         self.price_cache = {}
         self.price_cache_timestamp = {}
         # Cache TTL seconds (used to decide when to refresh real-time data)
-        self.price_cache_ttl_seconds = 60  # 增加到60秒，减少频繁请求
+        self.price_cache_ttl_seconds = 5  # 减少到5秒，确保实时按钮能获取最新价格
+    
+    def _sanitize_float(self, value):
+        """清理无效的浮点数值，将NaN和Infinity转换为None"""
+        if value is None:
+            return None
+        try:
+            if math.isnan(value) or math.isinf(value):
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
     
     @property
     def connected(self) -> bool:
@@ -403,7 +415,7 @@ class IBKRClient:
                     ibkr_logger.debug(f"Returning cached data for {symbol}")
                     return {
                         'symbol': symbol,
-                        'last': self.price_cache[symbol],
+                        'last': self._sanitize_float(self.price_cache[symbol]),
                         'bid': 0,
                         'ask': 0,
                         'volume': 0,
@@ -467,10 +479,10 @@ class IBKRClient:
                     self.price_cache_timestamp[symbol] = datetime.now()
                     result_payload = {
                         'symbol': symbol,
-                        'last': last,
-                        'bid': bid,
-                        'ask': ask,
-                        'volume': volume,
+                        'last': self._sanitize_float(last),
+                        'bid': self._sanitize_float(bid),
+                        'ask': self._sanitize_float(ask),
+                        'volume': self._sanitize_float(volume),
                         'timestamp': datetime.now().isoformat()
                     }
                     break
@@ -482,10 +494,10 @@ class IBKRClient:
                     self.price_cache_timestamp[symbol] = datetime.now()
                     result_payload = {
                         'symbol': symbol,
-                        'last': mid,
-                        'bid': bid,
-                        'ask': ask,
-                        'volume': volume,
+                        'last': self._sanitize_float(mid),
+                        'bid': self._sanitize_float(bid),
+                        'ask': self._sanitize_float(ask),
+                        'volume': self._sanitize_float(volume),
                         'timestamp': datetime.now().isoformat()
                     }
                     break
@@ -509,7 +521,7 @@ class IBKRClient:
                 ibkr_logger.info(f"No fresh data for {symbol}, returning cached: {cached_price}")
                 return {
                     'symbol': symbol,
-                    'last': cached_price,
+                    'last': self._sanitize_float(cached_price),
                     'bid': 0,
                     'ask': 0,
                     'volume': 0,
@@ -527,7 +539,7 @@ class IBKRClient:
                 ibkr_logger.info(f"Exception occurred for {symbol}, returning cached: {cached_price}")
                 return {
                     'symbol': symbol,
-                    'last': cached_price,
+                    'last': self._sanitize_float(cached_price),
                     'bid': 0,
                     'ask': 0,
                     'volume': 0,
@@ -906,14 +918,14 @@ class IBKRClient:
             time_since_last_refresh = current_time - self._last_order_refresh_time
             if time_since_last_refresh < 1.0:
                 ibkr_logger.debug(f"Skipping order refresh, last refresh was {time_since_last_refresh:.1f}s ago")
-                # 直接使用缓存的trades，不重复请求
-                trades = ib.trades()
+                # 直接使用缓存的开放订单，不重复请求
+                trades = ib.openTrades()
             else:
                 # 刷新订单数据并更新刷新时间
                 self.refresh_orders()
                 self._last_order_refresh_time = current_time
-                # 读取最新的 trades 列表，优先使用openTrades()
-                trades = ib.openTrades() or ib.trades()
+                # 读取最新的开放订单列表
+                trades = ib.openTrades()
             
             # 处理订单数据
             orders: List[Dict[str, Any]] = []
@@ -921,14 +933,54 @@ class IBKRClient:
             changed_orders: List[tuple[str, str]] = []  # (order_id_str, new_status)
             
             for trade in trades:
+                # 检查orderId是否有效，跳过ID为0的订单
+                order_id = trade.order.orderId
+                if order_id == 0 or order_id is None:
+                    ibkr_logger.warning(
+                        f"⚠️ 跳过无效订单ID: orderId={order_id}, "
+                        f"symbol={getattr(trade.contract, 'symbol', 'Unknown')}, "
+                        f"action={trade.order.action}, quantity={trade.order.totalQuantity}. "
+                        f"无法确定对应的本地订单，跳过更新以避免错误覆盖。"
+                    )
+                    continue
+                
+                # 检查剩余数量，跳过已完成的订单（剩余数量为0）
+                remaining_qty = getattr(trade.order, 'totalQuantity', 0) - getattr(trade, 'filled', 0)
+                if remaining_qty <= 0:
+                    ibkr_logger.debug(
+                        f"跳过已完成订单: orderId={order_id}, "
+                        f"symbol={getattr(trade.contract, 'symbol', 'Unknown')}, "
+                        f"totalQty={trade.order.totalQuantity}, filled={getattr(trade, 'filled', 0)}"
+                    )
+                    continue
+                
                 # 从risk_manager的auto_orders中获取订单来源信息
                 order_source = "未知"
-                order_id_str = str(trade.order.orderId)
+                order_id_str = str(order_id)
                 
                 # 先尝试从 OrderManager 中获取订单
                 existing_order = None
                 if order_manager:
                     existing_order = order_manager.get_order(order_id_str)
+                
+                # 如果未找到现有订单，尝试基于根符号/动作/数量进行匹配，并修正主键
+                if order_manager and not existing_order:
+                    try:
+                        matched_order = order_manager.find_potential_match(
+                            symbol=getattr(trade.contract, 'localSymbol', None) or trade.contract.symbol,
+                            sec_type=getattr(trade.contract, 'secType', 'STK'),
+                            action=trade.order.action,
+                            quantity=trade.order.totalQuantity,
+                            time_window_seconds=300
+                        )
+                        if matched_order and matched_order.order_id != order_id_str:
+                            # 将内存和数据库中的旧订单ID更正为IB返回的orderId
+                            old_order_id = matched_order.order_id
+                            if order_manager.rekey_order_id(old_order_id, order_id_str):
+                                existing_order = order_manager.get_order(order_id_str)
+                                ibkr_logger.info(f"Re-keyed matched order {old_order_id} -> {order_id_str} by root-symbol match")
+                    except Exception as match_err:
+                        ibkr_logger.warning(f"Failed to match/rekey order for IB order {order_id_str}: {match_err}")
                 
                 if risk_manager and hasattr(risk_manager, 'auto_orders'):
                     if order_id_str in risk_manager.auto_orders:
@@ -1263,7 +1315,7 @@ class IBKRClient:
                     'current_price': current_price,
                     'market_value': market_value,
                     'unrealized_pnl': item.unrealizedPNL if hasattr(item, 'unrealizedPNL') else market_value - (item.position * avg_cost_adjusted),
-                    'unrealized_pnl_percent': ((market_value - (item.position * avg_cost_adjusted)) / (item.position * avg_cost_adjusted) * 100) if item.position * avg_cost_adjusted != 0 else 0,
+                    'unrealized_pnl_percent': ((market_value - (item.position * avg_cost_adjusted)) / abs(item.position * avg_cost_adjusted) * 100) if item.position * avg_cost_adjusted != 0 else 0,
                     'price_source': price_source,
                 }
                 position_list.append(position_info)

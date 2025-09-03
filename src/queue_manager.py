@@ -9,8 +9,6 @@ import json
 # 为队列管理器绑定模块日志记录器
 queue_logger = logger.bind(module="queue_manager", request_id="-")
 from pathlib import Path
-import os
-import httpx
 
 @dataclass
 class QueueTask:
@@ -250,7 +248,7 @@ class QueueManager:
         
         payload = task.payload
         
-        # 检查连接状态（允许Mock模式，无需ibkr_client）
+        # 检查连接状态（无需 ibkr_client）
         if not self.connection_manager or not self.connection_manager.is_connected():
             raise Exception("Not connected to IBKR")
         
@@ -271,16 +269,6 @@ class QueueManager:
         else:
             exchange = payload.get('exchange', 'SMART')
         
-        # 判断是否为Mock模式（根据连接配置端口与环境变量MOCK_PORT）
-        mock_port = int(os.getenv('MOCK_PORT', '18080'))
-        is_mock = False
-        try:
-            is_mock = (self.connection_manager is not None and 
-                       getattr(self.connection_manager, 'config', None) is not None and 
-                       int(self.connection_manager.config.port) == mock_port)
-        except Exception:
-            is_mock = False
-        
         # 下单
         try:
             loop = asyncio.get_running_loop()
@@ -291,61 +279,34 @@ class QueueManager:
         order_id = None
         order_type_for_record = "MKT" if order_type == "MARKET" else "LMT"
         
-        if is_mock:
-            # 通过Mock网关HTTP下单
-            if order_type == "LIMIT" and not payload.get('price'):
+        # 真实IBKR路径：使用 ibkr_client
+        if not self.ibkr_client:
+            raise Exception("IBKR client not initialized")
+        if order_type == "MARKET":
+            trade = self.ibkr_client.place_market_order(
+                symbol=payload['symbol'],
+                quantity=payload['qty'],
+                action=action,
+                exchange=exchange,
+                sec_type=sec_type
+            )
+        elif order_type == "LIMIT":
+            if not payload.get('price'):
                 raise Exception("Price required for limit order")
-            order_data = {
-                "symbol": payload['symbol'],
-                "quantity": payload['qty'],
-                "action": action,
-                "order_type": order_type,
-                "exchange": exchange,
-                "sec_type": sec_type,
-                "price": payload.get('price')
-            }
-            try:
-                host = getattr(self.connection_manager.config, 'host', os.getenv('MOCK_HOST', '127.0.0.1'))
-                base = f"http://{host}:{mock_port}/api"
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.post(f"{base}/place_order", json=order_data)
-                    if resp.status_code != 200:
-                        raise Exception(f"Mock server error: {resp.status_code} {resp.text}")
-                    data = resp.json()
-                    if not data.get("success"):
-                        raise Exception("Mock order placement failed")
-                    order_id = str(data.get("order_id"))
-            except Exception as e:
-                raise Exception(f"Mock order placement error: {e}")
+            trade = self.ibkr_client.place_limit_order(
+                symbol=payload['symbol'],
+                quantity=payload['qty'],
+                price=payload['price'],
+                action=action,
+                exchange=exchange,
+                sec_type=sec_type
+            )
         else:
-            # 真实IBKR路径：使用 ibkr_client
-            if not self.ibkr_client:
-                raise Exception("IBKR client not initialized")
-            if order_type == "MARKET":
-                trade = self.ibkr_client.place_market_order(
-                    symbol=payload['symbol'],
-                    quantity=payload['qty'],
-                    action=action,
-                    exchange=exchange,
-                    sec_type=sec_type
-                )
-            elif order_type == "LIMIT":
-                if not payload.get('price'):
-                    raise Exception("Price required for limit order")
-                trade = self.ibkr_client.place_limit_order(
-                    symbol=payload['symbol'],
-                    quantity=payload['qty'],
-                    price=payload['price'],
-                    action=action,
-                    exchange=exchange,
-                    sec_type=sec_type
-                )
-            else:
-                raise Exception("Invalid order type")
-            
-            if not trade:
-                raise Exception("Failed to place strategy order")
-            order_id = str(trade.order.orderId)
+            raise Exception("Invalid order type")
+        
+        if not trade:
+            raise Exception("Failed to place strategy order")
+        order_id = str(trade.order.orderId)
         
         if not order_id:
             raise Exception("Failed to obtain order id")

@@ -304,11 +304,6 @@ class DatabaseManager:
         database_logger.warning("load_orders_legacy() is deprecated; use load_orders()")
         return self.load_orders()
 
-    def save_auto_order(self, order: AutoOrder):
-        """[兼容] 保存自动订单，已弃用，请使用 save_order"""
-        database_logger.warning("save_auto_order() is deprecated; use save_order()")
-        return self.save_order(order)  # type: ignore[arg-type]
-
     def update_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None):
         """更新订单状态和价格（新）"""
         with sqlite3.connect(self.db_path) as conn:

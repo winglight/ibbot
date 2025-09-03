@@ -218,13 +218,6 @@ docker run -d \
   -p 8000:8000 \
   ghcr.io/<owner>/ibbot:v1.0.0
 
-# 运行内置 Mock 网关进行测试
-docker run -d \
-  --name ibbot-mock \
-  -p 18080:18080 \
-  ghcr.io/<owner>/ibbot:v1.0.0 mock
-```
-
 **生产环境运行（推荐覆盖关键安全配置）：**
 
 ```bash
@@ -270,7 +263,7 @@ docker run -d \
 
 ### 1. 快速开始
 
-使用Docker Compose一键启动整个应用栈（包含Mock IB Gateway）：
+使用Docker Compose一键启动整个应用栈：
 
 ```bash
 # 构建并启动所有服务
@@ -281,7 +274,6 @@ docker-compose ps
 
 # 查看日志
 docker-compose logs ibbot
-docker-compose logs mock-gateway
 ```
 
 访问Web界面：`http://localhost:8000`
@@ -314,18 +306,6 @@ docker run -d \
 docker logs -f ibbot-main
 ```
 
-#### 运行Mock IB Gateway
-
-```bash
-# 运行Mock网关（用于测试）
-docker run -d \
-  --name ibbot-mock \
-  -p 18080:18080 \
-  ibbot:latest mock
-
-# 验证Mock网关
-curl http://localhost:18080/api/connection_status
-```
 
 #### 运行测试
 
@@ -352,12 +332,6 @@ IBKR_HOST=127.0.0.1       # IB Gateway主机
 IBKR_PORT=4002            # IB Gateway端口
 IBKR_CLIENT_ID=1          # 客户端ID
 IBKR_PAPER_TRADING=True   # 模拟交易模式
-```
-
-#### Mock模式配置
-```bash
-MOCK_HOST=mock-gateway    # Mock网关主机
-MOCK_PORT=18080           # Mock网关端口
 ```
 
 #### 认证配置
@@ -434,8 +408,6 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
       - ./strategy:/app/strategy
-    depends_on:
-      - mock-gateway
     networks:
       - ibbot-network
     restart: unless-stopped
@@ -445,22 +417,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
-  mock-gateway:
-    image: ghcr.io/<owner>/ibbot:v1.0.0
-    container_name: ibbot-mock
-    command: ["mock"]
-    ports:
-      - "18080:18080"
-    networks:
-      - ibbot-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:18080/api/connection_status"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
 networks:
   ibbot-network:
@@ -484,11 +440,11 @@ services:
       - WEB_PORT=8000
 
       # IBKR 实盘/纸交易连接（视环境修改）
-      - IBKR_HOST=host.docker.internal
+      - IBKR_HOST=ib-gateway
       - IBKR_PORT=4002
 
       # 认证与安全（务必覆盖默认值）
-      - ADMIN_USERNAME=admin
+      - ADMIN_USERNAME=${ADMIN_USERNAME}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
       - JWT_ALGORITHM=HS256
@@ -501,11 +457,15 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./logs:/app/logs
-      - ./data:/app/data
-      - ./strategy:/app/strategy
+      - ../logs:/app/logs
+      - ../data:/app/data
+      - ../strategy:/app/strategy
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     networks:
       - ibbot-network
+    depends_on:
+      - ib-gateway
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
@@ -513,6 +473,21 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ibbot-cloudflared
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}
+    # Token mode only
+    command: ["tunnel", "--no-autoupdate", "run"]
+    depends_on:
+      - ibbot
+    networks:
+      - ibbot-network
 
 networks:
   ibbot-network:

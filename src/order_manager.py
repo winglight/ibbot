@@ -1,5 +1,4 @@
-"""
-订单管理器 - 统一管理所有订单的创建、状态更新、取消和修改
+"""订单管理器 - 统一管理所有订单的创建、状态更新、取消和修改
 将原有的 auto_orders 表重构为 orders 表，支持完整的订单生命周期管理
 """
 
@@ -9,6 +8,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 from enum import Enum
 from loguru import logger
+import re
 # Module-specific logger for order_manager
 order_logger = logger.bind(module="order_manager", request_id="-")
 
@@ -91,6 +91,13 @@ class OrderManager:
         
         # 初始化完成日志
         order_logger.info(f"OrderManager initialized with {len(self.orders)} orders")
+
+    def set_dependencies(self, websocket_manager, telegram_notifier, risk_manager=None):
+        """设置依赖注入"""
+        self.websocket_manager = websocket_manager
+        self.telegram_notifier = telegram_notifier
+        self.risk_manager = risk_manager
+        order_logger.info("OrderManager dependencies set")
 
     def _initialize_database(self):
         """初始化数据库表结构"""
@@ -236,6 +243,32 @@ class OrderManager:
                     notes: Optional[str] = None) -> Order:
         """创建新订单"""
         try:
+            # 检查订单是否已存在，避免覆盖非手工订单
+            if order_id in self.orders:
+                existing_order = self.orders[order_id]
+                # 如果现有订单不是手工订单，且新订单是手工订单，则不应覆盖
+                if (existing_order.order_source != OrderSource.MANUAL.value and 
+                    order_source == OrderSource.MANUAL.value):
+                    order_logger.warning(
+                        f"⚠️ 拒绝覆盖非手工订单 {order_id}: 现有来源={existing_order.order_source}, "
+                        f"尝试覆盖为={order_source}. 保持现有订单不变。"
+                    )
+                    return existing_order
+                # 如果现有订单是自动订单（tp/sl等），且新订单也是自动订单，保留原有order_source
+                elif (existing_order.order_source in ["tp", "sl", "auto", "strategy"] and 
+                      order_source == OrderSource.MANUAL.value):
+                    order_logger.warning(
+                        f"⚠️ 保护自动订单 {order_id}: 保持原有来源={existing_order.order_source}, "
+                        f"拒绝覆盖为={order_source}"
+                    )
+                    # 只更新状态和价格，保持原有order_source
+                    existing_order.status = OrderStatus.SUBMITTED.value
+                    if price is not None:
+                        existing_order.price = price
+                    existing_order.updated_at = datetime.now()
+                    self._update_order_in_database(existing_order)
+                    return existing_order
+            
             # 创建订单对象
             order = Order(
                 order_id=order_id,
@@ -325,11 +358,134 @@ class OrderManager:
             # 记录日志
             order_logger.info(f"📊 订单状态更新: {order_id} | {old_status} → {status} | 成交价: {fill_price or 'N/A'}")
             
+            # 如果订单状态变为Filled，发送通知
+            if status == OrderStatus.FILLED.value and old_status != OrderStatus.FILLED.value:
+                self._send_filled_notifications(order)
+            
             return True
             
         except Exception as e:
             order_logger.error(f"Error updating order {order_id} status: {e}")
             return False
+
+    def _send_filled_notifications(self, order: Order):
+        """发送订单成交通知（浏览器通知和Telegram消息）"""
+        try:
+            # 构建通知消息
+            message = {
+                "type": "order_filled",
+                "order_id": order.order_id,
+                "symbol": order.symbol,
+                "action": order.action,
+                "quantity": order.quantity,
+                "fill_price": order.fill_price,
+                "order_type": order.order_type,
+                "executed_at": order.executed_at.isoformat() if order.executed_at else None,
+                "message": f"订单已成交: {order.symbol} {order.action} {order.quantity}股 @ {order.fill_price or 'N/A'}"
+            }
+            
+            # 发送浏览器通知
+            if hasattr(self, 'websocket_manager') and self.websocket_manager:
+                try:
+                    import asyncio
+                    # 在事件循环中发送WebSocket消息
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(self.websocket_manager.broadcast(message))
+                    else:
+                        asyncio.run(self.websocket_manager.broadcast(message))
+                    order_logger.info(f"🌐 已发送浏览器通知: 订单 {order.order_id} 成交")
+                except Exception as e:
+                    order_logger.error(f"发送浏览器通知失败: {e}")
+            
+            # 发送Telegram消息
+            if hasattr(self, 'telegram_notifier') and self.telegram_notifier:
+                try:
+                    self.telegram_notifier.send_order_alert(order)
+                    order_logger.info(f"📱 已发送Telegram通知: 订单 {order.order_id} 成交")
+                except Exception as e:
+                    order_logger.error(f"发送Telegram通知失败: {e}")
+            
+            # 检查并停用已平仓资产的风险规则
+            self._check_and_deactivate_risk_rules(order.symbol)
+                    
+        except Exception as e:
+            order_logger.error(f"发送订单成交通知失败: {e}")
+    
+    def _check_and_deactivate_risk_rules(self, symbol: str):
+        """检查指定资产的持仓状态，如果已平仓则停用相关的风险规则"""
+        try:
+            if not hasattr(self, 'risk_manager') or not self.risk_manager:
+                return
+            
+            # 获取当前持仓信息
+            from .ibkr_client import IBKRClient
+            ibkr_client = IBKRClient()
+            positions = ibkr_client.get_positions()
+            
+            # 查找指定资产的持仓
+            position_qty = 0
+            for position in positions:
+                if position.get('symbol') == symbol:
+                    position_qty = int(position.get('position', 0))
+                    break
+            
+            # 如果持仓为0，检查是否有激活的风险规则需要停用
+            if position_qty == 0:
+                if symbol in self.risk_manager.risk_rules:
+                    rule = self.risk_manager.risk_rules[symbol]
+                    if rule.enabled:
+                        # 停用风险规则
+                        rule.enabled = False
+                        
+                        # 更新数据库中的风险规则状态
+                        from .database import DatabaseRiskRule
+                        from datetime import datetime
+                        db_rule = DatabaseRiskRule(
+                            symbol=rule.symbol,
+                            stop_loss_price=rule.stop_loss_price,
+                            take_profit_price=rule.take_profit_price,
+                            max_loss_percent=rule.max_loss_percent,
+                            enabled=rule.enabled,
+                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        )
+                        self.risk_manager.db_manager.save_risk_rule(db_rule)
+                        
+                        order_logger.info(f"🔒 已停用风险规则: {symbol} (持仓已平仓)")
+                        
+                        # 发送通知
+                        if hasattr(self, 'telegram_notifier') and self.telegram_notifier:
+                            try:
+                                message = f"🔒 风险规则已自动停用\n资产: {symbol}\n原因: 持仓已平仓"
+                                self.telegram_notifier.send_message(message)
+                            except Exception as e:
+                                order_logger.error(f"发送风险规则停用通知失败: {e}")
+                        
+                        # 发送浏览器通知
+                        if hasattr(self, 'websocket_manager') and self.websocket_manager:
+                            try:
+                                notification = {
+                                    "type": "risk_rule_deactivated",
+                                    "symbol": symbol,
+                                    "message": f"风险规则已自动停用: {symbol} (持仓已平仓)"
+                                }
+                                import asyncio
+                                loop = asyncio.get_event_loop()
+                                if loop.is_running():
+                                    asyncio.create_task(self.websocket_manager.broadcast(notification))
+                                else:
+                                    asyncio.run(self.websocket_manager.broadcast(notification))
+                            except Exception as e:
+                                order_logger.error(f"发送风险规则停用浏览器通知失败: {e}")
+                    else:
+                        order_logger.debug(f"风险规则已经是停用状态: {symbol}")
+                else:
+                    order_logger.debug(f"未找到风险规则: {symbol}")
+            else:
+                order_logger.debug(f"资产 {symbol} 仍有持仓 ({position_qty})，保持风险规则激活状态")
+                
+        except Exception as e:
+            order_logger.error(f"检查和停用风险规则失败 ({symbol}): {e}")
 
     def cancel_order(self, order_id: str, reason: Optional[str] = None) -> bool:
         """取消订单"""
@@ -450,6 +606,7 @@ class OrderManager:
         """获取特定策略的所有订单"""
         return [order for order in self.orders.values() if order.strategy_name == strategy_name]
 
+    # 其余方法保持不变...
     def _save_order_to_database(self, order: Order):
         """保存订单到数据库"""
         try:
@@ -472,10 +629,8 @@ class OrderManager:
                     order.sec_type, order.notes, order.commission, order.is_deleted
                 ))
                 conn.commit()
-                
         except Exception as e:
             order_logger.error(f"Error saving order {order.order_id} to database: {e}")
-            raise
 
     def _update_order_in_database(self, order: Order):
         """更新数据库中的订单"""
@@ -484,223 +639,107 @@ class OrderManager:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE orders SET
-                        symbol = ?, action = ?, quantity = ?, order_type = ?, price = ?,
-                        status = ?, updated_at = ?, executed_at = ?, fill_price = ?,
-                        order_source = ?, strategy_name = ?, rule_id = ?, parent_order_id = ?,
-                        exchange = ?, sec_type = ?, notes = ?, commission = ?, is_deleted = ?
-                    WHERE order_id = ?
+                        symbol=?, action=?, quantity=?, order_type=?, price=?,
+                        status=?, updated_at=?, executed_at=?, fill_price=?,
+                        order_source=?, strategy_name=?, rule_id=?, parent_order_id=?,
+                        exchange=?, sec_type=?, notes=?, commission=?, is_deleted=?
+                    WHERE order_id=?
                 """, (
-                    order.symbol, order.action, order.quantity, order.order_type, order.price,
-                    order.status, order.updated_at.isoformat(),
+                    order.symbol, order.action, order.quantity, order.order_type,
+                    order.price, order.status, order.updated_at.isoformat(),
                     order.executed_at.isoformat() if order.executed_at else None,
                     order.fill_price, order.order_source, order.strategy_name,
                     order.rule_id, order.parent_order_id, order.exchange,
-                    order.sec_type, order.notes, order.commission, order.is_deleted, order.order_id
+                    order.sec_type, order.notes, order.commission, order.is_deleted,
+                    order.order_id
                 ))
                 conn.commit()
-                
         except Exception as e:
             order_logger.error(f"Error updating order {order.order_id} in database: {e}")
-            raise
-
-    def get_order_statistics(self) -> Dict[str, Any]:
-        """获取订单统计信息"""
-        total_orders = len(self.orders)
+    
+    def find_potential_match(self, symbol, sec_type, action, quantity, time_window_seconds=300):
+        """根据合约符号、证券类型、操作和数量在指定时间窗口内查找潜在匹配的订单
         
-        status_counts = {}
-        source_counts = {}
-        symbol_counts = {}
-        
-        for order in self.orders.values():
-            # 状态统计
-            status_counts[order.status] = status_counts.get(order.status, 0) + 1
+        Args:
+            symbol: 合约符号
+            sec_type: 证券类型
+            action: 操作（BUY/SELL）
+            quantity: 数量
+            time_window_seconds: 时间窗口（秒），默认300秒
             
-            # 来源统计
-            source_counts[order.order_source] = source_counts.get(order.order_source, 0) + 1
-            
-            # 标的统计
-            symbol_counts[order.symbol] = symbol_counts.get(order.symbol, 0) + 1
-        
-        return {
-            "total_orders": total_orders,
-            "status_distribution": status_counts,
-            "source_distribution": source_counts,
-            "symbol_distribution": symbol_counts,
-            "active_orders": len(self.get_active_orders())
-        }
-
-    def cleanup_old_orders(self, days: int = 30):
-        """清理超过指定天数的已完成订单（软删除）"""
+        Returns:
+            匹配的订单对象，如果没有找到则返回None
+        """
         try:
-            cutoff_date = datetime.now() - timedelta(days=days)
+            current_time = datetime.now()
+            time_threshold = current_time - timedelta(seconds=time_window_seconds)
             
-            orders_to_mark = []
-            # 标记内存中的旧订单并记录
-            for order_id, order in list(self.orders.items()):
-                if (
-                    order.status in [OrderStatus.FILLED.value, OrderStatus.CANCELLED.value, OrderStatus.REJECTED.value]
-                    and order.updated_at < cutoff_date
-                ):
-                    order.is_deleted = 1
-                    order.updated_at = datetime.now()
-                    orders_to_mark.append(order_id)
-                    # 从内存活动字典移除
-                    del self.orders[order_id]
-                    # 记录进已删除集合以防止重新同步
-                    self.deleted_order_ids.add(order_id)
+            # 在内存中查找匹配的订单
+            for order in self.orders.values():
+                if (order.symbol == symbol and 
+                    order.sec_type == sec_type and 
+                    order.action == action and 
+                    abs(order.quantity - quantity) < 1e-6 and  # 浮点数比较
+                    order.created_at >= time_threshold and
+                    order.status in [OrderStatus.SUBMITTED, OrderStatus.PENDING_SUBMIT]):
+                    
+                    order_logger.info(f"找到潜在匹配订单: {order.order_id}, symbol={symbol}, action={action}, quantity={quantity}")
+                    return order
             
-            # 批量更新数据库为软删除
-            if orders_to_mark:
-                with sqlite3.connect(self.db_manager.db_path) as conn:
-                    cursor = conn.cursor()
-                    placeholders = ','.join(['?'] * len(orders_to_mark))
-                    now_iso = datetime.now().isoformat()
-                    cursor.execute(
-                        f"""
-                        UPDATE orders
-                        SET is_deleted = 1, updated_at = ?
-                        WHERE order_id IN ({placeholders})
-                        AND status IN ('Filled', 'Cancelled', 'Rejected')
-                        AND updated_at < ?
-                        """,
-                        [now_iso, *orders_to_mark, cutoff_date.isoformat()]
-                    )
-                    conn.commit()
-                
-                order_logger.info(f"Soft-deleted {len(orders_to_mark)} old orders")
-                
+            order_logger.debug(f"未找到匹配订单: symbol={symbol}, action={action}, quantity={quantity}, time_window={time_window_seconds}s")
+            return None
+            
         except Exception as e:
-            order_logger.error(f"Error cleaning up old orders: {e}")
-
-    def mark_order_deleted(self, order_id: str) -> bool:
-        """软删除订单，防止被IBKR重新同步创建"""
-        try:
-            now = datetime.now()
-            if order_id in self.orders:
-                order = self.orders[order_id]
-                order.is_deleted = 1
-                order.updated_at = now
-                self._update_order_in_database(order)
-                del self.orders[order_id]
-            else:
-                # 仅数据库存在的记录，直接执行 UPDATE，避免覆盖其他字段
-                with sqlite3.connect(self.db_manager.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "UPDATE orders SET is_deleted = 1, updated_at = ? WHERE order_id = ?",
-                        (now.isoformat(), order_id)
-                    )
-                    conn.commit()
+            order_logger.error(f"查找潜在匹配订单时出错: {e}")
+            return None
+    
+    def rekey_order_id(self, old_order_id, new_order_id):
+        """更新订单ID，同时更新内存和数据库
+        
+        Args:
+            old_order_id: 旧的订单ID
+            new_order_id: 新的订单ID
             
-            # 记录到已删除集合，防止 IBKR 重新同步
-            self.deleted_order_ids.add(order_id)
-            order_logger.info(f"🗑️ 订单软删除: {order_id}")
-            return True
-        except Exception as e:
-            order_logger.error(f"Error soft-deleting order {order_id}: {e}")
-            return False
-
-    def was_order_deleted(self, order_id: str) -> bool:
-        """查询订单是否曾被标记为删除（避免IBKR重新创建）"""
-        return order_id in self.deleted_order_ids
-
-    def check_and_create_auto_risk_rule(self, order_id: str, fill_price: float, ibkr_client=None, risk_manager=None) -> bool:
-        """检查订单是否需要自动创建风险规则（针对新资产的市价单和限价单）"""
+        Returns:
+            bool: 是否成功更新
+        """
         try:
-            if order_id not in self.orders:
-                order_logger.warning(f"Order {order_id} not found for auto risk rule creation")
+            if old_order_id not in self.orders:
+                order_logger.warning(f"订单ID {old_order_id} 不存在，无法更新为 {new_order_id}")
                 return False
             
-            order = self.orders[order_id]
-            
-            # 只处理手动下单
-            if order.order_source != OrderSource.MANUAL.value:
+            if new_order_id in self.orders:
+                order_logger.warning(f"新订单ID {new_order_id} 已存在，无法更新")
                 return False
             
-            # 检查是否为新资产（portfolio中不包含的资产）
-            if ibkr_client and hasattr(ibkr_client, 'get_portfolio'):
-                try:
-                    portfolio = ibkr_client.get_portfolio()
-                    # 检查该资产是否已在portfolio中
-                    symbol_in_portfolio = any(pos.get('symbol') == order.symbol for pos in portfolio)
-                    
-                    if symbol_in_portfolio:
-                        order_logger.debug(f"Symbol {order.symbol} already in portfolio, skipping auto risk rule creation")
-                        return False
-                except Exception as e:
-                    order_logger.warning(f"Failed to get portfolio for auto risk rule check: {e}")
-                    return False
+            # 获取订单对象
+            order = self.orders[old_order_id]
             
-            stop_loss_price = None
-            take_profit_price = None
-            rule_source = "default"
+            # 更新内存中的订单ID
+            del self.orders[old_order_id]
+            order.order_id = new_order_id
+            self.orders[new_order_id] = order
             
-            # 检查是否有预设的风险规则（限价单）
-            if order.notes and "pending_risk_rule:" in order.notes:
-                try:
-                    # 解析预设的风险规则
-                    risk_part = order.notes.split("pending_risk_rule:")[1].split(";")[0].strip()
-                    for item in risk_part.split(","):
-                        if item.startswith("SL="):
-                            stop_loss_price = float(item.replace("SL=", ""))
-                        elif item.startswith("TP="):
-                            take_profit_price = float(item.replace("TP=", ""))
-                    rule_source = "preset"
-                except Exception as parse_err:
-                    order_logger.warning(f"Failed to parse preset risk rule for order {order_id}: {parse_err}")
-            
-            # 如果没有预设风险规则，使用默认值（仅对市价单）
-            if not stop_loss_price and not take_profit_price and order.order_type == "MKT":
-                # 基于成交价格计算默认的止损止盈价格
-                # 默认止损：-2%，止盈：+4%
-                stop_loss_percent = 0.02
-                take_profit_percent = 0.04
-                
-                if order.action == "BUY":
-                    stop_loss_price = fill_price * (1 - stop_loss_percent)
-                    take_profit_price = fill_price * (1 + take_profit_percent)
-                else:  # SELL
-                    stop_loss_price = fill_price * (1 + stop_loss_percent)
-                    take_profit_price = fill_price * (1 - take_profit_percent)
-                
-                rule_source = "default"
-            
-            # 如果有风险规则需要创建
-            if (stop_loss_price or take_profit_price) and risk_manager and hasattr(risk_manager, 'add_risk_rule'):
-                try:
-                    # 创建风险规则
-                    success = risk_manager.add_risk_rule(
-                        symbol=order.symbol,
-                        stop_loss_price=stop_loss_price,
-                        take_profit_price=take_profit_price,
-                        max_loss_percent=None
+            # 更新数据库中的订单ID
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute(
+                        "UPDATE orders SET order_id = ? WHERE order_id = ?",
+                        (new_order_id, old_order_id)
                     )
+                    conn.commit()
                     
-                    if success:
-                        risk_info = []
-                        if stop_loss_price:
-                            risk_info.append(f"SL={stop_loss_price:.2f}")
-                        if take_profit_price:
-                            risk_info.append(f"TP={take_profit_price:.2f}")
-                        
-                        order_logger.info(f"🛡️ 自动创建{rule_source}风险规则: {order.symbol} | {','.join(risk_info)} | 基于成交价: {fill_price:.2f}")
-                        
-                        # 更新订单备注
-                        order.notes = (order.notes or "") + f" | 自动创建{rule_source}风险规则: {','.join(risk_info)}"
-                        order.updated_at = datetime.now()
-                        self._update_order_in_database(order)
-                        
-                        return True
-                    else:
-                        order_logger.warning(f"Failed to create auto risk rule for {order.symbol}")
-                        return False
-                        
-                except Exception as e:
-                    order_logger.error(f"Error creating auto risk rule for {order.symbol}: {e}")
-                    return False
-            
-            return False
-            
+                order_logger.info(f"成功更新订单ID: {old_order_id} -> {new_order_id}")
+                return True
+                
+            except Exception as db_error:
+                # 如果数据库更新失败，回滚内存中的更改
+                del self.orders[new_order_id]
+                order.order_id = old_order_id
+                self.orders[old_order_id] = order
+                order_logger.error(f"数据库更新订单ID失败，已回滚: {db_error}")
+                return False
+                
         except Exception as e:
-            order_logger.error(f"Error in check_and_create_auto_risk_rule for order {order_id}: {e}")
+            order_logger.error(f"更新订单ID时出错: {e}")
             return False

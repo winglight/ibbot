@@ -49,7 +49,7 @@ services:
 
   # IB Gateway (gnzsnz)
   ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:latest
+    image: ghcr.io/gnzsnz/ib-gateway:10.39.1h
     container_name: ib-gateway
     restart: always
     env_file:
@@ -87,8 +87,8 @@ services:
       - SSH_RESTART=${SSH_RESTART:-}
       - SSH_VNC_PORT=${SSH_VNC_PORT:-}
     ports:
-      - "4001:4001"
-      - "4002:4002"
+      - "4001:4003"
+      - "4002:4004"
       - "5900:5900"
     volumes:
       - ../data/ibgateway:/config:rw

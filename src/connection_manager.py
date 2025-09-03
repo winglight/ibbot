@@ -336,14 +336,6 @@ class ConnectionManager:
 
     def is_connected(self) -> bool:
         """检查连接状态"""
-        # 支持Mock模式：当端口为MOCK_PORT时，返回基于self.connected的状态
-        try:
-            mock_port = int(os.getenv('MOCK_PORT', '18080'))
-            if getattr(self.config, 'port', None) == mock_port:
-                return bool(self.connected)
-        except Exception:
-            pass
-
         if not self.ib:
             self.connected = False
             return False
@@ -355,6 +347,13 @@ class ConnectionManager:
         except:
             self.connected = False
             return False
+    
+    def get_last_connect_error(self) -> Optional[str]:
+        """获取最近一次连接错误原因，便于对外展示更具体的失败信息"""
+        try:
+            return self._last_connect_error
+        except Exception:
+            return None
     
     def get_ib_instance(self) -> Optional[IB]:
         """获取IB实例"""

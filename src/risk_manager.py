@@ -261,6 +261,18 @@ class RiskManager:
             misfire_grace_time=60,
             max_instances=1
         )
+        
+        # 添加市价单自动同步任务（每1秒）
+        self.scheduler.add_job(
+            self._auto_sync_market_orders,
+            'interval',
+            seconds=1,
+            id='market_order_sync',
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=5,
+            max_instances=1
+        )
 
     def stop(self):
         """停止风险管理器"""
@@ -589,8 +601,17 @@ class RiskManager:
                     risk_logger.info(f"Take profit rule disabled due to exception for {symbol}")
             
             # If price has reached take profit, execute market order
-            if current_price >= rule.take_profit_price:
-                risk_logger.warning(f"🎯 Take profit triggered for {symbol}: ${current_price:.2f} >= ${rule.take_profit_price:.2f}")
+            # 修复：区分多头和空头持仓的止盈触发条件
+            take_profit_triggered = False
+            if position_qty > 0:  # 多头持仓：当前价格 >= 止盈价格
+                take_profit_triggered = current_price >= rule.take_profit_price
+                trigger_msg = f"${current_price:.2f} >= ${rule.take_profit_price:.2f}"
+            else:  # 空头持仓：当前价格 <= 止盈价格
+                take_profit_triggered = current_price <= rule.take_profit_price
+                trigger_msg = f"${current_price:.2f} <= ${rule.take_profit_price:.2f}"
+            
+            if take_profit_triggered:
+                risk_logger.warning(f"🎯 Take profit triggered for {symbol}: {trigger_msg}")
                 
                 # Check position direction before placing order
                 action = 'SELL' if position_qty > 0 else 'BUY'
@@ -706,8 +727,17 @@ class RiskManager:
                     risk_logger.info(f"Stop loss rule disabled due to exception for {symbol}")
             
             # If price has reached stop loss, execute market order
-            if current_price <= rule.stop_loss_price:
-                risk_logger.warning(f"🚨 Stop loss triggered for {symbol}: ${current_price:.2f} <= ${rule.stop_loss_price:.2f}")
+            # 修复：区分多头和空头持仓的止损触发条件
+            stop_loss_triggered = False
+            if position_qty > 0:  # 多头持仓：当前价格 <= 止损价格
+                stop_loss_triggered = current_price <= rule.stop_loss_price
+                trigger_msg = f"${current_price:.2f} <= ${rule.stop_loss_price:.2f}"
+            else:  # 空头持仓：当前价格 >= 止损价格
+                stop_loss_triggered = current_price >= rule.stop_loss_price
+                trigger_msg = f"${current_price:.2f} >= ${rule.stop_loss_price:.2f}"
+            
+            if stop_loss_triggered:
+                risk_logger.warning(f"🚨 Stop loss triggered for {symbol}: {trigger_msg}")
                 
                 # Check position direction before placing order
                 action = 'SELL' if position_qty > 0 else 'BUY'
@@ -733,6 +763,68 @@ class RiskManager:
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.info(f"Stop loss order queued for {symbol} at ${current_price:.2f}, rule disabled")
                 return  # 触发市价单后立即返回，不再检查止盈
+    
+    def _auto_sync_market_orders(self):
+        """自动同步市价单状态和成交价格（仅检查特定订单，避免全量同步）"""
+        try:
+            if not self.ibkr_client or not self.ibkr_client.is_connected():
+                return
+            
+            # 获取订单管理器
+            order_manager = getattr(self, 'order_manager', None)
+            if not order_manager:
+                return
+            
+            # 获取所有状态为Submitted的市价单（包括手动、平仓、反向下单）
+            submitted_market_orders = []
+            for order_id, order in order_manager.orders.items():
+                if (order.order_type == "MKT" and 
+                    order.status == "Submitted" and 
+                    order.order_source in ["manual", "close_position", "reverse_position"]):
+                    submitted_market_orders.append(order)
+            
+            if not submitted_market_orders:
+                return
+            
+            # 检查特定订单状态（避免全量同步）
+            try:
+                synced_count = 0
+                for order in submitted_market_orders:
+                    # 检查订单是否在IBKR的trades中
+                    order_id_int = int(order.order_id)
+                    trade = None
+                    
+                    # 查找对应的trade
+                    for t in self.ibkr_client.ib.trades():
+                        if t.order.orderId == order_id_int:
+                            trade = t
+                            break
+                    
+                    if trade:
+                        current_status = trade.orderStatus.status
+                        if current_status != "Submitted":
+                            # 更新订单状态
+                            fill_price = None
+                            if current_status == "Filled" and trade.orderStatus.avgFillPrice:
+                                fill_price = float(trade.orderStatus.avgFillPrice)
+                            
+                            order_manager.update_order_status(
+                                order.order_id,
+                                current_status,
+                                fill_price=fill_price,
+                                executed_at=datetime.now() if current_status == "Filled" else None
+                            )
+                            synced_count += 1
+                            risk_logger.debug(f"Market order {order.order_id} status updated: {current_status}")
+                
+                if synced_count > 0:
+                    risk_logger.debug(f"Auto-synced {synced_count} market orders")
+                    
+            except Exception as sync_err:
+                risk_logger.warning(f"Failed to auto-sync market orders: {sync_err}")
+                
+        except Exception as e:
+            risk_logger.error(f"Error in auto sync market orders: {e}")
     
     def _check_sufficient_funds(self, account_info: Dict, position: Dict) -> bool:
         """检查资金是否充足"""
@@ -923,7 +1015,7 @@ class RiskManager:
             )
             
             # 保存到数据库
-            self.db_manager.save_auto_order(db_order)
+            self.db_manager.save_order(db_order)
             
             # 更新内存缓存
             self.auto_orders[order.order_id] = order
@@ -1014,7 +1106,7 @@ class RiskManager:
                 # 同步到数据库：同时持久化状态、均价（若有）、执行时间
                 try:
                     executed_str = order.executed_at.isoformat() if order.executed_at else None
-                    self.db_manager.update_auto_order(order_id, status=new_status, price=order.price, executed_at=executed_str)
+                    self.db_manager.update_order(order_id, status=new_status, price=order.price, executed_at=executed_str)
                     risk_logger.info(f"Order {order_id} status persisted to DB: {new_status}, price={order.price}, executed_at={executed_str}")
                 except Exception as db_err:
                     risk_logger.warning(f"Failed to persist order {order_id} update to DB: {db_err}")

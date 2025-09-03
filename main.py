@@ -35,7 +35,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 from jose import JWTError, jwt
-import httpx
 
 # Add current directory to Python path
 sys.path.append(str(Path(__file__).parent))
@@ -55,10 +54,6 @@ from src.websocket_manager import websocket_manager  # 新增导入
 # Global variables
 load_dotenv()
 
-# Mock server configuration
-MOCK_HOST = os.getenv('MOCK_HOST', '127.0.0.1')
-MOCK_PORT = int(os.getenv('MOCK_PORT', '18080'))
-MOCK_BASE = f"http://{MOCK_HOST}:{MOCK_PORT}/api"
 # 优化：可配置的PnL广播间隔（秒），默认5秒
 PNL_BROADCAST_INTERVAL_SEC = int(os.getenv('PNL_BROADCAST_INTERVAL_SEC', '5'))
 
@@ -107,14 +102,6 @@ async def request_id_middleware(request: Request, call_next):
         module_ctx.reset(token_mod)
     response.headers["X-Request-ID"] = request_id
     return response
-
-def is_mock_mode() -> bool:
-    try:
-        # 优先使用运行时的连接配置端口来判断是否为Mock模式
-        port = int(getattr(connection_manager.config, 'port', MOCK_PORT))
-    except Exception:
-        port = MOCK_PORT
-    return port == MOCK_PORT
 
 
 def _parse_duration_to_minutes(duration: str) -> int:
@@ -224,7 +211,7 @@ async def rapidoc_html_main():
         status_code=200,
     )
 
-# 自定义 OpenAPI：为 /api/mock/* 设置独立 servers，并按“主服务/Mock 网关”分组
+# 自定义 OpenAPI：仅保留主服务分组
 
 def _ensure_tag(tags_list, name: str, description: str):
     if not any(t.get("name") == name for t in tags_list):
@@ -268,80 +255,19 @@ def custom_openapi():
     # Tag 分组
     schema.setdefault("tags", [])
     _ensure_tag(schema["tags"], "主服务", "主服务 API")
-    _ensure_tag(schema["tags"], "Mock 网关", "Mock 网关 API")
 
     # 设置全局默认安全要求（如需取消，可在具体 operation 设置 security: []）
     if not schema.get("security"):
         schema["security"] = [{"bearerAuth": []}]
 
-    # 为 /api/mock/* 设置 per-operation servers，并分配 Tag
-    # 特殊处理：trigger_strategy 属于主服务，不应指向 mock 地址
+    # 为所有 operation 添加“主服务”标签
     for path, methods in list(schema.get("paths", {}).items()):
-        is_mock = path.startswith("/api/mock/") and path != "/api/mock/trigger_strategy"
         for method, op in list(methods.items()):
             if method.lower() not in {"get", "post", "put", "delete", "patch", "options", "head"}:
                 continue
             op.setdefault("tags", [])
-            if is_mock:
-                if "Mock 网关" not in op["tags"]:
-                    op["tags"].append("Mock 网关")
-                op["servers"] = [{"url": f"http://{MOCK_HOST}:{MOCK_PORT}"}]
-                # Mock 接口默认不要求认证
-                op["security"] = []
-                # 注入更有意义的示例
-                if method.lower() == "post" and path in {"/api/mock/set_price", "/api/mock/feed_data", "/api/mock/reset"}:
-                    op.setdefault("requestBody", {}).setdefault("content", {}).setdefault("application/json", {}).setdefault("examples", {})
-                    examples = op["requestBody"]["content"]["application/json"]["examples"]
-                    if path == "/api/mock/set_price":
-                        examples.update({
-                            "mnq_set_price": {
-                                "summary": "设置 MNQ 价格",
-                                "value": {"symbol": "MNQ", "price": 18000.5}
-                            }
-                        })
-                    elif path == "/api/mock/feed_data":
-                        examples.update({
-                            "mnq_feed_1d": {
-                                "summary": "推送 MNQ 1D/5mins 数据，200ms 间隔",
-                                "value": {"symbol": "MNQ", "duration": "1 D", "bar_size": "5 mins", "delay_ms": 200}
-                            }
-                        })
-            else:
-                if "主服务" not in op["tags"]:
-                    op["tags"].append("主服务")
-                # 为 trigger_strategy 注入示例
-                if path == "/api/mock/trigger_strategy" and method.lower() == "post":
-                    op.setdefault("requestBody", {}).setdefault("content", {}).setdefault("application/json", {}).setdefault("examples", {})
-                    op["requestBody"]["content"]["application/json"]["examples"].update({
-                        "market_buy_mnq": {
-                            "summary": "Buy down and Sell open 在 MNQ 上市价买 1 手",
-                            "value": {
-                                "strategy": "Buy down and Sell open",
-                                "symbol": "MNQ",
-                                "action": "BUY",
-                                "qty": 1,
-                                "type": "MARKET",
-                                "price": None,
-                                "set_price": False,
-                                "exchange": "SMART",
-                                "sec_type": "FUT"
-                            }
-                        },
-                        "limit_buy_mnq": {
-                            "summary": "Buy the Dip Strategy 在 MNQ 上挂 17950 的限价买 1 手（先设置价格）",
-                            "value": {
-                                "strategy": "Buy the Dip Strategy",
-                                "symbol": "MNQ",
-                                "action": "BUY",
-                                "qty": 1,
-                                "type": "LIMIT",
-                                "price": 17950,
-                                "set_price": True,
-                                "exchange": "SMART",
-                                "sec_type": "FUT"
-                            }
-                        }
-                    })
+            if "主服务" not in op["tags"]:
+                op["tags"].append("主服务")
 
     app.openapi_schema = schema
     return app.openapi_schema
@@ -609,36 +535,6 @@ async def _pnl_broadcast_loop():
             if not websocket_manager.connections:
                 continue
             try:
-                if is_mock_mode():
-                    # 从模拟服务器获取数据并广播
-                    async with httpx.AsyncClient() as client:
-                        account_info = None
-                        positions = None
-                        try:
-                            resp_ai = await client.get(f"{MOCK_BASE}/account_info")
-                            if resp_ai.status_code == 200:
-                                data_ai = resp_ai.json()
-                                account_info = data_ai.get("account_info") or data_ai
-                        except Exception:
-                            account_info = None
-                        try:
-                            resp_pos = await client.get(f"{MOCK_BASE}/positions")
-                            if resp_pos.status_code == 200:
-                                data_pos = resp_pos.json()
-                                positions = data_pos.get("positions") or data_pos
-                        except Exception:
-                            positions = None
-                        if account_info is not None:
-                            await websocket_manager.broadcast({
-                                "type": "account_update",
-                                "account_info": account_info
-                            })
-                        if positions is not None:
-                            await websocket_manager.broadcast({
-                                "type": "positions_update",
-                                "positions": positions
-                            })
-                else:
                     # 仅在已连接且 ibkr_client 可用时运行
                     if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
                         continue
@@ -702,6 +598,16 @@ try:
 except Exception as _dep_err:
     logger.warning(f"QueueManager set_dependencies at startup failed: {_dep_err}")
 
+# 为 OrderManager 注入依赖
+try:
+    order_manager.set_dependencies(
+        websocket_manager=websocket_manager,
+        telegram_notifier=telegram_notifier,
+        risk_manager=risk_manager
+    )
+except Exception as _dep_err:
+    logger.warning(f"OrderManager set_dependencies at startup failed: {_dep_err}")
+
 @app.get("/api/connection_config")
 async def get_connection_config():
     """获取默认连接配置（不需要认证）"""
@@ -719,34 +625,13 @@ async def get_connection_config():
 
 @app.post("/api/connect")
 async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(get_current_user)):
-    """连接到IBKR或Mock (当端口为18080时)"""
+    """连接到IBKR"""
     global ibkr_client
-    
+
     try:
         # 更新配置
         connection_manager.update_config(config)
-        
-        # 若为mock模式，则调用mock连接端点并标记状态
-        if config.port == MOCK_PORT or is_mock_mode():
-            logger.info(f"Entering MOCK mode on {MOCK_BASE}")
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(f"{MOCK_BASE}/connect")
-                    if resp.status_code != 200:
-                        raise HTTPException(status_code=resp.status_code, detail=resp.text)
-                    data = resp.json()
-                    if not data.get("success"):
-                        raise HTTPException(status_code=500, detail="Mock server connect failed")
-            except httpx.RequestError as e:
-                logger.error(f"Mock server connect failed: {e}")
-                raise HTTPException(status_code=503, detail="Mock server unavailable")
 
-            # 标记连接状态为True，仅用于UI
-            connection_manager.connected = True
-            # 确保队列worker已启动
-            await queue_manager.start_worker()
-            return {"success": True, "message": "Connected to MOCK server"}
-        
         # 正常IBKR连接流程
         loop = asyncio.get_event_loop()
         try:
@@ -762,14 +647,14 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
         except asyncio.TimeoutError:
             logger.error("Connection operation timed out")
             raise HTTPException(status_code=408, detail="Connection operation timed out")
-        
+
         if success:
             # 建立/更新 ibkr_client 引用
             if ibkr_client is None:
                 ibkr_client_local = IBKRClient()
             else:
                 ibkr_client_local = ibkr_client
-            
+
             # 更新 risk_manager 的 ibkr_client（RiskManager 依赖 ibkr_client）
             try:
                 risk_manager.ibkr_client = ibkr_client_local
@@ -781,7 +666,7 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
                 logger.info("Risk manager ibkr_client updated after connection")
             except Exception as re_err:
                 logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
-            
+
             # 将 ibkr_client 注入到队列管理器
             try:
                 queue_manager.set_dependencies(
@@ -794,14 +679,14 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
                 )
             except Exception as dep_err:
                 logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
-            
+
             # 赋值全局 ibkr_client
             ibkr_client = ibkr_client_local
-            
+
             return {"success": True, "message": "Connected successfully"}
         else:
             raise HTTPException(status_code=400, detail="Failed to connect to IBKR")
-            
+
     except HTTPException:
         raise
     except Exception as e:
@@ -812,26 +697,15 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
 async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
     """断开IBKR连接"""
     global ibkr_client, risk_manager
-    
+
     try:
         if risk_manager:
             risk_manager.stop()
-        
-        # 若在mock模式，调用mock断开端点
-        if is_mock_mode():
-            try:
-                async with httpx.AsyncClient() as client:
-                    await client.post(f"{MOCK_BASE}/disconnect")
-            except httpx.RequestError as e:
-                logger.warning(f"Mock server disconnect call failed: {e}")
-            # 无论mock断开是否成功，都重置本地连接状态
-            connection_manager.connected = False
-            return {"success": True, "message": "Disconnected from MOCK server"}
 
         connection_manager.disconnect()
-        
+
         return {"success": True, "message": "Disconnected successfully"}
-        
+
     except Exception as e:
         logger.error(f"Disconnection error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -839,22 +713,6 @@ async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
 @app.get("/api/connection_status")
 async def get_connection_status(user: Optional[str] = Depends(get_current_user)):
     """获取连接状态"""
-    if is_mock_mode():
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{MOCK_BASE}/connection_status")
-                if response.status_code == 200:
-                    mock_data = response.json()
-                    return {
-                        "connected": mock_data.get("connected", False),
-                        "account_type": "Mock"
-                    }
-                else:
-                    return {"connected": False, "account_type": "Mock"}
-        except Exception as e:
-            logger.warning(f"Mock server connection failed: {e}")
-            return {"connected": False, "account_type": "Mock"}
-    
     return {
         "connected": connection_manager.is_connected(),
         "account_type": "Paper" if connection_manager.config.paper_trading else "Live"
@@ -864,37 +722,9 @@ async def get_connection_status(user: Optional[str] = Depends(get_current_user))
 @app.post("/api/historical_data")
 async def get_historical_data(request: HistoricalDataRequest, user: Optional[str] = Depends(get_current_user)):
     """获取历史数据"""
-    if is_mock_mode():
-        try:
-            # Convert request to dict for mock server
-            request_data = {
-                "symbol": request.symbol,
-                "duration": request.duration,
-                "bar_size": request.bar_size,
-                "exchange": request.exchange
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(f"{MOCK_BASE}/historical_data", json=request_data)
-                if response.status_code == 200:
-                    return response.json()
-                elif response.status_code == 404:
-                    raise HTTPException(status_code=404, detail="No historical data found")
-                else:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-                    
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Mock historical data error: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
     try:
         # 先查数据库缓存
         db_manager = get_db_manager()
@@ -902,7 +732,7 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
         now = datetime.now()
         minutes = _parse_duration_to_minutes(request.duration)
         start_dt = now - timedelta(minutes=minutes)
-        
+
         # 读取缓存
         cache_df = db_manager.query_historical_cache(
             request.symbol,
@@ -910,7 +740,7 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
             start_dt=start_dt.isoformat(timespec='seconds'),
             end_dt=now.isoformat(timespec='seconds')
         )
-        
+
         # 检查缓存是否满足需求
         if not db_manager.detect_missing_ranges(cache_df, start_dt.isoformat(), now.isoformat(), interval):
             # 缓存足够，直接返回
@@ -933,7 +763,7 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
         try:
             df = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, 
+                    None,
                     lambda: ibkr_client.get_historical_data(
                         symbol=request.symbol,
                         duration=request.duration,
@@ -946,7 +776,7 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
         except asyncio.TimeoutError:
             logger.error(f"Historical data request timed out for {request.symbol}")
             raise HTTPException(status_code=408, detail="Historical data request timed out")
-        
+
         if df.empty:
             # 即使IB无数据，也返回缓存（若有）
             if cache_df is not None and not cache_df.empty:
@@ -957,10 +787,10 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
                     "rows": len(cache_df)
                 }
             raise HTTPException(status_code=404, detail="No data found")
-        
+
         # 保存到数据库
         db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
-        
+
         # 可选：同时保存CSV作为备份
         filename = f"data/{request.symbol}_historical.csv"
         try:
@@ -968,113 +798,34 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
             df.to_csv(filename, index=False)
         except Exception as e:
             logger.warning(f"Failed to write CSV backup for historical data: {e}")
-        
+
         return {
             "success": True,
             "data": df.to_dict('records'),
             "filename": filename,
             "rows": len(df)
         }
-        
+
     except Exception as e:
         logger.error(f"Historical data error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/chart_data")
 async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depends(get_current_user)):
-    """获取图表数据"""
-    if is_mock_mode():
+    """获取图表数据（改进错误提示与缓存回退）"""
+    if not ibkr_client or not connection_manager.is_connected():
+        # 返回更具体的原因（如另一处已登录等）
+        reason = None
         try:
-            request_data = {
-                "symbol": request.symbol,
-                "duration": request.duration,
-                "bar_size": request.bar_size,
-                "exchange": request.exchange
-            }
-            # 透传 data_type 给 mock（若 mock 忽略也不影响）
-            if hasattr(request, 'data_type') and request.data_type:
-                request_data["data_type"] = request.data_type
-            async with httpx.AsyncClient() as client:
-                response = await client.post(f"{MOCK_BASE}/chart_data", json=request_data)
-                if response.status_code == 200:
-                    return response.json()
-                elif response.status_code == 404:
-                    raise HTTPException(status_code=404, detail="No chart data found")
-                else:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Mock chart data error: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            reason = connection_manager.get_last_connect_error()
+        except Exception:
+            reason = None
+        detail = "Not connected to IBKR" + (f": {reason}" if reason else "")
+        raise HTTPException(status_code=400, detail=detail)
 
-    if not ibkr_client or not ibkr_client.connected:
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
     try:
-        # 先查数据库缓存
-        db_manager = get_db_manager()
-        interval = db_manager._normalize_interval(request.bar_size)
-        now = datetime.now()
-        minutes = _parse_duration_to_minutes(request.duration)
-        start_dt = now - timedelta(minutes=minutes)
-
-        # 查询缓存
-        cached_df = db_manager.query_historical_cache(
-            request.symbol,
-            interval=interval,
-            start_dt=start_dt.isoformat(timespec='seconds'),
-            end_dt=now.isoformat(timespec='seconds')
-        )
-        
-        # 检查缓存是否满足需求
-        if not db_manager.detect_missing_ranges(cached_df, start_dt.isoformat(), now.isoformat(), interval):
-            # 缓存足够，根据interval构造图表数据
-            chart_data = []
-            if interval.endswith('d'):
-                # 日级数据，只使用date字段
-                for _, row in cached_df.iterrows():
-                    t = str(row['date'])
-                    chart_data.append({
-                        "time": t,
-                        "open": float(row['open']),
-                        "high": float(row['high']),
-                        "low": float(row['low']),
-                        "close": float(row['close']),
-                        "volume": int(row['volume']) if 'volume' in row else 0
-                    })
-            else:
-                # 分钟级数据，使用date+time字段
-                for _, row in cached_df.iterrows():
-                    d = str(row['date'])
-                    tm = str(row['time']) if row.get('time') is not None else '00:00:00'
-                    t = f"{d}T{tm}"
-                    chart_data.append({
-                        "time": t,
-                        "open": float(row['open']),
-                        "high": float(row['high']),
-                        "low": float(row['low']),
-                        "close": float(row['close']),
-                        "volume": int(row['volume']) if 'volume' in row else 0
-                    })
-            return {
-                "success": True,
-                "data": chart_data,
-                "symbol": request.symbol,
-                "duration": request.duration,
-                "bar_size": request.bar_size
-            }
-
-        # 缓存不完整，从IB获取数据
         # Run in executor to avoid blocking event loop
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        loop = asyncio.get_event_loop()
         try:
             df = await asyncio.wait_for(
                 loop.run_in_executor(
@@ -1086,40 +837,116 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
                         exchange=request.exchange
                     )
                 ),
-                timeout=30.0  # 30-second timeout for chart data
+                timeout=65.0  # 略大于连接管理器的60秒超时
             )
         except asyncio.TimeoutError:
-            logger.error(f"Chart data request timed out for {request.symbol}")
-            raise HTTPException(status_code=408, detail="Chart data request timed out")
-        
-        if df.empty:
-            # 如果IB无数据，尝试返回已有缓存
-            if cached_df is not None and not cached_df.empty:
+            # 检查连接状态
+            is_connected = connection_manager.is_connected()
+            error_msg = f"Chart data request timed out for {request.symbol}. IBKR connection status: {'Connected' if is_connected else 'Disconnected'}"
+            logger.error(error_msg)
+            
+            # 如果连接断开，返回408错误并提示重新连接
+            if not is_connected:
+                return JSONResponse(
+                    status_code=408,
+                    content={"detail": "IBKR connection lost. Please reconnect to IBKR Gateway/TWS and try again.", "error_type": "connection_lost"}
+                )
+            
+            # 超时：尝试数据库缓存回退
+            cache_df = None
+            try:
+                db_manager = get_db_manager()
+                cache_df = db_manager.load_historical_data(request.symbol, bar_size=request.bar_size)
+            except Exception:
+                cache_df = None
+            if cache_df is not None and not cache_df.empty:
                 chart_data = []
-                if interval.endswith('d'):
-                    for _, row in cached_df.iterrows():
-                        t = str(row['date'])
+                try:
+                    for ts, row in cache_df.iterrows():
+                        t = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
                         chart_data.append({
                             "time": t,
-                            "open": float(row['open']),
-                            "high": float(row['high']),
-                            "low": float(row['low']),
-                            "close": float(row['close']),
-                            "volume": int(row['volume']) if 'volume' in row else 0
+                            "open": float(row.get('open', 0) or 0),
+                            "high": float(row.get('high', 0) or 0),
+                            "low": float(row.get('low', 0) or 0),
+                            "close": float(row.get('close', 0) or 0),
+                            "volume": int(row.get('volume', 0) or 0)
                         })
+                except Exception:
+                    chart_data = []
+                if chart_data:
+                    return {
+                        "success": True,
+                        "data": chart_data,
+                        "symbol": request.symbol,
+                        "duration": request.duration,
+                        "bar_size": request.bar_size
+                    }
+            # 无缓存：返回 408 并附带最近连接错误原因
+            reason = None
+            try:
+                reason = connection_manager.get_last_connect_error()
+            except Exception:
+                reason = None
+            msg = "Chart data request timed out" + (f". Possible cause: {reason}" if reason else "")
+            raise HTTPException(status_code=408, detail=msg)
+
+        if df is not None and not df.empty:
+            db_manager = get_db_manager()
+            try:
+                db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
+            except Exception as e:
+                logger.warning(f"Failed to save chart data: {e}")
+
+            chart_data = []
+            for _, row in df.iterrows():
+                if hasattr(row['date'], 'isoformat'):
+                    t = row['date'].isoformat()
                 else:
-                    for _, row in cached_df.iterrows():
-                        d = str(row['date'])
-                        tm = str(row['time']) if row.get('time') is not None else '00:00:00'
-                        t = f"{d}T{tm}"
-                        chart_data.append({
-                            "time": t,
-                            "open": float(row['open']),
-                            "high": float(row['high']),
-                            "low": float(row['low']),
-                            "close": float(row['close']),
-                            "volume": int(row['volume']) if 'volume' in row else 0
-                        })
+                    if 'time' in df.columns and not pd.isna(row.get('time')):
+                        t = f"{str(row['date'])}T{str(row['time'])}"
+                    else:
+                        t = str(row['date'])
+                chart_data.append({
+                    "time": t,
+                    "open": float(row['open']),
+                    "high": float(row['high']),
+                    "low": float(row['low']),
+                    "close": float(row['close']),
+                    "volume": int(row['volume']) if 'volume' in row else 0
+                })
+                
+            return {
+                "success": True,
+                "data": chart_data,
+                "symbol": request.symbol,
+                "duration": request.duration,
+                "bar_size": request.bar_size
+            }
+
+        # df 为空：尝试数据库缓存回退
+        cache_df = None
+        try:
+            db_manager = get_db_manager()
+            cache_df = db_manager.load_historical_data(request.symbol, bar_size=request.bar_size)
+        except Exception:
+            cache_df = None
+        if cache_df is not None and not cache_df.empty:
+            chart_data = []
+            try:
+                for ts, row in cache_df.iterrows():
+                    t = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+                    chart_data.append({
+                        "time": t,
+                        "open": float(row.get('open', 0) or 0),
+                        "high": float(row.get('high', 0) or 0),
+                        "low": float(row.get('low', 0) or 0),
+                        "close": float(row.get('close', 0) or 0),
+                        "volume": int(row.get('volume', 0) or 0)
+                    })
+            except Exception:
+                chart_data = []
+            if chart_data:
                 return {
                     "success": True,
                     "data": chart_data,
@@ -1127,67 +954,31 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
                     "duration": request.duration,
                     "bar_size": request.bar_size
                 }
-            raise HTTPException(status_code=404, detail="No chart data found")
-        
-        # 保存到数据库
-        db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
-        
-        # 使用最新数据构造图表
-        chart_data = []
-        for _, row in df.iterrows():
-            # df['date'] 可能为 datetime/date 或字符串
-            if hasattr(row['date'], 'isoformat'):
-                t = row['date'].isoformat()
-            else:
-                # 分钟级可能包含 time 列
-                if 'time' in df.columns and not pd.isna(row.get('time')):
-                    t = f"{str(row['date'])}T{str(row['time'])}"
-                else:
-                    t = str(row['date'])
-            chart_data.append({
-                "time": t,
-                "open": float(row['open']),
-                "high": float(row['high']),
-                "low": float(row['low']),
-                "close": float(row['close']),
-                "volume": int(row['volume']) if 'volume' in row else 0
-            })
-        
-        return {
-            "success": True,
-            "data": chart_data,
-            "symbol": request.symbol,
-            "duration": request.duration,
-            "bar_size": request.bar_size
-        }
-        
+        # 无缓存：返回 404 并附带最近连接错误原因
+        reason = None
+        try:
+            reason = connection_manager.get_last_connect_error()
+        except Exception:
+            reason = None
+        raise HTTPException(status_code=404, detail=("No chart data found" + (f". Possible cause: {reason}" if reason else "")))
+
+    except HTTPException as http_exc:
+        # 保持原有的状态码与信息
+        raise http_exc
     except Exception as e:
         logger.error(f"Chart data error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # 500 错误附带最近连接错误原因
+        reason = None
+        try:
+            reason = connection_manager.get_last_connect_error()
+        except Exception:
+            reason = None
+        detail = (str(e) if str(e) else "Internal error") + (f" | {reason}" if reason else "")
+        raise HTTPException(status_code=500, detail=detail)
 
 @app.get("/api/realtime_data/{symbol}")
 async def get_realtime_data(symbol: str, exchange: str = "SMART", user: Optional[str] = Depends(get_current_user)):
     """获取实时数据"""
-    if is_mock_mode():
-        try:
-            params = {"symbol": symbol, "exchange": exchange}
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{MOCK_BASE}/realtime_data/{symbol}", params={"exchange": exchange})
-                if response.status_code == 200:
-                    return response.json()
-                elif response.status_code == 404:
-                    raise HTTPException(status_code=404, detail="No data available")
-                else:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Mock real-time data error: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
     if not ibkr_client or not ibkr_client.connected:
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -1255,36 +1046,6 @@ async def get_realtime_data(symbol: str, exchange: str = "SMART", user: Optional
 @app.post("/api/place_order")
 async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_current_user)):
     """下单"""
-    if is_mock_mode():
-        try:
-            # Convert OrderRequest to dict for mock server
-            order_data = {
-                "symbol": order.symbol,
-                "quantity": order.quantity,
-                "action": order.action,
-                "order_type": order.order_type,
-                "exchange": order.exchange,
-                "sec_type": order.sec_type,
-                "price": order.price
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(f"{MOCK_BASE}/place_order", json=order_data)
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    error_detail = response.text if response.text else f"Mock server error: {response.status_code}"
-                    raise HTTPException(status_code=response.status_code, detail=error_detail)
-                    
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Mock order placement error: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -1375,20 +1136,6 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
 @app.delete("/api/cancel_order/{order_id}")
 async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_user)):
     """取消订单"""
-    if is_mock_mode():
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.delete(f"{MOCK_BASE}/cancel_order/{order_id}")
-                if response.status_code == 200:
-                    return response.json()
-                elif response.status_code == 404:
-                    raise HTTPException(status_code=404, detail="Order not found")
-                else:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -1426,24 +1173,6 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
 @app.post("/api/cancel_order")
 async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_current_user)):
     """取消订单 (POST方法)"""
-    if is_mock_mode():
-        try:
-            order_id = request.get('order_id')
-            if not order_id:
-                raise HTTPException(status_code=400, detail="order_id is required")
-            async with httpx.AsyncClient() as client:
-                response = await client.post(f"{MOCK_BASE}/cancel_order", json={"order_id": int(order_id)})
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    return {"success": False, "error": response.text}
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            return {"success": False, "error": "Mock server unavailable"}
-        except Exception as e:
-            logger.error(f"Cancel order (mock) error: {e}")
-            return {"success": False, "error": str(e)}
-    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -1497,19 +1226,6 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
     symbol = request.get("symbol")
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
-    
-    if is_mock_mode():
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(f"{MOCK_BASE}/close_position", json={"symbol": symbol})
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    error_detail = response.text if response.text else f"Mock server error: {response.status_code}"
-                    raise HTTPException(status_code=response.status_code, detail=error_detail)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
     
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
@@ -1597,19 +1313,6 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
     
-    if is_mock_mode():
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(f"{MOCK_BASE}/reverse_position", json={"symbol": symbol})
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    error_detail = response.text if response.text else f"Mock server error: {response.status_code}"
-                    raise HTTPException(status_code=response.status_code, detail=error_detail)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -1630,9 +1333,41 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
         if position_qty == 0:
             raise HTTPException(status_code=400, detail=f"No position to reverse for symbol {symbol}")
         
-        # 计算反向订单参数（2倍持仓量的反向操作）
+        # 计算反向订单参数（按当前持仓量的反向操作）
         action = "SELL" if position_qty > 0 else "BUY"
-        quantity = abs(int(position_qty)) * 2
+        quantity = abs(int(position_qty))
+        
+        # 在下单前反激活对应的风险规则
+        try:
+            if 'risk_manager' in globals() and risk_manager:
+                if symbol in risk_manager.risk_rules:
+                    rule = risk_manager.risk_rules[symbol]
+                    if rule.enabled:
+                        rule.enabled = False
+                        
+                        # 更新数据库中的风险规则状态
+                        from src.database import DatabaseRiskRule
+                        from datetime import datetime
+                        db_rule = DatabaseRiskRule(
+                            symbol=rule.symbol,
+                            stop_loss_price=rule.stop_loss_price,
+                            take_profit_price=rule.take_profit_price,
+                            max_loss_percent=rule.max_loss_percent,
+                            enabled=rule.enabled,
+                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        )
+                        risk_manager.db_manager.save_risk_rule(db_rule)
+                        
+                        logger.info(f"🔒 反向下单前已停用风险规则: {symbol}")
+                        
+                        # 发送通知
+                        await websocket_manager.broadcast({
+                            "type": "risk_rule_deactivated",
+                            "symbol": symbol,
+                            "message": f"反向下单前已自动停用风险规则: {symbol}"
+                        })
+        except Exception as e:
+            logger.warning(f"反向下单前停用风险规则失败: {e}")
         
         # 执行反向市价单
         trade = ibkr_client.place_market_order(
@@ -1694,18 +1429,6 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
 @app.delete("/api/cancel_all_orders")
 async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
     """取消所有订单"""
-    if is_mock_mode():
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.delete(f"{MOCK_BASE}/cancel_all_orders")
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -1731,35 +1454,7 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
 @app.get("/api/orders")
 async def get_orders(user: Optional[str] = Depends(get_current_user)):
     """获取订单列表（从数据库读取，包含历史订单）"""
-    if is_mock_mode():
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{MOCK_BASE}/orders")
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-    
     try:
-        # 先从 IB 同步最新订单状态到本地记录（若已连接）
-        try:
-            if ibkr_client and connection_manager.is_connected():
-                # Run in executor to avoid blocking event loop with a short timeout
-                loop = asyncio.get_event_loop()
-                await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None,
-                        # 调用 ibkr_client.get_orders 刷新 IBKR 侧状态并同步到 OrderManager
-                        lambda: ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
-                    ),
-                    timeout=3.0
-                )
-        except Exception as sync_err:
-            logger.debug(f"Order sync skipped: {sync_err}")
-
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
         
@@ -1825,41 +1520,7 @@ async def get_orders(user: Optional[str] = Depends(get_current_user)):
 @app.get("/api/orders/{order_id}")
 async def get_order_detail(order_id: int, user: Optional[str] = Depends(get_current_user)):
     """获取单个订单详情"""
-    if is_mock_mode():
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{MOCK_BASE}/orders")
-                if response.status_code == 200:
-                    data = response.json()
-                    orders = data.get("orders", [])
-                    for o in orders:
-                        try:
-                            if int(o.get("order_id")) == order_id:
-                                return {"success": True, "order": o}
-                        except Exception:
-                            continue
-                    raise HTTPException(status_code=404, detail="Order not found")
-                else:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-
     try:
-        # 同步 IBKR 最新订单状态（若已连接），与列表接口保持一致
-        try:
-            if ibkr_client and connection_manager.is_connected():
-                loop = asyncio.get_event_loop()
-                await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None,
-                        lambda: ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
-                    ),
-                    timeout=3.0
-                )
-        except Exception as sync_err:
-            logger.debug(f"Order sync skipped: {sync_err}")
-
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
 
@@ -1930,22 +1591,68 @@ async def get_order_detail(order_id: int, user: Optional[str] = Depends(get_curr
         logger.error(f"Get order detail error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/orders/sync")
+async def sync_orders(user: Optional[str] = Depends(get_current_user)):
+    """手动同步订单状态和价格字段从IB"""
+    if not ibkr_client or not connection_manager.is_connected():
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    
+    try:
+        if 'order_manager' not in globals() or not order_manager:
+            raise HTTPException(status_code=500, detail="Order manager not initialized")
+        
+        # 手动同步订单状态
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
+            ),
+            timeout=10.0
+        )
+        
+        return {"success": True, "message": "Orders synced successfully"}
+        
+    except asyncio.TimeoutError:
+        logger.warning("Order sync request timed out")
+        raise HTTPException(status_code=408, detail="Order sync request timed out")
+    except Exception as e:
+        logger.error(f"Sync orders error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/orders/{order_id}/sync")
+async def sync_single_order(order_id: int, user: Optional[str] = Depends(get_current_user)):
+    """同步单个订单状态"""
+    if not ibkr_client or not connection_manager.is_connected():
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    
+    try:
+        if 'order_manager' not in globals() or not order_manager:
+            raise HTTPException(status_code=500, detail="Order manager not initialized")
+        
+        # 手动同步订单状态
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
+            ),
+            timeout=10.0
+        )
+        
+        return {"success": True, "message": f"Order {order_id} synced successfully"}
+        
+    except asyncio.TimeoutError:
+        logger.warning(f"Order {order_id} sync request timed out")
+        raise HTTPException(status_code=408, detail="Order sync request timed out")
+    except Exception as e:
+        logger.error(f"Sync order {order_id} error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Account endpoints
 @app.get("/api/account_info")
 async def get_account_info(user: Optional[str] = Depends(get_current_user)):
     """获取账户信息"""
-    if is_mock_mode():
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{MOCK_BASE}/account_info")
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -1972,18 +1679,6 @@ async def get_positions(user: Optional[str] = Depends(get_current_user), fast: b
     """获取持仓列表
     - fast: 是否启用快速模式（默认 True）。快速模式下跳过实时价格抓取，使用缓存/最近价格以提升响应速度。
     """
-    if is_mock_mode():
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{MOCK_BASE}/positions", params={"fast": fast})
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-        except httpx.RequestError as e:
-            logger.error(f"Mock server request failed: {e}")
-            raise HTTPException(status_code=503, detail="Mock server unavailable")
-    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
@@ -2332,111 +2027,6 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
         "status": "queued"
     }
 
-# 新增：Mock端点 - 手动触发策略（仅Mock模式）
-class MockTriggerRequest(BaseModel):
-    """在 Mock 模式下手动触发内部策略执行的请求体
-    
-    示例1：以 Buy down and Sell open 策略在 MNQ 上买入 1 手市价单
-    {
-      "strategy": "Buy down and Sell open",
-      "symbol": "MNQ",
-      "action": "BUY",
-      "qty": 1,
-      "type": "MARKET",
-      "price": null,
-      "set_price": false,
-      "exchange": "SMART",
-      "sec_type": "FUT"
-    }
-    
-    示例2：以 Buy the Dip Strategy 在 MNQ 上挂 17950 的限价买入 1 手，并先设置价格
-    {
-      "strategy": "Buy the Dip Strategy",
-      "symbol": "MNQ",
-      "action": "BUY",
-      "qty": 1,
-      "type": "LIMIT",
-      "price": 17950,
-      "set_price": true,
-      "exchange": "SMART",
-      "sec_type": "FUT"
-    }
-    """
-    strategy: str
-    symbol: str
-    action: str  # BUY, SELL
-    qty: int = 1
-    type: str = "MARKET"  # MARKET, LIMIT
-    price: Optional[float] = None
-    set_price: bool = False  # 若提供价格，是否先设置Mock价格
-    exchange: str = "SMART"
-    sec_type: str = "STK"
-
-@app.post("/api/mock/trigger_strategy")
-async def mock_trigger_strategy(payload: MockTriggerRequest, user: Optional[str] = Depends(get_current_user)):
-    """在 Mock 模式下手动触发内部策略执行
-    - 可选：若提供 price 且 set_price=True，先调用 Mock 网关设置最新价
-    - 然后将任务加入与外部策略一致的队列，异步处理下单
-    
-    成功返回示例：
-    {
-      "success": true,
-      "task_id": "abc123",
-      "message": "Mock trigger queued for processing",
-      "status": "queued",
-      "mock_price_set": true
-    }
-    """
-    # 仅在Mock模式下可用
-    if not is_mock_mode():
-        raise HTTPException(status_code=400, detail="This endpoint is only available in MOCK mode")
-
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-
-    # 校验策略存在且已启用
-    strategy = strategy_manager.get_strategy(payload.strategy)
-    if not strategy or not strategy.get('enabled', False):
-        raise HTTPException(status_code=400, detail="Strategy disabled or not found")
-
-    # 可选：先设置Mock价格
-    mock_price_set = False
-    if payload.set_price and payload.price is not None:
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.post(f"{MOCK_BASE}/mock/set_price", json={"symbol": payload.symbol, "price": payload.price})
-                if resp.status_code == 200:
-                    mock_price_set = True
-                else:
-                    logger.warning(f"Mock set_price failed: {resp.status_code} {resp.text}")
-        except Exception as e:
-            logger.warning(f"Mock set_price exception: {e}")
-
-    # 构建并入队任务（与 /api/strategy 一致）
-    task_payload = {
-        "strategy": payload.strategy,
-        "symbol": payload.symbol,
-        "action": payload.action,
-        "qty": payload.qty,
-        "type": payload.type,
-        "price": payload.price,
-        "exchange": payload.exchange,
-        "sec_type": payload.sec_type,
-    }
-
-    # 确保队列worker已启动
-    await queue_manager.start_worker()
-
-    task_id = queue_manager.add_task("strategy_order", task_payload)
-
-    return {
-        "success": True,
-        "task_id": task_id,
-        "message": "Mock trigger queued for processing",
-        "status": "queued",
-        "mock_price_set": mock_price_set,
-    }
-
 # Queue Management APIs
 @app.get("/api/queue/status")
 async def get_queue_status():
@@ -2645,12 +2235,11 @@ def main():
         main_logger.error("Environment check failed. Please configure .env file.")
         return
     
-    # Auto connect if enabled in .env and not in mock mode
+    # Auto connect if enabled in .env
     auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
-    if auto_connect and not is_mock_mode():
+    if auto_connect:
         main_logger.info("Auto-connect enabled, attempting to connect to IBKR...")
         try:
-            # Use the connection manager directly for synchronous connection test
             success = connection_manager.connect()
             if not success:
                 main_logger.warning("IBKR auto-connection failed. Continuing without connection...")
@@ -2686,8 +2275,6 @@ def main():
         except Exception as e:
             main_logger.warning(f"Auto-connection failed: {e}")
             main_logger.info("You can connect later through the web interface.")
-    elif auto_connect and is_mock_mode():
-        main_logger.info("Auto-connect enabled but running in mock mode - skipping real IBKR connection")
     else:
         main_logger.info("Auto-connect disabled. You can connect later through the web interface.")
     
