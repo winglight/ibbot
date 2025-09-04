@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# ibbot VPS快速启动脚本
+# 一键启动VPS开发环境
+
+set -e
+
+echo "🚀 ibbot VPS开发环境快速启动"
+echo "======================================"
+
+# 检查SSH连接
+echo "📡 检查VPS连接..."
+if ssh -o ConnectTimeout=5 vps-ibbot 'echo "VPS连接正常"' 2>/dev/null; then
+    echo "✅ VPS连接正常"
+else
+    echo "❌ VPS连接失败，请检查:"
+    echo "   1. SSH配置是否正确"
+    echo "   2. VPS是否在线"
+    echo "   3. 网络连接是否正常"
+    exit 1
+fi
+
+# 检查VPS上的服务状态
+echo "🔍 检查VPS服务状态..."
+VPS_STATUS=$(ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml ps --format "table {{.Name}}\t{{.Status}}"' 2>/dev/null || echo "服务未启动")
+
+if echo "$VPS_STATUS" | grep -q "Up"; then
+    echo "✅ VPS服务正在运行"
+    echo "$VPS_STATUS"
+else
+    echo "⚠️  VPS服务未运行，尝试启动..."
+    ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml up -d'
+    sleep 5
+    echo "✅ 服务启动完成"
+fi
+
+# 设置Docker远程上下文
+echo "🐳 配置Docker远程上下文..."
+if docker context ls | grep -q "vps-ibbot"; then
+    echo "✅ Docker上下文已存在"
+else
+    echo "创建Docker上下文..."
+    docker context create vps-ibbot --docker "host=ssh://vps-ibbot"
+fi
+
+docker context use vps-ibbot
+echo "✅ 已切换到VPS Docker上下文"
+
+# 检查本地端口占用
+echo "🔌 检查本地端口..."
+PORTS=(8000 5901 4001 4002)
+for port in "${PORTS[@]}"; do
+    if lsof -i :$port >/dev/null 2>&1; then
+        echo "⚠️  端口 $port 已被占用，尝试释放..."
+        lsof -ti :$port | xargs kill -9 2>/dev/null || true
+        sleep 1
+    fi
+done
+echo "✅ 端口检查完成"
+
+# 启动端口转发
+echo "🌉 启动SSH隧道..."
+echo "正在建立端口转发，请保持此窗口打开"
+echo ""
+echo "🎯 访问地址:"
+echo "   📱 ibbot Web界面: http://localhost:8000"
+echo "   🖥️  VNC (IB Gateway): localhost:5901"
+echo "   🔌 IBKR API: localhost:4001, localhost:4002"
+echo ""
+echo "💡 提示:"
+echo "   - 按 Ctrl+C 停止端口转发"
+echo "   - 在新终端中运行: docker context use vps-ibbot"
+echo "   - 然后可以使用: docker ps, docker logs 等命令"
+echo "======================================"
+
+# 启动autossh端口转发
+if command -v autossh &> /dev/null; then
+    exec autossh -M 0 -N \
+        -o "ServerAliveInterval 30" \
+        -o "ServerAliveCountMax 3" \
+        -L 8000:127.0.0.1:8000 \
+        -L 5901:127.0.0.1:5900 \
+        -L 4001:127.0.0.1:4001 \
+        -L 4002:127.0.0.1:4002 \
+        vps-ibbot
+else
+    echo "⚠️  autossh未安装，使用普通SSH转发"
+    echo "建议安装autossh: brew install autossh"
+    exec ssh -N \
+        -L 8000:127.0.0.1:8000 \
+        -L 5901:127.0.0.1:5900 \
+        -L 4001:127.0.0.1:4001 \
+        -L 4002:127.0.0.1:4002 \
+        vps-ibbot
+fi
