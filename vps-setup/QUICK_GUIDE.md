@@ -58,13 +58,27 @@ cat vps-setup/ssh-config >> ~/.ssh/config
 
 ## 三、日常开发使用
 
-### 🎯 一键启动开发环境
+### 🎯 方式一：一键启动VPS开发环境
 ```bash
 ./vps-setup/quick-start.sh
 ```
 
 启动后可访问：
 - **ibbot Web界面**: http://localhost:8000
+- **VNC (IB Gateway)**: localhost:5901
+
+### 🎯 方式二：本地运行连接VPS IB Gateway
+```bash
+# 1. 先启动SSH隧道
+./vps-setup/quick-start.sh
+
+# 2. 在新终端中启动本地程序
+./start-local.sh
+```
+
+启动后可访问：
+- **本地Web界面**: http://127.0.0.1:8001
+- **VPS Web界面**: http://localhost:8000
 - **VNC (IB Gateway)**: localhost:5901
 
 ### 🐳 Docker操作
