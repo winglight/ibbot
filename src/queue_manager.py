@@ -364,19 +364,9 @@ class QueueManager:
             self.risk_manager.auto_orders[order_id] = auto_order
             self.risk_manager.save_auto_order_to_db(auto_order)
         
-        # 记录策略执行
-        from src.strategy_manager import StrategyExecution
-        execution = StrategyExecution(
-            strategy_name=payload['strategy'],
-            execution_time=datetime.now(),
-            order_id=order_id,
-            symbol=payload['symbol'],
-            action=payload['action'],
-            quantity=payload['qty'],
-            price=payload.get('price'),
-            status="executed"
-        )
-        self.strategy_manager.record_execution(execution)
+        # 注意：不在此处记录策略执行，而是等订单实际成交时通过IBKR客户端的状态更新机制
+        # 使用实际成交数量来记录执行，避免下单数量与成交数量不一致导致的持仓计算错误
+        # 策略执行记录将在ibkr_client的订单状态更新中创建
         
         # 广播消息
         if self.websocket_manager:

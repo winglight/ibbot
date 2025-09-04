@@ -389,10 +389,11 @@ class OrderManager:
                 try:
                     import asyncio
                     # 在事件循环中发送WebSocket消息
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
+                    try:
+                        loop = asyncio.get_running_loop()
                         asyncio.create_task(self.websocket_manager.broadcast(message))
-                    else:
+                    except RuntimeError:
+                        # 没有运行中的事件循环，创建新的
                         asyncio.run(self.websocket_manager.broadcast(message))
                     order_logger.info(f"🌐 已发送浏览器通知: 订单 {order.order_id} 成交")
                 except Exception as e:
@@ -401,7 +402,28 @@ class OrderManager:
             # 发送Telegram消息
             if hasattr(self, 'telegram_notifier') and self.telegram_notifier:
                 try:
-                    self.telegram_notifier.send_order_alert(order)
+                    import asyncio
+                    # 修复参数传递问题
+                    try:
+                        loop = asyncio.get_running_loop()
+                        asyncio.create_task(self.telegram_notifier.send_order_alert(
+                            order_type=order.order_type,
+                            symbol=order.symbol,
+                            quantity=order.quantity,
+                            price=order.fill_price,
+                            status="Filled",
+                            order_id=order.order_id
+                        ))
+                    except RuntimeError:
+                        # 没有运行中的事件循环，创建新的
+                        asyncio.run(self.telegram_notifier.send_order_alert(
+                            order_type=order.order_type,
+                            symbol=order.symbol,
+                            quantity=order.quantity,
+                            price=order.fill_price,
+                            status="Filled",
+                            order_id=order.order_id
+                        ))
                     order_logger.info(f"📱 已发送Telegram通知: 订单 {order.order_id} 成交")
                 except Exception as e:
                     order_logger.error(f"发送Telegram通知失败: {e}")

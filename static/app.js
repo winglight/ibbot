@@ -2958,47 +2958,75 @@ class TradingApp {
     renderOhlcPriceStrip(data, currentPrice) {
         try {
             const container = document.getElementById('monitorOhlcStrip');
-            if (!container || !data || data.length === 0) return;
+            if (!container) return;
 
-            // 计算当日的OHLC数据
-            let low = Infinity, high = -Infinity, open = null, close = currentPrice;
-            
-            for (const item of data) {
-                if (item.low !== undefined && item.low < low) low = item.low;
-                if (item.high !== undefined && item.high > high) high = item.high;
-                if (open === null && item.open !== undefined) open = item.open;
+            // 规范化与过滤数据，避免出现 0 或 NaN 影响 L/C
+            const records = Array.isArray(data) ? data : [];
+            const toNum = (v) => {
+                const n = typeof v === 'string' ? parseFloat(v) : (typeof v === 'number' ? v : NaN);
+                return Number.isFinite(n) && n > 0 ? n : null;
+            };
+
+            let low = Infinity;
+            let high = -Infinity;
+            let open = null;
+
+            for (const item of records) {
+                const l = toNum(item?.low);
+                const h = toNum(item?.high);
+                const o = toNum(item?.open);
+
+                if (l !== null && l < low) low = l;
+                if (h !== null && h > high) high = h;
+                if (open === null && o !== null) open = o;
             }
-            
-            // 如果没有足够的数据，清空容器
-            if (low === Infinity || high === -Infinity || open === null) {
+
+            // 计算收盘/当前价：优先使用有效的 currentPrice；否则回退到最后一个有效 close/price；再不行回退到 open
+            const hasValidCur = Number.isFinite(currentPrice) && currentPrice > 0;
+            let close = null;
+            if (hasValidCur) {
+                close = currentPrice;
+            } else {
+                for (let i = records.length - 1; i >= 0; i--) {
+                    const c = toNum(records[i]?.close ?? records[i]?.price);
+                    if (c !== null) { close = c; break; }
+                }
+                if (close === null) close = open;
+            }
+
+            // 基本校验
+            if (!Number.isFinite(low) || !Number.isFinite(high) || open === null || close === null) {
                 container.innerHTML = '<div class="text-muted small">暂无数据</div>';
                 return;
             }
-            
-            // 确保当前价格在范围内
-            if (currentPrice < low) low = currentPrice;
-            if (currentPrice > high) high = currentPrice;
-            
+
+            // 扩展范围以包含当前价（如果有效）
+            if (hasValidCur) {
+                if (close < low) low = close;
+                if (close > high) high = close;
+            }
+
             const range = high - low;
-            if (range === 0) {
+            if (!Number.isFinite(range) || range <= 0) {
                 container.innerHTML = '<div class="text-muted small">价格无变化</div>';
                 return;
             }
-            
+
             // 计算各价格点的相对位置（百分比）
             const lowPos = 0;
             const openPos = ((open - low) / range) * 100;
             const closePos = ((close - low) / range) * 100;
             const highPos = 100;
-            
+
             // 确定开盘价和当前价之间的颜色
             const isRising = close >= open;
-            const segmentColor = isRising ? '#28a745' : '#dc3545'; // 绿色上涨，红色下跌
-            
+            const segmentColor = isRising ? '#28a745' : '#dc3545';
+
             // 创建SVG可视化
             const svgHeight = 14;
-            const svgWidth = container.offsetWidth || 200;
-            
+            const widthCandidate = container.offsetWidth || container.clientWidth;
+            const svgWidth = widthCandidate && widthCandidate > 0 ? widthCandidate : 200;
+
             const svg = `
                 <svg width="${svgWidth}" height="${svgHeight}" style="display: block;">
                     <!-- 背景线段 -->
@@ -3026,16 +3054,25 @@ class TradingApp {
                     <circle cx="${(highPos/100) * svgWidth}" cy="${svgHeight/2}" r="3" 
                             fill="#6c757d" stroke="white" stroke-width="1"/>
                 </svg>
+            `;
+
+            const fmt = (v) => Number.isFinite(v) ? v.toFixed(2) : '-';
+
+            // 生成按价格从低到高排序的标签
+            const points = [
+                { key: 'L', value: low, style: '' },
+                { key: 'O', value: open, style: '' },
+                { key: 'C', value: close, style: `color: ${segmentColor};` },
+                { key: 'H', value: high, style: '' },
+            ].sort((a, b) => a.value - b.value);
+
+            const labels = `
                 <div class="d-flex justify-content-between mt-1" style="font-size: 10px; color: #6c757d;">
-                    <span>L: $${low.toFixed(2)}</span>
-                    <span>O: $${open.toFixed(2)}</span>
-                    <span style="color: ${segmentColor};">C: $${close.toFixed(2)}</span>
-                    <span>H: $${high.toFixed(2)}</span>
+                    ${points.map(p => `<span style="${p.style}">${p.key}: $${fmt(p.value)}</span>`).join('')}
                 </div>
             `;
-            
-            container.innerHTML = svg;
-            
+
+            container.innerHTML = svg + labels;
         } catch (error) {
             console.error('Failed to render OHLC price strip:', error);
             const container = document.getElementById('monitorOhlcStrip');
@@ -3811,34 +3848,41 @@ class TradingApp {
 
     async toggleRiskRule(symbol, enabled) {
         try {
-            // If enabling but rule doesn't exist yet, try to create it from current monitor inputs
-            if (enabled && (!this.riskRules || !this.riskRules[symbol])) {
+            // 当启用规则时：优先尝试保存监控输入框中的SL/TP，再切换启用状态
+            if (enabled) {
                 const slInputEl = document.getElementById('monitorStopLoss');
                 const tpInputEl = document.getElementById('monitorTakeProfit');
                 const sl = slInputEl && slInputEl.value ? parseFloat(slInputEl.value) : null;
                 const tp = tpInputEl && tpInputEl.value ? parseFloat(tpInputEl.value) : null;
 
-                if ((!sl || sl <= 0) && (!tp || tp <= 0)) {
-                    throw new Error('未找到该品种的风险规则，请先输入止损或止盈，并点击“保存规则”后再启用。');
+                const existingRule = this.riskRules && this.riskRules[symbol] ? this.riskRules[symbol] : null;
+                const hasExistingPrice = !!(existingRule && ((existingRule.stop_loss_price && existingRule.stop_loss_price > 0) || (existingRule.take_profit_price && existingRule.take_profit_price > 0)));
+                const hasInputPrice = !!((sl && sl > 0) || (tp && tp > 0));
+
+                // 若既没有已存在的有效价格，也没有新的输入价格，则禁止启用
+                if (!hasExistingPrice && !hasInputPrice) {
+                    throw new Error('请先输入止损或止盈价，并点击“保存规则”或直接在监控框输入后再启用。');
                 }
 
-                await this.apiCall('/risk_rules', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        symbol,
-                        stop_loss_price: sl || undefined,
-                        take_profit_price: tp || undefined
-                    })
-                });
+                // 若有新的输入，则进行保存（后端POST为幂等的按symbol保存/更新）
+                if (hasInputPrice) {
+                    await this.apiCall('/risk_rules', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            symbol,
+                            stop_loss_price: sl || undefined,
+                            take_profit_price: tp || undefined
+                        })
+                    });
 
-                // update local cache for better UX
-                if (!this.riskRules) this.riskRules = {};
-                this.riskRules[symbol] = Object.assign({}, this.riskRules[symbol] || {}, {
-                    symbol,
-                    stop_loss_price: sl ?? this.riskRules[symbol]?.stop_loss_price,
-                    take_profit_price: tp ?? this.riskRules[symbol]?.take_profit_price,
-                    enabled: true
-                });
+                    // 更新本地缓存，改善UX
+                    if (!this.riskRules) this.riskRules = {};
+                    this.riskRules[symbol] = Object.assign({}, existingRule || {}, {
+                        symbol,
+                        stop_loss_price: sl ?? existingRule?.stop_loss_price,
+                        take_profit_price: tp ?? existingRule?.take_profit_price
+                    });
+                }
             }
 
             await this.apiCall(`/risk_rules/${symbol}?enabled=${enabled}`, { method: 'PUT' });
@@ -5357,7 +5401,7 @@ class TradingApp {
                 
                 // PnL显示样式
                 const pnlClass = orderPnl > 0 ? 'text-success' : orderPnl < 0 ? 'text-danger' : 'text-muted';
-                const pnlText = orderPnl !== 0 ? `$${this.formatNumber(Math.abs(orderPnl))}` : '$0.00';
+                const pnlText = `$${this.formatNumber(orderPnl)}`;
                 
                 return `
                 <tr>

@@ -72,12 +72,12 @@ class TelegramNotifier:
         action = "Take Profit" if order_type == "profit" else "Stop Loss"
         emoji = "💰" if order_type == "profit" else "🛑"
         
-        message = f"{emoji} <b>{action} Triggered</b> {emoji}\n\n"
+        message = f"{emoji} <b>Auto {action} Triggered</b> {emoji}\n\n"
         message += f"<b>Symbol:</b> {symbol}\n"
         message += f"<b>Position:</b> {position:,.0f} shares\n"
         message += f"<b>Trigger Price:</b> ${trigger_price:.2f}\n"
         message += f"<b>Order ID:</b> {order_id}\n\n"
-        message += f"📈 {action} order executed."
+        message += f"📈 Auto {action.lower()} order executed by risk management system."
         
         await self.send_message(message)
     
