@@ -16,6 +16,7 @@ import sys
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import List, Optional, Dict, Any
 from loguru import logger
 from dotenv import load_dotenv
@@ -60,6 +61,39 @@ PNL_BROADCAST_INTERVAL_SEC = int(os.getenv('PNL_BROADCAST_INTERVAL_SEC', '5'))
 # Context variables for request-scoped logging
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 module_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("module", default="-")
+
+
+# Timezone helpers
+LOCAL_TZ = datetime.now().astimezone().tzinfo
+NY_TZ = ZoneInfo("America/New_York")
+
+
+def to_local_time(value: Any) -> str:
+    """Convert IBKR timestamps (US/Eastern) to local timezone ISO strings."""
+    try:
+        if hasattr(value, "to_pydatetime"):
+            value = value.to_pydatetime()
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str):
+            raw = value.strip()
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    dt = datetime.strptime(raw, fmt)
+                    break
+                except ValueError:
+                    dt = None
+            if dt is None:
+                dt = datetime.fromisoformat(raw)
+        else:
+            return str(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=NY_TZ)
+        else:
+            dt = dt.astimezone(NY_TZ)
+        return dt.astimezone(LOCAL_TZ).isoformat()
+    except Exception:
+        return str(value)
 
 
 def resolve_module(path: str) -> str:
@@ -876,7 +910,7 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
                 chart_data = []
                 try:
                     for ts, row in cache_df.iterrows():
-                        t = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+                        t = to_local_time(ts)
                         chart_data.append({
                             "time": t,
                             "open": float(row.get('open', 0) or 0),
@@ -913,13 +947,10 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
 
             chart_data = []
             for _, row in df.iterrows():
-                if hasattr(row['date'], 'isoformat'):
-                    t = row['date'].isoformat()
-                else:
-                    if 'time' in df.columns and not pd.isna(row.get('time')):
-                        t = f"{str(row['date'])}T{str(row['time'])}"
-                    else:
-                        t = str(row['date'])
+                raw_time = row['date']
+                if 'time' in df.columns and not pd.isna(row.get('time')):
+                    raw_time = f"{row['date']} {row['time']}"
+                t = to_local_time(raw_time)
                 chart_data.append({
                     "time": t,
                     "open": float(row['open']),
@@ -948,7 +979,7 @@ async def get_chart_data(request: ChartDataRequest, user: Optional[str] = Depend
             chart_data = []
             try:
                 for ts, row in cache_df.iterrows():
-                    t = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+                    t = to_local_time(ts)
                     chart_data.append({
                         "time": t,
                         "open": float(row.get('open', 0) or 0),
