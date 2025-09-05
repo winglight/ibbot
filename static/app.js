@@ -1627,10 +1627,13 @@ class TradingApp {
             let entryTime = new Date();
             let lastOrderTime = null;
             if (Array.isArray(this.orders)) {
-                const lastOrder = this.orders.find(o => o.symbol === symbol && o.submit_time);
-                if (lastOrder) {
-                    entryTime = new Date(lastOrder.submit_time);
-                    lastOrderTime = entryTime; // 保存最近订单时间用于方框起点
+                const latestOrderTime = this.orders
+                    .filter(o => o.symbol === symbol && o.submit_time)
+                    .map(o => new Date(o.submit_time))
+                    .filter(d => !isNaN(d.getTime()))
+                    .sort((a, b) => b - a)[0];
+                if (latestOrderTime) {
+                    entryTime = latestOrderTime;
                 }
             }
 
