@@ -542,6 +542,17 @@ class TradingApp {
         // Cancel all orders
         document.getElementById('cancelAllOrdersBtn').addEventListener('click', () => this.cancelAllOrders());
         
+        // Test reminder buttons
+        const testReminderBtn = document.getElementById('testReminderBtn');
+        if (testReminderBtn) {
+            testReminderBtn.addEventListener('click', () => this.testReminder());
+        }
+        
+        const checkReminderStatusBtn = document.getElementById('checkReminderStatusBtn');
+        if (checkReminderStatusBtn) {
+            checkReminderStatusBtn.addEventListener('click', () => this.checkReminderStatus());
+        }
+        
         console.log('All event listeners bound successfully');
     }
 
@@ -604,41 +615,186 @@ class TradingApp {
     }
 
     scheduleTradingReminders() {
-        if (typeof window === 'undefined' || !('Notification' in window)) return;
+        if (typeof window === 'undefined' || !('Notification' in window)) {
+            console.log('浏览器不支持通知功能');
+            return;
+        }
 
         const startTime = localStorage.getItem('startTradingTime') || '20:30';
         const endTime = localStorage.getItem('endTradingTime') || '22:30';
 
         const now = new Date();
+        console.log(`当前时间: ${now.toLocaleString()}, 开市提醒: ${startTime}, 收市提醒: ${endTime}`);
 
         const schedule = (timeStr, type) => {
             const target = this.getNextReminderDate(timeStr, now);
             const delay = target.getTime() - now.getTime();
+            console.log(`${type === 'start' ? '开市' : '收市'}提醒计划时间: ${target.toLocaleString()}, 延迟: ${Math.round(delay/1000/60)}分钟`);
+            
+            if (delay <= 0) {
+                console.warn(`${type === 'start' ? '开市' : '收市'}提醒时间已过，跳过`);
+                return null;
+            }
+            
             return setTimeout(() => {
+                console.log(`触发${type === 'start' ? '开市' : '收市'}提醒`);
                 this.fireTradingReminder(type);
                 this.scheduleTradingReminders();
             }, delay);
         };
 
+        // 请求通知权限
         if (Notification.permission === 'default') {
-            try { Notification.requestPermission(); } catch (e) {}
+            try { 
+                Notification.requestPermission().then(permission => {
+                    console.log(`通知权限状态: ${permission}`);
+                });
+            } catch (e) {
+                console.error('请求通知权限失败:', e);
+            }
+        } else {
+            console.log(`当前通知权限状态: ${Notification.permission}`);
         }
 
-        if (this.startReminderTimeout) clearTimeout(this.startReminderTimeout);
-        if (this.endReminderTimeout) clearTimeout(this.endReminderTimeout);
+        // 清除之前的定时器
+        if (this.startReminderTimeout) {
+            clearTimeout(this.startReminderTimeout);
+            console.log('清除之前的开市提醒定时器');
+        }
+        if (this.endReminderTimeout) {
+            clearTimeout(this.endReminderTimeout);
+            console.log('清除之前的收市提醒定时器');
+        }
 
+        // 设置新的定时器
         this.startReminderTimeout = schedule(startTime, 'start');
         this.endReminderTimeout = schedule(endTime, 'end');
+        
+        console.log('定时提醒已重新设置');
     }
 
     fireTradingReminder(type) {
-        const message = type === 'start' ? '开始交易' : '结束交易';
+        const message = type === 'start' ? '🔔 开始交易提醒' : '🔔 结束交易提醒';
+        console.log(`发送提醒: ${message}`);
+        
+        // 浏览器通知
         try {
             if ('Notification' in window && Notification.permission === 'granted') {
-                new Notification(message);
+                const notification = new Notification(message, {
+                    icon: '/favicon.ico',
+                    badge: '/favicon.ico',
+                    tag: 'trading-reminder',
+                    requireInteraction: true
+                });
+                console.log('浏览器通知已发送');
+                
+                // 自动关闭通知
+                setTimeout(() => {
+                    notification.close();
+                }, 10000);
+            } else {
+                console.warn(`无法发送浏览器通知，权限状态: ${Notification.permission}`);
             }
-        } catch (e) {}
-        this.apiCall('/notify', { method: 'POST', body: JSON.stringify({ message }) }).catch(() => {});
+        } catch (e) {
+            console.error('发送浏览器通知失败:', e);
+        }
+        
+        // Telegram通知
+        this.apiCall('/notify', { 
+            method: 'POST', 
+            body: JSON.stringify({ message }) 
+        }).then(response => {
+            console.log('Telegram通知发送成功:', response);
+        }).catch(error => {
+            console.error('Telegram通知发送失败:', error);
+        });
+    }
+    
+    testReminder() {
+        console.log('=== 测试提醒功能 ===');
+        
+        // 测试浏览器通知权限
+        if ('Notification' in window) {
+            console.log(`浏览器通知支持: 是`);
+            console.log(`当前权限状态: ${Notification.permission}`);
+            
+            if (Notification.permission === 'default') {
+                Notification.requestPermission().then(permission => {
+                    console.log(`权限请求结果: ${permission}`);
+                    if (permission === 'granted') {
+                        this.fireTradingReminder('start');
+                    }
+                });
+            } else if (Notification.permission === 'granted') {
+                this.fireTradingReminder('start');
+            } else {
+                console.warn('浏览器通知权限被拒绝');
+                this.showAlert('warning', '浏览器通知权限被拒绝，请在浏览器设置中允许通知');
+            }
+        } else {
+            console.warn('浏览器不支持通知功能');
+            this.showAlert('warning', '当前浏览器不支持通知功能');
+        }
+        
+        // 测试Telegram通知
+        const testMessage = '🧪 这是一条测试提醒消息';
+        this.apiCall('/notify', {
+            method: 'POST',
+            body: JSON.stringify({ message: testMessage })
+        }).then(response => {
+            console.log('Telegram测试通知发送成功:', response);
+            this.showAlert('success', 'Telegram测试通知已发送');
+        }).catch(error => {
+            console.error('Telegram测试通知发送失败:', error);
+            // 不再显示额外的错误提示，因为 apiCall 已经处理了
+        });
+    }
+    
+    checkReminderStatus() {
+        console.log('=== 检查提醒状态 ===');
+        
+        const startTime = localStorage.getItem('startTradingTime') || '20:30';
+        const endTime = localStorage.getItem('endTradingTime') || '22:30';
+        const now = new Date();
+        
+        console.log(`当前时间: ${now.toLocaleString()}`);
+        console.log(`开市提醒时间: ${startTime}`);
+        console.log(`收市提醒时间: ${endTime}`);
+        
+        // 计算下次提醒时间
+        const nextStartReminder = this.getNextReminderDate(startTime, now);
+        const nextEndReminder = this.getNextReminderDate(endTime, now);
+        
+        console.log(`下次开市提醒: ${nextStartReminder.toLocaleString()}`);
+        console.log(`下次收市提醒: ${nextEndReminder.toLocaleString()}`);
+        
+        // 检查今天是否为工作日
+        const isWorkingDay = this.isWorkingDay(now);
+        const isHoliday = this.isNasdaqHoliday(now);
+        
+        console.log(`今天是工作日: ${isWorkingDay}`);
+        console.log(`今天是假期: ${isHoliday}`);
+        
+        // 检查定时器状态
+        console.log(`开市提醒定时器: ${this.startReminderTimeout ? '已设置' : '未设置'}`);
+        console.log(`收市提醒定时器: ${this.endReminderTimeout ? '已设置' : '未设置'}`);
+        
+        // 检查浏览器通知权限
+        if ('Notification' in window) {
+            console.log(`浏览器通知权限: ${Notification.permission}`);
+        } else {
+            console.log('浏览器不支持通知功能');
+        }
+        
+        // 更新UI状态显示
+        const statusEl = document.getElementById('reminderStatus');
+        if (statusEl) {
+            const statusText = `下次开市: ${nextStartReminder.toLocaleDateString()} ${nextStartReminder.toLocaleTimeString()}, 下次收市: ${nextEndReminder.toLocaleDateString()} ${nextEndReminder.toLocaleTimeString()}`;
+            statusEl.textContent = statusText;
+            statusEl.className = 'text-success';
+        }
+        
+        this.showAlert('info', '提醒状态已输出到控制台，请按F12查看详细信息');
     }
 
     getNextReminderDate(timeStr, reference) {
@@ -659,9 +815,14 @@ class TradingApp {
 
     isNasdaqHoliday(date) {
         const holidays = [
+            // 2024年假期
             '2024-01-01', '2024-01-15', '2024-02-19', '2024-03-29',
             '2024-05-27', '2024-06-19', '2024-07-04', '2024-09-02',
-            '2024-11-28', '2024-12-25'
+            '2024-11-28', '2024-12-25',
+            // 2025年假期
+            '2025-01-01', '2025-01-20', '2025-02-17', '2025-04-18',
+            '2025-05-26', '2025-06-19', '2025-07-04', '2025-09-01',
+            '2025-11-27', '2025-12-25'
         ];
         const d = date.toISOString().split('T')[0];
         return holidays.includes(d);
