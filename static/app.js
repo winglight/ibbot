@@ -2417,11 +2417,8 @@ class TradingApp {
                     } else {
                         date = new Date();
                     }
-                    // 确保时间是本地时间，修复时区差异问题
-                    // 注意：getTimezoneOffset()返回的是本地时区与UTC的差值（分钟），为负数表示超前UTC
-                    // 因此需要减去这个值来获得本地时间
-                    const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-                    return localDate;
+                    // 日期对象已包含时区信息，直接返回
+                    return date;
                 });
                 // 根据时间生成显示标签
                 const labels = timeValues.map(date => {
@@ -2484,24 +2481,20 @@ class TradingApp {
                 const futureTimes = [];
                 for (let i = 1; i <= padBars; i++) {
                     const future = new Date(lastDate.getTime() + i * padIntervalMinutes * 60000);
-                    // 确保未来时间点也应用相同的时区修正
-                    // 注意：getTimezoneOffset()返回的是本地时区与UTC的差值（分钟），为负数表示超前UTC
-                    // 因此需要减去这个值来获得本地时间
-                    const localFuture = new Date(future.getTime() - future.getTimezoneOffset() * 60000);
-                    futureTimes.push(localFuture);
+                    futureTimes.push(future);
                     let label;
                     if (intervalValueRaw.includes('day') || duration.includes('M') || duration.includes('Y')) {
-                        label = localFuture.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+                        label = future.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
                     } else if (intervalValueRaw.includes('hour') || duration === '1 W') {
-                        label = localFuture.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', hour12: false });
+                        label = future.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', hour12: false });
                     } else {
-                        label = localFuture.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+                        label = future.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
                     }
                     labels.push(label);
                     validLabels.push(label);
                     prices.push(null);
-                    timeValues.push(localFuture);
-                    validTimes.push(localFuture);
+                    timeValues.push(future);
+                    validTimes.push(future);
                 }
 
                 // Get stop loss and take profit values for annotations
@@ -2798,13 +2791,10 @@ class TradingApp {
                             date = new Date();
                         }
                         
-                        // 确保时间是本地时间，修复时区差异问题
-                        // 注意：getTimezoneOffset()返回的是本地时区与UTC的差值（分钟），为负数表示超前UTC
-                        // 因此需要减去这个值来获得本地时间
-                        const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-                        
+                        // 日期对象已包含时区信息
+
                         return {
-                            x: localDate.getTime(),  // 转换为时间戳以兼容Luxon
+                            x: date.getTime(),  // 转换为时间戳以兼容Luxon
                             o: parseFloat(bar.open) || parseFloat(bar.close) || 0,
                             h: parseFloat(bar.high) || parseFloat(bar.close) || 0,
                             l: parseFloat(bar.low) || parseFloat(bar.close) || 0,
@@ -2815,7 +2805,7 @@ class TradingApp {
 
                       // 添加未来时间点以在右侧保留空间
                       futureTimes.forEach(ft => {
-                          // 未来时间点已经在前面应用了时区修正，直接使用
+                          // 未来时间点直接使用
                           ohlcData.push({ x: ft.getTime(), o: NaN, h: NaN, l: NaN, c: NaN, volume: 0 });
                       });
                     
