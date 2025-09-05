@@ -1234,8 +1234,9 @@ class IBKRClient:
             ibkr_logger.error(f"Failed to get account info: {e}")
             return {}
     
-    def get_positions(self, fast: bool = True) -> List[Dict]:
+    def get_positions(self, fast: bool = False) -> List[Dict]:
         """获取持仓列表
+        fast=False 时会尝试获取实时价格，确保价格数据最新
         fast=True 时仅使用缓存或 portfolio 的 marketPrice/averageCost，跳过逐个实时行情请求以显著降低延迟"""
         try:
             # 确保连接
@@ -1330,6 +1331,25 @@ class IBKRClient:
 
                 market_value = item.position * current_price
                 
+                # 计算未实现盈亏，区分多头和空头持仓
+                unrealized_pnl = 0
+                if hasattr(item, 'unrealizedPNL'):
+                    # 如果IBKR直接提供了未实现盈亏，优先使用
+                    unrealized_pnl = item.unrealizedPNL
+                else:
+                    # 否则根据持仓方向计算
+                    if item.position > 0:  # 多头
+                        # 多头盈亏 = (当前价格 - 成本价) * 持仓数量
+                        unrealized_pnl = (current_price - avg_cost_adjusted) * item.position
+                    else:  # 空头
+                        # 空头盈亏 = (成本价 - 当前价格) * 持仓数量的绝对值
+                        unrealized_pnl = (avg_cost_adjusted - current_price) * abs(item.position)
+                
+                # 计算未实现盈亏百分比
+                unrealized_pnl_percent = 0
+                if item.position * avg_cost_adjusted != 0:
+                    unrealized_pnl_percent = (unrealized_pnl / abs(item.position * avg_cost_adjusted)) * 100
+                
                 position_info = {
                     'symbol': sym,
                     'position': item.position,
@@ -1337,8 +1357,8 @@ class IBKRClient:
                     'market_price': item.marketPrice if item.marketPrice == item.marketPrice else 0,
                     'current_price': current_price,
                     'market_value': market_value,
-                    'unrealized_pnl': item.unrealizedPNL if hasattr(item, 'unrealizedPNL') else market_value - (item.position * avg_cost_adjusted),
-                    'unrealized_pnl_percent': ((market_value - (item.position * avg_cost_adjusted)) / abs(item.position * avg_cost_adjusted) * 100) if item.position * avg_cost_adjusted != 0 else 0,
+                    'unrealized_pnl': unrealized_pnl,
+                    'unrealized_pnl_percent': unrealized_pnl_percent,
                     'price_source': price_source,
                 }
                 position_list.append(position_info)

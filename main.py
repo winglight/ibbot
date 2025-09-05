@@ -784,10 +784,17 @@ class NotificationRequest(BaseModel):
 @app.post("/api/notify")
 async def send_notification(req: NotificationRequest, user: Optional[str] = Depends(get_current_user)):
     """发送Telegram通知"""
-    success = await telegram_notifier.send_message(req.message)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to send Telegram message")
-    return {"success": True}
+    try:
+        success = await telegram_notifier.send_message(req.message)
+        if not success:
+            # 返回200状态码但标记为失败，避免前端报错
+            return {"success": False, "message": "Telegram notification disabled or failed to send"}
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Error sending notification: {e}")
+        # 返回200状态码但包含错误信息，避免前端报错
+        return {"success": False, "message": f"Error: {str(e)}"}
+
 
 # Market data endpoints
 @app.post("/api/historical_data")
@@ -1401,9 +1408,9 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
         if position_qty == 0:
             raise HTTPException(status_code=400, detail=f"No position to reverse for symbol {symbol}")
         
-        # 计算反向订单参数（按当前持仓量的反向操作）
+        # 计算反向订单参数（按当前持仓量的2倍反向操作）
         action = "SELL" if position_qty > 0 else "BUY"
-        quantity = abs(int(position_qty))
+        quantity = abs(int(position_qty)) * 2  # 使用2倍持仓量进行反向下单
         
         # 在下单前反激活对应的风险规则
         try:
@@ -1519,69 +1526,111 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
         logger.error(f"Cancel all orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# 订单缓存，避免频繁查询数据库
+orders_cache = []
+orders_cache_timestamp = None
+ORDERS_CACHE_TTL = 3  # 缓存有效期（秒）
+
 @app.get("/api/orders")
-async def get_orders(user: Optional[str] = Depends(get_current_user)):
-    """获取订单列表（从数据库读取，包含历史订单）"""
+async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int = 100, use_cache: bool = True):
+    """获取订单列表（从数据库读取，包含历史订单）
+    - limit: 限制返回的订单数量，默认100条，提高性能
+    - use_cache: 是否使用API级别缓存（默认 True）。启用时，短时间内的重复请求将直接返回缓存结果，无需重新查询数据库。
+    """
+    global orders_cache, orders_cache_timestamp
+    
     try:
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
         
-        # 从 OrderManager 获取所有订单数据（已按创建时间降序排列）
-        orders = order_manager.get_orders()
+        # 检查缓存是否有效
+        current_time = datetime.now()
+        if use_cache and orders_cache and orders_cache_timestamp:
+            cache_age = (current_time - orders_cache_timestamp).total_seconds()
+            if cache_age < ORDERS_CACHE_TTL:
+                logger.debug(f"Using orders cache, age: {cache_age:.1f}s")
+                return {"success": True, "orders": orders_cache, "from_cache": True}
         
-        # 转换字段名以匹配前端期望
-        converted_orders = []
-        for o in orders:
-            raw_type = (o.order_type or '').upper()
-            if raw_type in ('MARKET', 'MKT'):
-                order_type = 'MKT'
-            elif raw_type in ('LIMIT', 'LMT'):
-                order_type = 'LMT'
-            else:
-                order_type = raw_type or 'MKT'
+        # 从 OrderManager 获取所有订单数据（已按创建时间降序排列），限制数量提高性能
+        # 使用异步执行避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        try:
+            orders = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: order_manager.get_orders(limit=limit)),
+                timeout=5.0  # 5秒超时
+            )
             
-            price_val = 0.0
-            try:
-                if o.price is not None:
-                    price_val = float(o.price)
-            except Exception:
+            # 转换字段名以匹配前端期望
+            converted_orders = []
+            for o in orders:
+                raw_type = (o.order_type or '').upper()
+                if raw_type in ('MARKET', 'MKT'):
+                    order_type = 'MKT'
+                elif raw_type in ('LIMIT', 'LMT'):
+                    order_type = 'LMT'
+                else:
+                    order_type = raw_type or 'MKT'
+                
                 price_val = 0.0
-            
-            # 计算触发类型：仅对机器人订单（auto）有效
-            trigger_type = None
-            try:
-                if getattr(o, 'order_source', 'manual') == 'auto':
-                    rule_id = getattr(o, 'rule_id', None)
-                    symbol = getattr(o, 'symbol', None)
-                    if rule_id and rule_id != symbol:
-                        trigger_type = 'strategy'
-                    else:
-                        trigger_type = 'risk_rule'
-            except Exception:
+                try:
+                    if o.price is not None:
+                        price_val = float(o.price)
+                except Exception:
+                    price_val = 0.0
+                
+                # 计算触发类型：仅对机器人订单（auto）有效
                 trigger_type = None
+                try:
+                    if getattr(o, 'order_source', 'manual') == 'auto':
+                        rule_id = getattr(o, 'rule_id', None)
+                        symbol = getattr(o, 'symbol', None)
+                        if rule_id and rule_id != symbol:
+                            trigger_type = 'strategy'
+                        else:
+                            trigger_type = 'risk_rule'
+                except Exception:
+                    trigger_type = None
+                
+                converted_order = {
+                    'order_id': o.order_id,
+                    'symbol': o.symbol,
+                    'action': o.action,
+                    'quantity': o.quantity,
+                    'order_type': order_type,
+                    'limit_price': price_val if order_type == 'LMT' and price_val > 0 else None,
+                    'avg_fill_price': (o.fill_price if o.fill_price is not None else (price_val if order_type == 'MKT' and price_val > 0 else 0)),
+                    'status': o.status,
+                    'filled': o.quantity if o.status == 'Filled' else 0,
+                    'remaining': 0 if o.status == 'Filled' else o.quantity,
+                    'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
+                    'order_source': getattr(o, 'order_source', 'manual'),
+                    'trigger_type': trigger_type
+                }
+                converted_orders.append(converted_order)
             
-            converted_order = {
-                'order_id': o.order_id,
-                'symbol': o.symbol,
-                'action': o.action,
-                'quantity': o.quantity,
-                'order_type': order_type,
-                'limit_price': price_val if order_type == 'LMT' and price_val > 0 else None,
-                'avg_fill_price': (o.fill_price if o.fill_price is not None else (price_val if order_type == 'MKT' and price_val > 0 else 0)),
-                'status': o.status,
-                'filled': o.quantity if o.status == 'Filled' else 0,
-                'remaining': 0 if o.status == 'Filled' else o.quantity,
-                'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
-                'order_source': getattr(o, 'order_source', 'manual'),
-                'trigger_type': trigger_type
-            }
-            converted_orders.append(converted_order)
-        
-        return {"success": True, "orders": converted_orders}
+            # 更新缓存
+            orders_cache = converted_orders
+            orders_cache_timestamp = current_time
+            
+            return {"success": True, "orders": converted_orders, "from_cache": False}
+            
+        except asyncio.TimeoutError:
+            # 如果超时但有缓存，返回缓存数据
+            if orders_cache:
+                logger.warning("Orders request timed out, returning cached data")
+                return {"success": True, "orders": orders_cache, "from_cache": True, "cache_warning": "Request timed out, showing cached data"}
+            else:
+                logger.warning("Orders request timed out and no cache available")
+                return {"success": False, "error": "Orders request timed out"}
         
     except HTTPException:
         raise
     except Exception as e:
+        # 如果出错但有缓存，返回缓存数据
+        if orders_cache and orders_cache_timestamp:
+            logger.error(f"Get orders error: {e}, returning cached data")
+            return {"success": True, "orders": orders_cache, "from_cache": True, "cache_warning": "Error occurred, showing cached data"}
+        
         logger.error(f"Get orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1742,29 +1791,60 @@ async def get_account_info(user: Optional[str] = Depends(get_current_user)):
         logger.error(f"Get account info error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# 持仓缓存，避免频繁请求IBKR API
+positions_cache = {}
+positions_cache_timestamp = None
+POSITIONS_CACHE_TTL = 5  # 缓存有效期（秒）
+
 @app.get("/api/positions")
-async def get_positions(user: Optional[str] = Depends(get_current_user), fast: bool = True):
+async def get_positions(user: Optional[str] = Depends(get_current_user), fast: bool = True, use_cache: bool = True):
     """获取持仓列表
     - fast: 是否启用快速模式（默认 True）。快速模式下跳过实时价格抓取，使用缓存/最近价格以提升响应速度。
+    - use_cache: 是否使用API级别缓存（默认 True）。启用时，短时间内的重复请求将直接返回缓存结果，无需重新查询IBKR。
     """
+    global positions_cache, positions_cache_timestamp
+    
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        # Run in executor with timeout to avoid blocking event loop
+        # 检查缓存是否有效
+        current_time = datetime.now()
+        if use_cache and positions_cache and positions_cache_timestamp:
+            cache_age = (current_time - positions_cache_timestamp).total_seconds()
+            if cache_age < POSITIONS_CACHE_TTL:
+                logger.debug(f"Using positions cache, age: {cache_age:.1f}s")
+                return {"success": True, "positions": positions_cache, "from_cache": True}
+        
+        # 使用异步执行器运行get_positions，避免阻塞事件循环
         loop = asyncio.get_event_loop()
         try:
             positions = await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: ibkr_client.get_positions(fast=fast)),
-                timeout=10.0  # 10-second timeout
+                timeout=5.0  # 缩短超时时间到5秒
             )
-        except asyncio.TimeoutError:
-            logger.warning("Positions request timed out")
-            return {"success": False, "error": "Positions request timed out"}
             
-        return {"success": True, "positions": positions}
+            # 更新缓存
+            positions_cache = positions
+            positions_cache_timestamp = current_time
+            
+            return {"success": True, "positions": positions, "from_cache": False}
+            
+        except asyncio.TimeoutError:
+            # 如果超时但有缓存，返回缓存数据
+            if positions_cache:
+                logger.warning("Positions request timed out, returning cached data")
+                return {"success": True, "positions": positions_cache, "from_cache": True, "cache_warning": "Request timed out, showing cached data"}
+            else:
+                logger.warning("Positions request timed out and no cache available")
+                return {"success": False, "error": "Positions request timed out"}
         
     except Exception as e:
+        # 如果出错但有缓存，返回缓存数据
+        if positions_cache:
+            logger.error(f"Get positions error: {e}, returning cached data")
+            return {"success": True, "positions": positions_cache, "from_cache": True, "cache_warning": "Error occurred, showing cached data"}
+        
         logger.error(f"Get positions error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -248,9 +248,7 @@ class TradingApp {
                 }
             });
         }
-        const refreshLogsBtn = document.getElementById('refreshLogsBtn');
-        if (refreshLogsBtn) refreshLogsBtn.addEventListener('click', () => this.loadLogs());
-
+        // Logs search and filter controls
         const searchLogsBtn = document.getElementById('searchLogsBtn');
         if (searchLogsBtn) searchLogsBtn.addEventListener('click', () => this.loadLogs());
 
@@ -265,10 +263,7 @@ class TradingApp {
 
         const logStatsBtn = document.getElementById('logStatsBtn');
         if (logStatsBtn) logStatsBtn.addEventListener('click', () => this.showLogStats());
-        const refreshStrategiesBtn = document.getElementById('refreshStrategiesBtn');
-        if (refreshStrategiesBtn) {
-            refreshStrategiesBtn.addEventListener('click', () => this.loadStrategies());
-        }
+        // WebSocket updates logs and strategies automatically
         const addStrategyBtn = document.getElementById('addStrategyBtn');
         if (addStrategyBtn) {
             addStrategyBtn.addEventListener('click', async () => {
@@ -418,6 +413,21 @@ class TradingApp {
             if (lastQuantity) {
                 document.getElementById('orderQuantity').value = lastQuantity;
             }
+            
+            // 设置上次交易的资产符号
+            const lastSymbol = localStorage.getItem('lastOrderSymbol');
+            if (lastSymbol) {
+                const symbolInput = document.querySelector('#orderSymbol');
+                if (symbolInput) {
+                    // 设置输入框的值
+                    symbolInput.value = lastSymbol;
+                    
+                    // 触发 change 事件以更新组合框
+                    const event = new Event('change');
+                    symbolInput.dispatchEvent(event);
+                }
+            }
+            
             const modal = new bootstrap.Modal(document.getElementById('orderModal'));
             modal.show();
         });
@@ -538,19 +548,7 @@ class TradingApp {
             this.addRiskRule();
         });
         
-        // Refresh buttons
-        document.getElementById('refreshOrdersBtn').addEventListener('click', () => {
-            console.log('Refresh orders button clicked');
-            this.loadOrders();
-        });
-        document.getElementById('refreshPositionsBtn').addEventListener('click', () => {
-            console.log('Refresh positions button clicked');
-            this.loadPortfolio();
-        });
-        document.getElementById('refreshRiskRulesBtn').addEventListener('click', () => {
-            console.log('Refresh risk rules button clicked');
-            this.loadRiskRules();
-        });
+        // WebSocket updates orders, positions and risk rules automatically
         // Auto Orders panel removed - no longer needed
 
         
@@ -623,6 +621,11 @@ class TradingApp {
                 if (data.positions) {
                     this.updatePositionsUI(data.positions);
                 }
+                break;
+            case 'position_reversed':
+                this.loadPortfolio();
+                this.loadOrders();
+                this.showAlert('success', `反向下单成功: ${data.symbol} ${data.action} ${data.quantity}股`);
                 break;
             case 'realtime_data':
                 this.updateMonitorRealtime(data);
@@ -846,46 +849,132 @@ class TradingApp {
         return holidays.includes(d);
     }
 
-    async apiCall(endpoint, options = {}) {
+    // API请求缓存
+    apiCache = {};
+    
+    // 防抖函数
+    debounce(func, wait) {
+        let timeout;
+        return function(...args) {
+            const context = this;
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(context, args), wait);
+        };
+    }
+    
+    // 带超时的fetch
+    async fetchWithTimeout(url, options = {}) {
+        const { timeout = 15000, ...fetchOptions } = options;
+        
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeout);
+        
         try {
-            const headers = {
-                'Content-Type': 'application/json',
-                ...options.headers
-            };
-            
-            // Add JWT token to Authorization header if available
-            const token = localStorage.getItem('access_token');
-            if (token) {
-                headers['Authorization'] = `Bearer ${token}`;
-            }
-            
-            const response = await fetch(`/api${endpoint}`, {
-                headers,
-                ...options
+            const response = await fetch(url, {
+                ...fetchOptions,
+                signal: controller.signal
             });
-            
-            // Handle 401 Unauthorized - redirect to login
-            if (response.status === 401) {
-                localStorage.removeItem('access_token');
-                this.toggleAuthButtons(false);
-                this.showLoginModal();
-                throw new Error('Authentication required');
-            }
-            
-            const data = await response.json();
-            const reqId = response.headers.get('x-request-id');
-            if (reqId) data.request_id = reqId;
-            
-            if (!response.ok) {
-                throw new Error(data.detail || 'API call failed');
-            }
-            
-            return data;
+            clearTimeout(id);
+            return response;
         } catch (error) {
-            if (error.message !== 'Authentication required') {
-                this.showAlert('danger', error.message);
+            clearTimeout(id);
+            if (error.name === 'AbortError') {
+                throw new Error('请求超时，请稍后再试');
             }
             throw error;
+        }
+    }
+    
+    // 带重试的API调用
+    async apiCall(endpoint, options = {}) {
+        // 检查是否为GET请求且需要缓存
+        const method = options.method || 'GET';
+        const useCache = options.useCache !== false && method === 'GET';
+        const cacheTime = options.cacheTime || 30000; // 默认缓存30秒
+        
+        // 生成缓存键
+        const cacheKey = useCache ? `${endpoint}_${JSON.stringify(options.body || '')}` : null;
+        
+        // 检查缓存
+        if (useCache && this.apiCache[cacheKey]) {
+            const cachedData = this.apiCache[cacheKey];
+            if (Date.now() - cachedData.timestamp < cacheTime) {
+                console.log(`Using cached data for ${endpoint}`);
+                return cachedData.data;
+            }
+        }
+        
+        // 设置重试参数
+        const maxRetries = options.maxRetries || 2;
+        let retries = 0;
+        
+        while (true) {
+            try {
+                const headers = {
+                    'Content-Type': 'application/json',
+                    ...options.headers
+                };
+                
+                // 添加JWT令牌到Authorization头
+                const token = localStorage.getItem('access_token');
+                if (token) {
+                    headers['Authorization'] = `Bearer ${token}`;
+                }
+                
+                // 使用带超时的fetch
+                const response = await this.fetchWithTimeout(`/api${endpoint}`, {
+                    headers,
+                    ...options,
+                    timeout: options.timeout || 15000 // 默认15秒超时
+                });
+                
+                // 处理401未授权 - 重定向到登录
+                if (response.status === 401) {
+                    localStorage.removeItem('access_token');
+                    this.toggleAuthButtons(false);
+                    this.showLoginModal();
+                    throw new Error('Authentication required');
+                }
+                
+                const data = await response.json();
+                const reqId = response.headers.get('x-request-id');
+                if (reqId) data.request_id = reqId;
+                
+                // 特殊处理/api/notify接口，即使返回success:false也不抛出错误
+                if (endpoint === '/notify' && typeof data === 'object' && 'success' in data) {
+                    if (!data.success) {
+                        console.warn('Notification failed:', data.message || 'Unknown reason');
+                    }
+                    return data;
+                }
+                
+                if (!response.ok) {
+                    throw new Error(data.detail || 'API call failed');
+                }
+                
+                // 更新缓存
+                if (useCache) {
+                    this.apiCache[cacheKey] = {
+                        data: data,
+                        timestamp: Date.now()
+                    };
+                }
+                
+                return data;
+            } catch (error) {
+                // 如果还有重试次数，则重试
+                if (retries < maxRetries && error.message !== 'Authentication required') {
+                    retries++;
+                    console.warn(`Retrying API call to ${endpoint} (${retries}/${maxRetries})`);
+                    await new Promise(resolve => setTimeout(resolve, 1000 * retries)); // 指数退避
+                    continue;
+                }
+                
+                if (error.message !== 'Authentication required') {
+                    this.showAlert('danger', error.message);
+                }
+                throw error;
+            }
         }
     }
 
@@ -1272,8 +1361,9 @@ class TradingApp {
             
             this.showAlert('success', 'Order placed successfully');
             
-            // Save the quantity value before resetting
+            // Save the quantity and symbol values before resetting
             localStorage.setItem('lastOrderQuantity', quantityValue);
+            localStorage.setItem('lastOrderSymbol', symbol);
             
             document.getElementById('orderForm').reset();
             document.getElementById('orderPrice').disabled = true;
@@ -1535,10 +1625,12 @@ class TradingApp {
 
             // 计算建仓/加仓时间：取该标的最新订单时间
             let entryTime = new Date();
+            let lastOrderTime = null;
             if (Array.isArray(this.orders)) {
                 const lastOrder = this.orders.find(o => o.symbol === symbol && o.submit_time);
                 if (lastOrder) {
                     entryTime = new Date(lastOrder.submit_time);
+                    lastOrderTime = entryTime; // 保存最近订单时间用于方框起点
                 }
             }
 
@@ -1552,6 +1644,7 @@ class TradingApp {
                 pnlPercent: Number(pnlPercent) || 0,
                 maxTimeSpan: (this.riskRules && this.riskRules[symbol] && this.riskRules[symbol].max_time_span) || 30,
                 entryTime,
+                lastOrderTime, // 添加最近订单时间
                 timeAlertSent: false,
             };
 
@@ -1661,15 +1754,11 @@ class TradingApp {
                 const modal = new bootstrap.Modal(modalEl);
                 modal.show();
 
-                // 绑定按钮与输入事件
+                // WebSocket自动更新监控图表，刷新按钮已禁用
                 const refreshBtn = document.getElementById('refreshMonitorChartBtn');
                 if (refreshBtn) {
-                    refreshBtn.onclick = async () => {
-                        // 先刷新弹窗右侧数据，获取最新价格
-                        await this.syncMonitorModalData(symbol);
-                        // 然后更新图表，使用最新的价格数据
-                        this.loadMonitorChart(symbol);
-                    };
+                    refreshBtn.disabled = true;
+                    refreshBtn.title = 'WebSocket自动更新，无需手动刷新';
                 }
                 
                 // 重置缩放按钮事件
@@ -1850,7 +1939,7 @@ class TradingApp {
                             return;
                         }
                         
-                        const confirmed = confirm(`确认反向下单 ${symbol}？\n当前持仓: ${this.currentMonitor.positionQty}\n将执行反向操作（2倍持仓量）`);
+                        const confirmed = confirm(`确认反向下单 ${symbol}？\n当前持仓: ${this.currentMonitor.positionQty}\n将执行反向操作（2倍持仓量，完全反转头寸）`);
                         if (!confirmed) return;
                         
                         try {
@@ -2009,16 +2098,65 @@ class TradingApp {
         }
     }
 
+    // 订单数据缓存
+    ordersCache = {};
+    
+    // 创建防抖版本的loadMonitorOrdersList方法
+    debouncedLoadMonitorOrdersList = null;
+    
+    // 初始化防抖函数
+    initDebounce() {
+        if (!this.debouncedLoadMonitorOrdersList) {
+            this.debouncedLoadMonitorOrdersList = this.debounce(this._loadMonitorOrdersList.bind(this), 300);
+        }
+    }
+    
+    // 防抖包装方法
     async loadMonitorOrdersList(symbol, status = 'working') {
+        // 确保防抖函数已初始化
+        this.initDebounce();
+        
+        const ordersList = document.getElementById('monitorOrdersList');
+        if (!ordersList) return;
+        
+        // 显示加载状态
+        ordersList.innerHTML = '<div class="text-center text-muted py-2"><div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div><small>加载订单数据中...</small></div>';
+        
+        // 调用防抖版本的方法
+        this.debouncedLoadMonitorOrdersList(symbol, status);
+    }
+    
+    // 实际加载订单的方法
+    async _loadMonitorOrdersList(symbol, status = 'working') {
         try {
             const ordersList = document.getElementById('monitorOrdersList');
             if (!ordersList) return;
             
-            // 显示加载状态
-            ordersList.innerHTML = '<div class="text-center text-muted py-2"><small>加载中...</small></div>';
+            // 检查缓存
+            const cacheKey = `orders_${symbol}_${status}`;
+            const now = Date.now();
+            const cachedData = this.ordersCache[cacheKey];
             
-            // 获取订单数据
-            const result = await this.apiCall('/orders');
+            let result;
+            if (cachedData && (now - cachedData.timestamp) < 10 * 1000) { // 10秒缓存
+                console.log(`Using cached orders data for ${symbol} (${status})`);
+                result = cachedData.data;
+            } else {
+                console.log(`Fetching fresh orders data for ${symbol} (${status})`);
+                // 获取订单数据，使用缓存机制
+                result = await this.apiCall('/orders', {
+                    useCache: true,
+                    cacheTime: 10000, // 10秒缓存
+                    timeout: 20000 // 20秒超时
+                });
+                
+                // 更新缓存
+                this.ordersCache[cacheKey] = {
+                    data: result,
+                    timestamp: now
+                };
+            }
+            
             let orders = result.orders || [];
             // 仅保留当天创建的订单
             orders = orders.filter(order => this.isSameDay(order.submit_time || order.created_at));
@@ -2175,36 +2313,83 @@ class TradingApp {
         }
     }
 
+    // 添加图表数据缓存
+    chartDataCache = {};
+    
     async loadMonitorChart(symbol) {
         try {
             const chartContainer = document.getElementById('monitorChartContainer');
             if (!chartContainer) return;
 
-            // Clear previous charts - 增加canvas大小以解决数据点显示不完整问题
-            chartContainer.innerHTML = `<canvas id="monitorChart" width="900" height="450"></canvas>`;
+            // 显示加载状态
+            chartContainer.innerHTML = `<div class="text-center py-3"><div class="spinner-border text-primary" role="status"></div><p class="mt-2">加载图表数据中...</p></div>`;
             
             const volumeContainer = document.getElementById('monitorVolumeContainer');
             if (volumeContainer) {
-                volumeContainer.innerHTML = `<canvas id="monitorVolumeChart" width="900" height="270"></canvas>`;
+                volumeContainer.innerHTML = '';
             }
 
-            // Request chart data from API
+            // 获取图表参数
             const intervalSelect = document.getElementById('monitorInterval');
             const durationSelect = document.getElementById('monitorDuration');
             const barSize = intervalSelect?.value || '1 min';
             const duration = durationSelect?.value || '1 D';
-            const response = await this.apiCall('/chart_data', {
-                method: 'POST',
-                body: JSON.stringify({
-                    symbol: symbol,
-                    duration: duration,
-                    bar_size: barSize,
-                    data_type: 'TRADES'
-                })
-            });
+            
+            // 生成缓存键
+            const cacheKey = `${symbol}_${barSize}_${duration}`;
+            
+            // 检查缓存是否有效（5分钟内有效）
+            const now = Date.now();
+            const cachedData = this.chartDataCache[cacheKey];
+            let response;
+            
+            if (cachedData && (now - cachedData.timestamp) < 5 * 60 * 1000) {
+                console.log(`Using cached chart data for ${cacheKey}`);
+                response = cachedData.data;
+            } else {
+                console.log(`Fetching fresh chart data for ${cacheKey}`);
+                // 准备图表容器
+                chartContainer.innerHTML = `<canvas id="monitorChart" width="900" height="450"></canvas>`;
+                
+                if (volumeContainer) {
+                    volumeContainer.innerHTML = `<canvas id="monitorVolumeChart" width="900" height="270"></canvas>`;
+                }
+                
+                // 请求新数据
+                try {
+                    response = await this.apiCall('/chart_data', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            symbol: symbol,
+                            duration: duration,
+                            bar_size: barSize,
+                            data_type: 'TRADES'
+                        }),
+                        // 增加超时时间
+                        timeout: 30000
+                    });
+                    
+                    // 更新缓存
+                    this.chartDataCache[cacheKey] = {
+                        data: response,
+                        timestamp: now
+                    };
+                } catch (error) {
+                    console.error('Failed to fetch chart data:', error);
+                    chartContainer.innerHTML = `<div class="alert alert-danger">获取图表数据失败: ${error.message || '请稍后再试'}</div>`;
+                    return;
+                }
+            }
+            
+            // 准备图表容器
+            chartContainer.innerHTML = `<canvas id="monitorChart" width="900" height="450"></canvas>`;
+            
+            if (volumeContainer) {
+                volumeContainer.innerHTML = `<canvas id="monitorVolumeChart" width="900" height="270"></canvas>`;
+            }
 
             if (!response.data || response.data.length === 0) {
-                chartContainer.innerHTML = '<div class="alert alert-warning">No chart data available</div>';
+                chartContainer.innerHTML = '<div class="alert alert-warning">暂无图表数据</div>';
                 return;
             }
 
@@ -2229,25 +2414,29 @@ class TradingApp {
                     } else {
                         date = new Date();
                     }
-                    return date;
+                    // 确保时间是本地时间，修复时区差异问题
+                    // 注意：getTimezoneOffset()返回的是本地时区与UTC的差值（分钟），为负数表示超前UTC
+                    // 因此需要减去这个值来获得本地时间
+                    const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+                    return localDate;
                 });
                 // 根据时间生成显示标签
                 const labels = timeValues.map(date => {
                     const interval = intervalSelect?.value || '5 mins';
                     if (interval.includes('day') || duration.includes('M') || duration.includes('Y')) {
-                        return date.toLocaleDateString('en-US', {
+                        return date.toLocaleDateString(undefined, {
                             month: 'short',
                             day: 'numeric'
                         });
                     } else if (interval.includes('hour') || duration === '1 W') {
-                        return date.toLocaleString('en-US', {
+                        return date.toLocaleString(undefined, {
                             month: 'short',
                             day: 'numeric',
                             hour: '2-digit',
                             hour12: false
                         });
                     } else {
-                        return date.toLocaleTimeString('en-US', {
+                        return date.toLocaleTimeString(undefined, {
                             hour: '2-digit',
                             minute: '2-digit',
                             hour12: false
@@ -2292,20 +2481,24 @@ class TradingApp {
                 const futureTimes = [];
                 for (let i = 1; i <= padBars; i++) {
                     const future = new Date(lastDate.getTime() + i * padIntervalMinutes * 60000);
-                    futureTimes.push(future);
+                    // 确保未来时间点也应用相同的时区修正
+                    // 注意：getTimezoneOffset()返回的是本地时区与UTC的差值（分钟），为负数表示超前UTC
+                    // 因此需要减去这个值来获得本地时间
+                    const localFuture = new Date(future.getTime() - future.getTimezoneOffset() * 60000);
+                    futureTimes.push(localFuture);
                     let label;
                     if (intervalValueRaw.includes('day') || duration.includes('M') || duration.includes('Y')) {
-                        label = future.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                        label = localFuture.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
                     } else if (intervalValueRaw.includes('hour') || duration === '1 W') {
-                        label = future.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', hour12: false });
+                        label = localFuture.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', hour12: false });
                     } else {
-                        label = future.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                        label = localFuture.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
                     }
                     labels.push(label);
                     validLabels.push(label);
                     prices.push(null);
-                    timeValues.push(future);
-                    validTimes.push(future);
+                    timeValues.push(localFuture);
+                    validTimes.push(localFuture);
                 }
 
                 // Get stop loss and take profit values for annotations
@@ -2387,11 +2580,19 @@ class TradingApp {
                 const displayLabels = chartType === 'line' ? validLabels : labels;
                 const displayTimes = chartType === 'line' ? validTimes : timeValues;
 
+                // 使用最近持仓订单的成交时间作为方框起点
                 let startIndex = 0;
-                if (this.currentMonitor?.entryTime) {
+                if (this.currentMonitor?.lastOrderTime) {
+                    const lastOrderTime = new Date(this.currentMonitor.lastOrderTime);
+                    startIndex = displayTimes.findIndex(t => t >= lastOrderTime);
+                    if (startIndex === -1) startIndex = Math.max(0, displayTimes.length - spanBars - 1);
+                } else if (this.currentMonitor?.entryTime) {
                     const entryTime = new Date(this.currentMonitor.entryTime);
                     startIndex = displayTimes.findIndex(t => t >= entryTime);
-                    if (startIndex === -1) startIndex = 0;
+                    if (startIndex === -1) startIndex = Math.max(0, displayTimes.length - spanBars - 1);
+                } else {
+                    // 如果没有入场时间，则默认显示最近的数据
+                    startIndex = Math.max(0, displayTimes.length - spanBars - 1);
                 }
                 const endIndex = Math.min(displayLabels.length - 1, startIndex + spanBars);
                 this.currentMonitor.riskStartIndex = startIndex;
@@ -2499,19 +2700,24 @@ class TradingApp {
                     };
                 }
 
-                if (stopLossPrice && takeProfitPrice && avgCost > 0) {
+                if (stopLossPrice && takeProfitPrice) {
                     const isLong = (this.currentMonitor?.positionQty || 0) > 0;
                     const xMin = displayLabels[startIndex];
                     const xMax = displayLabels[endIndex];
                     const profitColor = isLong ? 'rgba(144,238,144,0.3)' : 'rgba(255,182,193,0.3)';
                     const lossColor = isLong ? 'rgba(255,182,193,0.3)' : 'rgba(144,238,144,0.3)';
+                    
+                    // 确保无论是多头还是空头，都能正确绘制盈亏方框
                     if (isLong) {
                         annotations.profitBox = { type: 'box', xMin, xMax, yMin: avgCost, yMax: takeProfitPrice, backgroundColor: profitColor, borderWidth: 0 };
                         annotations.lossBox = { type: 'box', xMin, xMax, yMin: stopLossPrice, yMax: avgCost, backgroundColor: lossColor, borderWidth: 0 };
                     } else {
+                        // 空头情况：止盈价格低于成本，止损价格高于成本
                         annotations.profitBox = { type: 'box', xMin, xMax, yMin: takeProfitPrice, yMax: avgCost, backgroundColor: profitColor, borderWidth: 0 };
                         annotations.lossBox = { type: 'box', xMin, xMax, yMin: avgCost, yMax: stopLossPrice, backgroundColor: lossColor, borderWidth: 0 };
                     }
+                    
+                    // 添加时间限制线
                     annotations.timeLimit = {
                         type: 'line',
                         xMin: xMax,
@@ -2521,6 +2727,9 @@ class TradingApp {
                         enter: (ctx) => { ctx.chart.canvas.style.cursor = 'ew-resize'; },
                         leave: (ctx) => { ctx.chart.canvas.style.cursor = 'default'; }
                     };
+                    
+                    // 添加调试信息
+                    console.log(`绘制${isLong ? '多头' : '空头'}盈亏方框: 成本=${avgCost}, 止损=${stopLossPrice}, 止盈=${takeProfitPrice}`);
                 }
                 
                 // 移除了价格范围线段（最低价线和最高价线），只保留当前价格、平均成本、SL/TP价格线
@@ -2586,8 +2795,13 @@ class TradingApp {
                             date = new Date();
                         }
                         
+                        // 确保时间是本地时间，修复时区差异问题
+                        // 注意：getTimezoneOffset()返回的是本地时区与UTC的差值（分钟），为负数表示超前UTC
+                        // 因此需要减去这个值来获得本地时间
+                        const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+                        
                         return {
-                            x: date.getTime(),  // 转换为时间戳以兼容Luxon
+                            x: localDate.getTime(),  // 转换为时间戳以兼容Luxon
                             o: parseFloat(bar.open) || parseFloat(bar.close) || 0,
                             h: parseFloat(bar.high) || parseFloat(bar.close) || 0,
                             l: parseFloat(bar.low) || parseFloat(bar.close) || 0,
@@ -2598,6 +2812,7 @@ class TradingApp {
 
                       // 添加未来时间点以在右侧保留空间
                       futureTimes.forEach(ft => {
+                          // 未来时间点已经在前面应用了时区修正，直接使用
                           ohlcData.push({ x: ft.getTime(), o: NaN, h: NaN, l: NaN, c: NaN, volume: 0 });
                       });
                     
@@ -2717,7 +2932,7 @@ class TradingApp {
                                     type: 'time',
                                     adapters: {
                                         date: {
-                                            locale: 'en-US'
+                                            locale: 'zh-CN'
                                         }
                                     },
                                     time: {
@@ -3497,7 +3712,16 @@ class TradingApp {
             const combinedEl = document.getElementById('monitorPositionCombined');
             if (combinedEl) combinedEl.textContent = `${qty} ($${this.formatNumber(Math.abs(qty) * price)})`;
 
-            const pnl = (price - avgCost) * qty;
+            // 计算未实现盈亏，区分多头和空头持仓
+            let pnl = 0;
+            if (qty > 0) {  // 多头
+                // 多头盈亏 = (当前价格 - 成本价) * 持仓数量
+                pnl = (price - avgCost) * qty;
+            } else {  // 空头
+                // 空头盈亏 = (成本价 - 当前价格) * 持仓数量的绝对值
+                pnl = (avgCost - price) * Math.abs(qty);
+            }
+            
             const pnlEl = document.getElementById('monitorPnL');
             if (pnlEl) {
                 pnlEl.textContent = `$${this.formatNumber(pnl)}`;
@@ -3541,52 +3765,96 @@ class TradingApp {
                 
                 // 获取当前图表的interval设置
                 const intervalSelect = document.getElementById('monitorInterval');
-                const interval = intervalSelect ? intervalSelect.value : '1min';
+                const intervalRaw = intervalSelect ? intervalSelect.value : '1 min';
+                
+                // 标准化interval格式，移除空格，与loadMonitorChart方法保持一致
+                const interval = intervalRaw.replace(/\s+/g, '');
                 
                 // 根据interval计算正确的时间点
                 const now = new Date();
                 let timeLabel;
                 let shouldUpdateLast = false;
                 
+                // 创建一个新的Date对象用于时间计算，避免修改原始now对象
+                // 使用const确保intervalTime不会被意外修改
+                const intervalTime = new Date(now);
+                
+                // 根据不同的时间间隔调整时间
                 switch(interval) {
                     case '1min':
                         // 对于1分钟间隔，向下取整到分钟
-                        now.setSeconds(0, 0);
-                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                        intervalTime.setSeconds(0, 0);
                         break;
                     case '5min':
                         // 对于5分钟间隔，向下取整到5分钟边界
-                        const minutes5 = Math.floor(now.getMinutes() / 5) * 5;
-                        now.setMinutes(minutes5, 0, 0);
-                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                        const minutes5 = Math.floor(intervalTime.getMinutes() / 5) * 5;
+                        intervalTime.setMinutes(minutes5, 0, 0);
                         break;
                     case '15min':
                         // 对于15分钟间隔，向下取整到15分钟边界
-                        const minutes15 = Math.floor(now.getMinutes() / 15) * 15;
-                        now.setMinutes(minutes15, 0, 0);
-                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                        const minutes15 = Math.floor(intervalTime.getMinutes() / 15) * 15;
+                        intervalTime.setMinutes(minutes15, 0, 0);
                         break;
                     case '1hour':
                         // 对于1小时间隔，向下取整到小时
-                        now.setMinutes(0, 0, 0);
-                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                        intervalTime.setMinutes(0, 0, 0);
                         break;
                     default:
-                        timeLabel = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+                        // 默认不做特殊处理
+                        break;
+                }
+                
+                // 根据interval和duration格式化时间标签，确保与loadMonitorChart方法中的格式完全一致
+                const durationSelect = document.getElementById('monitorDuration');
+                const duration = durationSelect?.value || '1 D';
+                
+                if (intervalRaw.includes('day') || duration.includes('M') || duration.includes('Y')) {
+                    timeLabel = intervalTime.toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric'
+                    });
+                } else if (intervalRaw.includes('hour') || duration === '1 W') {
+                    timeLabel = intervalTime.toLocaleString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        hour12: false
+                    });
+                } else {
+                    timeLabel = intervalTime.toLocaleTimeString('en-US', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false
+                    });
                 }
                 
                 // 检查最后一个数据点是否是同一时间点
-                if (labels.length > 0 && labels[labels.length - 1] === timeLabel) {
-                    // 更新最后一个数据点的价格
-                    dataset.data[dataset.data.length - 1] = price;
-                    shouldUpdateLast = true;
-                    console.log(`[实时更新] 更新最后一个数据点: ${timeLabel}, 价格: ${price}`);
+                if (labels.length > 0) {
+                    const lastLabel = labels[labels.length - 1];
+                    // 增强调试输出，帮助诊断问题
+                    console.log(`[实时更新] 比较: 最后标签="${lastLabel}", 当前标签="${timeLabel}"`);
+                    console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
+                    
+                    // 严格比较时间标签字符串 - 确保字符串格式完全一致
+                    if (lastLabel === timeLabel) {
+                        // 更新最后一个数据点的价格
+                        dataset.data[dataset.data.length - 1] = price;
+                        shouldUpdateLast = true;
+                        console.log(`[实时更新] 更新最后一个数据点: ${timeLabel}, 价格: ${price}`);
+                    } else {
+                        // 添加新的数据点
+                        labels.push(timeLabel);
+                        dataset.data.push(price);
+                        shouldUpdateLast = false;
+                        console.log(`[实时更新] 添加新数据点: ${timeLabel}, 价格: ${price}`);
+                    }
                 } else {
-                    // 添加新的数据点
+                    // 图表为空，添加第一个数据点
                     labels.push(timeLabel);
                     dataset.data.push(price);
                     shouldUpdateLast = false;
-                    console.log(`[实时更新] 添加新数据点: ${timeLabel}, 价格: ${price}`);
+                    console.log(`[实时更新] 添加首个数据点: ${timeLabel}, 价格: ${price}`);
+                    console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
                 }
                 
                 // 同时更新Volume图表
@@ -3630,18 +3898,29 @@ class TradingApp {
 
             // 检查时间跨度达到右边界提醒
             try {
-                const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
-                const intervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
-                const spanBars = Math.ceil((this.currentMonitor?.maxTimeSpan || 30) / intervalMinutes);
-                const labels = this.monitorChart ? (this.monitorChart.data.labels || []) : [];
-                if (!this.currentMonitor.timeAlertSent && labels.length - 1 - (this.currentMonitor.riskStartIndex || 0) >= spanBars) {
-                    const symbol = this.currentMonitor.symbol;
-                    const msg = `${symbol} 持仓时间已达预设上限`;
-                    this.showAlert('warning', msg);
-                    this.apiCall('/notify', { method: 'POST', body: JSON.stringify({ message: msg }) }).catch(console.error);
-                    this.currentMonitor.timeAlertSent = true;
+                // 使用实际的时间比较，而不是依赖图表标签数量
+                if (this.currentMonitor && this.currentMonitor.entryTime && !this.currentMonitor.timeAlertSent) {
+                    const entryTime = new Date(this.currentMonitor.entryTime);
+                    const currentTime = new Date();
+                    const elapsedMinutes = (currentTime - entryTime) / (60 * 1000);
+                    const maxTimeSpan = this.currentMonitor.maxTimeSpan || 30;
+                    
+                    if (elapsedMinutes >= maxTimeSpan) {
+                        const symbol = this.currentMonitor.symbol;
+                        const msg = `${symbol} 持仓时间已达预设上限 (${Math.floor(elapsedMinutes)}分钟)`;
+                        this.showAlert('warning', msg);
+                        // 发送通知，即使失败也不影响标记已发送
+                        this.apiCall('/notify', { method: 'POST', body: JSON.stringify({ message: msg }) })
+                            .then(result => {
+                                if (!result.success) {
+                                    console.warn('Position expiry notification failed:', result.message || 'Unknown reason');
+                                }
+                            })
+                            .catch(err => console.warn('Position expiry notification error:', err));
+                        this.currentMonitor.timeAlertSent = true;
+                    }
                 }
-            } catch (e) { /* ignore */ }
+            } catch (e) { console.warn('检查持仓时间失败:', e); }
         } catch (e) {
             console.warn('updateMonitorRealtime failed:', e);
         }
@@ -3679,7 +3958,16 @@ class TradingApp {
                 if (stopLossPrice && avgCost > 0) {
                     const deltaSL = stopLossPrice - avgCost;
                     const pctSL = avgCost ? (deltaSL / avgCost) * 100 : 0;
-                    const stopLossPnL = deltaSL * positionQty;
+                    
+                    // 根据持仓方向计算预期盈亏
+                    let stopLossPnL = 0;
+                    if (positionQty > 0) {  // 多头
+                        // 多头盈亏 = (止损价格 - 成本价) * 持仓数量
+                        stopLossPnL = deltaSL * positionQty;
+                    } else {  // 空头
+                        // 空头盈亏 = (成本价 - 止损价格) * 持仓数量的绝对值
+                        stopLossPnL = (avgCost - stopLossPrice) * Math.abs(positionQty);
+                    }
                     
                     // 仅显示金额
                     expectedStopLossPnL.textContent = `$${this.formatNumber(stopLossPnL)}`;
@@ -3700,7 +3988,16 @@ class TradingApp {
                 if (takeProfitPrice && avgCost > 0) {
                     const deltaTP = takeProfitPrice - avgCost;
                     const pctTP = avgCost ? (deltaTP / avgCost) * 100 : 0;
-                    const takeProfitPnL = deltaTP * positionQty;
+                    
+                    // 根据持仓方向计算预期盈亏
+                    let takeProfitPnL = 0;
+                    if (positionQty > 0) {  // 多头
+                        // 多头盈亏 = (止盈价格 - 成本价) * 持仓数量
+                        takeProfitPnL = deltaTP * positionQty;
+                    } else {  // 空头
+                        // 空头盈亏 = (成本价 - 止盈价格) * 持仓数量的绝对值
+                        takeProfitPnL = (avgCost - takeProfitPrice) * Math.abs(positionQty);
+                    }
                     
                     // 仅显示金额
                     expectedTakeProfitPnL.textContent = `$${this.formatNumber(takeProfitPnL)}`;
@@ -3888,12 +4185,72 @@ class TradingApp {
         }
     }
 
+    // 创建防抖版本的loadOrders方法
+    debouncedLoadOrders = null;
+    
+    // 初始化loadOrders防抖函数
+    initOrdersDebounce() {
+        if (!this.debouncedLoadOrders) {
+            this.debouncedLoadOrders = this.debounce(this._loadOrders.bind(this), 300);
+        }
+    }
+    
+    // 防抖包装方法
     async loadOrders() {
-        console.log('loadOrders method called');
+        console.log('loadOrders method called with debounce');
+        // 确保防抖函数已初始化
+        this.initOrdersDebounce();
+        
+        const tbody = document.querySelector('#ordersTable tbody');
+        if (tbody) {
+            // 显示加载状态
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="8" class="text-center py-3">
+                        <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
+                        <small>加载订单数据中...</small>
+                    </td>
+                </tr>
+            `;
+        }
+        
+        // 调用防抖版本的方法
+        this.debouncedLoadOrders();
+    }
+    
+    // 实际加载订单的方法
+    async _loadOrders() {
+        console.log('Executing actual orders loading...');
         try {
-            console.log('Fetching orders from API...');
-            const data = await this.apiCall('/orders');
-            console.log('Orders data received:', data);
+            // 检查缓存
+            const cacheKey = 'orders_main';
+            const now = Date.now();
+            const cachedData = this.ordersCache ? this.ordersCache[cacheKey] : null;
+            
+            let data;
+            if (cachedData && (now - cachedData.timestamp) < 10 * 1000) { // 10秒缓存
+                console.log('Using cached orders data for main list');
+                data = cachedData.data;
+            } else {
+                console.log('Fetching fresh orders data from API...');
+                // 获取订单数据，使用缓存机制
+                data = await this.apiCall('/orders', {
+                    useCache: true,
+                    cacheTime: 10000, // 10秒缓存
+                    timeout: 20000 // 20秒超时
+                });
+                
+                // 确保ordersCache已初始化
+                if (!this.ordersCache) {
+                    this.ordersCache = {};
+                }
+                
+                // 更新缓存
+                this.ordersCache[cacheKey] = {
+                    data: data,
+                    timestamp: now
+                };
+            }
             
             // 仅保留当天创建的订单，并按创建时间反序排列（最新的在前）
             let orders = (data.orders && Array.isArray(data.orders)) ? data.orders : [];
@@ -3910,6 +4267,19 @@ class TradingApp {
             this.orders = orders;
             
             const tbody = document.querySelector('#ordersTable tbody');
+            if (!tbody) return;
+            
+            // 如果没有订单，显示提示信息
+            if (orders.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="8" class="text-center py-3">
+                            <small>今日暂无订单</small>
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
             
             tbody.innerHTML = orders.map(order => {
                 // 计算价格显示
@@ -3984,6 +4354,17 @@ class TradingApp {
             }).join('');
         } catch (error) {
             console.error('Failed to load orders:', error);
+            const tbody = document.querySelector('#ordersTable tbody');
+            if (tbody) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="8" class="text-center py-3">
+                            <div class="text-danger">加载订单失败</div>
+                            <small class="text-muted">${error.message || '未知错误'}</small>
+                        </td>
+                    </tr>
+                `;
+            }
         }
     }
 
@@ -4876,12 +5257,11 @@ class TradingApp {
                 exportBtn.onclick = () => this.exportExecutionsCsv(name);
             }
             
+            // WebSocket updates executions automatically
             const refreshBtn = document.getElementById('refreshExecutionsBtn');
             if (refreshBtn) {
-                refreshBtn.onclick = () => {
-                    this.loadStrategyExecutions(name);
-                    this.loadStrategyPerformance(name, { range: '1d' });
-                };
+                refreshBtn.disabled = true;
+                refreshBtn.title = 'WebSocket updates executions automatically';
             }
 
             const clearBtn = document.getElementById('clearExecutionsBtn');

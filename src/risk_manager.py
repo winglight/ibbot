@@ -232,7 +232,7 @@ class RiskManager:
         self.scheduler.add_job(
             self._monitor_positions,
             'interval',
-            seconds=15,  # 从30秒改为15秒，提高检查频率
+            seconds=5,  # 从15秒改为5秒，大幅提高检查频率
             id='position_monitor',
             replace_existing=True,
             coalesce=True,
@@ -399,7 +399,8 @@ class RiskManager:
             
             risk_logger.info("=== Starting position monitoring cycle ===")
             
-            positions = self.ibkr_client.get_positions()
+            # 设置fast=False确保获取最新实时价格，而不是使用缓存
+            positions = self.ibkr_client.get_positions(fast=False)
             account_info = self.ibkr_client.get_account_info()
             
             risk_logger.info(f"Found {len(positions)} positions to monitor")
@@ -492,9 +493,24 @@ class RiskManager:
                     risk_logger.warning(f"Auto close triggered for {symbol} due to {loss_percent*100:.2f}% loss")
     
     async def _check_stop_loss_take_profit(self, position: Dict):
-        """检查止损止盈并提前下限价单"""
+        """检查止损止盈"""
         symbol = position['symbol']
-        current_price = position['current_price']
+        
+        # 获取最新实时价格，而不是使用position中的价格
+        try:
+            # 尝试获取最新实时价格
+            real_time_data = self.ibkr_client.get_real_time_data(symbol)
+            if real_time_data and 'price' in real_time_data:
+                current_price = real_time_data['price']
+                risk_logger.info(f"Using real-time price for {symbol}: ${current_price:.2f}")
+            else:
+                # 如果无法获取实时价格，则使用position中的价格
+                current_price = position['current_price']
+                risk_logger.info(f"Using position price for {symbol}: ${current_price:.2f}")
+        except Exception as e:
+            # 如果获取实时价格失败，则使用position中的价格
+            current_price = position['current_price']
+            risk_logger.error(f"Error getting real-time price for {symbol}: {e}, using position price: ${current_price:.2f}")
         
         if symbol not in self.risk_rules:
             risk_logger.debug(f"No risk rule found for {symbol}")
@@ -616,7 +632,7 @@ class RiskManager:
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.info(f"Take profit rule disabled due to order failure for {symbol}")
                 except Exception as e:
-                    risk_logger.error(f"Failed to place take profit limit order for {symbol}: {e}")
+                    risk_logger.error(f"Failed to place take profit market order for {symbol}: {e}")
                     # 下单异常时禁用规则
                     rule.enabled = False
                     db_rule = DatabaseRiskRule(
@@ -675,18 +691,18 @@ class RiskManager:
             # 对于止损：多头持仓时价格应该下跌到目标价格，空头持仓时价格应该上涨到目标价格
             if position_qty > 0:  # 多头持仓
                 price_diff = rule.stop_loss_price - current_price  # 止损价格 - 当前价格
-                # 修复：多头持仓当前价格<=止损价格时立即触发
-                should_trigger = current_price <= rule.stop_loss_price
+                # 修复：多头持仓当前价格<=止损价格时立即触发，或者价格差在1以内
+                should_trigger = current_price <= rule.stop_loss_price or (price_diff > 0 and price_diff <= 1)
             else:  # 空头持仓
                 price_diff = current_price - rule.stop_loss_price  # 当前价格 - 止损价格
-                # 修复：空头持仓当前价格>=止损价格时立即触发
-                should_trigger = current_price >= rule.stop_loss_price
+                # 修复：空头持仓当前价格>=止损价格时立即触发，或者价格差在1以内
+                should_trigger = current_price >= rule.stop_loss_price or (price_diff > 0 and price_diff <= 1)
             
-            risk_logger.info(f"Stop loss check for {symbol}: current=${current_price:.2f}, target=${rule.stop_loss_price:.2f}, price_diff=${price_diff:.4f}, should_trigger={should_trigger}, position_qty={position_qty}")
+            risk_logger.warning(f"⚠️ Stop loss check for {symbol}: current=${current_price:.2f}, target=${rule.stop_loss_price:.2f}, price_diff=${price_diff:.4f}, should_trigger={should_trigger}, position_qty={position_qty}")
             
             # If price reaches stop loss level, place market order immediately
             if should_trigger:
-                risk_logger.info(f"Price reaches stop loss for {symbol}, placing market order")
+                risk_logger.warning(f"🚨 STOP LOSS TRIGGERED for {symbol} at ${current_price:.2f}, placing market order immediately")
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
@@ -698,6 +714,18 @@ class RiskManager:
                     
                     if trade:
                         self.pending_orders[symbol]["stop_loss"] = True
+                        
+                        # 发送Telegram通知
+                        try:
+                            await self.telegram_notifier.send_message(
+                                f"🚨 STOP LOSS TRIGGERED\n\n"
+                                f"Symbol: {symbol}\n"
+                                f"Price: ${current_price:.2f}\n"
+                                f"Target Price: ${rule.stop_loss_price:.2f}\n"
+                                f"Quantity: {abs(position_qty)}"
+                            )
+                        except Exception as e:
+                            risk_logger.error(f"Failed to send Telegram notification for stop loss: {e}")
                         order_placed = True
                         
                         # 保存订单记录到auto_orders内存和数据库
@@ -718,7 +746,20 @@ class RiskManager:
                         self.save_auto_order_to_db(auto_order)
                         
                         risk_logger.info(f"✅ Market order placed for stop loss: {symbol} at market price ${current_price:.2f}")
-                        risk_logger.info(f"Stop loss market order successfully placed for {symbol}, rule remains active")
+                        
+                        # 禁用规则并更新数据库
+                        rule.enabled = False
+                        db_rule = DatabaseRiskRule(
+                            symbol=rule.symbol,
+                            stop_loss_price=rule.stop_loss_price,
+                            take_profit_price=rule.take_profit_price,
+                            max_loss_percent=rule.max_loss_percent,
+                            enabled=rule.enabled,
+                            max_time_span=rule.max_time_span,
+                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        )
+                        self.db_manager.save_risk_rule(db_rule)
+                        risk_logger.warning(f"🔒 Stop loss rule disabled for {symbol} after triggering at ${current_price:.2f}")
                         
                         # Send notification
                         await self.telegram_notifier.send_message(
@@ -969,6 +1010,44 @@ class RiskManager:
                 
                 self.auto_orders[str(order_id)] = auto_order
                 self.save_auto_order_to_db(auto_order)
+                
+                # 同步到订单管理器
+                if self.order_manager:
+                    from .order_manager import Order, OrderStatus, OrderSource
+                    order = Order(
+                        order_id=str(order_id),
+                        symbol=order_request.symbol,
+                        action=action,
+                        quantity=order_request.quantity,
+                        order_type="MARKET",
+                        price=position['current_price'],
+                        status=OrderStatus.SUBMITTED.value,
+                        created_at=datetime.now(),
+                        order_source=order_source,
+                        notes=order_request.reason
+                    )
+                    self.order_manager.add_order(order)
+                    risk_logger.info(f"订单已同步到订单管理器: {order_id}")
+                    
+                    # 对于市价单，立即更新状态为已成交
+                    # 市价单通常会立即成交，所以我们可以直接更新状态
+                    if order.order_type == "MARKET":
+                        from datetime import datetime
+                        executed_at = datetime.now()
+                        self.order_manager.update_order_status(
+                            order_id=str(order_id),
+                            status=OrderStatus.FILLED.value,
+                            fill_price=position['current_price'],
+                            executed_at=executed_at
+                        )
+                        risk_logger.info(f"市价单状态已更新为已成交: {order_id}")
+                        
+                        # 同时更新内存中的自动订单状态
+                        auto_order.status = "Filled"
+                        auto_order.executed_at = executed_at
+                        self.update_order_status(str(order_id), "Filled")
+                else:
+                    risk_logger.warning(f"订单管理器未初始化，无法同步订单: {order_id}")
                 
                 # Send notification based on order type
                 if order_request.order_type == OrderType.STOP_LOSS:

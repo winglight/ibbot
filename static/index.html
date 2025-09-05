@@ -91,9 +91,7 @@
                             <button class="btn btn-sm btn-primary me-2" id="placeOrderBtn">
                                 <i class="fas fa-plus"></i> Place Order
                             </button>
-                            <button class="btn btn-sm btn-outline-light" id="refreshOrdersBtn">
-                                <i class="fas fa-sync"></i>
-                            </button>
+
                         </div>
                     </div>
                     <div class="card-body">
@@ -128,9 +126,7 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-briefcase"></i> Portfolio</h5>
-                        <button class="btn btn-sm btn-outline-light" id="refreshPositionsBtn">
-                            <i class="fas fa-sync"></i>
-                        </button>
+
                     </div>
                     <div class="card-body">
                         <div class="table-responsive">
@@ -163,9 +159,6 @@
                             <button class="btn btn-sm btn-warning me-2" id="addRiskRuleBtn">
                                 <i class="fas fa-plus"></i>
                             </button>
-                            <button class="btn btn-sm btn-outline-light" id="refreshRiskRulesBtn">
-                                <i class="fas fa-sync"></i>
-                            </button>
                         </div>
                     </div>
                     <div class="card-body">
@@ -193,7 +186,6 @@
                     <div class="d-flex gap-2">
                       <button class="btn btn-outline-secondary btn-sm" id="strategySettingsBtn"><i class="fas fa-cog"></i> Settings</button>
                       <button class="btn btn-primary btn-sm" id="addStrategyBtn"><i class="fas fa-plus"></i> Add</button>
-                      <button class="btn btn-outline-primary btn-sm" id="refreshStrategiesBtn"><i class="fas fa-sync"></i> Refresh</button>
                     </div>
                   </div>
                   <div class="card-body">
@@ -628,9 +620,7 @@
                     </select>
                   </div>
                   <div class="d-flex gap-2">
-                    <button class="btn btn-outline-primary btn-sm" id="refreshExecutionsBtn">
-                      <i class="fas fa-sync"></i> Refresh
-                    </button>
+
                     <button class="btn btn-outline-danger btn-sm" id="clearExecutionsBtn">
                       <i class="fas fa-trash"></i> Clear
                     </button>
@@ -944,17 +934,15 @@
                                     </div>
                                     <div class="mt-2 p-2 bg-light rounded" id="expectedPnLSection" style="display: none;">
                                         <div class="row g-2 text-center">
-                                            <div class="col-6">
+                                            <div class="col-4">
                                                 <small class="text-muted d-block">止损预期</small>
                                                 <span class="fw-bold text-danger" id="expectedStopLossPnL">$0.00</span>
                                             </div>
-                                            <div class="col-6">
+                                            <div class="col-4">
                                                 <small class="text-muted d-block">止盈预期</small>
                                                 <span class="fw-bold text-success" id="expectedTakeProfitPnL">$0.00</span>
                                             </div>
-                                        </div>
-                                        <div class="row g-2 text-center mt-2">
-                                            <div class="col-12">
+                                            <div class="col-4">
                                                 <small class="text-muted d-block">RRR</small>
                                                 <span class="fw-bold" id="monitorRRR">2:1</span>
                                             </div>
@@ -1011,7 +999,6 @@
                     <h5 class="mb-0"><i class="fas fa-file-alt"></i> Logs</h5>
                     <div>
                         <button class="btn btn-sm btn-outline-light me-2" id="logStatsBtn">统计</button>
-                        <button class="btn btn-sm btn-outline-light" id="refreshLogsBtn"><i class="fas fa-sync"></i></button>
                     </div>
                 </div>
                 <div class="card-body">
