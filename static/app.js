@@ -2254,6 +2254,50 @@ class TradingApp {
                     }
                 });
 
+                // 为了在建仓后显示盈亏方框，右侧额外添加时间空间
+                const intervalValueRaw = intervalSelect?.value || '1 min';
+                const intervalKey = intervalValueRaw.replace(/\s+/g, '');
+                const intervalMinutesMap = {
+                    '1min': 1,
+                    '5mins': 5,
+                    '15mins': 15,
+                    '30mins': 30,
+                    '1hour': 60
+                };
+                const intervalMinutes = intervalMinutesMap[intervalKey] || 1;
+                const spanMinutes = this.currentMonitor?.maxTimeSpan || 30;
+                const padBars = Math.ceil(spanMinutes / intervalMinutes);
+                const lastBar = response.data[response.data.length - 1];
+                const lastRaw = (lastBar.time !== undefined && lastBar.time !== null) ? lastBar.time : lastBar.date;
+                let lastDate;
+                if (typeof lastRaw === 'string') {
+                    lastDate = new Date(lastRaw);
+                    if (isNaN(lastDate.getTime())) {
+                        const num = parseFloat(lastRaw);
+                        lastDate = new Date(num > 1e10 ? num : num * 1000);
+                    }
+                } else if (typeof lastRaw === 'number') {
+                    lastDate = new Date(lastRaw > 1e10 ? lastRaw : lastRaw * 1000);
+                } else {
+                    lastDate = new Date();
+                }
+                const futureTimes = [];
+                for (let i = 1; i <= padBars; i++) {
+                    const future = new Date(lastDate.getTime() + i * intervalMinutes * 60000);
+                    futureTimes.push(future);
+                    let label;
+                    if (intervalValueRaw.includes('day') || duration.includes('M') || duration.includes('Y')) {
+                        label = future.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                    } else if (intervalValueRaw.includes('hour') || duration === '1 W') {
+                        label = future.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', hour12: false });
+                    } else {
+                        label = future.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                    }
+                    labels.push(label);
+                    validLabels.push(label);
+                    prices.push(null);
+                }
+
                 // Get stop loss and take profit values for annotations
                 const stopLossInput = document.getElementById('monitorStopLoss');
                 const takeProfitInput = document.getElementById('monitorTakeProfit');
@@ -2507,7 +2551,7 @@ class TradingApp {
                 
                 if (chartType === 'candlestick') {
                     // 使用标准的Chart.js金融图表插件，参考折线图的数据处理方式
-                    ohlcData = validData.map((bar, index) => {
+                      ohlcData = validData.map((bar, index) => {
                         // 使用与折线图相同的时间处理逻辑
                         const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
                         let date;
@@ -2528,10 +2572,15 @@ class TradingApp {
                             o: parseFloat(bar.open) || parseFloat(bar.close) || 0,
                             h: parseFloat(bar.high) || parseFloat(bar.close) || 0,
                             l: parseFloat(bar.low) || parseFloat(bar.close) || 0,
-                            c: parseFloat(bar.close) || 0,
-                            volume: parseFloat(bar.volume) || 0
+                          c: parseFloat(bar.close) || 0,
+                          volume: parseFloat(bar.volume) || 0
                         };
-                    }).filter(item => item.c > 0);  // 只需要确保收盘价有效
+                      }).filter(item => item.c > 0);  // 只需要确保收盘价有效
+
+                      // 添加未来时间点以在右侧保留空间
+                      futureTimes.forEach(ft => {
+                          ohlcData.push({ x: ft.getTime(), o: NaN, h: NaN, l: NaN, c: NaN, volume: 0 });
+                      });
                     
                     console.log('OHLC data sample:', ohlcData.slice(0, 3));
                     console.log('Total OHLC points:', ohlcData.length);
@@ -2952,11 +3001,14 @@ class TradingApp {
                         y: parseFloat(item.volume || 0)
                     }));
                     volumeLabels = undefined; // 时间轴图表不需要labels
-                } else {
-                    // 折线图：使用传统的labels和data数组
-                    volumeChartData = validData.map((item) => parseFloat(item.volume || 0));
-                    volumeLabels = validLabels;
-                }
+                  } else {
+                      // 折线图：使用传统的labels和data数组
+                      volumeChartData = validData.map((item) => parseFloat(item.volume || 0));
+                      volumeLabels = validLabels;
+                      for (let i = 0; i < padBars; i++) {
+                          volumeChartData.push(null);
+                      }
+                  }
                 
                 this.monitorVolumeChart = new Chart(volumeCtx, {
                     type: 'bar',
