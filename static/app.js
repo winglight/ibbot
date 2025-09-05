@@ -1536,9 +1536,13 @@ class TradingApp {
             // 计算建仓/加仓时间：取该标的最新订单时间
             let entryTime = new Date();
             if (Array.isArray(this.orders)) {
-                const lastOrder = this.orders.find(o => o.symbol === symbol && o.submit_time);
-                if (lastOrder) {
-                    entryTime = new Date(lastOrder.submit_time);
+                const latestOrderTime = this.orders
+                    .filter(o => o.symbol === symbol && o.submit_time)
+                    .map(o => new Date(o.submit_time))
+                    .filter(d => !isNaN(d.getTime()))
+                    .sort((a, b) => b - a)[0];
+                if (latestOrderTime) {
+                    entryTime = latestOrderTime;
                 }
             }
 
