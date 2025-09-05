@@ -1357,6 +1357,9 @@ class TradingApp {
                 avgCost: Number(avgCost) || 0,
                 pnl: Number(pnl) || 0,
                 pnlPercent: Number(pnlPercent) || 0,
+                maxTimeSpan: (this.riskRules && this.riskRules[symbol] && this.riskRules[symbol].max_time_span) || 30,
+                entryTime: new Date(),
+                timeAlertSent: false,
             };
 
             // 清理输入框
@@ -1412,7 +1415,10 @@ class TradingApp {
                 if (rule && rule.enabled) {
                     if (slInputRef) slInputRef.value = rule.stop_loss_price ?? '';
                     if (tpInputRef) tpInputRef.value = rule.take_profit_price ?? '';
-                    
+                    if (this.currentMonitor) {
+                        this.currentMonitor.maxTimeSpan = rule.max_time_span || this.currentMonitor.maxTimeSpan;
+                    }
+
                     // 显示激活的风险规则信息
                     this.showActiveRiskRule(rule);
                 } else {
@@ -1579,7 +1585,8 @@ class TradingApp {
                                 body: JSON.stringify({
                                     symbol: symbol,
                                     stop_loss_price: sl,
-                                    take_profit_price: tp
+                                    take_profit_price: tp,
+                                    max_time_span: this.currentMonitor?.maxTimeSpan
                                 })
                             });
                             // 更新本地缓存
@@ -1588,6 +1595,7 @@ class TradingApp {
                                 symbol,
                                 stop_loss_price: sl,
                                 take_profit_price: tp,
+                                max_time_span: this.currentMonitor?.maxTimeSpan,
                             });
                             this.showAlert('success', '已保存风险规则');
                         } catch (err) {
@@ -2154,6 +2162,16 @@ class TradingApp {
                 const chartTypeRadio = document.querySelector('input[name="chartType"]:checked');
                 const chartType = chartTypeRadio ? chartTypeRadio.value : 'line';
 
+                // 计算时间跨度相关参数
+                const intervalValue = intervalSelect ? intervalSelect.value : '1min';
+                const intervalMinutesMap = { '1min': 1, '5min': 5, '15min': 15, '1hour': 60 };
+                const intervalMinutes = intervalMinutesMap[intervalValue] || 1;
+                const spanMinutes = this.currentMonitor?.maxTimeSpan || 30;
+                const spanBars = Math.max(1, Math.round(spanMinutes / intervalMinutes));
+                const endIndex = labels.length - 1;
+                const startIndex = Math.max(0, endIndex - spanBars);
+                this.currentMonitor.riskStartIndex = startIndex;
+
                 // Prepare annotations
                 const annotations = {};
                 if (stopLossPrice) {
@@ -2254,6 +2272,30 @@ class TradingApp {
                             color: 'white',
                             padding: 4
                         }
+                    };
+                }
+
+                if (stopLossPrice && takeProfitPrice && avgCost > 0) {
+                    const isLong = (this.currentMonitor?.positionQty || 0) > 0;
+                    const xMin = labels[startIndex];
+                    const xMax = labels[endIndex];
+                    const profitColor = isLong ? 'rgba(144,238,144,0.3)' : 'rgba(255,182,193,0.3)';
+                    const lossColor = isLong ? 'rgba(255,182,193,0.3)' : 'rgba(144,238,144,0.3)';
+                    if (isLong) {
+                        annotations.profitBox = { type: 'box', xMin, xMax, yMin: avgCost, yMax: takeProfitPrice, backgroundColor: profitColor, borderWidth: 0 };
+                        annotations.lossBox = { type: 'box', xMin, xMax, yMin: stopLossPrice, yMax: avgCost, backgroundColor: lossColor, borderWidth: 0 };
+                    } else {
+                        annotations.profitBox = { type: 'box', xMin, xMax, yMin: takeProfitPrice, yMax: avgCost, backgroundColor: profitColor, borderWidth: 0 };
+                        annotations.lossBox = { type: 'box', xMin, xMax, yMin: avgCost, yMax: stopLossPrice, backgroundColor: lossColor, borderWidth: 0 };
+                    }
+                    annotations.timeLimit = {
+                        type: 'line',
+                        xMin: xMax,
+                        xMax: xMax,
+                        borderColor: 'rgba(128,128,128,0.8)',
+                        borderWidth: 2,
+                        enter: (ctx) => { ctx.chart.canvas.style.cursor = 'ew-resize'; },
+                        leave: (ctx) => { ctx.chart.canvas.style.cursor = 'default'; }
                     };
                 }
                 
@@ -2545,20 +2587,30 @@ class TradingApp {
                             // 检查是否悬停在可拖动的annotation线上（只有SL/TP线可拖动）
                             const annotations = chart.options.plugins.annotation.annotations;
                             if (annotations) {
-                                let isOverDraggableLine = false;
+                                let overHLine = false;
+                                let overVLine = false;
+                                const canvasPosition = Chart.helpers.getRelativePosition(event, chart);
+                                const dataY = chart.scales.y.getValueForPixel(canvasPosition.y);
+                                const dataX = chart.scales.x.getValueForPixel(canvasPosition.x);
                                 Object.keys(annotations).forEach(key => {
-                                    // 只有stopLoss和takeProfit线可以拖动
                                     if ((key === 'stopLoss' || key === 'takeProfit') && annotations[key].type === 'line') {
                                         const annotation = annotations[key];
-                                        const canvasPosition = Chart.helpers.getRelativePosition(event, chart);
-                                        const dataY = chart.scales.y.getValueForPixel(canvasPosition.y);
                                         const lineY = annotation.yMin || annotation.value;
                                         if (Math.abs(dataY - lineY) < (chart.scales.y.max - chart.scales.y.min) * 0.02) {
-                                            isOverDraggableLine = true;
+                                            overHLine = true;
+                                        }
+                                    } else if (key === 'timeLimit' && annotations[key].type === 'line') {
+                                        const annotation = annotations[key];
+                                        const labels = chart.data.labels || [];
+                                        const lineIndex = labels.indexOf(annotation.xMin || annotation.value);
+                                        if (Math.abs(dataX - lineIndex) < 0.5) {
+                                            overVLine = true;
                                         }
                                     }
                                 });
-                                chart.canvas.style.cursor = isOverDraggableLine ? 'ns-resize' : 'default';
+                                if (overHLine) chart.canvas.style.cursor = 'ns-resize';
+                                else if (overVLine) chart.canvas.style.cursor = 'ew-resize';
+                                else chart.canvas.style.cursor = 'default';
                             }
                         },
                         // 移除onClick事件，改用mousedown处理拖动开始
@@ -2605,80 +2657,115 @@ class TradingApp {
 
                 canvas.addEventListener('mousedown', (event) => {
                     // 处理可拖动annotation线的拖动开始（只有SL/TP线可拖动）
+                const rect = canvas.getBoundingClientRect();
+                const canvasPosition = {
+                    x: event.clientX - rect.left,
+                    y: event.clientY - rect.top
+                };
+                const dataY = this.monitorChart.scales.y.getValueForPixel(canvasPosition.y);
+                const dataX = this.monitorChart.scales.x.getValueForPixel(canvasPosition.x);
+
+                const annotations = this.monitorChart.options.plugins.annotation.annotations;
+                if (annotations) {
+                    Object.keys(annotations).forEach(key => {
+                        if ((key === 'stopLoss' || key === 'takeProfit') && annotations[key].type === 'line') {
+                            const annotation = annotations[key];
+                            const lineY = annotation.yMin || annotation.value;
+                            if (Math.abs(dataY - lineY) < (this.monitorChart.scales.y.max - this.monitorChart.scales.y.min) * 0.02) {
+                                this.monitorChart._draggedAnnotation = key;
+                                this.monitorChart._isDragging = true;
+                                event.preventDefault();
+                            }
+                        } else if (key === 'timeLimit' && annotations[key].type === 'line') {
+                            const annotation = annotations[key];
+                            const labels = this.monitorChart.data.labels || [];
+                            const lineIndex = labels.indexOf(annotation.xMin || annotation.value);
+                            if (Math.abs(dataX - lineIndex) < 0.5) {
+                                this.monitorChart._draggedAnnotation = key;
+                                this.monitorChart._isDragging = true;
+                                event.preventDefault();
+                            }
+                        }
+                    });
+                }
+            });
+
+                canvas.addEventListener('mousemove', (event) => {
+                if (this.monitorChart._isDragging && this.monitorChart._draggedAnnotation) {
                     const rect = canvas.getBoundingClientRect();
                     const canvasPosition = {
                         x: event.clientX - rect.left,
                         y: event.clientY - rect.top
                     };
-                    const dataY = this.monitorChart.scales.y.getValueForPixel(canvasPosition.y);
-                    
+                    const annotationKey = this.monitorChart._draggedAnnotation;
                     const annotations = this.monitorChart.options.plugins.annotation.annotations;
-                    if (annotations) {
-                        Object.keys(annotations).forEach(key => {
-                            // 只有stopLoss和takeProfit线可以拖动
-                            if ((key === 'stopLoss' || key === 'takeProfit') && annotations[key].type === 'line') {
-                                const annotation = annotations[key];
-                                const lineY = annotation.yMin || annotation.value;
-                                if (Math.abs(dataY - lineY) < (this.monitorChart.scales.y.max - this.monitorChart.scales.y.min) * 0.02) {
-                                    // 开始拖动
-                                    this.monitorChart._draggedAnnotation = key;
-                                    this.monitorChart._isDragging = true;
-                                    event.preventDefault(); // 防止默认行为
-                                }
-                            }
-                        });
-                    }
-                });
+                    const annotation = annotations[annotationKey];
+                    if (!annotation) return;
 
-                canvas.addEventListener('mousemove', (event) => {
-                    if (this.monitorChart._isDragging && this.monitorChart._draggedAnnotation) {
-                        const rect = canvas.getBoundingClientRect();
-                        const canvasPosition = {
-                            x: event.clientX - rect.left,
-                            y: event.clientY - rect.top
-                        };
+                    if (annotationKey === 'timeLimit') {
+                        const dataX = this.monitorChart.scales.x.getValueForPixel(canvasPosition.x);
+                        const labels = this.monitorChart.data.labels || [];
+                        let index = Math.round(dataX);
+                        if (index <= this.currentMonitor.riskStartIndex) index = this.currentMonitor.riskStartIndex + 1;
+                        if (index >= labels.length) index = labels.length - 1;
+                        const label = labels[index];
+                        annotation.xMin = label;
+                        annotation.xMax = label;
+                        if (annotations.profitBox) annotations.profitBox.xMax = label;
+                        if (annotations.lossBox) annotations.lossBox.xMax = label;
+                        const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
+                        const intervalMinutesMap = { '1min':1,'5min':5,'15min':15,'1hour':60 };
+                        const intervalMinutes = intervalMinutesMap[intervalValue] || 1;
+                        const newSpan = (index - this.currentMonitor.riskStartIndex) * intervalMinutes;
+                        this.currentMonitor.maxTimeSpan = newSpan;
+                    } else {
                         const dataY = this.monitorChart.scales.y.getValueForPixel(canvasPosition.y);
-                        
-                        // 根据最小步长调整价格
                         const adjustedPrice = Math.round(dataY / minStep) * minStep;
-                        
-                        const annotationKey = this.monitorChart._draggedAnnotation;
-                        const annotation = this.monitorChart.options.plugins.annotation.annotations[annotationKey];
-                        
-                        if (annotation) {
-                            // 更新annotation位置
-                            annotation.yMin = adjustedPrice;
-                            annotation.yMax = adjustedPrice;
-                            annotation.value = adjustedPrice;
-                            annotation.endValue = adjustedPrice;
-                            annotation.label.content = `$${adjustedPrice.toFixed(2)}`;
-                            
-                            // 同步更新输入框
-                            if (annotationKey === 'stopLoss') {
-                                const stopLossInput = document.getElementById('monitorStopLoss');
-                                if (stopLossInput) {
-                                    stopLossInput.value = adjustedPrice.toFixed(2);
-                                }
-                            } else if (annotationKey === 'takeProfit') {
-                                const takeProfitInput = document.getElementById('monitorTakeProfit');
-                                if (takeProfitInput) {
-                                    takeProfitInput.value = adjustedPrice.toFixed(2);
-                                }
-                            }
-                            
-                            // 更新预期PnL
-                            this.updateExpectedPnL();
-                            
-                            // 更新图表
-                            this.monitorChart.update('none');
+                        annotation.yMin = adjustedPrice;
+                        annotation.yMax = adjustedPrice;
+                        annotation.value = adjustedPrice;
+                        annotation.endValue = adjustedPrice;
+                        annotation.label.content = `$${adjustedPrice.toFixed(2)}`;
+
+                        if (annotationKey === 'stopLoss') {
+                            const stopLossInput = document.getElementById('monitorStopLoss');
+                            if (stopLossInput) stopLossInput.value = adjustedPrice.toFixed(2);
+                        } else if (annotationKey === 'takeProfit') {
+                            const takeProfitInput = document.getElementById('monitorTakeProfit');
+                            if (takeProfitInput) takeProfitInput.value = adjustedPrice.toFixed(2);
                         }
+
+                        // 更新预期PnL
+                        this.updateExpectedPnL();
                     }
-                });
+
+                    // 更新图表
+                    this.monitorChart.update('none');
+                }
+            });
 
                 canvas.addEventListener('mouseup', () => {
                     if (this.monitorChart) {
+                        const dragged = this.monitorChart._draggedAnnotation;
                         this.monitorChart._isDragging = false;
                         this.monitorChart._draggedAnnotation = null;
+                        if (dragged === 'timeLimit') {
+                            const symbol = this.currentMonitor?.symbol;
+                            const sl = document.getElementById('monitorStopLoss')?.value;
+                            const tp = document.getElementById('monitorTakeProfit')?.value;
+                            const payload = {
+                                symbol: symbol,
+                                stop_loss_price: sl ? parseFloat(sl) : null,
+                                take_profit_price: tp ? parseFloat(tp) : null,
+                                max_time_span: this.currentMonitor?.maxTimeSpan
+                            };
+                            this.apiCall('/risk_rules', {
+                                method: 'POST',
+                                body: JSON.stringify(payload)
+                            }).catch(console.error);
+                            if (!this.riskRules) this.riskRules = {};
+                            this.riskRules[symbol] = Object.assign({}, this.riskRules[symbol] || {}, payload);
+                        }
                         // 拖动结束后更新预期PnL
                         this.updateExpectedPnL();
                     }
@@ -3103,10 +3190,18 @@ class TradingApp {
                     position: 'start'
                 }
             };
+            const ann = this.monitorChart.options.plugins.annotation.annotations;
+            if (ann.lossBox) {
+                if ((this.currentMonitor?.positionQty || 0) > 0) {
+                    ann.lossBox.yMin = stopLossPrice;
+                } else {
+                    ann.lossBox.yMax = stopLossPrice;
+                }
+            }
         } else {
             delete this.monitorChart.options.plugins.annotation.annotations.stopLoss;
         }
-        
+
         this.monitorChart.update('none');
     }
 
@@ -3131,10 +3226,18 @@ class TradingApp {
                     position: 'start'
                 }
             };
+            const ann = this.monitorChart.options.plugins.annotation.annotations;
+            if (ann.profitBox) {
+                if ((this.currentMonitor?.positionQty || 0) > 0) {
+                    ann.profitBox.yMax = takeProfitPrice;
+                } else {
+                    ann.profitBox.yMin = takeProfitPrice;
+                }
+            }
         } else {
             delete this.monitorChart.options.plugins.annotation.annotations.takeProfit;
         }
-        
+
         this.monitorChart.update('none');
     }
 
@@ -3297,6 +3400,22 @@ class TradingApp {
             
             // 更新预期PnL显示
             this.updateExpectedPnL();
+
+            // 检查时间跨度达到右边界提醒
+            try {
+                const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
+                const intervalMinutesMap = { '1min':1,'5min':5,'15min':15,'1hour':60 };
+                const intervalMinutes = intervalMinutesMap[intervalValue] || 1;
+                const spanBars = Math.ceil((this.currentMonitor?.maxTimeSpan || 30) / intervalMinutes);
+                const labels = this.monitorChart ? (this.monitorChart.data.labels || []) : [];
+                if (!this.currentMonitor.timeAlertSent && labels.length - 1 - (this.currentMonitor.riskStartIndex || 0) >= spanBars) {
+                    const symbol = this.currentMonitor.symbol;
+                    const msg = `${symbol} 持仓时间已达预设上限`;
+                    this.showAlert('warning', msg);
+                    this.apiCall('/notify', { method: 'POST', body: JSON.stringify({ message: msg }) }).catch(console.error);
+                    this.currentMonitor.timeAlertSent = true;
+                }
+            } catch (e) { /* ignore */ }
         } catch (e) {
             console.warn('updateMonitorRealtime failed:', e);
         }
@@ -3310,9 +3429,10 @@ class TradingApp {
             const takeProfitInput = document.getElementById('monitorTakeProfit');
             const expectedSection = document.getElementById('expectedPnLSection');
             const expectedStopLossPnL = document.getElementById('expectedStopLossPnL');
-            const expectedTakeProfitPnL = document.getElementById('expectedTakeProfitPnL');
-            const slDeltaEl = document.getElementById('monitorStopLossDelta');
-            const tpDeltaEl = document.getElementById('monitorTakeProfitDelta');
+        const expectedTakeProfitPnL = document.getElementById('expectedTakeProfitPnL');
+        const slDeltaEl = document.getElementById('monitorStopLossDelta');
+        const tpDeltaEl = document.getElementById('monitorTakeProfitDelta');
+        const rrrEl = document.getElementById('monitorRRR');
             
             if (!expectedSection || !expectedStopLossPnL || !expectedTakeProfitPnL) return;
             
@@ -3370,10 +3490,32 @@ class TradingApp {
                     expectedTakeProfitPnL.className = 'fw-bold text-muted';
                     if (tpDeltaEl) tpDeltaEl.textContent = 'Δ — / —%';
                 }
+                // 计算RRR
+                if (rrrEl) {
+                    if (stopLossPrice && takeProfitPrice && avgCost > 0 && positionQty !== 0) {
+                        let risk, reward;
+                        if (positionQty > 0) {
+                            risk = avgCost - stopLossPrice;
+                            reward = takeProfitPrice - avgCost;
+                        } else {
+                            risk = stopLossPrice - avgCost;
+                            reward = avgCost - takeProfitPrice;
+                        }
+                        if (risk > 0) {
+                            const ratio = reward / risk;
+                            rrrEl.textContent = `${this.formatNumber(ratio)}:1`;
+                        } else {
+                            rrrEl.textContent = '—';
+                        }
+                    } else {
+                        rrrEl.textContent = '2:1';
+                    }
+                }
             } else {
                 expectedSection.style.display = 'none';
                 if (slDeltaEl) slDeltaEl.textContent = 'Δ — / —%';
                 if (tpDeltaEl) tpDeltaEl.textContent = 'Δ — / —%';
+                if (rrrEl) rrrEl.textContent = '2:1';
             }
         } catch (err) {
             console.error('updateExpectedPnL failed:', err);

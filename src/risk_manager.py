@@ -48,6 +48,7 @@ class RiskRule:
     take_profit_price: Optional[float] = None
     max_loss_percent: Optional[float] = None
     enabled: bool = True
+    max_time_span: Optional[int] = None  # 以分钟为单位的最大持仓时间
     created_at: datetime = None
     
     def __post_init__(self):
@@ -122,6 +123,7 @@ class RiskManager:
                     take_profit_price=rule_db.take_profit_price,
                     max_loss_percent=rule_db.max_loss_percent,
                     enabled=getattr(rule_db, 'enabled', True),  # 从数据库读取enabled
+                    max_time_span=getattr(rule_db, 'max_time_span', None),
                     created_at=datetime.fromisoformat(rule_db.timestamp) if rule_db.timestamp else datetime.now()
                 )
                 self.risk_rules[rule.symbol] = rule
@@ -175,6 +177,7 @@ class RiskManager:
                         take_profit_price=rule.take_profit_price,
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
+                        max_time_span=rule.max_time_span,
                         timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
                     )
                     self.db_manager.save_risk_rule(db_rule)
@@ -284,17 +287,19 @@ class RiskManager:
         except Exception as e:
             risk_logger.error(f"Error stopping risk manager: {e}")
 
-    def add_risk_rule(self, symbol: str, stop_loss_price: Optional[float] = None, 
-                      take_profit_price: Optional[float] = None, max_loss_percent: Optional[float] = None):
+    def add_risk_rule(self, symbol: str, stop_loss_price: Optional[float] = None,
+                      take_profit_price: Optional[float] = None, max_loss_percent: Optional[float] = None,
+                      max_time_span: Optional[int] = None):
         """添加风险规则"""
         try:
-            risk_logger.info(f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}")
+            risk_logger.info(f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}, max_time_span={max_time_span}")
             rule = RiskRule(
                 symbol=symbol,
                 stop_loss_price=stop_loss_price,
                 take_profit_price=take_profit_price,
                 max_loss_percent=max_loss_percent,
                 enabled=True,
+                max_time_span=max_time_span,
                 created_at=datetime.now()
             )
             
@@ -305,6 +310,7 @@ class RiskManager:
                 take_profit_price=rule.take_profit_price,
                 max_loss_percent=rule.max_loss_percent,
                 enabled=rule.enabled,
+                max_time_span=rule.max_time_span,
                 timestamp=rule.created_at.isoformat()
             )
             self.db_manager.save_risk_rule(db_rule)
@@ -338,11 +344,12 @@ class RiskManager:
             risk_logger.error(f"Error removing risk rule: {e}")
             return False
 
-    def update_risk_rule(self, symbol: str, stop_loss_price: float = None, 
-                         take_profit_price: float = None, enabled: bool = True) -> bool:
+    def update_risk_rule(self, symbol: str, stop_loss_price: float = None,
+                         take_profit_price: float = None, enabled: bool = True,
+                         max_time_span: Optional[int] = None) -> bool:
         """更新风险规则"""
         try:
-            risk_logger.info(f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}")
+            risk_logger.info(f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}, max_time_span={max_time_span}")
             if symbol in self.risk_rules:
                 rule = self.risk_rules[symbol]
                 if stop_loss_price is not None:
@@ -354,6 +361,8 @@ class RiskManager:
                 if rule.enabled != enabled:
                     risk_logger.debug(f"Updating enabled for {symbol}: {rule.enabled} -> {enabled}")
                 rule.enabled = enabled
+                if max_time_span is not None:
+                    rule.max_time_span = max_time_span
                 
                 # 转换为数据库层的 RiskRule 并保存到数据库
                 db_rule = DatabaseRiskRule(
@@ -362,6 +371,7 @@ class RiskManager:
                     take_profit_price=rule.take_profit_price,
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
+                    max_time_span=rule.max_time_span,
                     timestamp=rule.created_at.isoformat()
                 )
                 self.db_manager.save_risk_rule(db_rule)
@@ -416,6 +426,7 @@ class RiskManager:
                         take_profit_price=rule.take_profit_price,
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
+                        max_time_span=rule.max_time_span,
                         timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
                     )
                     self.db_manager.save_risk_rule(db_rule)
@@ -505,6 +516,7 @@ class RiskManager:
                 take_profit_price=rule.take_profit_price,
                 max_loss_percent=rule.max_loss_percent,
                 enabled=rule.enabled,
+                max_time_span=rule.max_time_span,
                 timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
             )
             self.db_manager.save_risk_rule(db_rule)
@@ -598,6 +610,7 @@ class RiskManager:
                             take_profit_price=rule.take_profit_price,
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
+                            max_time_span=rule.max_time_span,
                             timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
                         )
                         self.db_manager.save_risk_rule(db_rule)
@@ -612,6 +625,7 @@ class RiskManager:
                         take_profit_price=rule.take_profit_price,
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
+                        max_time_span=rule.max_time_span,
                         timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
                     )
                     self.db_manager.save_risk_rule(db_rule)
@@ -649,6 +663,7 @@ class RiskManager:
                     take_profit_price=rule.take_profit_price,
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
+                    max_time_span=rule.max_time_span,
                     timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
                 )
                 self.db_manager.save_risk_rule(db_rule)
@@ -723,6 +738,7 @@ class RiskManager:
                             take_profit_price=rule.take_profit_price,
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
+                            max_time_span=rule.max_time_span,
                             timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
                         )
                         self.db_manager.save_risk_rule(db_rule)
@@ -737,6 +753,7 @@ class RiskManager:
                         take_profit_price=rule.take_profit_price,
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
+                        max_time_span=rule.max_time_span,
                         timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
                     )
                     self.db_manager.save_risk_rule(db_rule)
@@ -774,6 +791,7 @@ class RiskManager:
                     take_profit_price=rule.take_profit_price,
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
+                    max_time_span=rule.max_time_span,
                     timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
                 )
                 self.db_manager.save_risk_rule(db_rule)
@@ -1112,6 +1130,7 @@ class RiskManager:
                                 take_profit_price=rule.take_profit_price,
                                 max_loss_percent=rule.max_loss_percent,
                                 enabled=rule.enabled,
+                                max_time_span=rule.max_time_span,
                                 timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
                             )
                             self.db_manager.save_risk_rule(db_rule)
