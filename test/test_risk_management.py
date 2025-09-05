@@ -186,23 +186,7 @@ def test_order_queue_status(token: str):
     logger.info(f"队列状态: {data}")
 
 
-def test_auto_orders(token: str):
-    logger.info("测试: GET /api/auto_orders - 获取自动订单记录")
-    resp = api_get('/api/auto_orders', token)
-    
-    assert resp.status_code == 200, f"期望200, 实际{resp.status_code}, body={resp.text}"
-    
-    data = resp.json()
-    assert data.get('success') is True and 'orders' in data, f"响应格式不符合预期: {data}"
-    
-    orders = data.get('orders', [])
-    assert isinstance(orders, list), f"orders 应为列表: {data}"
-    
-    # 验证订单格式（如果有订单的话）
-    for order in orders:
-        assert order.get('order_source') == 'auto', f"应只返回自动订单，但发现: {order}"
-    
-    logger.info(f"自动订单数量: {len(orders)}")
+# test_auto_orders 函数已删除，因为 /api/auto_orders 端点不再存在
 
 
 def test_risk_config(token: str):
@@ -246,7 +230,7 @@ def main():
         ("更新不存在的规则", lambda: test_update_nonexistent_rule(token)),
         ("删除风险规则", lambda: test_remove_risk_rule(token)),
         ("获取订单队列状态", lambda: test_order_queue_status(token)),
-        ("获取自动订单记录", lambda: test_auto_orders(token)),
+        # ("获取自动订单记录", lambda: test_auto_orders(token)),  # 已删除，端点不存在
         ("获取风险配置参数", lambda: test_risk_config(token)),
     ]
 
