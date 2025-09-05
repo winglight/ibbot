@@ -607,6 +607,30 @@ async def _pnl_broadcast_loop():
     except Exception as e:
         logger.warning(f"PnL broadcast loop error: {e}")
 
+# 实时行情推送任务
+async def _realtime_price_sender(ws: WebSocket, symbol: str, interval: float = 2.0):
+    try:
+        loop = asyncio.get_event_loop()
+        while True:
+            if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
+                await asyncio.sleep(interval)
+                continue
+            try:
+                data = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: ibkr_client.get_real_time_data(symbol, "SMART")),
+                    timeout=10.0
+                )
+                await ws.send_text(json.dumps({
+                    "type": "realtime_data",
+                    "symbol": symbol,
+                    "data": data
+                }))
+            except Exception as e:
+                logger.debug(f"Realtime data error for {symbol}: {e}")
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        pass
+
 # FastAPI 生命周期事件已移至 lifespan 函数中
 
     # 关闭PnL广播任务
@@ -1881,16 +1905,26 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket_manager.connect(websocket)
+    realtime_tasks: Dict[str, asyncio.Task] = {}
     try:
         while True:
             data = await websocket.receive_text()
-            # Handle incoming WebSocket messages if needed
             message = json.loads(data)
-            
-            if message.get("type") == "ping":
+            msg_type = message.get("type")
+            if msg_type == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
-            
+            elif msg_type == "subscribe_realtime":
+                symbol = message.get("symbol")
+                if symbol and symbol not in realtime_tasks:
+                    realtime_tasks[symbol] = asyncio.create_task(_realtime_price_sender(websocket, symbol))
+            elif msg_type == "unsubscribe_realtime":
+                symbol = message.get("symbol")
+                task = realtime_tasks.pop(symbol, None)
+                if task:
+                    task.cancel()
     except WebSocketDisconnect:
+        for task in realtime_tasks.values():
+            task.cancel()
         websocket_manager.disconnect(websocket)
 
 # Strategy APIs

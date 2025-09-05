@@ -24,6 +24,8 @@ class TradingApp {
         this.strategiesLoaded = false;
         this.startReminderTimeout = null;
         this.endReminderTimeout = null;
+        // 当前订阅实时行情的合约符号，null 表示未订阅
+        this.monitorRealtimeSymbol = null;
         this.init();
     }
 
@@ -619,6 +621,9 @@ class TradingApp {
                 if (data.positions) {
                     this.updatePositionsUI(data.positions);
                 }
+                break;
+            case 'realtime_data':
+                this.updateMonitorRealtime(data);
                 break;
             default:
                 console.log('Unknown WebSocket message:', data);
@@ -1681,21 +1686,29 @@ class TradingApp {
                             icon.classList.toggle('fa-pause', active);
                         }
                     };
-                    // 停止可能已存在的定时器
-                    if (this.monitorRealtimeTimer) {
-                        clearInterval(this.monitorRealtimeTimer);
-                        this.monitorRealtimeTimer = null;
+                    // 如果之前订阅了其他合约，先取消订阅
+                    if (this.monitorRealtimeSymbol && this.monitorRealtimeSymbol !== symbol) {
+                        try {
+                            this.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
+                        } catch (e) {}
+                        this.monitorRealtimeSymbol = null;
                         setActive(false);
                     }
                     realtimeBtn.onclick = () => {
-                        if (this.monitorRealtimeTimer) {
-                            clearInterval(this.monitorRealtimeTimer);
-                            this.monitorRealtimeTimer = null;
+                        if (this.monitorRealtimeSymbol) {
+                            try {
+                                this.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
+                            } catch (e) {}
+                            this.monitorRealtimeSymbol = null;
                             setActive(false);
                         } else {
-                            setActive(true);
-                            this.monitorRealtimeTimer = setInterval(() => this.updateMonitorRealtime(), 2000);
-                            this.updateMonitorRealtime();
+                            try {
+                                this.ws?.send(JSON.stringify({ type: 'subscribe_realtime', symbol }));
+                                this.monitorRealtimeSymbol = symbol;
+                                setActive(true);
+                            } catch (e) {
+                                console.error('subscribe realtime failed', e);
+                            }
                         }
                     };
                 }
@@ -1848,11 +1861,13 @@ class TradingApp {
                     };
                 }
 
-                // 关闭时清理实时定时器
+                // 关闭时取消实时订阅
                 modalEl.addEventListener('hidden.bs.modal', () => {
-                    if (this.monitorRealtimeTimer) {
-                        clearInterval(this.monitorRealtimeTimer);
-                        this.monitorRealtimeTimer = null;
+                    if (this.monitorRealtimeSymbol) {
+                        try {
+                            this.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
+                        } catch (e) {}
+                        this.monitorRealtimeSymbol = null;
                     }
                 }, { once: true });
 
@@ -3456,17 +3471,13 @@ class TradingApp {
         this.monitorChart.update('none');
     }
 
-    async updateMonitorRealtime() {
+    updateMonitorRealtime(data) {
         try {
             if (!this.currentMonitor || !this.currentMonitor.symbol) return;
             const symbol = this.currentMonitor.symbol;
-
-            const resp = await this.apiCall(`/realtime_data/${encodeURIComponent(symbol)}`);
-            if (!resp || resp.success === false) {
-                console.warn('Realtime API returned error', resp?.error || resp);
-                return;
-            }
-            const data = resp.data || resp;
+            if (!data || (data.symbol && data.symbol !== symbol)) return;
+            // 兼容服务器返回结构
+            data = data.data || data;
             let price = null;
             if (typeof data.last === 'number') price = data.last;
             else if (typeof data.price === 'number') price = data.price;
@@ -5802,19 +5813,3 @@ class TradingApp {
 const app = new TradingApp();
 // expose for inline onclick handlers
 window.app = app;
-
-// Auto-refresh data every 30 seconds when connected
-setInterval(() => {
-    if (app.connected) {
-        app.loadAccountInfo();
-        app.loadPortfolio();
-        app.loadOrders();
-        app.loadRiskRules();
-        
-        // Only load strategies if strategies table has content or it's the first load
-        const strategiesTable = document.querySelector('#strategiesTable tbody');
-        if (!strategiesTable || strategiesTable.children.length > 0 || !app.strategiesLoaded) {
-            app.loadStrategies();
-        }
-    }
-}, 30000);
