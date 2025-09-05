@@ -1717,11 +1717,11 @@ class TradingApp {
             if (position) {
                 // 有持仓时更新持仓信息
                 if (positionQtyEl) positionQtyEl.textContent = position.position || '0';
-                if (avgCostEl) avgCostEl.textContent = `$${parseFloat(position.avgCost || 0).toFixed(2)}`;
-                if (currentPriceEl) currentPriceEl.textContent = `$${parseFloat(position.marketPrice || 0).toFixed(2)}`;
+                if (avgCostEl) avgCostEl.textContent = `$${parseFloat(position.avg_cost || 0).toFixed(2)}`;
+                if (currentPriceEl) currentPriceEl.textContent = `$${parseFloat(position.market_price || 0).toFixed(2)}`;
                 
                 // 更新PnL
-                const pnl = parseFloat(position.unrealizedPNL || 0);
+                const pnl = parseFloat(position.unrealized_pnl || 0);
                 if (pnlEl) {
                     pnlEl.textContent = `$${pnl.toFixed(2)}`;
                     pnlEl.className = pnl >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
@@ -1733,8 +1733,8 @@ class TradingApp {
                 }
                 this.currentMonitor.symbol = symbol;
                 this.currentMonitor.positionQty = parseFloat(position.position || 0);
-                this.currentMonitor.avgCost = parseFloat(position.avgCost || 0);
-                this.currentMonitor.currentPrice = parseFloat(position.marketPrice || 0);
+                this.currentMonitor.avgCost = parseFloat(position.avg_cost || 0);
+                this.currentMonitor.currentPrice = parseFloat(position.market_price || 0);
                 
                 // 保留现有的止损止盈设置，不清空
                 // const riskRuleSwitch = document.getElementById('monitorRiskRuleSwitch');

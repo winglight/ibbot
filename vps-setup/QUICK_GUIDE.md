@@ -41,7 +41,7 @@ nano docker/.env  # 编辑配置文件
 ### 4. 启动服务
 ```bash
 # 在VPS上执行
-docker compose -f docker/docker-compose.vps.yml up -d
+docker compose -f docker/docker-compose.yml up -d
 ```
 
 ## 二、本地端配置（一次性）
@@ -65,7 +65,7 @@ cat vps-setup/ssh-config >> ~/.ssh/config
 
 启动后可访问：
 - **ibbot Web界面**: http://localhost:8000
-- **VNC (IB Gateway)**: localhost:5901
+- **VNC (IB Gateway)**: vnc://localhost:5900
 
 ### 🎯 方式二：本地运行连接VPS IB Gateway
 ```bash
@@ -79,7 +79,7 @@ cat vps-setup/ssh-config >> ~/.ssh/config
 启动后可访问：
 - **本地Web界面**: http://127.0.0.1:8001
 - **VPS Web界面**: http://localhost:8000
-- **VNC (IB Gateway)**: localhost:5901
+- **VNC (IB Gateway)**: vnc://localhost:5900
 
 ### 🐳 Docker操作
 ```bash
@@ -90,10 +90,10 @@ docker context use vps-ibbot
 docker ps
 
 # 查看日志
-docker compose -f docker/docker-compose.vps.yml logs -f
+docker compose -f docker/docker-compose.yml logs -f
 
 # 重启服务
-docker compose -f docker/docker-compose.vps.yml restart
+docker compose -f docker/docker-compose.yml restart
 ```
 
 ### 📝 代码编辑
@@ -112,13 +112,13 @@ rsync -avz --exclude='.git' ./ ubuntu@147.135.37.200:~/ibbot/
 
 ```bash
 # 检查VPS服务状态
-ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml ps'
+ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml ps'
 
 # 重启VPS服务
-ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml restart'
+ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml restart'
 
 # 查看VPS日志
-ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml logs -f ibbot'
+ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml logs -f ibbot'
 
 # 切换回本地Docker
 docker context use default
@@ -135,6 +135,18 @@ ssh -v vps-ibbot  # 详细连接信息
 ```bash
 lsof -i :8000  # 检查端口占用
 kill -9 <PID>  # 杀死占用进程
+```
+
+### VNC连接问题
+```bash
+# 检查VNC服务状态
+ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gateway ps aux | grep vnc'
+
+# 手动启动VNC服务
+ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gateway bash -c "export DISPLAY=:1 && x11vnc -nopw -forever -display :1 -rfbport 5900 &"'
+
+# 测试VNC连接
+nc -zv localhost 5900
 ```
 
 ### Docker连接问题

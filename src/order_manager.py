@@ -429,82 +429,94 @@ class OrderManager:
                     order_logger.error(f"发送Telegram通知失败: {e}")
             
             # 检查并停用已平仓资产的风险规则
-            self._check_and_deactivate_risk_rules(order.symbol)
+            self._check_and_deactivate_risk_rules(order.symbol, order.order_source)
                     
         except Exception as e:
             order_logger.error(f"发送订单成交通知失败: {e}")
     
-    def _check_and_deactivate_risk_rules(self, symbol: str):
-        """检查指定资产的持仓状态，如果已平仓则停用相关的风险规则"""
+    def _check_and_deactivate_risk_rules(self, symbol: str, order_source: str = None):
+        """检查指定资产的持仓状态和订单来源，决定是否停用相关的风险规则"""
         try:
             if not hasattr(self, 'risk_manager') or not self.risk_manager:
                 return
             
-            # 获取当前持仓信息
-            from .ibkr_client import IBKRClient
-            ibkr_client = IBKRClient()
-            positions = ibkr_client.get_positions()
+            # 检查是否有激活的风险规则
+            if symbol not in self.risk_manager.risk_rules:
+                return
+                
+            rule = self.risk_manager.risk_rules[symbol]
+            if not rule.enabled:
+                return
             
-            # 查找指定资产的持仓
-            position_qty = 0
-            for position in positions:
-                if position.get('symbol') == symbol:
-                    position_qty = int(position.get('position', 0))
-                    break
+            should_deactivate = False
+            deactivate_reason = ""
             
-            # 如果持仓为0，检查是否有激活的风险规则需要停用
-            if position_qty == 0:
-                if symbol in self.risk_manager.risk_rules:
-                    rule = self.risk_manager.risk_rules[symbol]
-                    if rule.enabled:
-                        # 停用风险规则
-                        rule.enabled = False
-                        
-                        # 更新数据库中的风险规则状态
-                        from .database import DatabaseRiskRule
-                        from datetime import datetime
-                        db_rule = DatabaseRiskRule(
-                            symbol=rule.symbol,
-                            stop_loss_price=rule.stop_loss_price,
-                            take_profit_price=rule.take_profit_price,
-                            max_loss_percent=rule.max_loss_percent,
-                            enabled=rule.enabled,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
-                        )
-                        self.risk_manager.db_manager.save_risk_rule(db_rule)
-                        
-                        order_logger.info(f"🔒 已停用风险规则: {symbol} (持仓已平仓)")
-                        
-                        # 发送通知
-                        if hasattr(self, 'telegram_notifier') and self.telegram_notifier:
-                            try:
-                                message = f"🔒 风险规则已自动停用\n资产: {symbol}\n原因: 持仓已平仓"
-                                self.telegram_notifier.send_message(message)
-                            except Exception as e:
-                                order_logger.error(f"发送风险规则停用通知失败: {e}")
-                        
-                        # 发送浏览器通知
-                        if hasattr(self, 'websocket_manager') and self.websocket_manager:
-                            try:
-                                notification = {
-                                    "type": "risk_rule_deactivated",
-                                    "symbol": symbol,
-                                    "message": f"风险规则已自动停用: {symbol} (持仓已平仓)"
-                                }
-                                import asyncio
-                                loop = asyncio.get_event_loop()
-                                if loop.is_running():
-                                    asyncio.create_task(self.websocket_manager.broadcast(notification))
-                                else:
-                                    asyncio.run(self.websocket_manager.broadcast(notification))
-                            except Exception as e:
-                                order_logger.error(f"发送风险规则停用浏览器通知失败: {e}")
-                    else:
-                        order_logger.debug(f"风险规则已经是停用状态: {symbol}")
-                else:
-                    order_logger.debug(f"未找到风险规则: {symbol}")
+            # 如果是手动订单，立即反激活风险规则
+            if order_source == "manual":
+                should_deactivate = True
+                deactivate_reason = "手动下单"
             else:
-                order_logger.debug(f"资产 {symbol} 仍有持仓 ({position_qty})，保持风险规则激活状态")
+                # 获取当前持仓信息
+                from .ibkr_client import IBKRClient
+                ibkr_client = IBKRClient()
+                positions = ibkr_client.get_positions()
+                
+                # 查找指定资产的持仓
+                position_qty = 0
+                for position in positions:
+                    if position.get('symbol') == symbol:
+                        position_qty = int(position.get('position', 0))
+                        break
+                
+                # 如果持仓为0，停用风险规则
+                if position_qty == 0:
+                    should_deactivate = True
+                    deactivate_reason = "持仓已平仓"
+            
+            # 执行反激活操作
+            if should_deactivate:
+                # 停用风险规则
+                rule.enabled = False
+                
+                # 更新数据库中的风险规则状态
+                from .database import DatabaseRiskRule
+                from datetime import datetime
+                db_rule = DatabaseRiskRule(
+                    symbol=rule.symbol,
+                    stop_loss_price=rule.stop_loss_price,
+                    take_profit_price=rule.take_profit_price,
+                    max_loss_percent=rule.max_loss_percent,
+                    enabled=rule.enabled,
+                    timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                )
+                self.risk_manager.db_manager.save_risk_rule(db_rule)
+                
+                order_logger.info(f"🔒 已停用风险规则: {symbol} ({deactivate_reason})")
+                
+                # 发送通知
+                if hasattr(self, 'telegram_notifier') and self.telegram_notifier:
+                    try:
+                        message = f"🔒 风险规则已自动停用\n资产: {symbol}\n原因: {deactivate_reason}"
+                        self.telegram_notifier.send_message(message)
+                    except Exception as e:
+                        order_logger.error(f"发送风险规则停用通知失败: {e}")
+                
+                # 发送浏览器通知
+                if hasattr(self, 'websocket_manager') and self.websocket_manager:
+                    try:
+                        notification = {
+                            "type": "risk_rule_deactivated",
+                            "symbol": symbol,
+                            "message": f"风险规则已自动停用: {symbol} ({deactivate_reason})"
+                        }
+                        import asyncio
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(self.websocket_manager.broadcast(notification))
+                        else:
+                            asyncio.run(self.websocket_manager.broadcast(notification))
+                    except Exception as e:
+                        order_logger.error(f"发送风险规则停用浏览器通知失败: {e}")
                 
         except Exception as e:
             order_logger.error(f"检查和停用风险规则失败 ({symbol}): {e}")

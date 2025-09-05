@@ -102,7 +102,7 @@ class RiskManager:
         self.leverage_mnq = int(os.getenv('LEVERAGE_MNQ', 20))  # MNQ杠杆倍数，从环境变量读取
         
         # 待处理的限价订单状态
-        self.pending_limit_orders: Dict[str, Dict[str, bool]] = {}
+        self.pending_orders: Dict[str, Dict[str, bool]] = {}
         
         # 警告历史记录
         self.alert_history: Dict[str, Dict[str, datetime]] = {}
@@ -403,6 +403,24 @@ class RiskManager:
                 await self._check_position_risk(position, account_info)
                 await self._check_stop_loss_take_profit(position)
             
+            # 检查是否有持仓为0但风险规则仍激活的资产，如果有则反激活风险规则
+            position_symbols = {pos['symbol'] for pos in positions if pos['position'] != 0}
+            for symbol, rule in list(self.risk_rules.items()):
+                if rule.enabled and symbol not in position_symbols:
+                    risk_logger.info(f"Position for {symbol} is 0 but risk rule is still active, deactivating rule")
+                    rule.enabled = False
+                    # 更新数据库中的风险规则状态
+                    db_rule = DatabaseRiskRule(
+                        symbol=rule.symbol,
+                        stop_loss_price=rule.stop_loss_price,
+                        take_profit_price=rule.take_profit_price,
+                        max_loss_percent=rule.max_loss_percent,
+                        enabled=rule.enabled,
+                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    )
+                    self.db_manager.save_risk_rule(db_rule)
+                    risk_logger.info(f"Risk rule for {symbol} has been deactivated due to zero position")
+            
             risk_logger.info("=== Position monitoring cycle completed ===")
             
         except Exception as e:
@@ -495,15 +513,15 @@ class RiskManager:
         risk_logger.info(f"Checking risk rule for {symbol}: SL=${rule.stop_loss_price}, TP=${rule.take_profit_price}")
         
         # Initialize pending orders tracking for this symbol
-        if symbol not in self.pending_limit_orders:
-            self.pending_limit_orders[symbol] = {"stop_loss": False, "take_profit": False}
+        if symbol not in self.pending_orders:
+            self.pending_orders[symbol] = {"stop_loss": False, "take_profit": False}
         
         # 以金额阈值为基础，按杠杆换算成价格差阈值
         amount_threshold = self.price_threshold
         threshold_price = amount_threshold * self.leverage_mnq if symbol == 'MNQ' else amount_threshold
         
         # 检查是否已有任何limit order pending，如果有则跳过
-        if self.pending_limit_orders[symbol]["stop_loss"] or self.pending_limit_orders[symbol]["take_profit"]:
+        if self.pending_orders[symbol]["stop_loss"] or self.pending_orders[symbol]["take_profit"]:
             risk_logger.debug(f"Already have pending limit order for {symbol}, skipping new order placement")
             return
         
@@ -516,30 +534,29 @@ class RiskManager:
             # 对于止盈：多头持仓时价格应该上涨到目标价格，空头持仓时价格应该下跌到目标价格
             if position_qty > 0:  # 多头持仓
                 price_diff = current_price - rule.take_profit_price  # 当前价格 - 止盈价格
-                # 修复：只有当价格接近止盈价格时才触发（price_diff应该接近0且为负值或小正值）
-                should_trigger = price_diff >= -threshold_price and price_diff <= threshold_price
+                # 修复：多头持仓当前价格>=止盈价格时立即触发
+                should_trigger = current_price >= rule.take_profit_price
             else:  # 空头持仓
                 price_diff = rule.take_profit_price - current_price  # 止盈价格 - 当前价格
-                # 修复：只有当价格接近止盈价格时才触发（price_diff应该接近0且为负值或小正值）
-                should_trigger = price_diff >= -threshold_price and price_diff <= threshold_price
+                # 修复：空头持仓当前价格<=止盈价格时立即触发
+                should_trigger = current_price <= rule.take_profit_price
             
-            risk_logger.info(f"Take profit check for {symbol}: current=${current_price:.2f}, target=${rule.take_profit_price:.2f}, price_diff=${price_diff:.4f}, threshold_price=${threshold_price:.4f}, position_qty={position_qty}")
+            risk_logger.info(f"Take profit check for {symbol}: current=${current_price:.2f}, target=${rule.take_profit_price:.2f}, price_diff=${price_diff:.4f}, should_trigger={should_trigger}, position_qty={position_qty}")
             
-            # If price reaches take profit level, place limit order
+            # If price reaches take profit level, place market order
             if should_trigger:
-                risk_logger.info(f"Price close to take profit for {symbol}, placing limit order")
+                risk_logger.info(f"Price reaches take profit for {symbol}, placing market order")
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
-                    trade = self.ibkr_client.place_limit_order(
+                    trade = self.ibkr_client.place_market_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
-                        price=rule.take_profit_price,
                         action=action
                     )
                     
                     if trade:
-                        self.pending_limit_orders[symbol]["take_profit"] = True
+                        self.pending_orders[symbol]["take_profit"] = True
                         order_placed = True
                         
                         # 保存订单记录到auto_orders内存和数据库
@@ -548,8 +565,8 @@ class RiskManager:
                             symbol=symbol,
                             action=action,
                             quantity=abs(position_qty),
-                            order_type="LMT",
-                            price=rule.take_profit_price,
+                            order_type="MKT",
+                            price=current_price,  # 使用当前市价
                             status="Submitted",
                             created_at=datetime.now(),
                             executed_at=None,
@@ -560,19 +577,19 @@ class RiskManager:
                         # 保存到数据库，保证持久化
                         self.save_auto_order_to_db(auto_order)
                         
-                        risk_logger.info(f"✅ Limit order placed for take profit: {symbol} at ${rule.take_profit_price:.2f}")
-                        risk_logger.info(f"Take profit limit order successfully placed for {symbol}, rule remains active")
+                        risk_logger.info(f"✅ Market order placed for take profit: {symbol} at market price ${current_price:.2f}")
+                        risk_logger.info(f"Take profit market order successfully placed for {symbol}, rule remains active")
                         
                         # Send notification
                         await self.telegram_notifier.send_message(
-                            f"🟢 Limit order placed for take profit\n"
+                            f"🟢 Market order placed for take profit\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${rule.take_profit_price:.2f}\n"
-                            f"Current Price: ${current_price:.2f}\n"
+                            f"Market Price: ${current_price:.2f}\n"
+                            f"Target Price: ${rule.take_profit_price:.2f}\n"
                             f"Quantity: {abs(position_qty)}"
                         )
                     else:
-                        risk_logger.warning(f"Failed to place take profit limit order for {symbol}")
+                        risk_logger.warning(f"Failed to place take profit market order for {symbol}")
                         # 下单失败时禁用规则
                         rule.enabled = False
                         db_rule = DatabaseRiskRule(
@@ -643,30 +660,29 @@ class RiskManager:
             # 对于止损：多头持仓时价格应该下跌到目标价格，空头持仓时价格应该上涨到目标价格
             if position_qty > 0:  # 多头持仓
                 price_diff = rule.stop_loss_price - current_price  # 止损价格 - 当前价格
-                # 修复：只有当价格接近止损价格时才触发（price_diff应该接近0且为负值或小正值）
-                should_trigger = price_diff >= -threshold_price and price_diff <= threshold_price
+                # 修复：多头持仓当前价格<=止损价格时立即触发
+                should_trigger = current_price <= rule.stop_loss_price
             else:  # 空头持仓
                 price_diff = current_price - rule.stop_loss_price  # 当前价格 - 止损价格
-                # 修复：只有当价格接近止损价格时才触发（price_diff应该接近0且为负值或小正值）
-                should_trigger = price_diff >= -threshold_price and price_diff <= threshold_price
+                # 修复：空头持仓当前价格>=止损价格时立即触发
+                should_trigger = current_price >= rule.stop_loss_price
             
-            risk_logger.info(f"Stop loss check for {symbol}: current=${current_price:.2f}, target=${rule.stop_loss_price:.2f}, price_diff=${price_diff:.4f}, threshold_price=${threshold_price:.4f}, position_qty={position_qty}")
+            risk_logger.info(f"Stop loss check for {symbol}: current=${current_price:.2f}, target=${rule.stop_loss_price:.2f}, price_diff=${price_diff:.4f}, should_trigger={should_trigger}, position_qty={position_qty}")
             
             # If price reaches stop loss level, place market order immediately
             if should_trigger:
-                risk_logger.info(f"Price close to stop loss for {symbol}, placing limit order")
+                risk_logger.info(f"Price reaches stop loss for {symbol}, placing market order")
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
-                    trade = self.ibkr_client.place_limit_order(
+                    trade = self.ibkr_client.place_market_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
-                        price=rule.stop_loss_price,
                         action=action
                     )
                     
                     if trade:
-                        self.pending_limit_orders[symbol]["stop_loss"] = True
+                        self.pending_orders[symbol]["stop_loss"] = True
                         order_placed = True
                         
                         # 保存订单记录到auto_orders内存和数据库
@@ -675,8 +691,8 @@ class RiskManager:
                             symbol=symbol,
                             action=action,
                             quantity=abs(position_qty),
-                            order_type="LMT",
-                            price=rule.stop_loss_price,
+                            order_type="MKT",
+                            price=current_price,  # 使用当前市价
                             status="Submitted",
                             created_at=datetime.now(),
                             executed_at=None,
@@ -686,19 +702,19 @@ class RiskManager:
                         self.auto_orders[str(trade.order.orderId)] = auto_order
                         self.save_auto_order_to_db(auto_order)
                         
-                        risk_logger.info(f"✅ Limit order placed for stop loss: {symbol} at ${rule.stop_loss_price:.2f}")
-                        risk_logger.info(f"Stop loss limit order successfully placed for {symbol}, rule remains active")
+                        risk_logger.info(f"✅ Market order placed for stop loss: {symbol} at market price ${current_price:.2f}")
+                        risk_logger.info(f"Stop loss market order successfully placed for {symbol}, rule remains active")
                         
                         # Send notification
                         await self.telegram_notifier.send_message(
-                            f"🔴 Limit order placed for stop loss\n"
+                            f"🔴 Market order placed for stop loss\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${rule.stop_loss_price:.2f}\n"
-                            f"Current Price: ${current_price:.2f}\n"
+                            f"Market Price: ${current_price:.2f}\n"
+                            f"Target Price: ${rule.stop_loss_price:.2f}\n"
                             f"Quantity: {abs(position_qty)}"
                         )
                     else:
-                        risk_logger.warning(f"Failed to place stop loss limit order for {symbol}")
+                        risk_logger.warning(f"Failed to place stop loss market order for {symbol}")
                         # 下单失败时禁用规则
                         rule.enabled = False
                         db_rule = DatabaseRiskRule(
@@ -712,7 +728,7 @@ class RiskManager:
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.info(f"Stop loss rule disabled due to order failure for {symbol}")
                 except Exception as e:
-                    risk_logger.error(f"Failed to place stop loss limit order for {symbol}: {e}")
+                    risk_logger.error(f"Failed to place stop loss market order for {symbol}: {e}")
                     # 下单异常时禁用规则
                     rule.enabled = False
                     db_rule = DatabaseRiskRule(

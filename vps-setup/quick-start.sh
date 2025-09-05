@@ -23,14 +23,14 @@ fi
 
 # 检查VPS上的服务状态
 echo "🔍 检查VPS服务状态..."
-VPS_STATUS=$(ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml ps --format "table {{.Name}}\t{{.Status}}"' 2>/dev/null || echo "服务未启动")
+VPS_STATUS=$(ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml ps --format "table {{.Name}}\t{{.Status}}"' 2>/dev/null || echo "服务未启动")
 
 if echo "$VPS_STATUS" | grep -q "Up"; then
     echo "✅ VPS服务正在运行"
     echo "$VPS_STATUS"
 else
     echo "⚠️  VPS服务未运行，尝试启动..."
-    ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml up -d'
+    ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml up -d'
     sleep 5
     echo "✅ 服务启动完成"
 fi
@@ -49,7 +49,7 @@ echo "✅ 已切换到VPS Docker上下文"
 
 # 检查本地端口占用和清理SSH隧道
 echo "🔌 检查本地端口..."
-PORTS=(8000 5900 4001 4002)
+PORTS=(5900 4001 4002)
 
 # 先清理可能残留的SSH隧道进程
 echo "🧹 清理残留的SSH隧道进程..."
@@ -97,10 +97,10 @@ if command -v autossh &> /dev/null; then
         -o "ServerAliveInterval 30" \
         -o "ServerAliveCountMax 3" \
         -o "ExitOnForwardFailure yes" \
-        -L 8000:127.0.0.1:8000 \
+        -L 7800:127.0.0.1:7800 \
         -L 5900:127.0.0.1:5900 \
-        -L 4001:127.0.0.1:4003 \
-        -L 4002:127.0.0.1:4004 \
+        -L 4001:127.0.0.1:4001 \
+        -L 4002:127.0.0.1:4002 \
         vps-ibbot
 else
     echo "⚠️  autossh未安装，使用普通SSH转发"
@@ -110,9 +110,9 @@ else
         -o "ServerAliveInterval 30" \
         -o "ServerAliveCountMax 3" \
         -o "ExitOnForwardFailure yes" \
-        -L 8000:127.0.0.1:8000 \
+        -L 7800:127.0.0.1:7800 \
         -L 5900:127.0.0.1:5900 \
-        -L 4001:127.0.0.1:4003 \
-        -L 4002:127.0.0.1:4004 \
+        -L 4001:127.0.0.1:4001 \
+        -L 4002:127.0.0.1:4002 \
         vps-ibbot
 fi

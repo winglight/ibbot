@@ -81,13 +81,13 @@ TIME_ZONE=Asia/Shanghai
 ```bash
 # 在VPS上执行
 cd ~/ibbot
-docker compose -f docker/docker-compose.vps.yml up -d
+docker compose -f docker/docker-compose.yml up -d
 
 # 查看服务状态
-docker compose -f docker/docker-compose.vps.yml ps
+docker compose -f docker/docker-compose.yml ps
 
 # 查看日志
-docker compose -f docker/docker-compose.vps.yml logs -f
+docker compose -f docker/docker-compose.yml logs -f
 ```
 
 ### 第二阶段：本地端配置
@@ -112,13 +112,19 @@ chmod +x vps-setup/setup-docker-context.sh
 
 #### 3. 建立端口转发
 
-**方式一：普通SSH转发**
+**方式一：一键启动（推荐）**
+```bash
+chmod +x vps-setup/quick-start.sh
+./vps-setup/quick-start.sh
+```
+
+**方式二：普通SSH转发**
 ```bash
 chmod +x vps-setup/port-forward.sh
 ./vps-setup/port-forward.sh
 ```
 
-**方式二：autossh保活转发（推荐）**
+**方式三：autossh保活转发**
 ```bash
 chmod +x vps-setup/autossh-forward.sh
 ./vps-setup/autossh-forward.sh
@@ -129,7 +135,7 @@ chmod +x vps-setup/autossh-forward.sh
 #### 1. 访问服务
 
 - **ibbot Web界面**: http://localhost:8000
-- **VNC (IB Gateway)**: localhost:5901 (使用VNC客户端)
+- **VNC (IB Gateway)**: vnc://localhost:5900 (使用VNC客户端)
 - **IBKR API**: localhost:4001, localhost:4002
 
 #### 2. 代码编辑
@@ -155,16 +161,16 @@ fswatch -o . | xargs -n1 -I{} rsync -avz --exclude='.git' \
 docker context use vps-ibbot
 
 # 重启服务
-docker compose -f docker/docker-compose.vps.yml restart
+docker compose -f docker/docker-compose.yml restart
 
 # 查看日志
-docker compose -f docker/docker-compose.vps.yml logs -f ibbot
+docker compose -f docker/docker-compose.yml logs -f ibbot
 
 # 进入容器
-docker compose -f docker/docker-compose.vps.yml exec ibbot bash
+docker compose -f docker/docker-compose.yml exec ibbot bash
 
 # 重新构建
-docker compose -f docker/docker-compose.vps.yml up -d --build
+docker compose -f docker/docker-compose.yml up -d --build
 ```
 
 #### 4. 切换回本地Docker
@@ -178,10 +184,10 @@ docker context use default
 ### VPS操作
 ```bash
 # 查看服务状态
-ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml ps'
+ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml ps'
 
 # 重启服务
-ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml restart'
+ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml restart'
 
 # 查看系统资源
 ssh vps-ibbot 'htop'
@@ -239,8 +245,28 @@ ssh vps-ibbot 'ss -lntp | grep -E "8000|5900|4001|4002"'
 ssh vps-ibbot 'sudo ufw status'
 
 # 查看Docker日志
-ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.vps.yml logs'
+ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml logs'
 ```
+
+### 5. VNC连接问题
+```bash
+# 检查VNC服务状态
+ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gateway ps aux | grep vnc'
+
+# 检查容器内5900端口
+ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gateway ss -lntp | grep 5900'
+
+# 手动启动VNC服务（如果未运行）
+ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gateway bash -c "export DISPLAY=:1 && x11vnc -nopw -forever -display :1 -rfbport 5900 &"'
+
+# 测试本地VNC连接
+nc -zv localhost 5900
+```
+
+**VNC连接说明：**
+- 使用VNC客户端连接 `vnc://localhost:5900`
+- 如果连接失败，可能需要在容器内手动启动VNC服务
+- VNC服务配置为无密码访问（仅通过SSH隧道安全访问）
 
 ## 安全注意事项
 
