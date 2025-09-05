@@ -26,6 +26,8 @@ class TradingApp {
         this.endReminderTimeout = null;
         // 当前订阅实时行情的合约符号，null 表示未订阅
         this.monitorRealtimeSymbol = null;
+        // 缓存当日订单列表，供监控时查找最新建仓/加仓时间
+        this.orders = [];
         this.init();
     }
 
@@ -1501,6 +1503,11 @@ class TradingApp {
 
     async openMonitorModal(symbol, positionQty = 0, currentPrice = 0, avgCost = 0, pnl = 0, pnlPercent = 0) {
         try {
+            // 获取最新订单以确定建仓/加仓时间
+            try {
+                await this.loadOrders();
+            } catch (e) {}
+
             // 填充基础字段
             const symEl = document.getElementById('monitorSymbol');
             if (!symEl) return;
@@ -1526,6 +1533,15 @@ class TradingApp {
                 else if ((pnl || 0) < -1e-8) pnlPctEl.classList.add('text-danger');
             }
 
+            // 计算建仓/加仓时间：取该标的最新订单时间
+            let entryTime = new Date();
+            if (Array.isArray(this.orders)) {
+                const lastOrder = this.orders.find(o => o.symbol === symbol && o.submit_time);
+                if (lastOrder) {
+                    entryTime = new Date(lastOrder.submit_time);
+                }
+            }
+
             // 保存当前监控上下文
             this.currentMonitor = {
                 symbol,
@@ -1535,7 +1551,7 @@ class TradingApp {
                 pnl: Number(pnl) || 0,
                 pnlPercent: Number(pnlPercent) || 0,
                 maxTimeSpan: (this.riskRules && this.riskRules[symbol] && this.riskRules[symbol].max_time_span) || 30,
-                entryTime: new Date(),
+                entryTime,
                 timeAlertSent: false,
             };
 
@@ -2198,8 +2214,8 @@ class TradingApp {
                 if (!ctx) return;
 
                 // Prepare data for Chart.js
-                const labels = response.data.map(bar => {
-                    // Prefer bar.time, fallback to bar.date
+                // 先解析原始时间并保存Date对象
+                const timeValues = response.data.map(bar => {
                     const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
                     let date;
                     if (typeof raw === 'string') {
@@ -2213,72 +2229,45 @@ class TradingApp {
                     } else {
                         date = new Date();
                     }
-                    
-                    // Format based on interval
+                    return date;
+                });
+                // 根据时间生成显示标签
+                const labels = timeValues.map(date => {
                     const interval = intervalSelect?.value || '5 mins';
                     if (interval.includes('day') || duration.includes('M') || duration.includes('Y')) {
-                        return date.toLocaleDateString('en-US', { 
-                            month: 'short', 
+                        return date.toLocaleDateString('en-US', {
+                            month: 'short',
                             day: 'numeric'
                         });
                     } else if (interval.includes('hour') || duration === '1 W') {
-                        return date.toLocaleString('en-US', { 
+                        return date.toLocaleString('en-US', {
                             month: 'short',
                             day: 'numeric',
                             hour: '2-digit',
-                            hour12: false 
+                            hour12: false
                         });
                     } else {
-                        return date.toLocaleTimeString('en-US', { 
-                            hour: '2-digit', 
+                        return date.toLocaleTimeString('en-US', {
+                            hour: '2-digit',
                             minute: '2-digit',
-                            hour12: false 
+                            hour12: false
                         });
                     }
                 });
-                // 确保数据完整性，过滤掉无效的价格数据
-                const validData = response.data.filter(bar => bar.close != null && !isNaN(bar.close));
+                // 确保数据完整性，过滤掉无效的价格数据，并记录索引
+                const validData = [];
+                const validIndices = [];
+                response.data.forEach((bar, idx) => {
+                    if (bar.close != null && !isNaN(bar.close)) {
+                        validData.push(bar);
+                        validIndices.push(idx);
+                    }
+                });
                 const prices = validData.map(bar => bar.close);
-                
-                // 重新生成对应的labels
-                const validLabels = validData.map(bar => {
-                    // Prefer bar.time, fallback to bar.date
-                    const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
-                    let date;
-                    if (typeof raw === 'string') {
-                        date = new Date(raw);
-                        if (isNaN(date.getTime())) {
-                            const num = parseFloat(raw);
-                            date = new Date(num > 1e10 ? num : num * 1000);
-                        }
-                    } else if (typeof raw === 'number') {
-                        date = new Date(raw > 1e10 ? raw : raw * 1000);
-                    } else {
-                        date = new Date();
-                    }
-                    
-                    // Format based on interval
-                    const interval = intervalSelect?.value || '5 mins';
-                    if (interval.includes('day') || duration.includes('M') || duration.includes('Y')) {
-                        return date.toLocaleDateString('en-US', { 
-                            month: 'short', 
-                            day: 'numeric'
-                        });
-                    } else if (interval.includes('hour') || duration === '1 W') {
-                        return date.toLocaleString('en-US', { 
-                            month: 'short',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            hour12: false 
-                        });
-                    } else {
-                        return date.toLocaleTimeString('en-US', { 
-                            hour: '2-digit', 
-                            minute: '2-digit',
-                            hour12: false 
-                        });
-                    }
-                });
+
+                // 重新生成对应的labels和时间
+                const validLabels = validIndices.map(i => labels[i]);
+                const validTimes = validIndices.map(i => timeValues[i]);
 
                 // 为了在建仓后显示盈亏方框，右侧额外添加时间空间
                 const intervalValueRaw = intervalSelect?.value || '1 min';
@@ -2315,6 +2304,8 @@ class TradingApp {
                     labels.push(label);
                     validLabels.push(label);
                     prices.push(null);
+                    timeValues.push(future);
+                    validTimes.push(future);
                 }
 
                 // Get stop loss and take profit values for annotations
@@ -2391,8 +2382,18 @@ class TradingApp {
                 const chartIntervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
                 const chartSpanMinutes = this.currentMonitor?.maxTimeSpan || 30;
                 const spanBars = Math.max(1, Math.round(chartSpanMinutes / chartIntervalMinutes));
-                const endIndex = labels.length - 1;
-                const startIndex = Math.max(0, endIndex - spanBars);
+
+                // 根据图表类型选择对应的标签和时间数组
+                const displayLabels = chartType === 'line' ? validLabels : labels;
+                const displayTimes = chartType === 'line' ? validTimes : timeValues;
+
+                let startIndex = 0;
+                if (this.currentMonitor?.entryTime) {
+                    const entryTime = new Date(this.currentMonitor.entryTime);
+                    startIndex = displayTimes.findIndex(t => t >= entryTime);
+                    if (startIndex === -1) startIndex = 0;
+                }
+                const endIndex = Math.min(displayLabels.length - 1, startIndex + spanBars);
                 this.currentMonitor.riskStartIndex = startIndex;
 
                 // Prepare annotations
@@ -2500,8 +2501,8 @@ class TradingApp {
 
                 if (stopLossPrice && takeProfitPrice && avgCost > 0) {
                     const isLong = (this.currentMonitor?.positionQty || 0) > 0;
-                    const xMin = labels[startIndex];
-                    const xMax = labels[endIndex];
+                    const xMin = displayLabels[startIndex];
+                    const xMax = displayLabels[endIndex];
                     const profitColor = isLong ? 'rgba(144,238,144,0.3)' : 'rgba(255,182,193,0.3)';
                     const lossColor = isLong ? 'rgba(255,182,193,0.3)' : 'rgba(144,238,144,0.3)';
                     if (isLong) {
@@ -3904,6 +3905,9 @@ class TradingApp {
                     return timeB - timeA; // 反序排列
                 });
             }
+
+            // 缓存排序后的订单列表，供其他功能使用
+            this.orders = orders;
             
             const tbody = document.querySelector('#ordersTable tbody');
             
