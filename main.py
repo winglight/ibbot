@@ -1721,12 +1721,13 @@ async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
     try:
-        logger.info(f"API add_risk_rule: symbol={rule.symbol}, SL={rule.stop_loss_price}, TP={rule.take_profit_price}, max_loss%={rule.max_loss_percent}")
+        logger.info(f"API add_risk_rule: symbol={rule.symbol}, SL={rule.stop_loss_price}, TP={rule.take_profit_price}, max_loss%={rule.max_loss_percent}, max_time_span={rule.max_time_span}")
         risk_manager.add_risk_rule(
             symbol=rule.symbol,
             stop_loss_price=rule.stop_loss_price,
             take_profit_price=rule.take_profit_price,
-            max_loss_percent=rule.max_loss_percent
+            max_loss_percent=rule.max_loss_percent,
+            max_time_span=rule.max_time_span
         )
         
         return {"success": True, "message": "Risk rule added successfully"}
@@ -1751,6 +1752,7 @@ async def get_risk_rules(user: Optional[str] = Depends(get_current_user)):
                 "stop_loss_price": rule.stop_loss_price,
                 "take_profit_price": rule.take_profit_price,
                 "max_loss_percent": rule.max_loss_percent,
+                "max_time_span": rule.max_time_span,
                 "enabled": rule.enabled,
                 "created_at": rule.created_at.isoformat()
             }

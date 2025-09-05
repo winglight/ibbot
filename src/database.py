@@ -45,6 +45,7 @@ class RiskRule:
     take_profit_price: Optional[float] = None
     max_loss_percent: Optional[float] = None
     enabled: bool = True
+    max_time_span: Optional[int] = None  # 以分钟为单位的最大持仓时间
     timestamp: str = None
 
 
@@ -178,6 +179,7 @@ class DatabaseManager:
                     take_profit_price REAL,
                     max_loss_percent REAL,
                     enabled BOOLEAN DEFAULT 1,
+                    max_time_span INTEGER,
                     timestamp TEXT NOT NULL
                 )
                 """
@@ -189,6 +191,13 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE risk_rules ADD COLUMN enabled BOOLEAN DEFAULT 1")
                 database_logger.info("Added enabled column to risk_rules table")
             
+            # 迁移：为已有表添加 max_time_span 列
+            cursor.execute("PRAGMA table_info('risk_rules')")
+            cols = [row[1] for row in cursor.fetchall()]
+            if 'max_time_span' not in cols:
+                cursor.execute("ALTER TABLE risk_rules ADD COLUMN max_time_span INTEGER")
+                database_logger.info("Added max_time_span column to risk_rules table")
+
             # 创建策略表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS strategies (
@@ -365,7 +374,7 @@ class DatabaseManager:
         """加载所有风险规则"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT symbol, stop_loss_price, take_profit_price, max_loss_percent, COALESCE(enabled, 1) as enabled, timestamp FROM risk_rules")
+            cursor.execute("SELECT symbol, stop_loss_price, take_profit_price, max_loss_percent, COALESCE(enabled, 1) as enabled, max_time_span, timestamp FROM risk_rules")
             rows = cursor.fetchall()
             
             rules = []
@@ -377,7 +386,8 @@ class DatabaseManager:
                     take_profit_price=row[2],
                     max_loss_percent=row[3],
                     enabled=bool(row[4]),
-                    timestamp=row[5]
+                    max_time_span=row[5],
+                    timestamp=row[6]
                 )
                 rules.append(rule)
             
@@ -392,13 +402,14 @@ class DatabaseManager:
             enabled_val = 1 if getattr(rule, 'enabled', True) else 0
             cursor.execute(
                 """
-                INSERT INTO risk_rules (symbol, stop_loss_price, take_profit_price, max_loss_percent, enabled, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO risk_rules (symbol, stop_loss_price, take_profit_price, max_loss_percent, enabled, max_time_span, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     stop_loss_price=excluded.stop_loss_price,
                     take_profit_price=excluded.take_profit_price,
                     max_loss_percent=excluded.max_loss_percent,
                     enabled=excluded.enabled,
+                    max_time_span=excluded.max_time_span,
                     timestamp=excluded.timestamp
                 """,
                 (
@@ -407,6 +418,7 @@ class DatabaseManager:
                     rule.take_profit_price,
                     rule.max_loss_percent,
                     enabled_val,
+                    rule.max_time_span,
                     ts,
                 ),
             )
