@@ -1,3 +1,14 @@
+// 全局常量定义
+const INTERVAL_MINUTES_MAP = {
+    '1min': 1,
+    '5min': 5,
+    '5mins': 5,
+    '15min': 15,
+    '15mins': 15,
+    '30mins': 30,
+    '1hour': 60
+};
+
 class TradingApp {
     constructor() {
         this.ws = null;
@@ -2257,16 +2268,9 @@ class TradingApp {
                 // 为了在建仓后显示盈亏方框，右侧额外添加时间空间
                 const intervalValueRaw = intervalSelect?.value || '1 min';
                 const intervalKey = intervalValueRaw.replace(/\s+/g, '');
-                const intervalMinutesMap = {
-                    '1min': 1,
-                    '5mins': 5,
-                    '15mins': 15,
-                    '30mins': 30,
-                    '1hour': 60
-                };
-                const intervalMinutes = intervalMinutesMap[intervalKey] || 1;
-                const spanMinutes = this.currentMonitor?.maxTimeSpan || 30;
-                const padBars = Math.ceil(spanMinutes / intervalMinutes);
+                const padIntervalMinutes = INTERVAL_MINUTES_MAP[intervalKey] || 1;
+                const padSpanMinutes = this.currentMonitor?.maxTimeSpan || 30;
+                const padBars = Math.ceil(padSpanMinutes / padIntervalMinutes);
                 const lastBar = response.data[response.data.length - 1];
                 const lastRaw = (lastBar.time !== undefined && lastBar.time !== null) ? lastBar.time : lastBar.date;
                 let lastDate;
@@ -2283,7 +2287,7 @@ class TradingApp {
                 }
                 const futureTimes = [];
                 for (let i = 1; i <= padBars; i++) {
-                    const future = new Date(lastDate.getTime() + i * intervalMinutes * 60000);
+                    const future = new Date(lastDate.getTime() + i * padIntervalMinutes * 60000);
                     futureTimes.push(future);
                     let label;
                     if (intervalValueRaw.includes('day') || duration.includes('M') || duration.includes('Y')) {
@@ -2369,10 +2373,9 @@ class TradingApp {
 
                 // 计算时间跨度相关参数
                 const intervalValue = intervalSelect ? intervalSelect.value : '1min';
-                const intervalMinutesMap = { '1min': 1, '5min': 5, '15min': 15, '1hour': 60 };
-                const intervalMinutes = intervalMinutesMap[intervalValue] || 1;
-                const spanMinutes = this.currentMonitor?.maxTimeSpan || 30;
-                const spanBars = Math.max(1, Math.round(spanMinutes / intervalMinutes));
+                const chartIntervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
+                const chartSpanMinutes = this.currentMonitor?.maxTimeSpan || 30;
+                const spanBars = Math.max(1, Math.round(chartSpanMinutes / chartIntervalMinutes));
                 const endIndex = labels.length - 1;
                 const startIndex = Math.max(0, endIndex - spanBars);
                 this.currentMonitor.riskStartIndex = startIndex;
@@ -2924,8 +2927,7 @@ class TradingApp {
                         if (annotations.profitBox) annotations.profitBox.xMax = label;
                         if (annotations.lossBox) annotations.lossBox.xMax = label;
                         const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
-                        const intervalMinutesMap = { '1min':1,'5min':5,'15min':15,'1hour':60 };
-                        const intervalMinutes = intervalMinutesMap[intervalValue] || 1;
+                        const intervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
                         const newSpan = (index - this.currentMonitor.riskStartIndex) * intervalMinutes;
                         this.currentMonitor.maxTimeSpan = newSpan;
                     } else {
@@ -3617,8 +3619,7 @@ class TradingApp {
             // 检查时间跨度达到右边界提醒
             try {
                 const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
-                const intervalMinutesMap = { '1min':1,'5min':5,'15min':15,'1hour':60 };
-                const intervalMinutes = intervalMinutesMap[intervalValue] || 1;
+                const intervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
                 const spanBars = Math.ceil((this.currentMonitor?.maxTimeSpan || 30) / intervalMinutes);
                 const labels = this.monitorChart ? (this.monitorChart.data.labels || []) : [];
                 if (!this.currentMonitor.timeAlertSent && labels.length - 1 - (this.currentMonitor.riskStartIndex || 0) >= spanBars) {
