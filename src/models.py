@@ -113,3 +113,62 @@ class StrategySettingsRequest(BaseModel):
     strategy_path: Optional[str] = None
     enable_auth: Optional[bool] = None
     auth_token: Optional[str] = None
+
+# 新增：风险配置更新请求模型
+class RiskConfigUpdateRequest(BaseModel):
+    risk_per_trade_r: Optional[float] = None
+    rv_ref_value: Optional[float] = None
+    rv_ref_method: Optional[str] = None  # static/current/rolling
+    vol_window: Optional[int] = None
+    signal_tiers: Optional[Dict[str, float]] = None
+
+    exec_min_volume: Optional[float] = None
+    exec_max_spread: Optional[float] = None
+    exec_max_slippage: Optional[float] = None
+
+    dd_step: Optional[float] = None
+    dd_max_steps: Optional[int] = None
+    dd_scale: Optional[float] = None
+
+    contract_rounding: Optional[str] = None  # none/down/up/nearest
+    price_threshold: Optional[float] = None
+    leverage_mnq: Optional[int] = None
+
+    cb_daily_r: Optional[float] = None
+    cb_streak: Optional[int] = None
+
+    point_value_map: Optional[Dict[str, float]] = None
+
+    @validator('risk_per_trade_r', 'rv_ref_value', 'exec_min_volume', 'exec_max_spread', 'exec_max_slippage',
+               'dd_step', 'dd_scale', 'price_threshold', 'cb_daily_r')
+    def positive_or_zero(cls, v):
+        if v is not None and v < 0:
+            raise ValueError('numeric values must be >= 0 when provided')
+        return v
+
+    @validator('vol_window', 'dd_max_steps', 'leverage_mnq', 'cb_streak')
+    def positive_int(cls, v):
+        if v is not None and v < 0:
+            raise ValueError('integer values must be >= 0 when provided')
+        return v
+
+# 新增：仓位建议请求模型
+class PositionSizingRequest(BaseModel):
+    symbol: str
+    stop_distance: float
+    rv_current: Optional[float] = None
+    rv_ref: Optional[float] = None
+    signal_tier: Optional[str] = 'A'
+    execution_metrics: Optional[Dict[str, float]] = None
+
+    @validator('symbol')
+    def symbol_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('symbol is required')
+        return v.strip().upper()
+
+    @validator('stop_distance')
+    def stop_distance_positive(cls, v):
+        if v is None or v <= 0:
+            raise ValueError('stop_distance must be > 0')
+        return v

@@ -49,7 +49,7 @@ from src.database import get_db_manager
 from src.strategy_manager import StrategyExecution
 from src.queue_manager import queue_manager
 from src.order_manager import OrderManager
-from src.models import HistoricalDataRequest, ChartDataRequest, OrderRequest, ExternalStrategyOrderRequest, StrategySettingsRequest, StrategyRequest, RiskRuleRequest
+from src.models import HistoricalDataRequest, ChartDataRequest, OrderRequest, ExternalStrategyOrderRequest, StrategySettingsRequest, StrategyRequest, RiskRuleRequest, RiskConfigUpdateRequest, PositionSizingRequest
 from src.websocket_manager import websocket_manager  # 新增导入
 
 # Global variables
@@ -1970,13 +1970,54 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
         except Exception:
             leverage["MNQ"] = 20
 
+        # 新增：返回完整风控配置
+        full_cfg = {}
+        try:
+            if 'risk_manager' in globals() and risk_manager is not None:
+                full_cfg = risk_manager.get_config()
+        except Exception as e:
+            logger.warning(f"get_risk_config: fetch full config failed: {e}")
+
         return {
             "stop_loss_ratio": stop_loss_ratio,
             "take_profit_ratio": take_profit_ratio,
-            "leverage": leverage
+            "leverage": leverage,
+            "risk_config": full_cfg,
         }
     except Exception as e:
         logger.error(f"Get risk config error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 新增：更新风控配置
+@app.put("/api/risk-config")
+async def update_risk_config(payload: RiskConfigUpdateRequest, user: Optional[str] = Depends(get_current_user)):
+    if 'risk_manager' not in globals() or risk_manager is None:
+        raise HTTPException(status_code=400, detail="Risk manager not initialized")
+    try:
+        updates = {k: v for k, v in payload.dict(exclude_none=True).items()}
+        new_cfg = risk_manager.update_config(updates)
+        return {"success": True, "risk_config": new_cfg}
+    except Exception as e:
+        logger.error(f"Update risk config error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 新增：仓位建议计算
+@app.post("/api/position-sizing")
+async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str] = Depends(get_current_user)):
+    if 'risk_manager' not in globals() or risk_manager is None:
+        raise HTTPException(status_code=400, detail="Risk manager not initialized")
+    try:
+        res = risk_manager.position_sizing(
+            symbol=payload.symbol,
+            stop_distance=payload.stop_distance,
+            rv_current=payload.rv_current,
+            signal_tier=(payload.signal_tier or 'A'),
+            execution_metrics=payload.execution_metrics,
+            rv_ref=payload.rv_ref,
+        )
+        return {"success": True, "result": asdict(res)}
+    except Exception as e:
+        logger.error(f"Position sizing error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

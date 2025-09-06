@@ -1,7 +1,9 @@
 import asyncio
 import os
 import csv
-from typing import Dict, List, Optional, Tuple
+import json
+import math
+from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
@@ -68,6 +70,20 @@ class OrderRequest:
         if self.timestamp is None:
             self.timestamp = datetime.now()
 
+@dataclass
+class PositionSizingResult:
+    contracts: int
+    scale_vol: float
+    scale_dd: float
+    scale_sig: float
+    scale_exec: float
+    scale_total: float
+    R: float  # base risk budget in currency
+    R_star: float  # risk after vol scaling
+    stop_distance: float
+    point_value: float
+    explanation: str = ""
+
 class RiskManager:
     def __init__(self, ibkr_client: IBKRClient, telegram_notifier: TelegramNotifier):
         self.ibkr_client = ibkr_client
@@ -101,6 +117,50 @@ class RiskManager:
         # 价格阈值与杠杆配置
         self.price_threshold = float(os.getenv('PRICE_THRESHOLD', 0.02))  # 从环境变量读取，默认2%金额阈值
         self.leverage_mnq = int(os.getenv('LEVERAGE_MNQ', 20))  # MNQ杠杆倍数，从环境变量读取
+        
+        # 动态仓位管理与断路器配置
+        self.risk_per_trade_r = float(os.getenv('RISK_PER_TRADE_R', 0.005))
+        self.rv_ref_value = float(os.getenv('RV_REF_VALUE', 1.0))
+        self.signal_tiers: Dict[str, float] = {
+            'A': 1.0, 'B': 0.75, 'C': 0.5, 'D': 0.25
+        }
+        self.exec_min_volume: Optional[float] = None
+        self.exec_max_spread: Optional[float] = None
+        self.exec_max_slippage: Optional[float] = None
+
+        # 新增：波动率与点值运行时配置
+        self.vol_window: int = int(os.getenv('VOL_WINDOW', 20))
+        self.rv_ref_method: str = os.getenv('RV_REF_METHOD', 'static').lower()  # static|rolling|current
+        self.point_value_map: Dict[str, float] = {
+            'MNQ': 2.0,
+            'MES': 5.0,
+            'NQ': 20.0,
+            'ES': 50.0,
+        }
+
+        # 回撤分级缩放
+        self.dd_step: float = float(os.getenv('DD_STEP', 0.05))
+        self.dd_max_steps: int = int(os.getenv('DD_MAX_STEPS', 4))
+        self.dd_scale: float = float(os.getenv('DD_SCALE', 0.5))
+        self.dd_steps_applied: int = 0
+
+        # 合约数量舍入
+        self.contract_rounding: str = os.getenv('CONTRACT_ROUNDING', 'floor').lower()
+
+        # 权益与风控状态
+        self.equity_last: float = 0.0
+        self.equity_peak: float = 0.0
+        self.sod_equity: float = 0.0
+        self.today_date = datetime.now().date()
+        self.daily_loss_currency: float = 0.0
+        self.daily_loss_R: float = 0.0
+        self.loss_streak: int = 0
+
+        # 断路器状态
+        self.circuit_active: bool = False
+        self.circuit_reason: str = ''
+        self.cb_daily_r: float = float(os.getenv('CB_DAILY_R', 3.0))
+        self.cb_streak: int = int(os.getenv('CB_STREAK', 3))
         
         # 待处理的限价订单状态
         self.pending_orders: Dict[str, Dict[str, bool]] = {}
@@ -194,6 +254,162 @@ class RiskManager:
                 
         except Exception as e:
             risk_logger.error(f"Error during CSV to database migration: {e}")
+
+    # 新增：从数据库加载风控运行时配置
+    def _load_risk_config_from_db(self) -> None:
+        try:
+            settings = self.db_manager.load_strategy_settings() or {}
+            cfg = settings.get('risk_config') or {}
+
+            # 读取及回退默认
+            self.vol_window = int(cfg.get('vol_window', self.vol_window))
+            self.rv_ref_method = str(cfg.get('rv_ref_method', self.rv_ref_method)).lower()
+            self.risk_per_trade_r = float(cfg.get('risk_per_trade_r', self.risk_per_trade_r))
+            self.rv_ref_value = float(cfg.get('rv_ref_value', self.rv_ref_value))
+
+            st = cfg.get('signal_tiers')
+            if isinstance(st, dict) and st:
+                new_st: Dict[str, float] = {}
+                for k, v in st.items():
+                    try:
+                        new_st[str(k).upper()] = float(v)
+                    except Exception:
+                        continue
+                if new_st:
+                    self.signal_tiers.update(new_st)
+
+            # 执行约束
+            mv = cfg.get('exec_min_volume', self.exec_min_volume)
+            self.exec_min_volume = float(mv) if mv is not None else None
+            ms = cfg.get('exec_max_spread', self.exec_max_spread)
+            self.exec_max_spread = float(ms) if ms is not None else None
+            sl = cfg.get('exec_max_slippage', self.exec_max_slippage)
+            self.exec_max_slippage = float(sl) if sl is not None else None
+
+            # 回撤分级缩放与舍入
+            self.dd_step = float(cfg.get('dd_step', self.dd_step))
+            self.dd_max_steps = int(cfg.get('dd_max_steps', self.dd_max_steps))
+            self.dd_scale = float(cfg.get('dd_scale', self.dd_scale))
+            self.contract_rounding = str(cfg.get('contract_rounding', self.contract_rounding)).lower()
+
+            # 断路器与其他
+            self.cb_daily_r = float(cfg.get('cb_daily_r', self.cb_daily_r))
+            self.cb_streak = int(cfg.get('cb_streak', self.cb_streak))
+            self.price_threshold = float(cfg.get('price_threshold', self.price_threshold))
+            self.leverage_mnq = int(cfg.get('leverage_mnq', self.leverage_mnq))
+
+            # 点值映射
+            pv_map = cfg.get('point_value_map')
+            if isinstance(pv_map, dict):
+                cleaned: Dict[str, float] = {}
+                for k, v in pv_map.items():
+                    try:
+                        cleaned[(k or '').upper()] = float(v)
+                    except Exception:
+                        continue
+                if cleaned:
+                    self.point_value_map.update(cleaned)
+
+            risk_logger.info("Loaded risk runtime config from database")
+        except Exception as e:
+            risk_logger.warning(f"Failed to load risk_config: {e}")
+
+    # 新增：对外获取风控配置
+    def get_config(self) -> Dict[str, Any]:
+        try:
+            return {
+                'risk_per_trade_r': self.risk_per_trade_r,
+                'rv_ref_value': self.rv_ref_value,
+                'rv_ref_method': self.rv_ref_method,
+                'vol_window': self.vol_window,
+                'signal_tiers': self.signal_tiers,
+                'exec_min_volume': self.exec_min_volume,
+                'exec_max_spread': self.exec_max_spread,
+                'exec_max_slippage': self.exec_max_slippage,
+                'dd_step': self.dd_step,
+                'dd_max_steps': self.dd_max_steps,
+                'dd_scale': self.dd_scale,
+                'contract_rounding': self.contract_rounding,
+                'price_threshold': self.price_threshold,
+                'leverage_mnq': self.leverage_mnq,
+                'cb_daily_r': self.cb_daily_r,
+                'cb_streak': self.cb_streak,
+                'point_value_map': self.point_value_map,
+            }
+        except Exception as e:
+            risk_logger.error(f"get_config error: {e}")
+            return {}
+
+    # 新增：更新风控配置并持久化
+    def update_config(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            # 简单校验/转换
+            def as_float(name: str, default: Optional[float]):
+                if name in updates and updates[name] is not None:
+                    return float(updates[name])
+                return default
+            def as_int(name: str, default: Optional[int]):
+                if name in updates and updates[name] is not None:
+                    return int(updates[name])
+                return default
+            def as_str(name: str, default: Optional[str]):
+                if name in updates and updates[name] is not None:
+                    return str(updates[name])
+                return default
+
+            self.risk_per_trade_r = as_float('risk_per_trade_r', self.risk_per_trade_r)
+            self.rv_ref_value = as_float('rv_ref_value', self.rv_ref_value)
+            self.rv_ref_method = as_str('rv_ref_method', self.rv_ref_method).lower()
+            self.vol_window = as_int('vol_window', self.vol_window)
+
+            # tiers 合并（大写key）
+            if isinstance(updates.get('signal_tiers'), dict):
+                st_new: Dict[str, float] = {}
+                for k, v in updates['signal_tiers'].items():
+                    try:
+                        st_new[str(k).upper()] = float(v)
+                    except Exception:
+                        continue
+                if st_new:
+                    self.signal_tiers.update(st_new)
+
+            # 执行约束
+            self.exec_min_volume = as_float('exec_min_volume', self.exec_min_volume)
+            self.exec_max_spread = as_float('exec_max_spread', self.exec_max_spread)
+            self.exec_max_slippage = as_float('exec_max_slippage', self.exec_max_slippage)
+
+            # 回撤与舍入
+            self.dd_step = as_float('dd_step', self.dd_step)
+            self.dd_max_steps = as_int('dd_max_steps', self.dd_max_steps)
+            self.dd_scale = as_float('dd_scale', self.dd_scale)
+            self.contract_rounding = as_str('contract_rounding', self.contract_rounding).lower()
+
+            # 断路器与其他
+            self.cb_daily_r = as_float('cb_daily_r', self.cb_daily_r)
+            self.cb_streak = as_int('cb_streak', self.cb_streak)
+            self.price_threshold = as_float('price_threshold', self.price_threshold)
+            self.leverage_mnq = as_int('leverage_mnq', self.leverage_mnq)
+
+            # 点值映射合并
+            if isinstance(updates.get('point_value_map'), dict):
+                pv_new: Dict[str, float] = {}
+                for k, v in updates['point_value_map'].items():
+                    try:
+                        pv_new[(k or '').upper()] = float(v)
+                    except Exception:
+                        continue
+                if pv_new:
+                    self.point_value_map.update(pv_new)
+
+            # 持久化到数据库（与 strategy_settings 共表，使用 risk_config 命名空间）
+            settings = self.db_manager.load_strategy_settings() or {}
+            settings['risk_config'] = self.get_config()
+            self.db_manager.save_strategy_settings(settings)
+
+            return self.get_config()
+        except Exception as e:
+            risk_logger.error(f"update_config error: {e}")
+            return self.get_config()
 
     def start(self):
         """启动风险管理器"""
@@ -311,7 +527,7 @@ class RiskManager:
                 max_loss_percent=rule.max_loss_percent,
                 enabled=rule.enabled,
                 max_time_span=rule.max_time_span,
-                timestamp=rule.created_at.isoformat()
+                timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
             )
             self.db_manager.save_risk_rule(db_rule)
             risk_logger.debug(f"Risk rule persisted: {db_rule}")
@@ -1349,3 +1565,258 @@ class RiskManager:
             risk_logger.info(f"All orders loaded from {filename}, total orders: {len(self.auto_orders)}")
         except Exception as e:
             risk_logger.error(f"Error loading orders from CSV: {e}")
+
+    def update_equity_state(self, account_info: Dict) -> None:
+        """更新权益状态"""
+        try:
+            today = datetime.now().date()
+            net_liq = float(account_info.get('net_liquidation', 0.0) or 0.0)
+            realized_pnl = float(account_info.get('realized_pnl', 0.0) or 0.0)
+
+            # 日切换处理：重置当日损益，记录开盘权益
+            if getattr(self, 'today_date', None) != today:
+                self.today_date = today
+                self.sod_equity = net_liq if net_liq > 0 else (self.sod_equity or self.equity_last or 0.0)
+                self.daily_loss_currency = 0.0
+                self.daily_loss_R = 0.0
+                # 不重置loss_streak，在record_trade_result中维护
+
+            # 更新权益与峰值
+            self.equity_last = net_liq
+            if net_liq > 0:
+                self.equity_peak = max(self.equity_peak, net_liq)
+
+            # 计算回撤分级
+            dd_pct = 0.0
+            if self.equity_peak > 0:
+                dd_pct = max(0.0, (self.equity_peak - net_liq) / self.equity_peak)
+            steps = int(dd_pct // self.dd_step) if self.dd_step > 0 else 0
+            self.dd_steps_applied = min(max(steps, 0), self.dd_max_steps)
+
+            # 基于IBKR当日realized_pnl估算当日亏损（只统计亏损部分）
+            self.daily_loss_currency = max(0.0, -realized_pnl)
+
+            denom_R = max(1e-9, (self.sod_equity or net_liq) * max(1e-9, self.risk_per_trade_r))
+            self.daily_loss_R = float(self.daily_loss_currency) / denom_R
+        except Exception as e:
+            risk_logger.error(f"[PS] update_equity_state error: {e}")
+
+    def _compute_scale_dd(self) -> float:
+        if self.dd_steps_applied <= 0:
+            return 1.0
+        try:
+            scale = self.dd_scale ** self.dd_steps_applied
+            return max(0.0, min(1.0, scale))
+        except Exception:
+            return 1.0
+
+    def _compute_scale_vol(self, rv_current: Optional[float], rv_ref: Optional[float]) -> float:
+        try:
+            if rv_current is None or rv_current <= 0:
+                return 1.0
+            ref = rv_ref if (rv_ref is not None and rv_ref > 0) else (self.rv_ref_value if self.rv_ref_value > 0 else rv_current)
+            scale = ref / rv_current
+            return max(0.25, min(2.0, float(scale)))
+        except Exception:
+            return 1.0
+
+    def _compute_scale_sig(self, tier: str) -> float:
+        t = (tier or 'A').upper()
+        return float(self.signal_tiers.get(t, 0.0))
+
+    def _compute_scale_exec(self, execution_metrics: Optional[Dict[str, float]]) -> float:
+        if not execution_metrics:
+            return 1.0
+        violations = 0
+        try:
+            vol = execution_metrics.get('volume')
+            if vol is not None and self.exec_min_volume is not None and vol < self.exec_min_volume:
+                violations += 1
+            spread = execution_metrics.get('spread')
+            if spread is not None and self.exec_max_spread is not None and spread > self.exec_max_spread:
+                violations += 1
+            slippage = execution_metrics.get('slippage')
+            if slippage is not None and self.exec_max_slippage is not None and slippage > self.exec_max_slippage:
+                violations += 1
+            if violations <= 0:
+                return 1.0
+            if violations == 1:
+                return 0.5
+            return 0.0
+        except Exception:
+            return 1.0
+
+    def _get_point_value(self, symbol: str) -> float:
+        """根据合约符号返回每点价值，优先使用可配置映射。未命中返回1.0。"""
+        try:
+            sym = (symbol or "").upper()
+            if hasattr(self, 'point_value_map') and isinstance(self.point_value_map, dict):
+                pv = self.point_value_map.get(sym)
+                if pv is not None:
+                    return float(pv)
+            return 1.0
+        except Exception:
+            return 1.0
+
+    def _estimate_rv(self, symbol: str) -> Tuple[Optional[float], Optional[float], str]:
+        """基于历史日线自动估算当前RV与参考RV。
+        返回: (rv_current, rv_ref_by_method, info)
+        - rv_current: 最近 vol_window 的收益率滚动标准差
+        - rv_ref_by_method: 当 rv_ref_method=rolling/current 时返回对应参考值；static 时返回 None 以回退至 rv_ref_value
+        - info: 解释字符串，便于拼接到 explanation
+        """
+        try:
+            df = self.ibkr_client.get_historical_data(symbol)
+            if df is None or getattr(df, 'empty', True) or 'close' not in getattr(df, 'columns', {}):
+                return None, None, f"rv:auto=no_data({symbol})"
+
+            closes = df['close']
+            rets = closes.pct_change().dropna()
+            w = int(max(1, getattr(self, 'vol_window', 20)))
+            if rets.shape[0] < max(5, w):
+                return None, None, f"rv:auto=insufficient_data(n={rets.shape[0]})"
+
+            rv_series = rets.rolling(w).std().dropna()
+            rv_cur = float(rv_series.iloc[-1]) if not rv_series.empty else float(rets.std())
+
+            method = (getattr(self, 'rv_ref_method', 'static') or 'static').lower()
+            rv_ref_est: Optional[float] = None
+            if method == 'current':
+                rv_ref_est = rv_cur
+            elif method == 'rolling':
+                tail_n = max(w, min(len(rv_series), w * 5))
+                rv_ref_est = float(rv_series.tail(tail_n).mean()) if not rv_series.empty else float(rets.std())
+
+            info = f"rv:auto method={method}, window={w}, current={rv_cur:.6f}"
+            if rv_ref_est is not None:
+                info += f", ref={rv_ref_est:.6f}"
+            return rv_cur, rv_ref_est, info
+        except Exception as e:
+            risk_logger.error(f"_estimate_rv error: {e}")
+            return None, None, "rv:auto=error"
+
+    def position_sizing(self,
+                        symbol: str,
+                        stop_distance: float,
+                        rv_current: Optional[float] = None,
+                        signal_tier: str = 'A',
+                        execution_metrics: Optional[Dict[str, float]] = None,
+                        rv_ref: Optional[float] = None) -> PositionSizingResult:
+        account_info = {}
+        try:
+            account_info = self.ibkr_client.get_account_info() or {}
+        except Exception as e:
+            risk_logger.error(f"[PS] get_account_info error: {e}")
+        self.update_equity_state(account_info)
+
+        equity = self.equity_last
+        point_value = self._get_point_value(symbol)
+        explanation_parts: List[str] = []
+
+        R = max(0.0, equity * self.risk_per_trade_r)
+        explanation_parts.append(f"Equity={equity:.2f}, r={self.risk_per_trade_r:.4f} -> R={R:.2f}")
+
+        # 自动估算RV（当未提供时），并按 rv_ref_method 处理参考值
+        try:
+            method_lower = (self.rv_ref_method or 'static').lower()
+        except Exception:
+            method_lower = 'static'
+        need_auto_rv_cur = rv_current is None or rv_current <= 0
+        need_auto_rv_ref = (rv_ref is None) and (method_lower in ('rolling', 'current'))
+        if need_auto_rv_cur or need_auto_rv_ref:
+            est_cur, est_ref, rv_info = self._estimate_rv(symbol)
+            if need_auto_rv_cur and est_cur is not None and est_cur > 0:
+                rv_current = est_cur
+            if need_auto_rv_ref and est_ref is not None and est_ref > 0:
+                rv_ref = est_ref
+            if rv_info:
+                explanation_parts.append(rv_info)
+
+        scale_vol = self._compute_scale_vol(rv_current, rv_ref)
+        scale_dd = self._compute_scale_dd()
+        scale_sig = self._compute_scale_sig(signal_tier)
+        scale_exec = self._compute_scale_exec(execution_metrics)
+        scale_total = max(0.0, min(1.0, scale_vol * scale_dd * scale_sig * scale_exec))
+        explanation_parts.append(
+            f"scale_vol={scale_vol:.3f}, scale_dd={scale_dd:.3f}, scale_sig={scale_sig:.3f}, scale_exec={scale_exec:.3f} -> total={scale_total:.3f}")
+
+        R_star = R * scale_vol * scale_dd * scale_sig * scale_exec
+        denom = max(1e-9, point_value * max(1e-9, float(stop_distance or 0)))
+        contracts_float = R_star / denom
+
+        round_mode = self.contract_rounding
+        if round_mode in ('round', 'bankers'):
+            contracts = int(max(0, round(contracts_float)))
+        else:
+            contracts = int(math.floor(max(0.0, contracts_float)))
+
+        explanation_parts.append(
+            f"R*={R_star:.2f}, stop={stop_distance}, point_value={point_value} -> raw={contracts_float:.3f}, rounding={round_mode} -> {contracts}")
+
+        return PositionSizingResult(
+            contracts=contracts,
+            scale_vol=scale_vol,
+            scale_dd=scale_dd,
+            scale_sig=scale_sig,
+            scale_exec=scale_exec,
+            scale_total=scale_total,
+            R=R,
+            R_star=R_star,
+            stop_distance=float(stop_distance or 0.0),
+            point_value=point_value,
+            explanation=' | '.join(explanation_parts)
+        )
+
+    def check_circuit_breaker_before_new_order(self) -> Tuple[bool, str]:
+        try:
+            info = self.ibkr_client.get_account_info() or {}
+            self.update_equity_state(info)
+        except Exception as e:
+            risk_logger.error(f"[CB] get_account_info error: {e}")
+
+        if self.circuit_active:
+            return False, f"circuit_active: {self.circuit_reason}"
+
+        reasons = []
+        if self.cb_daily_r > 0 and self.daily_loss_R >= self.cb_daily_r:
+            reasons.append(f"daily_loss_R={self.daily_loss_R:.2f} >= {self.cb_daily_r}")
+        if self.cb_streak > 0 and self.loss_streak >= self.cb_streak:
+            reasons.append(f"loss_streak={self.loss_streak} >= {self.cb_streak}")
+
+        if reasons:
+            self.circuit_active = True
+            self.circuit_reason = ', '.join(reasons)
+            try:
+                self.clear_order_queue()
+            except Exception:
+                pass
+            risk_logger.warning(f"[CB] Circuit breaker TRIGGERED: {self.circuit_reason}")
+            try:
+                if self.telegram_notifier:
+                    asyncio.create_task(self.telegram_notifier.send_message(f"[CB] 断路器触发: {self.circuit_reason}"))
+            except Exception:
+                pass
+            return False, self.circuit_reason
+
+        return True, "ok"
+
+    def reset_circuit_breaker(self):
+        self.circuit_active = False
+        self.circuit_reason = ''
+        risk_logger.info("[CB] Circuit breaker manually reset")
+
+    def record_trade_result(self, pnl_currency: float):
+        try:
+            if pnl_currency is None:
+                return
+            if pnl_currency < 0:
+                self.loss_streak += 1
+                self.daily_loss_currency += -pnl_currency
+            else:
+                self.loss_streak = 0
+            denom_R = (self.sod_equity or self.equity_last) * (self.risk_per_trade_r or 1e-9)
+            self.daily_loss_R = (self.daily_loss_currency / denom_R) if denom_R > 0 else 0.0
+        except Exception as e:
+            risk_logger.error(f"[CB] record_trade_result error: {e}")
+
+    # ... existing code ...

@@ -2465,6 +2465,12 @@ class TradingApp {
                 const padSpanMinutes = this.currentMonitor?.maxTimeSpan || 30;
                 const padBars = Math.ceil(padSpanMinutes / padIntervalMinutes);
                 const lastBar = response.data[response.data.length - 1];
+                // 打印chart数据数组中的最后一个对象
+                console.log('chart数据数组中的最后一个对象:', {
+                    lastBar,
+                    dataLength: response.data.length,
+                    currentTime: new Date().toISOString()
+                });
                 const lastRaw = (lastBar.time !== undefined && lastBar.time !== null) ? lastBar.time : lastBar.date;
                 let lastDate;
                 if (typeof lastRaw === 'string') {
@@ -2478,6 +2484,13 @@ class TradingApp {
                 } else {
                     lastDate = new Date();
                 }
+                // 打印解析后的最后一个数据点时间
+                console.log('解析后的最后一个数据点时间:', {
+                    lastRaw,
+                    lastDate,
+                    lastDateISO: lastDate.toISOString(),
+                    currentTime: new Date().toISOString()
+                });
                 const futureTimes = [];
                 for (let i = 1; i <= padBars; i++) {
                     const future = new Date(lastDate.getTime() + i * padIntervalMinutes * 60000);
@@ -2575,11 +2588,25 @@ class TradingApp {
                 // 根据图表类型选择对应的标签和时间数组
                 const displayLabels = chartType === 'line' ? validLabels : labels;
                 const displayTimes = chartType === 'line' ? validTimes : timeValues;
+                
+                // 打印处理后的时间数组信息
+                console.log('处理后的displayTimes数组信息:', {
+                    displayTimesLength: displayTimes.length,
+                    firstTime: displayTimes[0]?.toISOString(),
+                    lastTime: displayTimes[displayTimes.length-1]?.toISOString(),
+                    chartType
+                });
 
                 // 使用最近持仓订单的成交时间作为方框起点
                 let startIndex = 0;
                 if (this.currentMonitor?.lastOrderTime) {
                     const lastOrderTime = new Date(this.currentMonitor.lastOrderTime);
+                    // 打印作为起点时间的订单对象
+                    console.log('作为起点时间的订单对象:', {
+                        lastOrderTime: this.currentMonitor.lastOrderTime,
+                        lastOrderTimeDate: lastOrderTime,
+                        orders: this.currentMonitor.orders
+                    });
                     startIndex = displayTimes.findIndex(t => t >= lastOrderTime);
                     if (startIndex === -1) startIndex = Math.max(0, displayTimes.length - spanBars - 1);
                 } else if (this.currentMonitor?.entryTime) {
@@ -2592,6 +2619,15 @@ class TradingApp {
                 }
                 const endIndex = Math.min(displayLabels.length - 1, startIndex + spanBars);
                 this.currentMonitor.riskStartIndex = startIndex;
+                
+                // 打印最终确定的起点索引和对应的时间
+                console.log('最终确定的起点索引和时间:', {
+                    startIndex,
+                    endIndex,
+                    startTime: displayTimes[startIndex]?.toISOString(),
+                    endTime: displayTimes[endIndex]?.toISOString(),
+                    spanBars
+                });
 
                 // Prepare annotations
                 const annotations = {};
