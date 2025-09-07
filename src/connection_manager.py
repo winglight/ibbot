@@ -350,7 +350,7 @@ class ConnectionManager:
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(check_connection)
                 try:
-                    is_connected = future.result(timeout=2.0)  # 2秒超时
+                    is_connected = future.result(timeout=5.0)  # 5秒超时
                     self.connected = is_connected
                     return is_connected
                 except concurrent.futures.TimeoutError:
