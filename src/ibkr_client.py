@@ -458,49 +458,82 @@ class IBKRClient:
                 ibkr_logger.error(f"Failed to obtain ticker for {symbol}")
                 return None
             
-            # 6. 在当前调用线程等待数据更新，避免阻塞连接线程
+            # 6. 非阻塞方式检查数据，避免阻塞主线程
             import time
-            max_wait = 5.0
-            wait_interval = 0.2
+            max_wait = 1.0  # 减少最大等待时间
+            wait_interval = 0.1  # 减少检查间隔
             waited = 0.0
             result_payload = None
             
-            while waited < max_wait:
-                time.sleep(wait_interval)
-                waited += wait_interval
-                last = getattr(ticker, 'last', 0) or 0
-                bid = getattr(ticker, 'bid', 0) or 0
-                ask = getattr(ticker, 'ask', 0) or 0
-                volume = getattr(ticker, 'volume', 0) or 0
-                
-                if last and last > 0:
-                    ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (waited {waited:.1f}s)")
-                    self.price_cache[symbol] = last
-                    self.price_cache_timestamp[symbol] = datetime.now()
-                    result_payload = {
-                        'symbol': symbol,
-                        'last': self._sanitize_float(last),
-                        'bid': self._sanitize_float(bid),
-                        'ask': self._sanitize_float(ask),
-                        'volume': self._sanitize_float(volume),
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    break
-                
-                if bid and ask and bid > 0 and ask > 0:
-                    mid = (bid + ask) / 2
-                    ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (waited {waited:.1f}s)")
-                    self.price_cache[symbol] = mid
-                    self.price_cache_timestamp[symbol] = datetime.now()
-                    result_payload = {
-                        'symbol': symbol,
-                        'last': self._sanitize_float(mid),
-                        'bid': self._sanitize_float(bid),
-                        'ask': self._sanitize_float(ask),
-                        'volume': self._sanitize_float(volume),
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    break
+            # 立即检查一次数据是否已经可用
+            last = getattr(ticker, 'last', 0) or 0
+            bid = getattr(ticker, 'bid', 0) or 0
+            ask = getattr(ticker, 'ask', 0) or 0
+            volume = getattr(ticker, 'volume', 0) or 0
+            
+            if last and last > 0:
+                ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (immediate)")
+                self.price_cache[symbol] = last
+                self.price_cache_timestamp[symbol] = datetime.now()
+                result_payload = {
+                    'symbol': symbol,
+                    'last': self._sanitize_float(last),
+                    'bid': self._sanitize_float(bid),
+                    'ask': self._sanitize_float(ask),
+                    'volume': self._sanitize_float(volume),
+                    'timestamp': datetime.now().isoformat()
+                }
+            elif bid and ask and bid > 0 and ask > 0:
+                mid = (bid + ask) / 2
+                ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (immediate)")
+                self.price_cache[symbol] = mid
+                self.price_cache_timestamp[symbol] = datetime.now()
+                result_payload = {
+                    'symbol': symbol,
+                    'last': self._sanitize_float(mid),
+                    'bid': self._sanitize_float(bid),
+                    'ask': self._sanitize_float(ask),
+                    'volume': self._sanitize_float(volume),
+                    'timestamp': datetime.now().isoformat()
+                }
+            else:
+                # 如果立即没有数据，进行短暂的非阻塞等待
+                while waited < max_wait and not result_payload:
+                    time.sleep(wait_interval)
+                    waited += wait_interval
+                    last = getattr(ticker, 'last', 0) or 0
+                    bid = getattr(ticker, 'bid', 0) or 0
+                    ask = getattr(ticker, 'ask', 0) or 0
+                    volume = getattr(ticker, 'volume', 0) or 0
+                    
+                    if last and last > 0:
+                        ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (waited {waited:.1f}s)")
+                        self.price_cache[symbol] = last
+                        self.price_cache_timestamp[symbol] = datetime.now()
+                        result_payload = {
+                            'symbol': symbol,
+                            'last': self._sanitize_float(last),
+                            'bid': self._sanitize_float(bid),
+                            'ask': self._sanitize_float(ask),
+                            'volume': self._sanitize_float(volume),
+                            'timestamp': datetime.now().isoformat()
+                        }
+                        break
+                    
+                    if bid and ask and bid > 0 and ask > 0:
+                        mid = (bid + ask) / 2
+                        ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (waited {waited:.1f}s)")
+                        self.price_cache[symbol] = mid
+                        self.price_cache_timestamp[symbol] = datetime.now()
+                        result_payload = {
+                            'symbol': symbol,
+                            'last': self._sanitize_float(mid),
+                            'bid': self._sanitize_float(bid),
+                            'ask': self._sanitize_float(ask),
+                            'volume': self._sanitize_float(volume),
+                            'timestamp': datetime.now().isoformat()
+                        }
+                        break
             
             # 7. 取消市场数据订阅以避免泄漏（在连接线程中执行）
             def _cancel_mkt_data():
