@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>订单模态框测试</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-5">
+        <h2>订单模态框测试</h2>
+        <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#orderModal">
+            打开下单弹窗
+        </button>
+        
+        <button type="button" class="btn btn-secondary" onclick="testEditOrder()">
+            测试编辑限价单
+        </button>
+    </div>
+
+    <!-- Order Modal -->
+    <div class="modal fade" id="orderModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">下单</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="orderForm">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <label for="orderSymbol" class="form-label">股票代码</label>
+                                <input type="text" class="form-control" id="orderSymbol" value="AAPL">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="orderAction" class="form-label">操作</label>
+                                <select class="form-select" id="orderAction">
+                                    <option value="BUY">买入</option>
+                                    <option value="SELL">卖出</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-3">
+                            <div class="col-md-6">
+                                <label for="orderType" class="form-label">订单类型</label>
+                                <select class="form-select" id="orderType">
+                                    <option value="MARKET">市价单</option>
+                                    <option value="LIMIT">限价单</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="orderPrice" class="form-label">价格</label>
+                                <input type="number" class="form-control" id="orderPrice" step="0.01" disabled>
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-3">
+                            <div class="col-md-6">
+                                <label for="orderQuantity" class="form-label">数量</label>
+                                <input type="number" class="form-control" id="orderQuantity" value="100">
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-3">
+                            <div class="col-md-6">
+                                <label for="stopLossPrice" class="form-label">止损价格</label>
+                                <input type="number" class="form-control" id="stopLossPrice" step="0.01">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="takeProfitPrice" class="form-label">止盈价格</label>
+                                <input type="number" class="form-control" id="takeProfitPrice" step="0.01">
+                            </div>
+                        </div>
+                        
+                        <!-- 当前价格显示 -->
+                        <div id="currentPriceDisplay" class="mt-3" style="display: none;">
+                            <div class="alert alert-info">
+                                <strong>当前价格:</strong> <span id="currentPriceValue">--</span>
+                            </div>
+                        </div>
+                        
+                        <!-- 风险规则部分 -->
+                        <div id="riskRuleSection" class="mt-3" style="display: block;">
+                            <h6>风险管理</h6>
+                            <p>止损止盈价格将根据当前价格自动计算</p>
+                        </div>
+                        
+                        <!-- 建议仓位部分 -->
+                        <div id="suggestedPositionSection" class="mt-3" style="display: none;">
+                            <h6>建议仓位</h6>
+                            <p>系统建议仓位信息</p>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary">提交订单</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // 简化的TradingApp类用于测试
+        class TestTradingApp {
+            constructor() {
+                this.editingOrderId = null;
+                this.setupEventListeners();
+            }
+            
+            setupEventListeners() {
+                // Order type change
+                document.getElementById('orderType').addEventListener('change', (e) => {
+                    const priceInput = document.getElementById('orderPrice');
+                    
+                    priceInput.disabled = e.target.value === 'MARKET';
+                    if (e.target.value === 'MARKET') {
+                        // 市价单时获取当前价格并填入
+                        this.fetchCurrentPrice();
+                    } else {
+                        // 限价单时清空价格，让用户手动输入
+                        priceInput.value = '';
+                    }
+                    
+                    // Recalculate SL/TP and suggestion whenever order type changes
+                    this.updateRiskPrices().catch(console.error);
+                });
+                
+                // Order price change - auto-calculate risk prices
+                document.getElementById('orderPrice').addEventListener('input', () => {
+                    this.updateRiskPrices().catch(console.error);
+                });
+            }
+            
+            async fetchCurrentPrice(symbol) {
+                const priceDisplay = document.getElementById('currentPriceDisplay');
+                const priceValue = document.getElementById('currentPriceValue');
+                
+                if (!priceDisplay || !priceValue) return;
+                
+                // 模拟获取价格
+                const mockPrice = 150.25;
+                
+                priceDisplay.style.display = 'block';
+                priceValue.textContent = `$${mockPrice.toFixed(2)}`;
+                priceValue.className = 'fw-bold text-primary';
+                
+                // 如果是市价单，自动填入价格输入框
+                const orderTypeSelect = document.getElementById('orderType');
+                const orderPriceInput = document.getElementById('orderPrice');
+                if (orderTypeSelect && orderPriceInput && orderTypeSelect.value === 'MARKET') {
+                    orderPriceInput.value = mockPrice.toString();
+                    // 触发价格变化事件以更新相关计算
+                    orderPriceInput.dispatchEvent(new Event('input'));
+                }
+            }
+            
+            async updateRiskPrices() {
+                const orderPrice = parseFloat(document.getElementById('orderPrice').value);
+                const orderAction = document.getElementById('orderAction').value;
+                
+                if (!orderPrice || orderPrice <= 0) {
+                    document.getElementById('stopLossPrice').value = '';
+                    document.getElementById('takeProfitPrice').value = '';
+                    return;
+                }
+                
+                // 简单的SL/TP计算
+                const stopLossRatio = 0.025; // 2.5%
+                const takeProfitRatio = 0.025; // 2.5%
+                
+                let stopLoss, takeProfit;
+                if (orderAction === 'BUY') {
+                    stopLoss = (orderPrice * (1 - stopLossRatio)).toFixed(2);
+                    takeProfit = (orderPrice * (1 + takeProfitRatio)).toFixed(2);
+                } else { // SELL
+                    stopLoss = (orderPrice * (1 + stopLossRatio)).toFixed(2);
+                    takeProfit = (orderPrice * (1 - takeProfitRatio)).toFixed(2);
+                }
+                
+                document.getElementById('stopLossPrice').value = stopLoss;
+                document.getElementById('takeProfitPrice').value = takeProfit;
+                
+                console.log(`价格: ${orderPrice}, 止损: ${stopLoss}, 止盈: ${takeProfit}`);
+            }
+            
+            editOrder(orderId, symbol, action, quantity, orderType, limitPrice) {
+                // 填充下单表单
+                document.getElementById('orderSymbol').value = symbol;
+                document.getElementById('orderAction').value = action;
+                document.getElementById('orderQuantity').value = quantity;
+                
+                // 正确转换订单类型到HTML选项值
+                let normalizedType;
+                if (orderType === 'LMT') {
+                    normalizedType = 'LIMIT';
+                } else if (orderType === 'MKT') {
+                    normalizedType = 'MARKET';
+                } else {
+                    normalizedType = orderType;
+                }
+                document.getElementById('orderType').value = normalizedType;
+                
+                // 获取当前价格（这会更新价格显示）
+                this.fetchCurrentPrice(symbol);
+                
+                // 在fetchCurrentPrice之后设置价格输入框状态，确保限价单的设置不被覆盖
+                setTimeout(() => {
+                    const priceInput = document.getElementById('orderPrice');
+                    if ((normalizedType === 'LIMIT') && limitPrice) {
+                        priceInput.value = limitPrice;
+                        priceInput.disabled = false;
+                    } else if (normalizedType === 'LIMIT') {
+                        // 限价单但没有预设价格，启用输入框让用户输入
+                        priceInput.disabled = false;
+                        if (!priceInput.value) {
+                            priceInput.value = '';
+                        }
+                    }
+                    // 触发价格变化事件以更新SL/TP计算
+                    if (priceInput.value) {
+                        priceInput.dispatchEvent(new Event('input'));
+                    }
+                }, 100);
+                
+                // 显示下单模态框
+                const modal = new bootstrap.Modal(document.getElementById('orderModal'));
+                modal.show();
+                
+                // 存储原订单ID，用于后续处理
+                this.editingOrderId = orderId;
+                
+                console.log(`正在编辑订单 ${orderId}，请修改后重新提交`);
+            }
+        }
+        
+        // 初始化测试应用
+        const testApp = new TestTradingApp();
+        
+        // 测试函数
+        function testEditOrder() {
+            // 测试编辑限价单
+            testApp.editOrder('TEST123', 'AAPL', 'BUY', 100, 'LMT', 145.50);
+        }
+        
+        // 页面加载完成后的测试说明
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('测试页面已加载');
+            console.log('测试步骤:');
+            console.log('1. 点击"打开下单弹窗"按钮');
+            console.log('2. 默认是市价单，Price输入框应该是禁用状态');
+            console.log('3. 切换到限价单，Price输入框应该变为启用状态');
+            console.log('4. 在Price中输入价格，应该自动计算并填充SL/TP价格');
+            console.log('5. 点击"测试编辑限价单"按钮，测试editOrder方法');
+        });
+    </script>
+</body>
+</html>

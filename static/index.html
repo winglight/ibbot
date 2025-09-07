@@ -213,7 +213,13 @@
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-shield-alt"></i> Position & Risk Controls</h5>
                         <div>
-                            <button class="btn btn-sm btn-warning me-2" id="addRiskRuleBtn">
+                            <button class="btn btn-sm btn-outline-primary me-2" id="gRulesSettingsBtn" title="G Rules Settings">
+                                <i class="fas fa-cog"></i> G
+                            </button>
+                            <button class="btn btn-sm btn-outline-info me-2" id="sRulesSettingsBtn" title="S Rules Settings">
+                                <i class="fas fa-calculator"></i> S
+                            </button>
+                            <button class="btn btn-sm btn-warning" id="addRiskRuleBtn">
                                 <i class="fas fa-plus"></i>
                             </button>
                         </div>
@@ -236,8 +242,8 @@
                         <div class="tab-content mt-3" id="riskControlTabContent">
                             <!-- G Rules Tab -->
                             <div class="tab-pane fade show active" id="g-rules" role="tabpanel" aria-labelledby="g-rules-tab">
-                                <!-- G Rules Configuration Form -->
-                                <div class="mb-3">
+                                <!-- G Rules Configuration Form (Hidden by default) -->
+                                <div class="mb-3" id="gRulesConfigSection" style="display: none;">
                                     <h6><i class="fas fa-cog"></i> G Rules Configuration</h6>
                                     <form id="gRulesForm">
                                         <div class="row">
@@ -370,8 +376,8 @@
                             
                             <!-- S Rules Tab -->
                             <div class="tab-pane fade" id="s-rules" role="tabpanel" aria-labelledby="s-rules-tab">
-                                <!-- Sizing Policy Form -->
-                                <div class="mb-3">
+                                <!-- Sizing Policy Form (Hidden by default) -->
+                                <div class="mb-3" id="sRulesConfigSection" style="display: none;">
                                     <h6><i class="fas fa-cog"></i> Sizing Policy Settings</h6>
                                     <form id="sizingPolicyForm">
                                         <div class="row">
@@ -444,18 +450,66 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-bell"></i> Notifications</h5>
-                        <div>
+                        <div class="btn-group">
+                            <button class="btn btn-sm btn-outline-primary" onclick="app.showNotificationSettings()">
+                                <i class="fas fa-cog"></i> Settings
+                            </button>
                             <button class="btn btn-sm btn-outline-secondary" id="clearNotificationsBtn">
                                 <i class="fas fa-trash"></i> Clear All
                             </button>
                         </div>
                     </div>
                     <div class="card-body">
-                        <div id="notificationsList" style="max-height: 400px; overflow-y: auto;">
-                            <div class="text-muted text-center py-3">
-                                <i class="fas fa-bell-slash"></i>
-                                <p class="mb-0">No notifications</p>
+                        <!-- Notification History Filters -->
+                        <div class="mb-3">
+                            <div class="row g-2">
+                                <div class="col-md-3">
+                                    <select class="form-select form-select-sm" id="historyStatusFilter">
+                                        <option value="">All Status</option>
+                                        <option value="sent">Sent</option>
+                                        <option value="failed">Failed</option>
+                                        <option value="pending">Pending</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-3">
+                                    <select class="form-select form-select-sm" id="historyChannelFilter">
+                                        <option value="">All Channels</option>
+                                        <option value="telegram">Telegram</option>
+                                        <option value="email">Email</option>
+                                        <option value="websocket">WebSocket</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <input type="date" class="form-control form-control-sm" id="historySinceFilter" placeholder="Since date">
+                                </div>
+                                <div class="col-md-2">
+                                    <button class="btn btn-sm btn-primary" onclick="app.filterNotificationHistory()">Filter</button>
+                                </div>
                             </div>
+                        </div>
+                        
+                        <!-- Notification History Table -->
+                        <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                            <table class="table table-sm" id="notificationHistoryTable">
+                                <thead class="table-light sticky-top">
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Channel</th>
+                                        <th>Event</th>
+                                        <th>Message</th>
+                                        <th>Status</th>
+                                        <th>Error</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="notificationHistoryBody">
+                                    <tr>
+                                        <td colspan="6" class="text-center text-muted py-3">
+                                            <i class="fas fa-history"></i>
+                                            <p class="mb-0">Loading notification history...</p>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -466,7 +520,7 @@
     </div>
 
     <!-- Alert Container -->
-    <div id="alertContainer"></div>
+    <div id="alertContainer" style="position: fixed; top: 20px; right: 20px; z-index: 9999; max-width: 400px;"></div>
 
     <!-- Connection Settings Modal -->
     <div class="modal fade" id="connectionModal" tabindex="-1">
@@ -673,13 +727,13 @@
                             <div class="col-md-6">
                                 <div class="mb-3">
                                     <label class="form-label">Price</label>
-                                    <input type="number" class="form-control" id="orderPrice" step="0.01" disabled>
+                                    <input type="number" class="form-control" id="orderPrice" step="0.01">
                                 </div>
                             </div>
                         </div>
                         
                         <!-- Risk Rule Section for Limit Orders -->
-                        <div id="riskRuleSection" class="border rounded p-3 mb-3" style="display: none; background-color: #f8f9fa;">
+                        <div id="riskRuleSection" class="border rounded p-3 mb-3" style="display: block; background-color: #f8f9fa;">
                             <h6 class="mb-3"><i class="fas fa-shield-alt"></i> Risk Management (Auto-created for new assets)</h6>
                             <div class="row">
                                 <div class="col-md-6">
@@ -722,39 +776,81 @@
                         <!-- Suggested Position Size Section -->
                         <div id="suggestedPositionSection" class="border rounded p-3 mb-3" style="background-color: #e8f5e8;">
                             <h6 class="mb-3"><i class="fas fa-balance-scale"></i> 建议仓位 (S)</h6>
-                            <div class="row">
-                                <div class="col-md-4">
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-3">
                                     <div class="mb-2">
                                         <label class="form-label text-muted small">建议数量</label>
                                         <div class="fw-bold text-success" id="suggestedQuantity">--</div>
                                     </div>
                                 </div>
-                                <div class="col-md-4">
+                                <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">计算方法</label>
-                                        <div class="fw-bold" id="sizingMethod">--</div>
+                                        <label class="form-label text-muted small">止损距离</label>
+                                        <div class="fw-bold" id="stopDistance">--</div>
                                     </div>
                                 </div>
-                                <div class="col-md-4">
+                                <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">风险比例</label>
-                                        <div class="fw-bold" id="riskRatio">--</div>
+                                        <label class="form-label text-muted small">点值</label>
+                                        <div class="fw-bold" id="pointValue">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">总缩放</label>
+                                        <div class="fw-bold" id="scaleTotal">--</div>
                                     </div>
                                 </div>
                             </div>
-                            <div class="row">
-                                <div class="col-md-6">
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">预估投入</label>
+                                        <label class="form-label text-muted small">波动缩放</label>
+                                        <div class="fw-bold" id="scaleVol">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">回撤缩放</label>
+                                        <div class="fw-bold" id="scaleDd">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">信号缩放</label>
+                                        <div class="fw-bold" id="scaleSig">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">执行缩放</label>
+                                        <div class="fw-bold" id="scaleExec">--</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-3">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">最大风险 (R)</label>
+                                        <div class="fw-bold text-danger" id="maxRisk">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">预估投入 (R*)</label>
                                         <div class="fw-bold text-primary" id="estimatedInvestment">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-6">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">最大风险</label>
-                                        <div class="fw-bold text-danger" id="maxRisk">--</div>
+                                        <label class="form-label text-muted small">计算方法</label>
+                                        <div class="fw-bold" id="sizingMethod">--</div>
                                     </div>
                                 </div>
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label text-muted small">详细说明</label>
+                                <div class="bg-light p-2 rounded small" id="sizingExplanation" style="white-space: pre-wrap; max-height: 100px; overflow-y: auto;">--</div>
                             </div>
                             <div class="mt-2">
                                 <button type="button" class="btn btn-sm btn-outline-success" id="applySuggestedQuantity">
@@ -768,9 +864,9 @@
                     </form>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-primary" id="positionSizingBtn">
+                    <!-- <button type="button" class="btn btn-outline-primary" id="positionSizingBtn">
                         <i class="fas fa-calculator"></i> Position Sizing
-                    </button>
+                    </button> -->
                     <button type="button" class="btn btn-primary" id="submitOrderBtn">
                         <i class="fas fa-paper-plane"></i> Place Order
                     </button>
@@ -781,11 +877,11 @@
     </div>
 
     <!-- Position Sizing Result Modal -->
-    <div class="modal fade" id="positionSizingModal" tabindex="-1" aria-hidden="true">
+    <div class="modal fade" id="positionSizingModal" tabindex="-1" aria-hidden="true" aria-labelledby="positionSizingModalLabel">
       <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title"><i class="fas fa-balance-scale"></i> Position Sizing Suggestion</h5>
+            <h5 class="modal-title" id="positionSizingModalLabel"><i class="fas fa-balance-scale"></i> Position Sizing Suggestion</h5>
             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <div class="modal-body">

@@ -50,7 +50,7 @@ from src.database import get_db_manager
 from src.strategy_manager import StrategyExecution
 from src.queue_manager import queue_manager
 from src.order_manager import OrderManager
-from src.models import HistoricalDataRequest, ChartDataRequest, OrderRequest, ExternalStrategyOrderRequest, StrategySettingsRequest, StrategyRequest, RiskRuleRequest, RiskConfigUpdateRequest, PositionSizingRequest
+from src.models import HistoricalDataRequest, ChartDataRequest, OrderRequest, ExternalStrategyOrderRequest, StrategySettingsRequest, StrategyRequest, RiskRuleRequest, RiskConfigUpdateRequest, PositionSizingRequest, CurrentPriceRequest
 from src.websocket_manager import websocket_manager  # 新增导入
 
 # Global variables
@@ -58,6 +58,11 @@ load_dotenv()
 
 # 优化：可配置的PnL广播间隔（秒），默认5秒
 PNL_BROADCAST_INTERVAL_SEC = int(os.getenv('PNL_BROADCAST_INTERVAL_SEC', '5'))
+
+# 内存缓存：用于缓存历史数据请求
+# 格式: {"symbol_duration_barsize": {"data": df, "timestamp": datetime, "expires_at": datetime}}
+historical_data_cache: Dict[str, Dict[str, Any]] = {}
+CACHE_DURATION_MINUTES = 1  # 缓存1分钟
 
 # Context variables for request-scoped logging
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
@@ -854,6 +859,11 @@ class NotificationRequest(BaseModel):
     message: str
 
 
+class NotificationTestRequest(BaseModel):
+    channel: str
+    message: str = "Test notification from IBKR Trading Bot"
+
+
 @app.post("/api/notify")
 async def send_notification(req: NotificationRequest, user: Optional[str] = Depends(get_current_user)):
     """发送Telegram通知"""
@@ -870,6 +880,17 @@ async def send_notification(req: NotificationRequest, user: Optional[str] = Depe
 
 
 # Market data endpoints
+def _clean_expired_cache():
+    """清理过期的内存缓存"""
+    global historical_data_cache
+    now = datetime.now()
+    expired_keys = [key for key, value in historical_data_cache.items() 
+                   if value.get('expires_at', now) <= now]
+    for key in expired_keys:
+        del historical_data_cache[key]
+    if expired_keys:
+        logger.debug(f"Cleaned {len(expired_keys)} expired cache entries")
+
 @app.post("/api/historical_data")
 async def get_historical_data(request: HistoricalDataRequest, user: Optional[str] = Depends(get_current_user)):
     """获取历史数据"""
@@ -877,10 +898,30 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     try:
-        # 先查数据库缓存
+        # 清理过期缓存
+        _clean_expired_cache()
+        
+        # 生成缓存键
+        cache_key = f"{request.symbol}_{request.duration}_{request.bar_size}_{request.exchange}"
+        now = datetime.now()
+        
+        # 先检查内存缓存
+        if cache_key in historical_data_cache:
+            cache_entry = historical_data_cache[cache_key]
+            if cache_entry.get('expires_at', now) > now:
+                logger.debug(f"Using memory cache for {request.symbol}")
+                cached_data = cache_entry['data']
+                return {
+                    "success": True,
+                    "data": cached_data,
+                    "filename": f"data/{request.symbol}_historical.csv",
+                    "rows": len(cached_data),
+                    "source": "memory_cache"
+                }
+        
+        # 再查数据库缓存
         db_manager = get_db_manager()
         interval = db_manager._normalize_interval(request.bar_size)
-        now = datetime.now()
         minutes = _parse_duration_to_minutes(request.duration)
         start_dt = now - timedelta(minutes=minutes)
 
@@ -895,6 +936,17 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
         # 检查缓存是否满足需求
         if not db_manager.detect_missing_ranges(cache_df, start_dt.isoformat(), now.isoformat(), interval):
             # 缓存足够，直接返回
+            logger.debug(f"Using database cache for {request.symbol}")
+            data_dict = cache_df.to_dict('records')
+            
+            # 同时保存到内存缓存
+            expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
+            historical_data_cache[cache_key] = {
+                'data': data_dict,
+                'timestamp': now,
+                'expires_at': expires_at
+            }
+            
             filename = f"data/{request.symbol}_historical.csv"
             try:
                 os.makedirs(os.path.dirname(filename), exist_ok=True)
@@ -903,9 +955,10 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
                 logger.warning(f"Failed to write CSV backup for historical data (cache): {e}")
             return {
                 "success": True,
-                "data": cache_df.to_dict('records'),
+                "data": data_dict,
                 "filename": filename,
-                "rows": len(cache_df)
+                "rows": len(cache_df),
+                "source": "database_cache"
             }
 
         # 缓存不完整，从IB获取数据
@@ -942,6 +995,18 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
         # 保存到数据库
         db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
 
+        # 转换为字典格式
+        data_dict = df.to_dict('records')
+        
+        # 保存到内存缓存
+        expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
+        historical_data_cache[cache_key] = {
+            'data': data_dict,
+            'timestamp': now,
+            'expires_at': expires_at
+        }
+        logger.debug(f"Cached historical data for {request.symbol}, expires at {expires_at}")
+
         # 可选：同时保存CSV作为备份
         filename = f"data/{request.symbol}_historical.csv"
         try:
@@ -952,9 +1017,10 @@ async def get_historical_data(request: HistoricalDataRequest, user: Optional[str
 
         return {
             "success": True,
-            "data": df.to_dict('records'),
+            "data": data_dict,
             "filename": filename,
-            "rows": len(df)
+            "rows": len(df),
+            "source": "ibkr_api"
         }
 
     except Exception as e:
@@ -1188,6 +1254,81 @@ async def get_realtime_data(symbol: str, exchange: str = "SMART", user: Optional
             
     except Exception as e:
         logger.error(f"Real-time data error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/current_price")
+async def get_current_price(request: CurrentPriceRequest, user: Optional[str] = Depends(get_current_user)):
+    """获取当前价格 - 轻量级接口，专门用于获取最新价格"""
+    if not ibkr_client or not connection_manager.is_connected():
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    
+    try:
+        # 首先尝试从价格缓存获取
+        if hasattr(ibkr_client, 'price_cache') and request.symbol in ibkr_client.price_cache:
+            cached_price = ibkr_client.price_cache.get(request.symbol)
+            if cached_price:
+                return {
+                    "success": True,
+                    "symbol": request.symbol,
+                    "price": cached_price,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "cache"
+                }
+        
+        # 如果缓存中没有，尝试获取实时数据
+        loop = asyncio.get_event_loop()
+        try:
+            data = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, 
+                    lambda: ibkr_client.get_real_time_data(request.symbol, request.exchange)
+                ), 
+                timeout=5.0  # 5秒超时，比realtime_data接口更短
+            )
+            
+            if data and 'last' in data:
+                price = data['last']
+                return {
+                    "success": True,
+                    "symbol": request.symbol,
+                    "price": price,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "realtime"
+                }
+        except asyncio.TimeoutError:
+            logger.warning(f"Current price request for {request.symbol} timed out")
+        
+        # 最后尝试从历史数据获取最新价格（1分钟数据）
+        try:
+            df = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: ibkr_client.get_historical_data(
+                        symbol=request.symbol,
+                        duration="1 D",
+                        bar_size="1 min",
+                        exchange=request.exchange
+                    )
+                ),
+                timeout=10.0
+            )
+            
+            if df is not None and not df.empty:
+                latest_price = float(df.iloc[-1]['close'])
+                return {
+                    "success": True,
+                    "symbol": request.symbol,
+                    "price": latest_price,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "historical"
+                }
+        except asyncio.TimeoutError:
+            logger.warning(f"Historical data fallback for {request.symbol} timed out")
+        
+        raise HTTPException(status_code=404, detail="Unable to get current price")
+        
+    except Exception as e:
+        logger.error(f"Current price error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Trading endpoints
@@ -2341,23 +2482,7 @@ async def update_risk_config(payload: RiskConfigUpdateRequest, user: Optional[st
         raise HTTPException(status_code=500, detail=str(e))
 
 # 新增：仓位建议计算
-@app.post("/api/position-sizing")
-async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str] = Depends(get_current_user)):
-    if 'risk_manager' not in globals() or risk_manager is None:
-        raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    try:
-        res = risk_manager.position_sizing(
-            symbol=payload.symbol,
-            stop_distance=payload.stop_distance,
-            rv_current=payload.rv_current,
-            signal_tier=(payload.signal_tier or 'A'),
-            execution_metrics=payload.execution_metrics,
-            rv_ref=payload.rv_ref,
-        )
-        return {"success": True, "result": asdict(res)}
-    except Exception as e:
-        logger.error(f"Position sizing error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# Removed duplicate /api/position-sizing endpoint - use /api/sizing/preview instead
 
 
 # 新增：S 规则 - 预览接口（返回 N/explain，并写入历史）
@@ -2369,6 +2494,23 @@ async def api_sizing_preview(payload: PositionSizingRequest, user: Optional[str]
     # Note: Position sizing calculation doesn't require IB connection
     # Only actual order placement requires connection
     try:
+        # 获取实时账户信息
+        account_info = {}
+        if ibkr_client and connection_manager.is_connected():
+            try:
+                account_response = await asyncio.wait_for(
+                    ibkr_client.get_account_info(),
+                    timeout=5.0
+                )
+                if account_response:
+                    account_info = account_response
+            except Exception as e:
+                logger.warning(f"Failed to get account info for sizing preview: {e}")
+        
+        # 更新风险管理器的账户状态
+        if account_info:
+            risk_manager.update_equity_state(account_info)
+        
         # 使用异步执行器和超时来避免阻塞
         loop = asyncio.get_event_loop()
         try:
@@ -2423,6 +2565,129 @@ async def api_sizing_preview(payload: PositionSizingRequest, user: Optional[str]
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/position-sizing")
+async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str] = Depends(get_current_user)):
+    """Position sizing calculation - optimized to only require symbol and stop_distance"""
+    if 'risk_manager' not in globals() or risk_manager is None:
+        raise HTTPException(status_code=400, detail="Risk manager not initialized")
+    
+    try:
+        # 获取实时账户信息
+        account_info = {}
+        if ibkr_client and connection_manager.is_connected():
+            try:
+                account_response = await asyncio.wait_for(
+                    ibkr_client.get_account_info(),
+                    timeout=5.0
+                )
+                if account_response:
+                    account_info = account_response
+            except Exception as e:
+                logger.warning(f"Failed to get account info for position sizing: {e}")
+        
+        # 更新风险管理器的账户状态
+        if account_info:
+            risk_manager.update_equity_state(account_info)
+        
+        # 使用异步执行器和超时来避免阻塞
+        # 只传递必需的参数，其他参数使用默认值或让risk_manager自动估算
+        loop = asyncio.get_event_loop()
+        try:
+            res = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: risk_manager.position_sizing(
+                        symbol=payload.symbol,
+                        stop_distance=payload.stop_distance,
+                        rv_current=None,  # 让risk_manager自动估算当前价格
+                        signal_tier='A',  # 使用默认信号等级
+                        execution_metrics=None,  # 使用默认执行指标
+                        rv_ref=None,  # 使用默认参考价格
+                    )
+                ),
+                timeout=10.0  # 10秒超时
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Position sizing request timed out for {payload.symbol}")
+            raise HTTPException(status_code=408, detail="Position sizing calculation timed out. This may be due to slow market data retrieval.")
+        
+        # 执行G Rules验证（用于历史记录）
+        g_rules_checked = []
+        try:
+            # 创建模拟订单对象进行验证
+            from src.models import OrderRequest
+            mock_order = OrderRequest(
+                symbol=payload.symbol,
+                action="BUY",  # 默认买入
+                quantity=int(res.contracts),
+                order_type="MKT",
+                price=payload.rv_current
+            )
+            
+            # 执行各项G Rules验证
+            g7_result = _validate_g7_basic_params(mock_order)
+            g_rules_checked.append(g7_result)
+            
+            g6_result = _validate_g6_connection()
+            g_rules_checked.append(g6_result)
+            
+            g5_result = _validate_g5_market_hours(payload.symbol)
+            g_rules_checked.append(g5_result)
+            
+            g4_result = await _validate_g4_risk_management(mock_order)
+            g_rules_checked.append(g4_result)
+            
+            g3_result = await _validate_g3_position_limits(mock_order)
+            g_rules_checked.append(g3_result)
+            
+            g2_result = await _validate_g2_capital_adequacy(mock_order)
+            g_rules_checked.append(g2_result)
+            
+            g1_result = _validate_g1_final_compliance(mock_order)
+            g_rules_checked.append(g1_result)
+            
+        except Exception as ve:
+            logger.warning(f"G Rules validation failed: {ve}")
+            g_rules_checked = []
+        
+        # 写入历史
+        try:
+            db = get_db_manager()
+            db.save_sizing_history(
+                symbol=payload.symbol,
+                action="calculate",
+                suggested_quantity=int(res.contracts),
+                current_price=getattr(payload, 'rv_current', None),
+                sizing_method="risk_based",
+                calculation_details=json.dumps({
+                    "request": payload.dict(exclude_none=True),
+                    "result": asdict(res)
+                }),
+                g_rules_checked=json.dumps(g_rules_checked) if g_rules_checked else None
+            )
+        except Exception as he:
+            logger.warning(f"/api/position-sizing: save history failed: {he}")
+        
+        # 返回完整的数据结构
+        return {
+            "N": int(res.contracts),
+            "explain": res.explanation,
+            "stopDistance": res.stop_distance,
+            "pointValue": res.point_value,
+            "scaleTotal": res.scale_total,
+            "scaleSig": res.scale_sig,
+            "scaleVol": res.scale_vol,
+            "scaleDd": res.scale_dd,
+            "scaleExec": res.scale_exec,
+            "estimatedInvestment": res.R_star,
+            "maxRisk": res.R,
+            "calculationMethod": "Risk-based position sizing"
+        }
+    except Exception as e:
+        logger.error(f"Position sizing error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # 新增：S 规则 - 历史查询
 @app.get("/api/sizing/history")
 async def get_sizing_history(symbol: Optional[str] = None, since: Optional[str] = None, limit: int = 100, user: Optional[str] = Depends(get_current_user)):
@@ -2442,7 +2707,7 @@ async def get_sizing_policy(user: Optional[str] = Depends(get_current_user)):
         db = get_db_manager()
         settings = db.load_strategy_settings()
         policy = settings.get("sizing_policy") if isinstance(settings, dict) else None
-        return policy or {}
+        return {"s_rules": policy or {}}
     except Exception as e:
         logger.error(f"Get sizing policy error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2452,11 +2717,20 @@ async def get_sizing_policy(user: Optional[str] = Depends(get_current_user)):
 async def update_sizing_policy(payload: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
     try:
         db = get_db_manager()
-        db.save_strategy_settings({"sizing_policy": payload})
+        # 提取s_rules或g_rules数据
+        if "s_rules" in payload:
+            db.save_strategy_settings({"sizing_policy": payload["s_rules"]})
+        elif "g_rules" in payload:
+            db.save_strategy_settings({"g_rules_config": payload["g_rules"]})
+        else:
+            # 兼容旧格式
+            db.save_strategy_settings({"sizing_policy": payload})
+        
         # 读回确认
         settings = db.load_strategy_settings()
         policy = settings.get("sizing_policy") if isinstance(settings, dict) else None
-        return {"success": True, "policy": policy or {}}
+        g_rules = settings.get("g_rules_config") if isinstance(settings, dict) else None
+        return {"success": True, "s_rules": policy or {}, "g_rules": g_rules or {}}
     except Exception as e:
         logger.error(f"Update sizing policy error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2807,37 +3081,36 @@ async def get_notification_history(
 
 @app.post("/api/notifications/test")
 async def test_notification(
-    channel: str,
-    message: str = "Test notification from IBKR Trading Bot",
+    req: NotificationTestRequest,
     user: Optional[str] = Depends(get_current_user)
 ):
     """测试通知发送"""
     try:
         db = get_db_manager()
         
-        if channel == "telegram" and telegram_notifier:
+        if req.channel == "telegram" and telegram_notifier:
             # 测试Telegram通知
-            success = await telegram_notifier.send_notification(message)
+            success = await telegram_notifier.send_notification(req.message)
             status = "sent" if success else "failed"
             error_msg = None if success else "Failed to send Telegram notification"
-        elif channel == "chrome":
+        elif req.channel == "chrome":
             # 浏览器通知通过WebSocket发送
             await websocket_manager.broadcast_notification({
                 "type": "test",
-                "message": message,
+                "message": req.message,
                 "timestamp": datetime.now().isoformat()
             })
             status = "sent"
             error_msg = None
         else:
             status = "failed"
-            error_msg = f"Unsupported channel: {channel}"
+            error_msg = f"Unsupported channel: {req.channel}"
         
         # 保存测试通知历史
         db.save_notification_history(
-            channel=channel,
+            channel=req.channel,
             event_type="test",
-            message=message,
+            message=req.message,
             status=status,
             error_message=error_msg
         )

@@ -616,9 +616,9 @@ class RiskManager:
             risk_logger.info("=== Starting position monitoring cycle ===")
             
             # 设置fast=False确保获取最新实时价格，而不是使用缓存
-            # get_positions 和 get_account_info 是同步阻塞方法，
-            # 使用 asyncio.to_thread 在后台线程执行以避免阻塞事件循环
-            positions = await asyncio.to_thread(self.ibkr_client.get_positions, fast=False)
+            # get_positions 是异步方法，直接await调用
+            # get_account_info 是同步阻塞方法，使用 asyncio.to_thread 在后台线程执行
+            positions = await self.ibkr_client.get_positions(fast=False)
             account_info = await asyncio.to_thread(self.ibkr_client.get_account_info)
             
             risk_logger.info(f"Found {len(positions)} positions to monitor")
@@ -1740,9 +1740,18 @@ class RiskManager:
             if hasattr(self.ibkr_client, '_cached_account_info'):
                 account_info = self.ibkr_client._cached_account_info or {}
             else:
-                # 如果没有缓存，使用默认值避免阻塞
-                account_info = {'net_liquidation': 100000.0}  # 默认值
-                risk_logger.warning(f"[PS] Using default account info for position sizing")
+                # 如果没有缓存，尝试获取实际账户信息
+                try:
+                    account_info = self.ibkr_client.get_account_info() or {}
+                    if not account_info.get('net_liquidation'):
+                        account_info = {'net_liquidation': 100000.0}  # 最后的默认值
+                        risk_logger.warning(f"[PS] No account info available, using default value")
+                    else:
+                        risk_logger.info(f"[PS] Retrieved account info: net_liquidation={account_info.get('net_liquidation')}")
+                except Exception as inner_e:
+                    risk_logger.error(f"[PS] Failed to get account info: {inner_e}")
+                    account_info = {'net_liquidation': 100000.0}  # 默认值
+                    risk_logger.warning(f"[PS] Using default account info for position sizing")
         except Exception as e:
             risk_logger.error(f"[PS] get_account_info error: {e}")
         self.update_equity_state(account_info)

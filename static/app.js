@@ -30,6 +30,9 @@ class TradingApp {
         this.orders = [];
         // 通知列表
         this.notifications = [];
+        // 价格缓存机制
+        this.priceCache = new Map();
+        this.priceCacheTimeout = 30000; // 30秒缓存
         this.init();
     }
 
@@ -265,6 +268,16 @@ class TradingApp {
             });
         }
 
+        // G Rules and S Rules Settings buttons
+        const gRulesSettingsBtn = document.getElementById('gRulesSettingsBtn');
+        if (gRulesSettingsBtn) {
+            gRulesSettingsBtn.addEventListener('click', () => this.showGRulesModal());
+        }
+        const sRulesSettingsBtn = document.getElementById('sRulesSettingsBtn');
+        if (sRulesSettingsBtn) {
+            sRulesSettingsBtn.addEventListener('click', () => this.showSRulesModal());
+        }
+
         // Strategy and Logs buttons
         const strategyBtn = document.getElementById('strategyBtn');
         if (strategyBtn) {
@@ -332,13 +345,46 @@ class TradingApp {
         const orderAction = document.getElementById('orderAction');
         const orderPrice = document.getElementById('orderPrice');
         if (orderSymbol) {
-            orderSymbol.addEventListener('input', () => this.debounceRefreshSuggestion());
+            orderSymbol.addEventListener('input', () => {
+                const symbol = orderSymbol.value.toUpperCase().trim();
+                
+                // 获取当前价格（如果输入的标的长度>=2）
+                if (symbol.length >= 2) {
+                    // 使用防抖避免频繁调用
+                    clearTimeout(this.priceUpdateTimeout);
+                    this.priceUpdateTimeout = setTimeout(() => {
+                        this.fetchCurrentPrice(symbol);
+                    }, 500);
+                } else {
+                    // 隐藏价格显示
+                    const priceDisplay = document.getElementById('currentPriceDisplay');
+                    if (priceDisplay) {
+                        priceDisplay.style.display = 'none';
+                    }
+                }
+                
+                // Recalculate risk prices whenever symbol changes
+                this.updateRiskPrices().catch(console.error);
+                
+                // Refresh position suggestion with debounce
+                this.debounceRefreshSuggestion();
+            });
         }
         if (orderAction) {
-            orderAction.addEventListener('change', () => this.refreshPositionSuggestion());
+            orderAction.addEventListener('change', () => {
+                // Update risk prices when action changes
+                this.updateRiskPrices().catch(console.error);
+                // Refresh position suggestion with debounce
+                this.debounceRefreshSuggestion();
+            });
         }
         if (orderPrice) {
-            orderPrice.addEventListener('input', () => this.debounceRefreshSuggestion());
+            orderPrice.addEventListener('input', () => {
+                // Update risk prices when price changes
+                this.updateRiskPrices().catch(console.error);
+                // Refresh position suggestion with debounce
+                this.debounceRefreshSuggestion();
+            });
         }
 
         // WebSocket updates logs and strategies automatically
@@ -472,8 +518,8 @@ class TradingApp {
             // Reset order form to default state
             document.getElementById('orderType').value = 'MARKET';
             document.getElementById('orderPrice').value = '';
-            document.getElementById('orderPrice').disabled = true;
-            document.getElementById('riskRuleSection').style.display = 'none';
+            document.getElementById('orderPrice').disabled = true; // Market order by default
+            document.getElementById('riskRuleSection').style.display = 'block'; // Always show SL/TP section
             
             // Clear SL/TP inputs
             document.getElementById('stopLossPrice').value = '';
@@ -506,6 +552,8 @@ class TradingApp {
                 }
             }
             
+
+            this.setupOrderFormListeners();
             const modal = new bootstrap.Modal(document.getElementById('orderModal'));
             modal.show();
         });
@@ -558,20 +606,8 @@ class TradingApp {
                             return;
                         }
                     } else {
-                        // MARKET：直接查询最新价格，避免从DOM解析格式化文本
-                        const resp = await this.apiCall('/historical_data', {
-                            method: 'POST',
-                            body: JSON.stringify({
-                                symbol,
-                                duration: '1 D',
-                                bar_size: '1 min',
-                                exchange: 'SMART'
-                            })
-                        });
-                        if (resp && resp.success && Array.isArray(resp.data) && resp.data.length > 0) {
-                            const latest = resp.data[resp.data.length - 1];
-                            entryPrice = latest.close || latest.price || NaN;
-                        }
+                        // MARKET：使用缓存的当前价格接口
+                        entryPrice = await this.getCachedPrice(symbol);
                         if (!isFinite(entryPrice) || entryPrice <= 0) {
                             this.showAlert('danger', '获取当前价格失败，无法计算仓位建议');
                             return;
@@ -585,22 +621,21 @@ class TradingApp {
                         return;
                     }
 
-                    const payload = {
-                        symbol,
-                        stop_distance: stopDistance
-                        // 其余参数（rv_current、rv_ref、signal_tier、execution_metrics）留空使用后端默认
-                    };
+                    // 只传递必要的参数，其余参数由后端自动估算或使用默认值
 
                     const data = await this.apiCall('/position-sizing', {
                         method: 'POST',
-                        body: JSON.stringify(payload)
+                        body: JSON.stringify({
+                            symbol,
+                            stop_distance: stopDistance
+                        })
                     });
 
-                    if (!data || !data.success) {
-                        throw new Error(data?.message || 'Position sizing request failed');
+                    if (!data || !data.N) {
+                        throw new Error('Position sizing request failed');
                     }
 
-                    const res = data.result || {};
+                    const res = { contracts: data.N, ...data.explain || {} };
                     const safeNum = (v) => (typeof v === 'number' && isFinite(v)) ? v : null;
                     const setText = (id, val, digits = null) => {
                         const el = document.getElementById(id);
@@ -616,16 +651,17 @@ class TradingApp {
                         }
                     };
 
-                    setText('psContracts', safeNum(res.contracts));
-                    setText('psStopDistance', safeNum(res.stop_distance) ?? stopDistance, 4);
-                    setText('psPointValue', safeNum(res.point_value), 4);
-                    setText('psScaleTotal', safeNum(res.scale_total), 3);
-                    setText('psScaleVol', safeNum(res.scale_vol), 3);
-                    setText('psScaleDd', safeNum(res.scale_dd), 3);
-                    setText('psScaleSig', safeNum(res.scale_sig), 3);
-                    setText('psScaleExec', safeNum(res.scale_exec), 3);
-                    setText('psR', safeNum(res.R), 2);
-                    setText('psRStar', safeNum(res.R_star), 2);
+                    setText('suggestedQuantity', safeNum(res.contracts));
+                    setText('stopDistance', safeNum(res.stop_distance) ?? stopDistance, 4);
+                    setText('pointValue', safeNum(res.point_value), 4);
+                    setText('scaleTotal', safeNum(res.scale_total), 3);
+                    setText('scaleVol', safeNum(res.scale_vol), 3);
+                    setText('scaleDd', safeNum(res.scale_dd), 3);
+                    setText('scaleSig', safeNum(res.scale_sig), 3);
+                    setText('scaleExec', safeNum(res.scale_exec), 3);
+                    setText('maxRisk', safeNum(res.R), 2);
+                    setText('estimatedInvestment', safeNum(res.R_star), 2);
+                    setText('sizingMethod', res.method || res.explanation || '-');
 
                     const expl = document.getElementById('psExplanation');
                     if (expl) expl.textContent = (res.explanation && String(res.explanation).trim()) ? res.explanation : '-';
@@ -633,6 +669,16 @@ class TradingApp {
                     const psModalEl = document.getElementById('positionSizingModal');
                     if (psModalEl) {
                         const psModal = new bootstrap.Modal(psModalEl);
+                        
+                        // Handle aria-hidden properly for accessibility
+                        psModalEl.addEventListener('shown.bs.modal', function() {
+                            psModalEl.removeAttribute('aria-hidden');
+                        });
+                        
+                        psModalEl.addEventListener('hidden.bs.modal', function() {
+                            psModalEl.setAttribute('aria-hidden', 'true');
+                        });
+                        
                         psModal.show();
                     }
                 } catch (err) {
@@ -649,170 +695,7 @@ class TradingApp {
         document.getElementById('submitRiskRuleBtn').addEventListener('click', () => {
             this.addRiskRule();
         });
-    }
-    
-    // Refresh position suggestion automatically
-    async refreshPositionSuggestion() {
-        const symbol = document.getElementById('orderSymbol').value;
-        const action = document.getElementById('orderAction').value;
-        const orderType = document.getElementById('orderType').value;
-        const stopLossPrice = parseFloat(document.getElementById('stopLossPrice').value);
-        
-        if (!symbol) {
-            this.clearPositionSuggestion();
-            return;
-        }
-        
-        // Check if this is opening position
-        const isOpening = this.isOpeningPosition(symbol, action);
-        if (!isOpening) {
-            this.clearPositionSuggestion();
-            return;
-        }
-        
-        if (!stopLossPrice || stopLossPrice <= 0) {
-            this.clearPositionSuggestion();
-            return;
-        }
-        
-        let price;
-        if (orderType === 'MARKET') {
-            // Get current price for market orders
-            try {
-                price = await this.fetchCurrentPrice(symbol);
-                if (!price) {
-                    this.clearPositionSuggestion();
-                    return;
-                }
-            } catch (error) {
-                console.error('Error fetching current price:', error);
-                this.clearPositionSuggestion();
-                return;
-            }
-        } else {
-            price = parseFloat(document.getElementById('orderPrice').value);
-            if (!price || price <= 0) {
-                this.clearPositionSuggestion();
-                return;
-            }
-        }
-        
-        // Calculate stop distance
-        const stopDistance = Math.abs(price - stopLossPrice);
-        
-        try {
-            const response = await this.apiCall('/position-sizing', {
-                method: 'POST',
-                body: JSON.stringify({
-                    symbol: symbol,
-                    price: price,
-                    stop_distance: stopDistance,
-                    action: action
-                })
-            });
-            
-            if (response.success) {
-                this.updatePositionSuggestionUI(response);
-            } else {
-                this.clearPositionSuggestion();
-            }
-        } catch (error) {
-            console.error('Position sizing error:', error);
-            this.clearPositionSuggestion();
-        }
-    }
-    
-    // Clear position suggestion UI
-    clearPositionSuggestion() {
-        document.getElementById('suggestedQuantity').textContent = '-';
-        document.getElementById('calculationMethod').textContent = '-';
-        document.getElementById('riskPercentage').textContent = '-';
-        document.getElementById('estimatedInvestment').textContent = '-';
-        document.getElementById('maxRisk').textContent = '-';
-    }
-    
-    setupOrderFormListeners() {
-        // Order form
-        document.getElementById('orderForm').addEventListener('submit', (e) => {
-            e.preventDefault();
-            this.placeOrder();
-        });
-        
-        // Order type change
-        document.getElementById('orderType').addEventListener('change', (e) => {
-            const priceInput = document.getElementById('orderPrice');
 
-            priceInput.disabled = e.target.value === 'MARKET';
-            if (e.target.value === 'MARKET') {
-                priceInput.value = '';
-            }
-
-            // Recalculate SL/TP and suggestion whenever order type changes
-            this.updateRiskPrices().catch(console.error);
-        });
-        
-        // Order price change - auto-calculate risk prices
-        document.getElementById('orderPrice').addEventListener('input', () => {
-            this.updateRiskPrices().catch(console.error);
-        });
-        
-        // Stop loss and take profit price changes - calculate expected PnL and refresh position suggestion
-        document.getElementById('stopLossPrice').addEventListener('input', () => {
-            this.updateExpectedPnL();
-            // Auto refresh position suggestion when SL price changes
-            clearTimeout(this.positionRefreshTimeout);
-            this.positionRefreshTimeout = setTimeout(() => {
-                this.refreshPositionSuggestion().catch(console.error);
-            }, 500);
-        });
-        
-        document.getElementById('takeProfitPrice').addEventListener('input', () => {
-            this.updateExpectedPnL();
-        });
-        
-        // Order quantity change - update expected PnL
-        document.getElementById('orderQuantity').addEventListener('input', () => {
-            this.updateExpectedPnL();
-        });
-        
-        // Order action change - update expected PnL, recalculate SL/TP and refresh position suggestion
-        document.getElementById('orderAction').addEventListener('change', () => {
-            this.updateRiskPrices().catch(console.error);
-            // Auto refresh position suggestion when action changes
-            setTimeout(() => {
-                this.refreshPositionSuggestion().catch(console.error);
-            }, 100);
-        });
-        
-        // Order symbol change - update current price, SL/TP, and position suggestion
-        document.getElementById('orderSymbol').addEventListener('input', () => {
-            const symbol = document.getElementById('orderSymbol').value.toUpperCase().trim();
-
-            // 获取当前价格（如果输入的标的长度>=2）
-            if (symbol.length >= 2) {
-                // 使用防抖避免频繁调用
-                clearTimeout(this.priceUpdateTimeout);
-                this.priceUpdateTimeout = setTimeout(() => {
-                    this.fetchCurrentPrice(symbol);
-                }, 500);
-            } else {
-                // 隐藏价格显示
-                const priceDisplay = document.getElementById('currentPriceDisplay');
-                if (priceDisplay) {
-                    priceDisplay.style.display = 'none';
-                }
-            }
-
-            // Recalculate risk prices whenever symbol changes
-            this.updateRiskPrices().catch(console.error);
-
-            // Auto refresh position suggestion when symbol changes
-            clearTimeout(this.positionRefreshTimeout);
-            this.positionRefreshTimeout = setTimeout(() => {
-                this.refreshPositionSuggestion().catch(console.error);
-            }, 800);
-        });
-        
         // Market data
 
         
@@ -857,7 +740,74 @@ class TradingApp {
             resetGRulesBtn.addEventListener('click', () => this.resetGRulesConfig());
         }
         
+        // 加载通知历史记录到面板
+        this.loadNotificationHistory();
+        
         console.log('All event listeners bound successfully');
+    }
+    
+    // Refresh position suggestion automatically
+    // Removed duplicate refreshPositionSuggestion method - using the one at line 6543
+    
+    // Clear position suggestion UI
+    clearPositionSuggestion() {
+        document.getElementById('suggestedQuantity').textContent = '-';
+        document.getElementById('calculationMethod').textContent = '-';
+        document.getElementById('riskPercentage').textContent = '-';
+        document.getElementById('estimatedInvestment').textContent = '-';
+        document.getElementById('maxRisk').textContent = '-';
+    }
+    
+    setupOrderFormListeners() {
+        // Order form
+        document.getElementById('orderForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            this.placeOrder();
+        });
+        
+        // Order type change
+        document.getElementById('orderType').addEventListener('change', (e) => {
+            const priceInput = document.getElementById('orderPrice');
+
+            priceInput.disabled = e.target.value === 'MARKET';
+            if (e.target.value === 'MARKET') {
+                // 市价单时获取当前价格并填入
+                this.fetchCurrentPrice();
+            } else {
+                // 限价单时清空价格，让用户手动输入
+                priceInput.value = '';
+            }
+
+            // Recalculate SL/TP and suggestion whenever order type changes
+            this.updateRiskPrices().catch(console.error);
+        });
+        
+        // Order price change - auto-calculate risk prices
+        document.getElementById('orderPrice').addEventListener('input', () => {
+            this.updateRiskPrices().catch(console.error);
+        });
+        
+        // Stop loss and take profit price changes - calculate expected PnL only
+        document.getElementById('stopLossPrice').addEventListener('input', () => {
+            this.updateExpectedPnL();
+            // 移除自动刷新position suggestion，避免频繁API调用
+            // this.debounceRefreshSuggestion();
+        });
+        
+        document.getElementById('takeProfitPrice').addEventListener('input', () => {
+            this.updateExpectedPnL();
+        });
+        
+        // Order quantity change - update expected PnL only
+        document.getElementById('orderQuantity').addEventListener('input', () => {
+            this.updateExpectedPnL();
+            // 只有在数量变化时才刷新position suggestion
+            this.debounceRefreshSuggestion();
+        });
+        
+        // Note: Order action and symbol event listeners are already handled above in the unified section
+        
+        
     }
 
     connectWebSocket() {
@@ -1261,6 +1211,17 @@ class TradingApp {
                     continue;
                 }
                 
+                // 特殊处理IBKR连接错误 - 直接打开设置窗口而不显示错误提示
+                if (error.message === 'Not connected to IBKR') {
+                    console.warn('IBKR not connected, opening settings modal');
+                    const connectionModalEl = document.getElementById('connectionModal');
+                    if (connectionModalEl) {
+                        const settingsModal = new bootstrap.Modal(connectionModalEl);
+                        settingsModal.show();
+                    }
+                    throw error;
+                }
+                
                 if (error.message !== 'Authentication required') {
                     this.showAlert('danger', error.message);
                 }
@@ -1534,33 +1495,49 @@ class TradingApp {
         return true; // This is adding to existing position (opening)
     }
     
-    // Get trading price based on order type
-    async getTradingPrice(symbol, orderType, limitPrice = null) {
-        if (orderType === 'LIMIT' && limitPrice && limitPrice > 0) {
-            return limitPrice;
+    // 带缓存的价格获取方法
+    async getCachedPrice(symbol) {
+        const cacheKey = symbol.toUpperCase();
+        const now = Date.now();
+        
+        // 检查缓存
+        if (this.priceCache.has(cacheKey)) {
+            const cached = this.priceCache.get(cacheKey);
+            if (now - cached.timestamp < this.priceCacheTimeout) {
+                return cached.price;
+            }
         }
         
-        // For market orders, get current market price
+        // 缓存过期或不存在，重新获取
         try {
-            const response = await this.apiCall('/historical_data', {
+            const response = await this.apiCall('/current_price', {
                 method: 'POST',
-                body: JSON.stringify({
-                    symbol: symbol,
-                    duration: '1 D',
-                    bar_size: '1 min',
-                    exchange: 'SMART'
-                })
+                body: JSON.stringify({ symbol: symbol })
             });
             
-            if (response.success && response.data && response.data.length > 0) {
-                const latestData = response.data[response.data.length - 1];
-                return latestData.close || latestData.price;
+            if (response.success && response.price) {
+                // 更新缓存
+                this.priceCache.set(cacheKey, {
+                    price: response.price,
+                    timestamp: now
+                });
+                return response.price;
             }
         } catch (error) {
             console.error('Failed to get current price:', error);
         }
         
         return null;
+    }
+
+    // Get trading price based on order type
+    async getTradingPrice(symbol, orderType, limitPrice = null) {
+        if (orderType === 'LIMIT' && limitPrice && limitPrice > 0) {
+            return limitPrice;
+        }
+        
+        // For market orders, get current market price from cache
+        return await this.getCachedPrice(symbol);
     }
     
     // Update risk prices based on trading price and order details
@@ -1575,7 +1552,8 @@ class TradingApp {
         if (!orderSymbol) {
             document.getElementById('stopLossPrice').value = '';
             document.getElementById('takeProfitPrice').value = '';
-            if (riskRuleSection) riskRuleSection.style.display = 'none';
+            // Always keep SL/TP section visible
+            if (riskRuleSection) riskRuleSection.style.display = 'block';
             this.updateExpectedPnL();
             return;
         }
@@ -1583,11 +1561,12 @@ class TradingApp {
         // Check if this is opening or closing position
         const isOpening = this.isOpeningPosition(orderSymbol, orderAction);
 
-        // If closing position, don't calculate SL/TP and hide suggestions
+        // If closing position, don't calculate SL/TP but keep section visible
         if (!isOpening) {
             document.getElementById('stopLossPrice').value = '';
             document.getElementById('takeProfitPrice').value = '';
-            if (riskRuleSection) riskRuleSection.style.display = 'none';
+            // Always keep SL/TP section visible, hide only position suggestions
+            if (riskRuleSection) riskRuleSection.style.display = 'block';
             document.getElementById('suggestedPositionSection').style.display = 'none';
             this.updateExpectedPnL();
             return;
@@ -1602,7 +1581,8 @@ class TradingApp {
         if (!tradingPrice || tradingPrice <= 0) {
             document.getElementById('stopLossPrice').value = '';
             document.getElementById('takeProfitPrice').value = '';
-            if (riskRuleSection) riskRuleSection.style.display = 'none';
+            // Always keep SL/TP section visible even without valid price
+            if (riskRuleSection) riskRuleSection.style.display = 'block';
             this.updateExpectedPnL();
             return;
         }
@@ -1642,8 +1622,8 @@ class TradingApp {
             document.getElementById('stopLossPrice').value = stopLoss;
             document.getElementById('takeProfitPrice').value = takeProfit;
             
-            // Auto-refresh position suggestions with calculated SL/TP
-            this.refreshPositionSuggestion();
+            // 移除自动刷新position suggestion，避免频繁API调用
+            // this.refreshPositionSuggestion();
             
         } catch (error) {
             console.warn('Failed to get risk config, using defaults:', error);
@@ -1660,43 +1640,15 @@ class TradingApp {
             document.getElementById('stopLossPrice').value = stopLoss;
             document.getElementById('takeProfitPrice').value = takeProfit;
             
-            // Auto-refresh position suggestions with calculated SL/TP
-            this.refreshPositionSuggestion();
+            // 移除自动刷新position suggestion，避免频繁API调用
+            // this.refreshPositionSuggestion();
         }
         
         this.updateExpectedPnL();
     }
     
     // Update expected PnL based on current inputs
-    updateExpectedPnL() {
-        const orderPrice = parseFloat(document.getElementById('orderPrice').value);
-        const stopLossPrice = parseFloat(document.getElementById('stopLossPrice').value);
-        const takeProfitPrice = parseFloat(document.getElementById('takeProfitPrice').value);
-        const quantity = parseInt(document.getElementById('orderQuantity').value);
-        const action = document.getElementById('orderAction').value;
-        
-        if (!orderPrice || !quantity) {
-            document.getElementById('expectedLoss').value = '';
-            document.getElementById('expectedProfit').value = '';
-            return;
-        }
-        
-        let expectedLoss = '';
-        let expectedProfit = '';
-        
-        if (stopLossPrice && stopLossPrice > 0) {
-            const lossDiff = action === 'BUY' ? (stopLossPrice - orderPrice) : (orderPrice - stopLossPrice);
-            expectedLoss = `$${(lossDiff * quantity).toFixed(2)}`;
-        }
-        
-        if (takeProfitPrice && takeProfitPrice > 0) {
-            const profitDiff = action === 'BUY' ? (takeProfitPrice - orderPrice) : (orderPrice - takeProfitPrice);
-            expectedProfit = `$${(profitDiff * quantity).toFixed(2)}`;
-        }
-        
-        document.getElementById('expectedLoss').value = expectedLoss;
-        document.getElementById('expectedProfit').value = expectedProfit;
-    }
+    // 旧版本的updateExpectedPnL已删除，使用新版本的方法
 
     async placeOrder() {
         // 如果是编辑订单，先取消原订单
@@ -1770,6 +1722,8 @@ class TradingApp {
             localStorage.setItem('lastOrderSymbol', symbol);
             
             document.getElementById('orderForm').reset();
+            // Reset to market order default state
+            document.getElementById('orderType').value = 'MARKET';
             document.getElementById('orderPrice').disabled = true;
             
             // Restore the quantity value
@@ -4365,16 +4319,40 @@ class TradingApp {
 
     updateExpectedPnL() {
         try {
-            if (!this.currentMonitor) return;
+            // 支持两种模式：监控模式和建议仓位模式
+            const isMonitorMode = !!this.currentMonitor;
             
-            const stopLossInput = document.getElementById('monitorStopLoss');
-            const takeProfitInput = document.getElementById('monitorTakeProfit');
+            let stopLossInput, takeProfitInput, positionQty, avgCost;
+            
+            if (isMonitorMode) {
+                // 监控模式：使用监控面板的数据
+                stopLossInput = document.getElementById('monitorStopLoss');
+                takeProfitInput = document.getElementById('monitorTakeProfit');
+                positionQty = this.currentMonitor.positionQty || 0;
+                avgCost = this.currentMonitor.avgCost || 0;
+            } else {
+                // 建议仓位模式：使用订单面板的数据
+                stopLossInput = document.getElementById('stopLossPrice');
+                takeProfitInput = document.getElementById('takeProfitPrice');
+                const orderPrice = parseFloat(document.getElementById('orderPrice')?.value || 0);
+                const quantity = parseInt(document.getElementById('orderQuantity')?.value || 0);
+                const action = document.getElementById('orderAction')?.value;
+                
+                // 在建议仓位模式下，使用订单价格作为成本价，订单数量作为持仓
+                avgCost = orderPrice;
+                positionQty = action === 'SELL' ? -quantity : quantity;
+            }
+            
             const expectedSection = document.getElementById('expectedPnLSection');
             const expectedStopLossPnL = document.getElementById('expectedStopLossPnL');
         const expectedTakeProfitPnL = document.getElementById('expectedTakeProfitPnL');
         const slDeltaEl = document.getElementById('monitorStopLossDelta');
         const tpDeltaEl = document.getElementById('monitorTakeProfitDelta');
         const rrrEl = document.getElementById('monitorRRR');
+            
+            // 获取下单弹窗中的Expected Loss和Expected Profit字段
+            const expectedLossInput = document.getElementById('expectedLoss');
+            const expectedProfitInput = document.getElementById('expectedProfit');
             
             if (!expectedSection || !expectedStopLossPnL || !expectedTakeProfitPnL) return;
             
@@ -4384,8 +4362,6 @@ class TradingApp {
             
             const stopLossPrice = stopLossInput?.value ? parseFloat(stopLossInput.value) : null;
             const takeProfitPrice = takeProfitInput?.value ? parseFloat(takeProfitInput.value) : null;
-            const positionQty = this.currentMonitor.positionQty || 0;
-            const avgCost = this.currentMonitor.avgCost || 0;
             
             // 只有当有持仓且设置了止损或止盈价格时才显示预期PnL
             if (positionQty !== 0 && (stopLossPrice || takeProfitPrice)) {
@@ -4410,6 +4386,11 @@ class TradingApp {
                     expectedStopLossPnL.textContent = `$${this.formatNumber(stopLossPnL)}`;
                     expectedStopLossPnL.className = stopLossPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
                     
+                    // 填充下单弹窗中的Expected Loss字段
+                    if (expectedLossInput) {
+                        expectedLossInput.value = `$${this.formatNumber(stopLossPnL)}`;
+                    }
+                    
                     // 小字Δ/百分比（颜色保持 text-muted）
                     if (slDeltaEl) {
                         const sign = deltaSL >= 0 ? '+' : '';
@@ -4418,6 +4399,9 @@ class TradingApp {
                 } else {
                     expectedStopLossPnL.textContent = '$0.00';
                     expectedStopLossPnL.className = 'fw-bold text-muted';
+                    if (expectedLossInput) {
+                        expectedLossInput.value = '';
+                    }
                     if (slDeltaEl) slDeltaEl.textContent = 'Δ — / —%';
                 }
                 
@@ -4440,6 +4424,11 @@ class TradingApp {
                     expectedTakeProfitPnL.textContent = `$${this.formatNumber(takeProfitPnL)}`;
                     expectedTakeProfitPnL.className = takeProfitPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
                     
+                    // 填充下单弹窗中的Expected Profit字段
+                    if (expectedProfitInput) {
+                        expectedProfitInput.value = `$${this.formatNumber(takeProfitPnL)}`;
+                    }
+                    
                     // 小字Δ/百分比（颜色保持 text-muted）
                     if (tpDeltaEl) {
                         const sign = deltaTP >= 0 ? '+' : '';
@@ -4448,6 +4437,9 @@ class TradingApp {
                 } else {
                     expectedTakeProfitPnL.textContent = '$0.00';
                     expectedTakeProfitPnL.className = 'fw-bold text-muted';
+                    if (expectedProfitInput) {
+                        expectedProfitInput.value = '';
+                    }
                     if (tpDeltaEl) tpDeltaEl.textContent = 'Δ — / —%';
                 }
                 // 计算RRR
@@ -5262,9 +5254,7 @@ class TradingApp {
     }
 
     // Symbol combobox functionality
-    initSymbolCombobox() {
-        this.setupSymbolInput('orderSymbol', 'orderSymbolDropdown');
-    }
+    // Duplicate initSymbolCombobox method removed
 
     setupSymbolInput(inputId, dropdownId) {
         const input = document.getElementById(inputId);
@@ -5391,62 +5381,7 @@ class TradingApp {
         });
     }
 
-    async searchSymbols(query, dropdownId) {
-        const dropdown = document.getElementById(dropdownId);
-        
-        try {
-            // Show loading
-            dropdown.innerHTML = '<div class="dropdown-item-text">Searching...</div>';
-            dropdown.classList.add('show');
-            
-            // For now, we'll use a simple client-side filter of common symbols
-            // In a real implementation, this would call an API
-            const allSymbols = [
-                'MNQ', 'NQ', 'ES', 'YM', 'RTY', 'CL', 'GC', 'SI',
-                'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'TSLA', 'NVDA', 'AMZN', 'META',
-                'NFLX', 'AMD', 'INTC', 'CRM', 'ORCL', 'ADBE', 'PYPL', 'UBER',
-                'SPOT', 'ZM', 'DOCU', 'SNOW', 'PLTR', 'COIN', 'RBLX', 'HOOD'
-            ];
-            
-            const filteredSymbols = allSymbols.filter(symbol => 
-                symbol.toLowerCase().includes(query.toLowerCase())
-            );
-            
-            let html = '';
-            
-            if (filteredSymbols.length > 0) {
-                html += '<h6 class="dropdown-header">Search Results</h6>';
-                filteredSymbols.slice(0, 10).forEach(symbol => {
-                    html += `<a class="dropdown-item" href="#" data-symbol="${symbol}">${symbol}</a>`;
-                });
-            } else {
-                html += '<div class="dropdown-item-text text-muted">No symbols found</div>';
-            }
-            
-            dropdown.innerHTML = html;
-            
-            // Add click handlers
-            dropdown.querySelectorAll('.dropdown-item').forEach(item => {
-                item.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    const symbol = e.target.getAttribute('data-symbol');
-                    const inputId = dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol';
-                    document.getElementById(inputId).value = symbol;
-                    dropdown.classList.remove('show');
-                    this.addToHistoricalSymbols(symbol);
-                    
-                    // 如果是下单弹窗的symbol选择，获取当前价格
-                    if (inputId === 'orderSymbol') {
-                        this.fetchCurrentPrice(symbol);
-                    }
-                });
-            });
-            
-        } catch (error) {
-            console.error('Error searching symbols:', error);
-            dropdown.innerHTML = '<div class="dropdown-item-text text-danger">Search failed</div>';
-        }
-    }
+    // Duplicate searchSymbols method removed
     displayAutoOrders(orders) {
         // Auto Orders panel removed - method kept for compatibility
         console.log('Auto orders display skipped - panel removed');
@@ -5470,19 +5405,30 @@ class TradingApp {
         }
         document.getElementById('orderType').value = normalizedType;
         
-        const priceInput = document.getElementById('orderPrice');
-        if ((normalizedType === 'LIMIT') && limitPrice) {
-            priceInput.value = limitPrice;
-            priceInput.disabled = false;
-        } else {
-            priceInput.value = '';
-            priceInput.disabled = true;
-        }
-        
-        // 获取当前价格
+        // 获取当前价格（这会更新价格显示）
         this.fetchCurrentPrice(symbol);
         
+        // 在fetchCurrentPrice之后设置价格输入框状态，确保限价单的设置不被覆盖
+        setTimeout(() => {
+            const priceInput = document.getElementById('orderPrice');
+            if ((normalizedType === 'LIMIT') && limitPrice) {
+                priceInput.value = limitPrice;
+                priceInput.disabled = false;
+            } else if (normalizedType === 'LIMIT') {
+                // 限价单但没有预设价格，启用输入框让用户输入
+                priceInput.disabled = false;
+                if (!priceInput.value) {
+                    priceInput.value = '';
+                }
+            }
+            // 触发价格变化事件以更新SL/TP计算
+            if (priceInput.value) {
+                priceInput.dispatchEvent(new Event('input'));
+            }
+        }, 100);
+        
         // 显示下单模态框
+        this.setupOrderFormListeners();
         const modal = new bootstrap.Modal(document.getElementById('orderModal'));
         modal.show();
         
@@ -5980,95 +5926,6 @@ class TradingApp {
 
     // Logs functionality removed - panel no longer exists
 
-    async executeRiskRule(symbol, currentPrice, stopLossPrice, takeProfitPrice, positionSize) {
-        if (!positionSize || positionSize === 0) {
-            this.showAlert('No position found for ' + symbol, 'warning');
-            return;
-        }
-
-        try {
-            // Determine which rule to execute based on current price
-            let orderType = 'LIMIT';
-            let targetPrice = null;
-            let action = positionSize > 0 ? 'SELL' : 'BUY';
-            let ruleType = '';
-            let slippage = 0;
-
-            // Check stop loss condition
-            if (stopLossPrice && ((positionSize > 0 && currentPrice <= stopLossPrice) || (positionSize < 0 && currentPrice >= stopLossPrice))) {
-                targetPrice = stopLossPrice;
-                ruleType = 'Stop Loss';
-                // If price has already passed stop loss, use market order
-                if ((positionSize > 0 && currentPrice < stopLossPrice) || (positionSize < 0 && currentPrice > stopLossPrice)) {
-                    orderType = 'MARKET';
-                    slippage = Math.abs(currentPrice - stopLossPrice) / stopLossPrice * 100;
-                }
-            }
-            // Check take profit condition
-            else if (takeProfitPrice && ((positionSize > 0 && currentPrice >= takeProfitPrice) || (positionSize < 0 && currentPrice <= takeProfitPrice))) {
-                targetPrice = takeProfitPrice;
-                ruleType = 'Take Profit';
-                // If price has already passed take profit, use market order
-                if ((positionSize > 0 && currentPrice > takeProfitPrice) || (positionSize < 0 && currentPrice < takeProfitPrice)) {
-                    orderType = 'MARKET';
-                    slippage = Math.abs(currentPrice - takeProfitPrice) / takeProfitPrice * 100;
-                }
-            }
-            else {
-                this.showAlert('No rule conditions met for execution', 'info');
-                return;
-            }
-
-            // Confirm execution
-            let confirmMessage = `Execute ${ruleType} for ${symbol}?\n`;
-            confirmMessage += `Current Price: $${currentPrice.toFixed(2)}\n`;
-            confirmMessage += `Target Price: $${targetPrice.toFixed(2)}\n`;
-            confirmMessage += `Order Type: ${orderType}\n`;
-            confirmMessage += `Quantity: ${Math.abs(positionSize)}\n`;
-            if (slippage > 0) {
-                confirmMessage += `Estimated Slippage: ${slippage.toFixed(4)}%\n`;
-            }
-
-            if (!confirm(confirmMessage)) {
-                return;
-            }
-
-            // Prepare order data
-            const orderData = {
-                symbol: symbol,
-                action: action,
-                quantity: Math.abs(positionSize),
-                order_type: orderType
-            };
-
-            if (orderType === 'LIMIT') {
-                orderData.price = targetPrice;
-            }
-
-            // Place the order
-            const response = await this.apiCall('/place_order', {
-                method: 'POST',
-                body: JSON.stringify(orderData)
-            });
-            
-            let message = `${ruleType} order placed successfully for ${symbol}`;
-            if (slippage > 0) {
-                message += ` (Slippage: ${slippage.toFixed(4)}%)`;
-            }
-            
-            this.showAlert(message, 'success');
-            
-            // Refresh data
-            await Promise.all([
-                this.loadPortfolio(),
-                this.loadRiskRules()
-            ]);
-
-        } catch (error) {
-            this.showAlert('Failed to execute risk rule: ' + error.message, 'danger');
-        }
-    }
-
     clearData() {
         document.getElementById('accountInfo').innerHTML = '<p class="text-muted">Connect to view account information</p>';
         document.querySelector('#ordersTable tbody').innerHTML = '';
@@ -6093,14 +5950,6 @@ class TradingApp {
         }
     }
 
-    formatNumber(num) {
-        if (num === null || num === undefined) return 'N/A';
-        return parseFloat(num).toLocaleString('en-US', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2
-        });
-    }
-
     // 判断传入日期是否为“今天”（按本地时区）
     isSameDay(dateInput) {
         if (!dateInput) return false;
@@ -6112,95 +5961,12 @@ class TradingApp {
                d.getDate() === now.getDate();
     }
 
-    showAlert(type, message) {
-        const alertContainer = document.getElementById('alertContainer');
-        const alertId = 'alert-' + Date.now();
-        
-        const alertHtml = `
-            <div id="${alertId}" class="alert alert-${type} alert-dismissible fade show" role="alert">
-                ${message}
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>
-        `;
-        
-        alertContainer.insertAdjacentHTML('beforeend', alertHtml);
-        
-        // Auto-dismiss after 5 seconds
-        setTimeout(() => {
-            const alert = document.getElementById(alertId);
-            if (alert) {
-                const bsAlert = new bootstrap.Alert(alert);
-                bsAlert.close();
-            }
-        }, 5000);
-    }
-
     // Symbol combobox functionality
     initSymbolCombobox() {
         this.setupSymbolInput('orderSymbol', 'orderSymbolDropdown');
     }
 
-    setupSymbolInput(inputId, dropdownId) {
-        const input = document.getElementById(inputId);
-        const dropdown = document.getElementById(dropdownId);
-        let searchTimeout;
-
-        // Load historical symbols on focus
-        input.addEventListener('focus', () => {
-            this.showHistoricalSymbols(dropdownId);
-            dropdown.classList.add('show');
-        });
-
-        // Hide dropdown when clicking outside
-        document.addEventListener('click', (e) => {
-            if (!input.contains(e.target) && !dropdown.contains(e.target)) {
-                dropdown.classList.remove('show');
-            }
-        });
-
-        // Search symbols on input
-        input.addEventListener('input', (e) => {
-            const query = e.target.value.trim();
-            
-            clearTimeout(searchTimeout);
-            
-            if (query.length === 0) {
-                this.showHistoricalSymbols(dropdownId);
-                return;
-            }
-
-            if (query.length >= 1) {
-                searchTimeout = setTimeout(() => {
-                    this.searchSymbols(query, dropdownId);
-                }, 300);
-            }
-        });
-
-        // Handle keyboard navigation
-        input.addEventListener('keydown', (e) => {
-            const items = dropdown.querySelectorAll('.dropdown-item');
-            const activeItem = dropdown.querySelector('.dropdown-item.active');
-            let activeIndex = Array.from(items).indexOf(activeItem);
-
-            if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                activeIndex = activeIndex < items.length - 1 ? activeIndex + 1 : 0;
-                this.setActiveDropdownItem(items, activeIndex);
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                activeIndex = activeIndex > 0 ? activeIndex - 1 : items.length - 1;
-                this.setActiveDropdownItem(items, activeIndex);
-            } else if (e.key === 'Enter') {
-                e.preventDefault();
-                if (activeItem) {
-                    activeItem.click();
-                }
-            } else if (e.key === 'Escape') {
-                dropdown.classList.remove('show');
-                input.blur();
-            }
-        });
-    }
+    // Duplicate setupSymbolInput method removed
 
     setActiveDropdownItem(items, activeIndex) {
         items.forEach((item, index) => {
@@ -6333,34 +6099,39 @@ class TradingApp {
         
         if (!priceDisplay || !priceValue) return;
         
+        // 如果未显式传入symbol，则尝试从表单读取；若仍为空则不请求
+        if (!symbol) {
+            const symEl = document.getElementById('orderSymbol');
+            symbol = (symEl?.value || '').toUpperCase().trim();
+        }
+        if (!symbol) {
+            priceDisplay.style.display = 'none';
+            return;
+        }
+        
         try {
             // 显示加载状态
             priceDisplay.style.display = 'block';
             priceValue.textContent = '加载中...';
             priceValue.className = 'fw-bold text-muted';
             
-            // 获取最新的1分钟数据来获取当前价格
-            const response = await this.apiCall('/historical_data', {
-                method: 'POST',
-                body: JSON.stringify({
-                    symbol: symbol,
-                    duration: '1 D',
-                    bar_size: '1 min',
-                    exchange: 'SMART'
-                })
-            });
+            // 使用缓存的当前价格接口
+            const currentPrice = await this.getCachedPrice(symbol);
             
-            if (response.success && response.data && response.data.length > 0) {
-                // 获取最新的收盘价作为当前价格
-                const latestData = response.data[response.data.length - 1];
-                const currentPrice = latestData.close || latestData.price;
+            if (currentPrice && currentPrice > 0) {
+                priceValue.textContent = `$${this.formatNumber(currentPrice)}`;
+                priceValue.className = 'fw-bold text-primary';
                 
-                if (currentPrice && currentPrice > 0) {
-                    priceValue.textContent = `$${this.formatNumber(currentPrice)}`;
-                    priceValue.className = 'fw-bold text-primary';
-                } else {
-                    priceValue.textContent = '无数据';
-                    priceValue.className = 'fw-bold text-muted';
+                // 显示数据源信息
+                priceValue.title = `数据源: 缓存`;
+                
+                // 如果是市价单，自动填入价格输入框（即使是disabled状态）
+                const orderTypeSelect = document.getElementById('orderType');
+                const orderPriceInput = document.getElementById('orderPrice');
+                if (orderTypeSelect && orderPriceInput && orderTypeSelect.value === 'MARKET') {
+                    orderPriceInput.value = currentPrice.toString();
+                    // 触发价格变化事件以更新相关计算
+                    orderPriceInput.dispatchEvent(new Event('input'));
                 }
             } else {
                 priceValue.textContent = '获取失败';
@@ -6374,41 +6145,7 @@ class TradingApp {
     }
 
 
-    // 编辑订单
-    editOrder(orderId, symbol, action, quantity, orderType, limitPrice) {
-        // 填充下单表单
-        document.getElementById('orderSymbol').value = symbol;
-        document.getElementById('orderAction').value = action;
-            document.getElementById('orderQuantity').value = quantity;
-            // 正确转换订单类型到HTML选项值
-            let normalizedType;
-            if (orderType === 'LMT') {
-                normalizedType = 'LIMIT';
-            } else if (orderType === 'MKT') {
-                normalizedType = 'MARKET';
-            } else {
-                normalizedType = orderType; // 保持原值
-            }
-            document.getElementById('orderType').value = normalizedType;
-            
-            const priceInput = document.getElementById('orderPrice');
-            if ((normalizedType === 'LIMIT') && limitPrice) {
-                priceInput.value = limitPrice;
-                priceInput.disabled = false;
-            } else {
-                priceInput.value = '';
-            priceInput.disabled = true;
-        }
-        
-        // 显示下单模态框
-        const modal = new bootstrap.Modal(document.getElementById('orderModal'));
-        modal.show();
-        
-        // 存储原订单ID，用于后续处理
-        this.editingOrderId = orderId;
-        
-        this.showAlert('info', `正在编辑订单 ${orderId}，请修改后重新提交`);
-    }
+    // Duplicate editOrder method removed
 
     // 取消订单
     async cancelOrder(orderId, btn) {
@@ -6681,7 +6418,7 @@ class TradingApp {
     async loadSizingPolicy() {
         try {
             const data = await this.apiCall('/sizing/policy');
-            const policy = data.policy || {};
+            const policy = data.s_rules || {};
             
             // Populate form fields
             const methodSelect = document.getElementById('defaultSizingMethod');
@@ -6714,10 +6451,12 @@ class TradingApp {
             
             await this.apiCall('/sizing/policy', {
                 method: 'PUT',
-                body: JSON.stringify({ policy })
+                body: JSON.stringify({ s_rules: policy })
             });
             
             this.showAlert('success', 'Sizing policy saved successfully');
+            // 刷新配置显示
+            await this.loadSizingPolicy();
         } catch (error) {
             console.error('Failed to save sizing policy:', error);
             this.showAlert('danger', 'Failed to save sizing policy');
@@ -6741,7 +6480,7 @@ class TradingApp {
                     <td><span class="badge bg-${item.action === 'BUY' ? 'success' : 'danger'}">${item.action}</span></td>
                     <td>${item.suggested_quantity}</td>
                     <td>${item.sizing_method}</td>
-                    <td>$${this.formatNumber(item.current_price)}</td>
+                    <td>${item.current_price !== null && item.current_price !== undefined ? '$' + this.formatNumber(item.current_price) : 'N/A'}</td>
                 </tr>
                 `;
             }).join('');
@@ -6766,9 +6505,10 @@ class TradingApp {
         const action = document.getElementById('orderAction')?.value;
         const priceInput = document.getElementById('orderPrice')?.value?.trim();
         const price = parseFloat(priceInput) || 0;
-        const stopLoss = parseFloat(document.getElementById('orderStopLoss')?.value) || 0;
-        
-        console.log('refreshPositionSuggestion called with:', { symbol, action, price, stopLoss });
+        const stopLoss = parseFloat(document.getElementById('stopLossPrice')?.value) || 0;
+    
+    console.log('refreshPositionSuggestion called with:', { symbol, action, price, stopLoss });
+    console.log('stopLossPrice element value:', document.getElementById('stopLossPrice')?.value);
         
         // Note: Position sizing calculation doesn't require IB connection
         // Only actual order placement requires connection
@@ -6812,20 +6552,25 @@ class TradingApp {
         
         // Calculate stop_distance based on action and stop loss
         let stopDistance = 0;
+        console.log('Calculating stopDistance - stopLoss:', stopLoss, 'effectivePrice:', effectivePrice, 'action:', action);
+        
         if (stopLoss > 0) {
             if (action === 'BUY') {
                 stopDistance = Math.abs(effectivePrice - stopLoss);
             } else if (action === 'SELL') {
                 stopDistance = Math.abs(stopLoss - effectivePrice);
             }
+            console.log('Calculated stopDistance from SL price:', stopDistance);
         } else {
             // Default stop distance based on symbol type
             if (symbol.includes('ES') || symbol.includes('NQ') || symbol.includes('YM') || symbol.includes('RTY')) {
                 // For futures, use a smaller default stop distance (e.g., 10 points)
                 stopDistance = 10;
+                console.log('Using default futures stopDistance:', stopDistance);
             } else {
                 // For stocks, use 2% of price as default
                 stopDistance = effectivePrice * 0.02;
+                console.log('Using default stock stopDistance:', stopDistance);
             }
         }
         
@@ -6835,19 +6580,18 @@ class TradingApp {
         }
         
         try {
-            const data = await this.apiCall('/sizing/preview', {
+            const data = await this.apiCall('/position-sizing', {
                 method: 'POST',
                 body: JSON.stringify({
                     symbol: symbol,
-                    stop_distance: stopDistance,
-                    rv_current: effectivePrice,
-                    rv_ref: null,
-                    signal_tier: 'A',
-                    execution_metrics: null
+                    stop_distance: stopDistance
                 })
             });
             
             this.updatePositionSuggestionUI(data);
+            
+            // Refresh sizing history table after successful calculation
+            this.loadSizingHistory();
         } catch (error) {
             console.error('Failed to get position suggestion:', error);
             this.clearPositionSuggestion();
@@ -6864,9 +6608,16 @@ class TradingApp {
     updatePositionSuggestionUI(data) {
         const suggestedQuantity = document.getElementById('suggestedQuantity');
         const sizingMethod = document.getElementById('sizingMethod');
-        const riskRatio = document.getElementById('riskRatio');
         const estimatedInvestment = document.getElementById('estimatedInvestment');
         const maxRisk = document.getElementById('maxRisk');
+        const stopDistance = document.getElementById('stopDistance');
+        const pointValue = document.getElementById('pointValue');
+        const scaleTotal = document.getElementById('scaleTotal');
+        const scaleVol = document.getElementById('scaleVol');
+        const scaleDd = document.getElementById('scaleDd');
+        const scaleSig = document.getElementById('scaleSig');
+        const scaleExec = document.getElementById('scaleExec');
+        const sizingExplanation = document.getElementById('sizingExplanation');
         
         console.log('Updating position suggestion UI with data:', data);
         
@@ -6876,16 +6627,27 @@ class TradingApp {
         
         if (suggestedQuantity) suggestedQuantity.textContent = contracts || '--';
         if (sizingMethod) sizingMethod.textContent = 'Position Sizing';
-        if (riskRatio) riskRatio.textContent = explain.f_total ? `${(explain.f_total * 100).toFixed(2)}%` : '--';
-        if (estimatedInvestment) estimatedInvestment.textContent = explain.R_star ? `$${explain.R_star.toFixed(2)}` : '--';
-        if (maxRisk) maxRisk.textContent = explain.R ? `$${explain.R.toFixed(2)}` : '--';
+        if (estimatedInvestment) estimatedInvestment.textContent = data.estimatedInvestment ? `$${data.estimatedInvestment.toFixed(2)}` : '--';
+        if (maxRisk) maxRisk.textContent = data.maxRisk ? `$${data.maxRisk.toFixed(2)}` : '--';
+        if (stopDistance) stopDistance.textContent = data.stopDistance ? data.stopDistance.toFixed(4) : '--';
+        if (pointValue) pointValue.textContent = data.pointValue ? data.pointValue.toFixed(2) : '--';
+        if (scaleTotal) scaleTotal.textContent = data.scaleTotal ? data.scaleTotal.toFixed(4) : '--';
+        if (scaleVol) scaleVol.textContent = data.scaleVol ? data.scaleVol.toFixed(4) : '--';
+        if (scaleDd) scaleDd.textContent = data.scaleDd ? data.scaleDd.toFixed(4) : '--';
+        if (scaleSig) scaleSig.textContent = data.scaleSig ? data.scaleSig.toFixed(4) : '--';
+        if (scaleExec) scaleExec.textContent = data.scaleExec ? data.scaleExec.toFixed(4) : '--';
+        if (sizingExplanation) sizingExplanation.textContent = explain || '--';
         
         // Store suggested quantity for apply button
         this.lastSuggestedQuantity = contracts;
     }
     
     clearPositionSuggestion() {
-        const elements = ['suggestedQuantity', 'sizingMethod', 'riskRatio', 'estimatedInvestment', 'maxRisk'];
+        const elements = [
+            'suggestedQuantity', 'sizingMethod', 'estimatedInvestment', 'maxRisk',
+            'stopDistance', 'pointValue', 'scaleTotal', 'scaleVol', 'scaleDd', 
+            'scaleSig', 'scaleExec', 'sizingExplanation'
+        ];
         elements.forEach(id => {
             const element = document.getElementById(id);
             if (element) element.textContent = '--';
@@ -7039,6 +6801,11 @@ class TradingApp {
                                         </div>
                                         <div class="card-body">
                                             <div class="mb-3">
+                                                <label class="form-label">Bot Token</label>
+                                                <input type="text" class="form-control" id="telegramBotToken" value="${settings.telegram_bot_token || ''}" placeholder="Enter your Telegram bot token">
+                                                <div class="form-text">Get your bot token from @BotFather on Telegram</div>
+                                            </div>
+                                            <div class="mb-3">
                                                 <label class="form-label">Chat ID</label>
                                                 <input type="text" class="form-control" id="telegramChatId" value="${settings.telegram_chat_id}" placeholder="Enter your Telegram chat ID">
                                                 <div class="form-text">Get your chat ID by messaging @userinfobot on Telegram</div>
@@ -7137,6 +6904,7 @@ class TradingApp {
         try {
             const settings = {
                 telegram_enabled: document.getElementById('telegramEnabled').checked,
+                telegram_bot_token: document.getElementById('telegramBotToken').value,
                 telegram_chat_id: document.getElementById('telegramChatId').value,
                 email_enabled: document.getElementById('emailEnabled').checked,
                 email_address: document.getElementById('emailAddress').value,
@@ -7175,12 +6943,9 @@ class TradingApp {
         try {
             const response = await this.apiCall('/notifications/test', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
                 body: JSON.stringify({
-                    message: 'This is a test notification from IBBot',
-                    type: 'info'
+                    channel: 'chrome',
+                    message: 'This is a test notification from IBBot'
                 })
             });
 
@@ -7195,7 +6960,41 @@ class TradingApp {
         }
     }
 
-    // 通知历史记录功能
+    // 加载通知历史记录到面板
+    async loadNotificationHistory() {
+        try {
+            const response = await this.apiCall('/notifications/history?limit=50');
+            const history = response.history || [];
+
+            const tbody = document.getElementById('notificationHistoryBody');
+            if (history.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6" class="text-center text-muted py-3">
+                            <i class="fas fa-bell-slash"></i>
+                            <p class="mb-0">No notification history found</p>
+                        </td>
+                    </tr>
+                `;
+            } else {
+                tbody.innerHTML = this.renderNotificationHistoryRows(history);
+            }
+
+        } catch (error) {
+            console.error('Failed to load notification history:', error);
+            const tbody = document.getElementById('notificationHistoryBody');
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" class="text-center text-danger py-3">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <p class="mb-0">Failed to load notification history</p>
+                    </td>
+                </tr>
+            `;
+        }
+    }
+
+    // 通知历史记录功能（保留原有弹窗方法以防其他地方调用）
     async showNotificationHistory() {
         try {
             const response = await this.apiCall('/notifications/history?limit=50');
@@ -7337,8 +7136,19 @@ class TradingApp {
             const response = await this.apiCall(url);
             const history = response.history || [];
 
-            const tbody = document.querySelector('#notificationHistoryTable tbody');
-            tbody.innerHTML = this.renderNotificationHistoryRows(history);
+            const tbody = document.getElementById('notificationHistoryBody');
+            if (history.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6" class="text-center text-muted py-3">
+                            <i class="fas fa-bell-slash"></i>
+                            <p class="mb-0">No notification history found</p>
+                        </td>
+                    </tr>
+                `;
+            } else {
+                tbody.innerHTML = this.renderNotificationHistoryRows(history);
+            }
 
         } catch (error) {
             console.error('Failed to filter notification history:', error);
@@ -7348,31 +7158,27 @@ class TradingApp {
 
     // G Rules 配置管理方法
     async saveGRulesConfig() {
+        console.log('Save G Rules button clicked');
         try {
             const config = {
-                g0_enabled: document.getElementById('g0_enabled').checked,
-                g0_max_position_pct: parseFloat(document.getElementById('g0_max_position_pct').value) || 10,
-                g1_enabled: document.getElementById('g1_enabled').checked,
-                g1_max_daily_loss_pct: parseFloat(document.getElementById('g1_max_daily_loss_pct').value) || 5,
-                g2_enabled: document.getElementById('g2_enabled').checked,
-                g2_max_total_exposure_pct: parseFloat(document.getElementById('g2_max_total_exposure_pct').value) || 80,
-                g3_enabled: document.getElementById('g3_enabled').checked,
-                g3_max_sector_exposure_pct: parseFloat(document.getElementById('g3_max_sector_exposure_pct').value) || 30,
-                g4_enabled: document.getElementById('g4_enabled').checked,
-                g4_max_correlation: parseFloat(document.getElementById('g4_max_correlation').value) || 0.7
+                g0_account_breaker: parseFloat(document.getElementById('g0AccountBreaker').value) || 5.0,
+                g1_max_risk_per_trade: parseFloat(document.getElementById('g1MaxRiskPerTrade').value) || 2.0,
+                g2_max_position_per_symbol: parseFloat(document.getElementById('g2MaxPositionPerSymbol').value) || 10.0,
+                g3_correlation_check: document.getElementById('g3CorrelationCheck').value === 'enabled',
+                g4_liquidity_check: document.getElementById('g4LiquidityCheck').value === 'enabled',
+                g5_time_window: document.getElementById('g5TimeWindow').value === 'enabled'
             };
 
             const response = await this.apiCall('/sizing/policy', {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
                 body: JSON.stringify({ g_rules: config })
             });
 
             if (response.success) {
                 this.showAlert('success', 'G Rules 配置已保存');
-                this.loadGRulesStatus();
+                // 刷新配置显示和状态
+                await this.loadGRulesConfig();
+                await this.loadGRulesStatus();
             } else {
                 this.showAlert('danger', 'G Rules 配置保存失败: ' + (response.error || '未知错误'));
             }
@@ -7385,16 +7191,12 @@ class TradingApp {
     async resetGRulesConfig() {
         if (confirm('确定要重置 G Rules 配置为默认值吗？')) {
             // 重置为默认值
-            document.getElementById('g0_enabled').checked = true;
-            document.getElementById('g0_max_position_pct').value = 10;
-            document.getElementById('g1_enabled').checked = true;
-            document.getElementById('g1_max_daily_loss_pct').value = 5;
-            document.getElementById('g2_enabled').checked = true;
-            document.getElementById('g2_max_total_exposure_pct').value = 80;
-            document.getElementById('g3_enabled').checked = true;
-            document.getElementById('g3_max_sector_exposure_pct').value = 30;
-            document.getElementById('g4_enabled').checked = true;
-            document.getElementById('g4_max_correlation').value = 0.7;
+            document.getElementById('g0AccountBreaker').value = 5.0;
+            document.getElementById('g1MaxRiskPerTrade').value = 2.0;
+            document.getElementById('g2MaxPositionPerSymbol').value = 10.0;
+            document.getElementById('g3CorrelationCheck').value = 'enabled';
+            document.getElementById('g4LiquidityCheck').value = 'enabled';
+            document.getElementById('g5TimeWindow').value = 'enabled';
             
             this.showAlert('info', 'G Rules 配置已重置为默认值');
         }
@@ -7403,20 +7205,16 @@ class TradingApp {
     async loadGRulesConfig() {
         try {
             const response = await this.apiCall('/sizing/policy');
-            if (response.success && response.data && response.data.g_rules) {
-                const config = response.data.g_rules;
+            if (response.g_rules) {
+                const config = response.g_rules;
                 
                 // 加载配置到表单
-                document.getElementById('g0_enabled').checked = config.g0_enabled !== false;
-                document.getElementById('g0_max_position_pct').value = config.g0_max_position_pct || 10;
-                document.getElementById('g1_enabled').checked = config.g1_enabled !== false;
-                document.getElementById('g1_max_daily_loss_pct').value = config.g1_max_daily_loss_pct || 5;
-                document.getElementById('g2_enabled').checked = config.g2_enabled !== false;
-                document.getElementById('g2_max_total_exposure_pct').value = config.g2_max_total_exposure_pct || 80;
-                document.getElementById('g3_enabled').checked = config.g3_enabled !== false;
-                document.getElementById('g3_max_sector_exposure_pct').value = config.g3_max_sector_exposure_pct || 30;
-                document.getElementById('g4_enabled').checked = config.g4_enabled !== false;
-                document.getElementById('g4_max_correlation').value = config.g4_max_correlation || 0.7;
+                document.getElementById('g0AccountBreaker').value = config.g0_account_breaker || 5.0;
+                document.getElementById('g1MaxRiskPerTrade').value = config.g1_max_risk_per_trade || 2.0;
+                document.getElementById('g2MaxPositionPerSymbol').value = config.g2_max_position_per_symbol || 10.0;
+                document.getElementById('g3CorrelationCheck').value = config.g3_correlation_check ? 'enabled' : 'disabled';
+                document.getElementById('g4LiquidityCheck').value = config.g4_liquidity_check ? 'enabled' : 'disabled';
+                document.getElementById('g5TimeWindow').value = config.g5_time_window ? 'enabled' : 'disabled';
             }
         } catch (error) {
             console.error('加载 G Rules 配置失败:', error);
@@ -7453,6 +7251,161 @@ class TradingApp {
         
         if (messageElement) {
             messageElement.textContent = status.message || (status.passed ? '正常' : '违规');
+        }
+    }
+
+    showGRulesModal() {
+        // Create modal HTML if not exists
+        let modal = document.getElementById('gRulesModal');
+        if (!modal) {
+            const modalHTML = `
+                <div class="modal fade" id="gRulesModal" tabindex="-1" aria-labelledby="gRulesModalLabel" aria-hidden="true">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title" id="gRulesModalLabel"><i class="fas fa-cog"></i> G Rules Configuration</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body" id="gRulesModalBody">
+                                <!-- G Rules form will be loaded here -->
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                                <button type="button" class="btn btn-primary" id="saveGRulesModalBtn">保存</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modalHTML);
+            modal = document.getElementById('gRulesModal');
+            
+            // Add save event listener
+            document.getElementById('saveGRulesModalBtn').addEventListener('click', () => {
+                this.saveGRulesFromModal();
+            });
+        }
+        
+        // Load G Rules form content into modal
+        const gRulesSection = document.getElementById('gRulesConfigSection');
+        const modalBody = document.getElementById('gRulesModalBody');
+        if (gRulesSection && modalBody) {
+            modalBody.innerHTML = gRulesSection.innerHTML;
+        }
+        
+        // Show modal
+        const bootstrapModal = new bootstrap.Modal(modal);
+        bootstrapModal.show();
+    }
+
+    showSRulesModal() {
+        // Create modal HTML if not exists
+        let modal = document.getElementById('sRulesModal');
+        if (!modal) {
+            const modalHTML = `
+                <div class="modal fade" id="sRulesModal" tabindex="-1" aria-labelledby="sRulesModalLabel" aria-hidden="true">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title" id="sRulesModalLabel"><i class="fas fa-calculator"></i> S Rules Configuration</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body" id="sRulesModalBody">
+                                <!-- S Rules form will be loaded here -->
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                                <button type="button" class="btn btn-primary" id="saveSRulesModalBtn">保存</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modalHTML);
+            modal = document.getElementById('sRulesModal');
+            
+            // Add save event listener
+            document.getElementById('saveSRulesModalBtn').addEventListener('click', () => {
+                this.saveSRulesFromModal();
+            });
+        }
+        
+        // Load S Rules form content into modal
+        const sRulesSection = document.getElementById('sRulesConfigSection');
+        const modalBody = document.getElementById('sRulesModalBody');
+        if (sRulesSection && modalBody) {
+            modalBody.innerHTML = sRulesSection.innerHTML;
+        }
+        
+        // Show modal
+        const bootstrapModal = new bootstrap.Modal(modal);
+        bootstrapModal.show();
+    }
+
+    async saveGRulesFromModal() {
+        try {
+            // Get form data from modal
+            const modalBody = document.getElementById('gRulesModalBody');
+            const form = modalBody.querySelector('#gRulesForm');
+            if (!form) return;
+            
+            const formData = new FormData(form);
+            const config = {};
+            for (let [key, value] of formData.entries()) {
+                config[key] = value;
+            }
+            
+            // Save to backend
+            await this.apiCall('/api/g-rules/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+            
+            this.showAlert('success', 'G Rules配置已保存');
+            
+            // Close modal
+            const modal = bootstrap.Modal.getInstance(document.getElementById('gRulesModal'));
+            if (modal) modal.hide();
+            
+            // Reload G Rules status
+            this.loadGRulesStatus();
+            
+        } catch (error) {
+            console.error('保存G Rules配置失败:', error);
+            this.showAlert('danger', '保存G Rules配置失败');
+        }
+    }
+
+    async saveSRulesFromModal() {
+        try {
+            // Get form data from modal
+            const modalBody = document.getElementById('sRulesModalBody');
+            const form = modalBody.querySelector('#sizingPolicyForm');
+            if (!form) return;
+            
+            const formData = new FormData(form);
+            const config = {};
+            for (let [key, value] of formData.entries()) {
+                config[key] = value;
+            }
+            
+            // Save to backend
+            await this.apiCall('/api/sizing-policy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+            
+            this.showAlert('success', 'S Rules配置已保存');
+            
+            // Close modal
+            const modal = bootstrap.Modal.getInstance(document.getElementById('sRulesModal'));
+            if (modal) modal.hide();
+            
+        } catch (error) {
+            console.error('保存S Rules配置失败:', error);
+            this.showAlert('danger', '保存S Rules配置失败');
         }
     }
 }

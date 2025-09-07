@@ -296,9 +296,17 @@ class DatabaseManager:
                     risk_percent REAL,
                     sizing_method TEXT NOT NULL,
                     calculation_details TEXT,
+                    g_rules_checked TEXT,
                     timestamp TEXT NOT NULL
                 )
             """)
+            
+            # 添加g_rules_checked字段（如果不存在）
+            try:
+                cursor.execute("ALTER TABLE sizing_history ADD COLUMN g_rules_checked TEXT")
+            except sqlite3.OperationalError:
+                # 字段已存在，忽略错误
+                pass
             
             # 创建通知设置表
             cursor.execute("""
@@ -888,7 +896,8 @@ class DatabaseManager:
     def save_sizing_history(self, symbol: str, action: str, suggested_quantity: int, 
                            current_price: float = None, account_value: float = None,
                            position_size: float = None, risk_percent: float = None,
-                           sizing_method: str = "default", calculation_details: str = None):
+                           sizing_method: str = "default", calculation_details: str = None,
+                           g_rules_checked: str = None):
         """保存仓位计算历史"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -898,11 +907,11 @@ class DatabaseManager:
                 """
                 INSERT INTO sizing_history 
                 (symbol, action, suggested_quantity, current_price, account_value, 
-                 position_size, risk_percent, sizing_method, calculation_details, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 position_size, risk_percent, sizing_method, calculation_details, g_rules_checked, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (symbol, action, suggested_quantity, current_price, account_value,
-                 position_size, risk_percent, sizing_method, calculation_details, timestamp)
+                 position_size, risk_percent, sizing_method, calculation_details, g_rules_checked, timestamp)
             )
             conn.commit()
             database_logger.debug(f"Sizing history saved for {symbol}: {suggested_quantity} shares")
@@ -928,7 +937,7 @@ class DatabaseManager:
             
             query = f"""
                 SELECT symbol, action, suggested_quantity, current_price, account_value,
-                       position_size, risk_percent, sizing_method, calculation_details, timestamp
+                       position_size, risk_percent, sizing_method, calculation_details, g_rules_checked, timestamp
                 FROM sizing_history 
                 {where_clause}
                 ORDER BY timestamp DESC
@@ -941,6 +950,14 @@ class DatabaseManager:
             rows = cursor.fetchall()
             history = []
             for row in rows:
+                # 解析g_rules_checked JSON字符串
+                g_rules_checked = []
+                if row[9]:  # g_rules_checked字段
+                    try:
+                        g_rules_checked = json.loads(row[9])
+                    except (json.JSONDecodeError, TypeError):
+                        g_rules_checked = []
+                
                 history.append({
                     'symbol': row[0],
                     'action': row[1],
@@ -951,7 +968,8 @@ class DatabaseManager:
                     'risk_percent': row[6],
                     'sizing_method': row[7],
                     'calculation_details': row[8],
-                    'timestamp': row[9]
+                    'g_rules_checked': g_rules_checked,
+                    'timestamp': row[10]
                 })
             
             database_logger.debug(f"Loaded {len(history)} sizing history records")

@@ -164,11 +164,22 @@ class PositionSizingRequest(BaseModel):
     @validator('symbol')
     def symbol_not_empty(cls, v):
         if not v or not v.strip():
-            raise ValueError('symbol is required')
+            raise ValueError('symbol cannot be empty')
         return v.strip().upper()
 
     @validator('stop_distance')
     def stop_distance_positive(cls, v):
-        if v is None or v <= 0:
-            raise ValueError('stop_distance must be > 0')
+        if v <= 0:
+            raise ValueError('stop_distance must be greater than 0')
         return v
+
+class CurrentPriceRequest(BaseModel):
+    """获取当前价格请求模型"""
+    symbol: str
+    exchange: str = "SMART"
+    
+    @validator('symbol')
+    def symbol_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('symbol cannot be empty')
+        return v.strip().upper()

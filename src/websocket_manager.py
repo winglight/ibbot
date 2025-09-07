@@ -61,6 +61,10 @@ class WebSocketManager:
             websocket_logger.info(f"清理了 {len(disconnected)} 个断开的WebSocket连接")
         
         websocket_logger.debug(f"广播消息到 {len(self.connections)} 个连接: {message}")
+    
+    async def broadcast_notification(self, notification: Dict[str, Any]):
+        """广播通知消息（broadcast方法的别名）"""
+        await self.broadcast(notification)
 
 
 # 全局WebSocket管理器实例
