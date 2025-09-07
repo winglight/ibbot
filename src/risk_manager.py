@@ -400,8 +400,10 @@ class RiskManager:
             risk_logger.info("=== Starting position monitoring cycle ===")
             
             # 设置fast=False确保获取最新实时价格，而不是使用缓存
-            positions = self.ibkr_client.get_positions(fast=False)
-            account_info = self.ibkr_client.get_account_info()
+            # get_positions 和 get_account_info 是同步阻塞方法，
+            # 使用 asyncio.to_thread 在后台线程执行以避免阻塞事件循环
+            positions = await asyncio.to_thread(self.ibkr_client.get_positions, fast=False)
+            account_info = await asyncio.to_thread(self.ibkr_client.get_account_info)
             
             risk_logger.info(f"Found {len(positions)} positions to monitor")
             risk_logger.info(f"Active risk rules: {len([r for r in self.risk_rules.values() if r.enabled])}")
@@ -498,13 +500,16 @@ class RiskManager:
         
         # 获取最新实时价格，而不是使用position中的价格
         try:
-            # 尝试获取最新实时价格
-            real_time_data = self.ibkr_client.get_real_time_data(symbol)
-            if real_time_data and 'price' in real_time_data:
-                current_price = real_time_data['price']
+            # 尝试在后台线程获取最新实时价格，避免阻塞事件循环
+            real_time_data = await asyncio.to_thread(self.ibkr_client.get_real_time_data, symbol)
+            price = None
+            if real_time_data:
+                # get_real_time_data 返回的键为 'last'
+                price = real_time_data.get('price') or real_time_data.get('last')
+            if price:
+                current_price = price
                 risk_logger.info(f"Using real-time price for {symbol}: ${current_price:.2f}")
             else:
-                # 如果无法获取实时价格，则使用position中的价格
                 current_price = position['current_price']
                 risk_logger.info(f"Using position price for {symbol}: ${current_price:.2f}")
         except Exception as e:
@@ -935,7 +940,8 @@ class RiskManager:
             risk_logger.debug(f"IBKR连接状态正常，开始获取持仓信息 for {order_request.symbol}")
             
             # Determine order action
-            positions = self.ibkr_client.get_positions()
+            # get_positions 为同步阻塞方法，放到后台线程执行
+            positions = await asyncio.to_thread(self.ibkr_client.get_positions)
             risk_logger.debug(f"获取到 {len(positions)} 个持仓")
             
             position = next((p for p in positions if p['symbol'] == order_request.symbol), None)
