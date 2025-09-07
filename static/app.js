@@ -500,8 +500,8 @@ class TradingApp {
                     // 设置输入框的值
                     symbolInput.value = lastSymbol;
                     
-                    // 触发 change 事件以更新组合框
-                    const event = new Event('change');
+                    // 触发 input 事件以更新组合框
+                    const event = new Event('input');
                     symbolInput.dispatchEvent(event);
                 }
             }
@@ -741,27 +741,14 @@ class TradingApp {
         // Order type change
         document.getElementById('orderType').addEventListener('change', (e) => {
             const priceInput = document.getElementById('orderPrice');
-            const riskRuleSection = document.getElementById('riskRuleSection');
-            
+
             priceInput.disabled = e.target.value === 'MARKET';
             if (e.target.value === 'MARKET') {
                 priceInput.value = '';
-                riskRuleSection.style.display = 'none';
-            } else {
-                // Check if symbol exists in portfolio
-                const symbol = document.getElementById('orderSymbol').value.toUpperCase();
-                const symbolInPortfolio = this.positions && this.positions.some(pos => pos.symbol === symbol);
-                
-                if (symbolInPortfolio) {
-                    // Hide risk rule section if symbol exists in portfolio
-                    riskRuleSection.style.display = 'none';
-                } else {
-                    // Show risk rule section for limit orders only when symbol not in portfolio
-                    riskRuleSection.style.display = 'block';
-                    // Auto-calculate risk prices when switching to limit order
-                    this.updateRiskPrices().catch(console.error);
-                }
             }
+
+            // Recalculate SL/TP and suggestion whenever order type changes
+            this.updateRiskPrices().catch(console.error);
         });
         
         // Order price change - auto-calculate risk prices
@@ -797,12 +784,10 @@ class TradingApp {
             }, 100);
         });
         
-        // Order symbol change - check portfolio status, update risk rule visibility and refresh position suggestion
+        // Order symbol change - update current price, SL/TP, and position suggestion
         document.getElementById('orderSymbol').addEventListener('input', () => {
-            const orderType = document.getElementById('orderType').value;
-            const riskRuleSection = document.getElementById('riskRuleSection');
             const symbol = document.getElementById('orderSymbol').value.toUpperCase().trim();
-            
+
             // 获取当前价格（如果输入的标的长度>=2）
             if (symbol.length >= 2) {
                 // 使用防抖避免频繁调用
@@ -817,21 +802,10 @@ class TradingApp {
                     priceDisplay.style.display = 'none';
                 }
             }
-            
-            if (orderType === 'LIMIT') {
-                const symbolInPortfolio = this.positions && this.positions.some(pos => pos.symbol === symbol);
-                
-                if (symbolInPortfolio) {
-                    // Hide risk rule section if symbol exists in portfolio
-                    riskRuleSection.style.display = 'none';
-                } else {
-                    // Show risk rule section for limit orders when symbol not in portfolio
-                    riskRuleSection.style.display = 'block';
-                    // Auto-calculate risk prices
-                    this.updateRiskPrices().catch(console.error);
-                }
-            }
-            
+
+            // Recalculate risk prices whenever symbol changes
+            this.updateRiskPrices().catch(console.error);
+
             // Auto refresh position suggestion when symbol changes
             clearTimeout(this.positionRefreshTimeout);
             this.positionRefreshTimeout = setTimeout(() => {
@@ -1595,39 +1569,45 @@ class TradingApp {
         const orderType = document.getElementById('orderType').value;
         const orderAction = document.getElementById('orderAction').value;
         const orderPrice = parseFloat(document.getElementById('orderPrice').value);
-        
+        const riskRuleSection = document.getElementById('riskRuleSection');
+
         // Clear SL/TP if no symbol
         if (!orderSymbol) {
             document.getElementById('stopLossPrice').value = '';
             document.getElementById('takeProfitPrice').value = '';
+            if (riskRuleSection) riskRuleSection.style.display = 'none';
             this.updateExpectedPnL();
             return;
         }
-        
+
         // Check if this is opening or closing position
         const isOpening = this.isOpeningPosition(orderSymbol, orderAction);
-        
+
         // If closing position, don't calculate SL/TP and hide suggestions
         if (!isOpening) {
             document.getElementById('stopLossPrice').value = '';
             document.getElementById('takeProfitPrice').value = '';
+            if (riskRuleSection) riskRuleSection.style.display = 'none';
             document.getElementById('suggestedPositionSection').style.display = 'none';
             this.updateExpectedPnL();
             return;
         }
-        
-        // Show suggestions for opening positions
+
+        // Show suggestions and risk rule section for opening positions
         document.getElementById('suggestedPositionSection').style.display = 'block';
-        
+
         // Get trading price
         const tradingPrice = await this.getTradingPrice(orderSymbol, orderType, orderPrice);
-        
+
         if (!tradingPrice || tradingPrice <= 0) {
             document.getElementById('stopLossPrice').value = '';
             document.getElementById('takeProfitPrice').value = '';
+            if (riskRuleSection) riskRuleSection.style.display = 'none';
             this.updateExpectedPnL();
             return;
         }
+
+        if (riskRuleSection) riskRuleSection.style.display = 'block';
         
         // Get configuration from backend
         let stopLossRatio = 0.025; // Default 2.5%
