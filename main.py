@@ -2497,86 +2497,6 @@ async def update_risk_config(payload: RiskConfigUpdateRequest, user: Optional[st
 # Removed duplicate /api/position-sizing endpoint - use /api/sizing/preview instead
 
 
-# 新增：S 规则 - 预览接口（返回 N/explain，并写入历史）
-@app.post("/api/sizing/preview")
-async def api_sizing_preview(payload: PositionSizingRequest, user: Optional[str] = Depends(get_current_user)):
-    if 'risk_manager' not in globals() or risk_manager is None:
-        raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    
-    # Note: Position sizing calculation doesn't require IB connection
-    # Only actual order placement requires connection
-    try:
-        # 获取实时账户信息
-        account_info = {}
-        if ibkr_client and connection_manager.is_connected():
-            try:
-                account_response = await asyncio.wait_for(
-                    ibkr_client.get_account_info(),
-                    timeout=5.0
-                )
-                if account_response:
-                    account_info = account_response
-            except Exception as e:
-                logger.warning(f"Failed to get account info for sizing preview: {e}")
-        
-        # 更新风险管理器的账户状态
-        if account_info:
-            risk_manager.update_equity_state(account_info)
-        
-        # 使用异步执行器和超时来避免阻塞
-        loop = asyncio.get_event_loop()
-        try:
-            res = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: risk_manager.position_sizing(
-                        symbol=payload.symbol,
-                        stop_distance=payload.stop_distance,
-                        rv_current=payload.rv_current,
-                        signal_tier=(payload.signal_tier or 'A'),
-                        execution_metrics=payload.execution_metrics,
-                        rv_ref=payload.rv_ref,
-                    )
-                ),
-                timeout=10.0  # 10秒超时
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"Position sizing request timed out for {payload.symbol}")
-            raise HTTPException(status_code=408, detail="Position sizing calculation timed out. This may be due to slow market data retrieval.")
-        # 写入历史
-        try:
-            db = get_db_manager()
-            db.save_sizing_history(
-                symbol=payload.symbol,
-                action="preview",
-                suggested_quantity=int(res.contracts),
-                current_price=getattr(payload, 'rv_current', None),
-                sizing_method="risk_based",
-                calculation_details=json.dumps({
-                    "request": payload.dict(exclude_none=True),
-                    "result": asdict(res)
-                })
-            )
-        except Exception as he:
-            logger.warning(f"/api/sizing/preview: save history failed: {he}")
-        explain = {
-            "R": res.R,
-            "R_star": res.R_star,
-            "S": res.stop_distance,
-            "point_value": res.point_value,
-            "f_sig": res.scale_sig,
-            "f_vol": res.scale_vol,
-            "f_dd": res.scale_dd,
-            "f_exec": res.scale_exec,
-            "f_total": res.scale_total,
-            "explanation": res.explanation,
-        }
-        return {"N": int(res.contracts), "explain": explain}
-    except Exception as e:
-        logger.error(f"Sizing preview error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post("/api/position-sizing")
 async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str] = Depends(get_current_user)):
     """Position sizing calculation - optimized to only require symbol and stop_distance"""
@@ -2712,39 +2632,54 @@ async def get_sizing_history(symbol: Optional[str] = None, since: Optional[str] 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 新增：S 规则 - 配置读写（持久化于 strategy_settings.sizing_policy）
-@app.get("/api/sizing/policy")
-async def get_sizing_policy(user: Optional[str] = Depends(get_current_user)):
+# 配置管理接口 - 统一管理G Rules和S Rules
+@app.get("/api/config/rules")
+async def get_config_rules(user: Optional[str] = Depends(get_current_user)):
     try:
         db = get_db_manager()
-        settings = db.load_strategy_settings()
-        policy = settings.get("sizing_policy") if isinstance(settings, dict) else None
-        return {"s_rules": policy or {}}
+        
+        # 从新的config表获取配置
+        g_rules = db.get_config("g_rules", {})
+        s_rules = db.get_config("s_rules", {})
+        
+        # 如果config表中没有数据，尝试从旧的strategy_settings迁移
+        if not g_rules and not s_rules:
+            settings = db.load_strategy_settings()
+            if isinstance(settings, dict):
+                g_rules = settings.get("g_rules_config", {})
+                s_rules = settings.get("sizing_policy", {})
+                
+                # 迁移到新的config表
+                if g_rules:
+                    db.save_config("g_rules", g_rules, "G Rules配置")
+                if s_rules:
+                    db.save_config("s_rules", s_rules, "S Rules配置")
+        
+        return {"g_rules": g_rules, "s_rules": s_rules}
     except Exception as e:
-        logger.error(f"Get sizing policy error: {e}")
+        logger.error(f"Get config rules error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/api/sizing/policy")
-async def update_sizing_policy(payload: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
+@app.put("/api/config/rules")
+async def update_config_rules(payload: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
     try:
         db = get_db_manager()
-        # 提取s_rules或g_rules数据
+        
+        # 保存G Rules和S Rules到config表
+        if "g_rules" in payload:
+            db.save_config("g_rules", payload["g_rules"], "G Rules配置")
+        
         if "s_rules" in payload:
-            db.save_strategy_settings({"sizing_policy": payload["s_rules"]})
-        elif "g_rules" in payload:
-            db.save_strategy_settings({"g_rules_config": payload["g_rules"]})
-        else:
-            # 兼容旧格式
-            db.save_strategy_settings({"sizing_policy": payload})
+            db.save_config("s_rules", payload["s_rules"], "S Rules配置")
         
         # 读回确认
-        settings = db.load_strategy_settings()
-        policy = settings.get("sizing_policy") if isinstance(settings, dict) else None
-        g_rules = settings.get("g_rules_config") if isinstance(settings, dict) else None
-        return {"success": True, "s_rules": policy or {}, "g_rules": g_rules or {}}
+        g_rules = db.get_config("g_rules", {})
+        s_rules = db.get_config("s_rules", {})
+        
+        return {"success": True, "g_rules": g_rules, "s_rules": s_rules}
     except Exception as e:
-        logger.error(f"Update sizing policy error: {e}")
+        logger.error(f"Update config rules error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

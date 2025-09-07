@@ -1,1 +1,0 @@
-{"N":0,"explain":{"R":0.0,"R_star":0.0,"S":10.0,"point_value":2.0,"f_sig":1.0,"f_vol":0.25,"f_dd":1.0,"f_exec":1.0,"f_total":0.25,"explanation":"Equity=0.00, r=0.0050 -> R=0.00 | scale_vol=0.250, scale_dd=1.000, scale_sig=1.000, scale_exec=1.000 -> total=0.250 | R*=0.00, stop=10.0, point_value=2.0 -> raw=0.000, rounding=floor -> 0"}}

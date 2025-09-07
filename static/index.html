@@ -247,71 +247,7 @@
                             <!-- G Rules Tab -->
                             <div class="tab-pane fade show active" id="g-rules" role="tabpanel" aria-labelledby="g-rules-tab">
                                 <!-- G Rules Configuration Form (Hidden by default) -->
-                                <div class="mb-3" id="gRulesConfigSection" style="display: none;">
-                                    <h6><i class="fas fa-cog"></i> G Rules Configuration</h6>
-                                    <form id="gRulesForm">
-                                        <div class="row">
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">G0: 账户级断路器 (%)</label>
-                                                    <input type="number" class="form-control form-control-sm" id="g0AccountBreaker" step="0.1" placeholder="5.0" max="20">
-                                                    <small class="form-text text-muted">当日总亏损超过此比例时停止交易</small>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">G1: 单笔最大风险 (%)</label>
-                                                    <input type="number" class="form-control form-control-sm" id="g1MaxRiskPerTrade" step="0.1" placeholder="2.0" max="10">
-                                                    <small class="form-text text-muted">单笔交易最大风险占账户比例</small>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="row">
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">G2: 单标的最大仓位 (%)</label>
-                                                    <input type="number" class="form-control form-control-sm" id="g2MaxPositionPerSymbol" step="0.1" placeholder="10.0" max="50">
-                                                    <small class="form-text text-muted">单个标的最大仓位占账户比例</small>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">G3: 相关性检查</label>
-                                                    <select class="form-select form-select-sm" id="g3CorrelationCheck">
-                                                        <option value="enabled">启用</option>
-                                                        <option value="disabled">禁用</option>
-                                                    </select>
-                                                    <small class="form-text text-muted">检查持仓标的间相关性</small>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="row">
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">G4: 流动性检查</label>
-                                                    <select class="form-select form-select-sm" id="g4LiquidityCheck">
-                                                        <option value="enabled">启用</option>
-                                                        <option value="disabled">禁用</option>
-                                                    </select>
-                                                    <small class="form-text text-muted">检查标的流动性是否充足</small>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">G5: 时间窗口限制</label>
-                                                    <select class="form-select form-select-sm" id="g5TimeWindow">
-                                                        <option value="enabled">启用</option>
-                                                        <option value="disabled">禁用</option>
-                                                    </select>
-                                                    <small class="form-text text-muted">限制交易时间窗口</small>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <button type="button" class="btn btn-primary btn-sm" id="saveGRulesBtn">
-                                            <i class="fas fa-save"></i> Save G Rules
-                                        </button>
-                                    </form>
-                                </div>
+
                                 
                                 <hr>
                                 
@@ -380,50 +316,62 @@
                             
                             <!-- S Rules Tab -->
                             <div class="tab-pane fade" id="s-rules" role="tabpanel" aria-labelledby="s-rules-tab">
-                                <!-- Sizing Policy Form (Hidden by default) -->
-                                <div class="mb-3" id="sRulesConfigSection" style="display: none;">
-                                    <h6><i class="fas fa-cog"></i> Sizing Policy Settings</h6>
-                                    <form id="sizingPolicyForm">
-                                        <div class="row">
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">Default Method</label>
-                                                    <select class="form-select form-select-sm" id="defaultSizingMethod">
-                                                        <option value="fixed">Fixed Amount</option>
-                                                        <option value="percent">Percent of Portfolio</option>
-                                                        <option value="kelly">Kelly Criterion</option>
-                                                        <option value="volatility">Volatility Based</option>
-                                                    </select>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">Default Value</label>
-                                                    <input type="number" class="form-control form-control-sm" id="defaultSizingValue" step="0.01" placeholder="1000">
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="row">
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">Max Position Size</label>
-                                                    <input type="number" class="form-control form-control-sm" id="maxPositionSize" step="0.01" placeholder="10000">
-                                                </div>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <div class="mb-3">
-                                                    <label class="form-label">Risk Per Trade (%)</label>
-                                                    <input type="number" class="form-control form-control-sm" id="riskPerTrade" step="0.1" placeholder="2.0" max="10">
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <button type="button" class="btn btn-primary btn-sm" id="saveSizingPolicyBtn">
-                                            <i class="fas fa-save"></i> Save Policy
-                                        </button>
-                                    </form>
-                                </div>
-                                
                                 <hr>
+                                
+                                <!-- S Rules Status Display -->
+                                <div class="mb-3">
+                                    <h6><i class="fas fa-list"></i> S Rules Status</h6>
+                                    <div class="table-responsive">
+                                        <table class="table table-sm" id="sRulesStatusTable">
+                                            <thead>
+                                                <tr>
+                                                    <th>Rule</th>
+                                                    <th>Description</th>
+                                                    <th>Status</th>
+                                                    <th>Current Value</th>
+                                                    <th>Last Check</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr>
+                                                    <td>S0</td>
+                                                    <td>仓位计算方法</td>
+                                                    <td><span id="s0_status" class="badge bg-success">正常</span></td>
+                                                    <td id="s0_message">百分比</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>S1</td>
+                                                    <td>仓位数值/百分比</td>
+                                                    <td><span id="s1_status" class="badge bg-success">正常</span></td>
+                                                    <td id="s1_message">1.0%</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>S2</td>
+                                                    <td>最大仓位数量</td>
+                                                    <td><span id="s2_status" class="badge bg-success">正常</span></td>
+                                                    <td id="s2_message">10</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>S3</td>
+                                                    <td>仓位重平衡</td>
+                                                    <td><span id="s3_status" class="badge bg-success">正常</span></td>
+                                                    <td id="s3_message">启用</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>S4</td>
+                                                    <td>波动率调整</td>
+                                                    <td><span id="s4_status" class="badge bg-success">正常</span></td>
+                                                    <td id="s4_message">启用</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
                                 
                                 <!-- Sizing History -->
                                 <div class="mb-3">
@@ -445,6 +393,7 @@
                                     </div>
                                 </div>
                             </div>
+
                         </div>
                     </div>
                 </div>
@@ -1792,6 +1741,163 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/luxon" defer></script>
+    <!-- Config Rules Modal -->
+    <div class="modal fade" id="configRulesModal" tabindex="-1" aria-labelledby="configRulesModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="configRulesModalLabel"><i class="fas fa-cog"></i> 规则配置</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <!-- Nav tabs -->
+                    <ul class="nav nav-tabs" id="configRulesTabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="config-g-rules-tab" data-bs-toggle="tab" data-bs-target="#config-g-rules" type="button" role="tab" aria-controls="config-g-rules" aria-selected="true">
+                                <i class="fas fa-cog"></i> G Rules
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="config-s-rules-tab" data-bs-toggle="tab" data-bs-target="#config-s-rules" type="button" role="tab" aria-controls="config-s-rules" aria-selected="false">
+                                <i class="fas fa-calculator"></i> S Rules
+                            </button>
+                        </li>
+                    </ul>
+                    
+                    <!-- Tab panes -->
+                    <div class="tab-content" id="configRulesTabContent">
+                        <div class="tab-pane fade show active" id="config-g-rules" role="tabpanel" aria-labelledby="config-g-rules-tab">
+                            <div class="mt-3" id="gRulesContent">
+                                <h6><i class="fas fa-cog"></i> G Rules Configuration</h6>
+                                <form id="gRulesForm">
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">G0: 最大回撤 (%)</label>
+                                                <input type="number" class="form-control form-control-sm" id="g0MaxDrawdown" step="0.1" placeholder="5.0" max="20">
+                                                <small class="form-text text-muted">账户最大回撤限制</small>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">G1: 最大亏损 (%)</label>
+                                                <input type="number" class="form-control form-control-sm" id="g1MaxLoss" step="0.1" placeholder="2.0" max="10">
+                                                <small class="form-text text-muted">单笔交易最大亏损限制</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">G2: 单标的最大仓位 (%)</label>
+                                                <input type="number" class="form-control form-control-sm" id="g2MaxPositionPerSymbol" step="0.1" placeholder="10.0" max="50">
+                                                <small class="form-text text-muted">单个标的最大仓位占账户比例</small>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">G3: 相关性检查</label>
+                                                <select class="form-select form-select-sm" id="g3CorrelationCheck">
+                                                    <option value="enabled">启用</option>
+                                                    <option value="disabled">禁用</option>
+                                                </select>
+                                                <small class="form-text text-muted">检查持仓标的间相关性</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">G4: 流动性检查</label>
+                                                <select class="form-select form-select-sm" id="g4LiquidityCheck">
+                                                    <option value="enabled">启用</option>
+                                                    <option value="disabled">禁用</option>
+                                                </select>
+                                                <small class="form-text text-muted">检查标的流动性是否充足</small>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">G5: 时间窗口限制</label>
+                                                <select class="form-select form-select-sm" id="g5TimeWindow">
+                                                    <option value="enabled">启用</option>
+                                                    <option value="disabled">禁用</option>
+                                                </select>
+                                                <small class="form-text text-muted">限制交易时间窗口</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                        <div class="tab-pane fade" id="config-s-rules" role="tabpanel" aria-labelledby="config-s-rules-tab">
+                            <div class="mt-3" id="sRulesContent">
+                                <h6><i class="fas fa-cog"></i> Sizing Policy Settings</h6>
+                                <form id="sizingPolicyForm">
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">Position Sizing Method</label>
+                                                <select class="form-select form-select-sm" id="s0PositionSizing">
+                                                    <option value="fixed">Fixed Amount</option>
+                                                    <option value="percent">Percent of Portfolio</option>
+                                                    <option value="kelly">Kelly Criterion</option>
+                                                    <option value="volatility">Volatility Based</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">Position Value/Percentage</label>
+                                                <input type="number" class="form-control form-control-sm" id="s1PositionValue" step="0.1" placeholder="1.0">
+                                                <small class="form-text text-muted">Value depends on selected method above</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">Max Positions</label>
+                                                <input type="number" class="form-control form-control-sm" id="s2MaxPositions" step="1" placeholder="10" min="1">
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">Position Rebalancing</label>
+                                                <select class="form-select form-select-sm" id="s3Rebalancing">
+                                                    <option value="enabled">Enabled</option>
+                                                    <option value="disabled">Disabled</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label">Volatility Adjustment</label>
+                                                <select class="form-select form-select-sm" id="s4VolatilityAdjustment">
+                                                    <option value="enabled">Enabled</option>
+                                                    <option value="disabled">Disabled</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer d-flex justify-content-between">
+                    <button type="button" class="btn btn-warning" id="resetConfigRulesBtn">重置</button>
+                    <div>
+                        <button type="button" class="btn btn-secondary me-2" data-bs-dismiss="modal">取消</button>
+                        <button type="button" class="btn btn-primary" id="saveConfigRulesBtn">保存</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3" defer></script>

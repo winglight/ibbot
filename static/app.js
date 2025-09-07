@@ -63,9 +63,8 @@ class TradingApp {
             this.loadLogs();
             // 初始化通知面板
             this.updateNotificationPanel();
-            // 加载 G Rules 配置和状态
-            this.loadGRulesConfig();
-            this.loadGRulesStatus();
+            // 加载配置和状态
+            this.loadGSRulesStatus();
             // 加载风险规则
             this.loadRiskRules();
             await cfgPromise.catch(() => {});
@@ -268,14 +267,20 @@ class TradingApp {
             });
         }
 
-        // G Rules and S Rules Settings buttons
+        // Config Rules Settings buttons
         const gRulesSettingsBtn = document.getElementById('gRulesSettingsBtn');
         if (gRulesSettingsBtn) {
-            gRulesSettingsBtn.addEventListener('click', () => this.showGRulesModal());
+            gRulesSettingsBtn.addEventListener('click', () => this.showConfigModal('g-rules'));
         }
         const sRulesSettingsBtn = document.getElementById('sRulesSettingsBtn');
         if (sRulesSettingsBtn) {
-            sRulesSettingsBtn.addEventListener('click', () => this.showSRulesModal());
+            sRulesSettingsBtn.addEventListener('click', () => this.showConfigModal('s-rules'));
+        }
+
+        // Position Sizing Method change event
+        const positionMethodSelect = document.getElementById('s0PositionSizing');
+        if (positionMethodSelect) {
+            positionMethodSelect.addEventListener('change', () => this.updatePositionValueField());
         }
 
         // Strategy and Logs buttons
@@ -307,18 +312,11 @@ class TradingApp {
 
         const logStatsBtn = document.getElementById('logStatsBtn');
         if (logStatsBtn) logStatsBtn.addEventListener('click', () => this.showLogStats());
-        // S Rules (Sizing Policy) event listeners
-        const saveSizingPolicyBtn = document.getElementById('saveSizingPolicyBtn');
-        if (saveSizingPolicyBtn) {
-            saveSizingPolicyBtn.addEventListener('click', () => this.saveSizingPolicy());
-        }
-        
         // Tab switching event listeners
         const sRulesTab = document.getElementById('s-rules-tab');
         if (sRulesTab) {
             sRulesTab.addEventListener('click', () => {
                 this.loadRiskRules();
-                this.loadSizingPolicy();
                 this.loadSizingHistory();
             });
         }
@@ -729,16 +727,7 @@ class TradingApp {
             clearNotificationsBtn.addEventListener('click', () => this.clearNotifications());
         }
         
-        // G Rules 配置表单事件监听器
-        const saveGRulesBtn = document.getElementById('saveGRulesBtn');
-        if (saveGRulesBtn) {
-            saveGRulesBtn.addEventListener('click', () => this.saveGRulesConfig());
-        }
-        
-        const resetGRulesBtn = document.getElementById('resetGRulesBtn');
-        if (resetGRulesBtn) {
-            resetGRulesBtn.addEventListener('click', () => this.resetGRulesConfig());
-        }
+
         
         // 加载通知历史记录到面板
         this.loadNotificationHistory();
@@ -6421,53 +6410,7 @@ class TradingApp {
     }
 
     // S Rules (Sizing Policy) related functions
-    async loadSizingPolicy() {
-        try {
-            const data = await this.apiCall('/sizing/policy');
-            const policy = data.s_rules || {};
-            
-            // Populate form fields
-            const methodSelect = document.getElementById('defaultSizingMethod');
-            const valueInput = document.getElementById('defaultSizingValue');
-            const maxPositionInput = document.getElementById('maxPositionSize');
-            const riskPerTradeInput = document.getElementById('riskPerTrade');
-            
-            if (methodSelect) methodSelect.value = policy.default_method || 'fixed';
-            if (valueInput) valueInput.value = policy.default_value || 1000;
-            if (maxPositionInput) maxPositionInput.value = policy.max_position_size || 10000;
-            if (riskPerTradeInput) riskPerTradeInput.value = policy.risk_per_trade || 2.0;
-        } catch (error) {
-            console.error('Failed to load sizing policy:', error);
-        }
-    }
 
-    async saveSizingPolicy() {
-        try {
-            const methodSelect = document.getElementById('defaultSizingMethod');
-            const valueInput = document.getElementById('defaultSizingValue');
-            const maxPositionInput = document.getElementById('maxPositionSize');
-            const riskPerTradeInput = document.getElementById('riskPerTrade');
-            
-            const policy = {
-                default_method: methodSelect?.value || 'fixed',
-                default_value: parseFloat(valueInput?.value) || 1000,
-                max_position_size: parseFloat(maxPositionInput?.value) || 10000,
-                risk_per_trade: parseFloat(riskPerTradeInput?.value) || 2.0
-            };
-            
-            await this.apiCall('/sizing/policy', {
-                method: 'PUT',
-                body: JSON.stringify({ s_rules: policy })
-            });
-            
-            this.showAlert('success', 'Sizing policy saved successfully');
-            // 刷新配置显示
-            await this.loadSizingPolicy();
-        } catch (error) {
-            console.error('Failed to save sizing policy:', error);
-            this.showAlert('danger', 'Failed to save sizing policy');
-        }
-    }
 
     async loadSizingHistory() {
         try {
@@ -7000,92 +6943,6 @@ class TradingApp {
         }
     }
 
-    // 通知历史记录功能（保留原有弹窗方法以防其他地方调用）
-    async showNotificationHistory() {
-        try {
-            const response = await this.apiCall('/notifications/history?limit=50');
-            const history = response.history || [];
-
-            const modalHtml = `
-                <div class="modal fade" id="notificationHistoryModal" tabindex="-1">
-                    <div class="modal-dialog modal-xl">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title"><i class="fas fa-history"></i> Notification History</h5>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                            </div>
-                            <div class="modal-body">
-                                <div class="mb-3">
-                                    <div class="row">
-                                        <div class="col-md-3">
-                                            <select class="form-select" id="historyStatusFilter">
-                                                <option value="">All Status</option>
-                                                <option value="sent">Sent</option>
-                                                <option value="failed">Failed</option>
-                                                <option value="pending">Pending</option>
-                                            </select>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <select class="form-select" id="historyChannelFilter">
-                                                <option value="">All Channels</option>
-                                                <option value="telegram">Telegram</option>
-                                                <option value="email">Email</option>
-                                                <option value="websocket">WebSocket</option>
-                                            </select>
-                                        </div>
-                                        <div class="col-md-4">
-                                            <input type="date" class="form-control" id="historySinceFilter" placeholder="Since date">
-                                        </div>
-                                        <div class="col-md-2">
-                                            <button class="btn btn-primary" onclick="app.filterNotificationHistory()">Filter</button>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="table-responsive" style="max-height: 400px;">
-                                    <table class="table table-sm" id="notificationHistoryTable">
-                                        <thead>
-                                            <tr>
-                                                <th>Time</th>
-                                                <th>Channel</th>
-                                                <th>Event</th>
-                                                <th>Message</th>
-                                                <th>Status</th>
-                                                <th>Error</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            ${this.renderNotificationHistoryRows(history)}
-                                        </tbody>
-                                    </table>
-                                </div>
-                                ${history.length === 0 ? '<div class="text-center text-muted py-3">No notification history found</div>' : ''}
-                            </div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-
-            // Remove existing modal if any
-            const existingModal = document.getElementById('notificationHistoryModal');
-            if (existingModal) {
-                existingModal.remove();
-            }
-
-            // Add modal to body
-            document.body.insertAdjacentHTML('beforeend', modalHtml);
-
-            // Show modal
-            const modal = new bootstrap.Modal(document.getElementById('notificationHistoryModal'));
-            modal.show();
-
-        } catch (error) {
-            console.error('Failed to load notification history:', error);
-            this.showAlert('danger', 'Failed to load notification history');
-        }
-    }
 
     renderNotificationHistoryRows(history) {
         if (!history || history.length === 0) {
@@ -7162,91 +7019,35 @@ class TradingApp {
         }
     }
 
-    // G Rules 配置管理方法
-    async saveGRulesConfig() {
-        console.log('Save G Rules button clicked');
-        try {
-            const config = {
-                g0_account_breaker: parseFloat(document.getElementById('g0AccountBreaker').value) || 5.0,
-                g1_max_risk_per_trade: parseFloat(document.getElementById('g1MaxRiskPerTrade').value) || 2.0,
-                g2_max_position_per_symbol: parseFloat(document.getElementById('g2MaxPositionPerSymbol').value) || 10.0,
-                g3_correlation_check: document.getElementById('g3CorrelationCheck').value === 'enabled',
-                g4_liquidity_check: document.getElementById('g4LiquidityCheck').value === 'enabled',
-                g5_time_window: document.getElementById('g5TimeWindow').value === 'enabled'
-            };
 
-            const response = await this.apiCall('/sizing/policy', {
-                method: 'PUT',
-                body: JSON.stringify({ g_rules: config })
-            });
-
-            if (response.success) {
-                this.showAlert('success', 'G Rules 配置已保存');
-                // 刷新配置显示和状态
-                await this.loadGRulesConfig();
-                await this.loadGRulesStatus();
-            } else {
-                this.showAlert('danger', 'G Rules 配置保存失败: ' + (response.error || '未知错误'));
-            }
-        } catch (error) {
-            console.error('保存 G Rules 配置失败:', error);
-            this.showAlert('danger', 'G Rules 配置保存失败: ' + error.message);
-        }
-    }
-
-    async resetGRulesConfig() {
-        if (confirm('确定要重置 G Rules 配置为默认值吗？')) {
-            // 重置为默认值
-            document.getElementById('g0AccountBreaker').value = 5.0;
-            document.getElementById('g1MaxRiskPerTrade').value = 2.0;
-            document.getElementById('g2MaxPositionPerSymbol').value = 10.0;
-            document.getElementById('g3CorrelationCheck').value = 'enabled';
-            document.getElementById('g4LiquidityCheck').value = 'enabled';
-            document.getElementById('g5TimeWindow').value = 'enabled';
-            
-            this.showAlert('info', 'G Rules 配置已重置为默认值');
-        }
-    }
-
-    async loadGRulesConfig() {
-        try {
-            const response = await this.apiCall('/sizing/policy');
-            if (response.g_rules) {
-                const config = response.g_rules;
-                
-                // 加载配置到表单
-                document.getElementById('g0AccountBreaker').value = config.g0_account_breaker || 5.0;
-                document.getElementById('g1MaxRiskPerTrade').value = config.g1_max_risk_per_trade || 2.0;
-                document.getElementById('g2MaxPositionPerSymbol').value = config.g2_max_position_per_symbol || 10.0;
-                document.getElementById('g3CorrelationCheck').value = config.g3_correlation_check ? 'enabled' : 'disabled';
-                document.getElementById('g4LiquidityCheck').value = config.g4_liquidity_check ? 'enabled' : 'disabled';
-                document.getElementById('g5TimeWindow').value = config.g5_time_window ? 'enabled' : 'disabled';
-            }
-        } catch (error) {
-            console.error('加载 G Rules 配置失败:', error);
-        }
-    }
-
-    async loadGRulesStatus() {
+    async loadGSRulesStatus() {
         try {
             const response = await this.apiCall('/sizing/history?limit=1');
             if (response.success && response.data && response.data.length > 0) {
                 const latest = response.data[0];
-                const status = latest.g_rules_status || {};
+                const gStatus = latest.g_rules_status || {};
+                const sStatus = latest.s_rules_status || {};
                 
-                // 更新状态表格
-                this.updateGRuleStatus('g0', status.g0 || { passed: true, message: '正常' });
-                this.updateGRuleStatus('g1', status.g1 || { passed: true, message: '正常' });
-                this.updateGRuleStatus('g2', status.g2 || { passed: true, message: '正常' });
-                this.updateGRuleStatus('g3', status.g3 || { passed: true, message: '正常' });
-                this.updateGRuleStatus('g4', status.g4 || { passed: true, message: '正常' });
+                // 更新G Rules状态表格
+                this.updateRuleStatus('g0', gStatus.g0 || { passed: true, message: '正常' });
+                this.updateRuleStatus('g1', gStatus.g1 || { passed: true, message: '正常' });
+                this.updateRuleStatus('g2', gStatus.g2 || { passed: true, message: '正常' });
+                this.updateRuleStatus('g3', gStatus.g3 || { passed: true, message: '正常' });
+                this.updateRuleStatus('g4', gStatus.g4 || { passed: true, message: '正常' });
+                
+                // 更新S Rules状态表格
+                this.updateRuleStatus('s0', sStatus.s0 || { passed: true, message: '正常' });
+                this.updateRuleStatus('s1', sStatus.s1 || { passed: true, message: '正常' });
+                this.updateRuleStatus('s2', sStatus.s2 || { passed: true, message: '正常' });
+                this.updateRuleStatus('s3', sStatus.s3 || { passed: true, message: '正常' });
+                this.updateRuleStatus('s4', sStatus.s4 || { passed: true, message: '正常' });
             }
         } catch (error) {
-            console.error('加载 G Rules 状态失败:', error);
+            console.error('加载 G&S Rules 状态失败:', error);
         }
     }
 
-    updateGRuleStatus(ruleId, status) {
+    updateRuleStatus(ruleId, status) {
         const statusElement = document.getElementById(`${ruleId}_status`);
         const messageElement = document.getElementById(`${ruleId}_message`);
         
@@ -7260,158 +7061,159 @@ class TradingApp {
         }
     }
 
-    showGRulesModal() {
-        // Create modal HTML if not exists
-        let modal = document.getElementById('gRulesModal');
-        if (!modal) {
-            const modalHTML = `
-                <div class="modal fade" id="gRulesModal" tabindex="-1" aria-labelledby="gRulesModalLabel" aria-hidden="true">
-                    <div class="modal-dialog modal-lg">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="gRulesModalLabel"><i class="fas fa-cog"></i> G Rules Configuration</h5>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                            </div>
-                            <div class="modal-body" id="gRulesModalBody">
-                                <!-- G Rules form will be loaded here -->
-                            </div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                                <button type="button" class="btn btn-primary" id="saveGRulesModalBtn">保存</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            document.body.insertAdjacentHTML('beforeend', modalHTML);
-            modal = document.getElementById('gRulesModal');
-            
-            // Add save event listener
-            document.getElementById('saveGRulesModalBtn').addEventListener('click', () => {
-                this.saveGRulesFromModal();
-            });
+    showConfigModal(activeTab = 'g-rules') {
+        // 激活指定的标签页
+        const gRulesTab = document.getElementById('config-g-rules-tab');
+        const sRulesTab = document.getElementById('config-s-rules-tab');
+        const gRulesPane = document.getElementById('config-g-rules');
+        const sRulesPane = document.getElementById('config-s-rules');
+        
+        if (activeTab === 'g-rules') {
+            gRulesTab.classList.add('active');
+            gRulesTab.setAttribute('aria-selected', 'true');
+            sRulesTab.classList.remove('active');
+            sRulesTab.setAttribute('aria-selected', 'false');
+            gRulesPane.classList.add('show', 'active');
+            sRulesPane.classList.remove('show', 'active');
+        } else {
+            sRulesTab.classList.add('active');
+            sRulesTab.setAttribute('aria-selected', 'true');
+            gRulesTab.classList.remove('active');
+            gRulesTab.setAttribute('aria-selected', 'false');
+            sRulesPane.classList.add('show', 'active');
+            gRulesPane.classList.remove('show', 'active');
         }
         
-        // Load G Rules form content into modal
-        const gRulesSection = document.getElementById('gRulesConfigSection');
-        const modalBody = document.getElementById('gRulesModalBody');
-        if (gRulesSection && modalBody) {
-            modalBody.innerHTML = gRulesSection.innerHTML;
-        }
+        // 添加保存事件监听器
+        const saveBtn = document.getElementById('saveConfigRulesBtn');
+        const resetBtn = document.getElementById('resetConfigRulesBtn');
         
-        // Show modal
+        // 移除旧的事件监听器
+        const newSaveBtn = saveBtn.cloneNode(true);
+        const newResetBtn = resetBtn.cloneNode(true);
+        saveBtn.parentNode.replaceChild(newSaveBtn, saveBtn);
+        resetBtn.parentNode.replaceChild(newResetBtn, resetBtn);
+        
+        newSaveBtn.addEventListener('click', () => {
+            this.saveConfigFromModal();
+        });
+        
+        newResetBtn.addEventListener('click', () => {
+            this.resetConfigFromModal();
+        });
+        
+        // 更新Position Value字段显示
+        this.updatePositionValueField();
+        
+        // 显示模态框
+        const modal = document.getElementById('configRulesModal');
         const bootstrapModal = new bootstrap.Modal(modal);
         bootstrapModal.show();
     }
 
-    showSRulesModal() {
-        // Create modal HTML if not exists
-        let modal = document.getElementById('sRulesModal');
-        if (!modal) {
-            const modalHTML = `
-                <div class="modal fade" id="sRulesModal" tabindex="-1" aria-labelledby="sRulesModalLabel" aria-hidden="true">
-                    <div class="modal-dialog modal-lg">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="sRulesModalLabel"><i class="fas fa-calculator"></i> S Rules Configuration</h5>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                            </div>
-                            <div class="modal-body" id="sRulesModalBody">
-                                <!-- S Rules form will be loaded here -->
-                            </div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                                <button type="button" class="btn btn-primary" id="saveSRulesModalBtn">保存</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            document.body.insertAdjacentHTML('beforeend', modalHTML);
-            modal = document.getElementById('sRulesModal');
-            
-            // Add save event listener
-            document.getElementById('saveSRulesModalBtn').addEventListener('click', () => {
-                this.saveSRulesFromModal();
-            });
-        }
-        
-        // Load S Rules form content into modal
-        const sRulesSection = document.getElementById('sRulesConfigSection');
-        const modalBody = document.getElementById('sRulesModalBody');
-        if (sRulesSection && modalBody) {
-            modalBody.innerHTML = sRulesSection.innerHTML;
-        }
-        
-        // Show modal
-        const bootstrapModal = new bootstrap.Modal(modal);
-        bootstrapModal.show();
-    }
-
-    async saveGRulesFromModal() {
+    async saveConfigFromModal() {
         try {
-            // Get form data from modal
-            const modalBody = document.getElementById('gRulesModalBody');
-            const form = modalBody.querySelector('#gRulesForm');
-            if (!form) return;
+            // 获取G Rules配置
+            const gRulesConfig = {
+                g0_max_drawdown: parseFloat(document.getElementById('g0MaxDrawdown').value) || 5.0,
+                g1_max_loss: parseFloat(document.getElementById('g1MaxLoss').value) || 2.0,
+                g2_max_position_per_symbol: parseFloat(document.getElementById('g2MaxPositionPerSymbol').value) || 10.0,
+                g3_correlation_check: document.getElementById('g3CorrelationCheck').value === 'enabled',
+                g4_liquidity_check: document.getElementById('g4LiquidityCheck').value === 'enabled',
+                g5_time_window: document.getElementById('g5TimeWindow').value === 'enabled'
+            };
             
-            const formData = new FormData(form);
-            const config = {};
-            for (let [key, value] of formData.entries()) {
-                config[key] = value;
-            }
+            // 获取S Rules配置
+            const sRulesConfig = {
+                s0_position_sizing: document.getElementById('s0PositionSizing').value || 'fixed',
+                s1_risk_percentage: parseFloat(document.getElementById('s1PositionValue').value) || 1.0,
+                s2_max_positions: parseInt(document.getElementById('s2MaxPositions').value) || 10,
+                s3_volatility_adjustment: document.getElementById('s3Rebalancing').value === 'enabled',
+                s4_volatility_adjustment: document.getElementById('s4VolatilityAdjustment').value === 'enabled'
+            };
             
-            // Save to backend
-            await this.apiCall('/api/g-rules/config', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(config)
+            // 保存到后端
+            await this.apiCall('/config/rules', {
+                method: 'PUT',
+                body: JSON.stringify({ 
+                    g_rules: gRulesConfig,
+                    s_rules: sRulesConfig
+                })
             });
             
-            this.showAlert('success', 'G Rules配置已保存');
+            this.showAlert('success', '配置已保存');
             
-            // Close modal
-            const modal = bootstrap.Modal.getInstance(document.getElementById('gRulesModal'));
+            // 关闭模态框
+            const modal = bootstrap.Modal.getInstance(document.getElementById('configRulesModal'));
             if (modal) modal.hide();
             
-            // Reload G Rules status
-            this.loadGRulesStatus();
+            // 重新加载状态
+            this.loadGSRulesStatus();
             
         } catch (error) {
-            console.error('保存G Rules配置失败:', error);
-            this.showAlert('danger', '保存G Rules配置失败');
+            console.error('保存配置失败:', error);
+            this.showAlert('danger', '保存配置失败');
         }
     }
+    
+    resetConfigFromModal() {
+        // 重置G Rules为默认值
+        document.getElementById('g0MaxDrawdown').value = 5.0;
+        document.getElementById('g1MaxLoss').value = 2.0;
+        document.getElementById('g2MaxPositionPerSymbol').value = 10.0;
+        document.getElementById('g3CorrelationCheck').value = 'enabled';
+        document.getElementById('g4LiquidityCheck').value = 'enabled';
+        document.getElementById('g5TimeWindow').value = 'enabled';
+        
+        // 重置S Rules为默认值
+        document.getElementById('s0PositionSizing').value = 'fixed';
+        document.getElementById('s1PositionValue').value = 1.0;
+        document.getElementById('s2MaxPositions').value = 10;
+        document.getElementById('s3Rebalancing').value = 'enabled';
+        document.getElementById('s4VolatilityAdjustment').value = 'enabled';
+        
+        // 更新Position Value字段显示
+        this.updatePositionValueField();
+        
+        this.showAlert('info', '配置已重置为默认值');
+    }
 
-    async saveSRulesFromModal() {
-        try {
-            // Get form data from modal
-            const modalBody = document.getElementById('sRulesModalBody');
-            const form = modalBody.querySelector('#sizingPolicyForm');
-            if (!form) return;
-            
-            const formData = new FormData(form);
-            const config = {};
-            for (let [key, value] of formData.entries()) {
-                config[key] = value;
-            }
-            
-            // Save to backend
-            await this.apiCall('/api/sizing-policy', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(config)
-            });
-            
-            this.showAlert('success', 'S Rules配置已保存');
-            
-            // Close modal
-            const modal = bootstrap.Modal.getInstance(document.getElementById('sRulesModal'));
-            if (modal) modal.hide();
-            
-        } catch (error) {
-            console.error('保存S Rules配置失败:', error);
-            this.showAlert('danger', '保存S Rules配置失败');
+    updatePositionValueField() {
+        const positionMethod = document.getElementById('s0PositionSizing')?.value;
+        const positionValueLabel = document.querySelector('label[for="s1PositionValue"]');
+        const positionValueInput = document.getElementById('s1PositionValue');
+        const positionValueHelp = document.getElementById('s1PositionValue')?.parentNode?.querySelector('.form-text');
+        
+        if (!positionValueLabel || !positionValueInput) return;
+        
+        switch (positionMethod) {
+            case 'percentage':
+                positionValueLabel.textContent = 'Position Percentage (%)';
+                positionValueInput.placeholder = '例如: 2.5 (表示2.5%)';
+                if (positionValueHelp) {
+                    positionValueHelp.textContent = '每个仓位占总资金的百分比';
+                }
+                break;
+            case 'fixed':
+                positionValueLabel.textContent = 'Fixed Amount ($)';
+                positionValueInput.placeholder = '例如: 1000 (表示$1000)';
+                if (positionValueHelp) {
+                    positionValueHelp.textContent = '每个仓位的固定金额';
+                }
+                break;
+            case 'shares':
+                positionValueLabel.textContent = 'Number of Shares';
+                positionValueInput.placeholder = '例如: 100 (表示100股)';
+                if (positionValueHelp) {
+                    positionValueHelp.textContent = '每个仓位的固定股数';
+                }
+                break;
+            default:
+                positionValueLabel.textContent = 'Position Value';
+                positionValueInput.placeholder = '';
+                if (positionValueHelp) {
+                    positionValueHelp.textContent = '';
+                }
         }
     }
 }

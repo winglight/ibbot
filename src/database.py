@@ -273,12 +273,24 @@ class DatabaseManager:
                 """)
                 database_logger.info("Migrated existing historical_data to new schema")
             
-            # 创建策略设置表
+            # 创建设置表
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS strategy_settings (
+                CREATE TABLE IF NOT EXISTS settings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     key TEXT UNIQUE NOT NULL,
                     value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            
+            # 创建配置表（用于存储系统配置参数）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS config (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    config_key TEXT UNIQUE NOT NULL,
+                    config_value TEXT NOT NULL,
+                    description TEXT,
+                    created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
             """)
@@ -1121,6 +1133,78 @@ class DatabaseManager:
             
             conn.commit()
             database_logger.debug(f"Notification status updated: {notification_id} -> {status}")
+    
+    # Config表相关方法
+    def save_config(self, config_key: str, config_value: Any, description: str = None):
+        """保存配置"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            timestamp = datetime.now().isoformat()
+            
+            # 将配置值转换为JSON字符串
+            if isinstance(config_value, (dict, list)):
+                value_str = json.dumps(config_value, ensure_ascii=False)
+            else:
+                value_str = str(config_value)
+            
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO config 
+                (config_key, config_value, description, created_at, updated_at)
+                VALUES (?, ?, ?, 
+                    COALESCE((SELECT created_at FROM config WHERE config_key = ?), ?),
+                    ?)
+                """,
+                (config_key, value_str, description, config_key, timestamp, timestamp)
+            )
+            conn.commit()
+            database_logger.debug(f"Config saved: {config_key}")
+    
+    def get_config(self, config_key: str, default_value: Any = None) -> Any:
+        """获取配置"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT config_value FROM config WHERE config_key = ?",
+                (config_key,)
+            )
+            row = cursor.fetchone()
+            
+            if row is None:
+                return default_value
+            
+            try:
+                # 尝试解析JSON
+                return json.loads(row[0])
+            except json.JSONDecodeError:
+                # 如果不是JSON，返回原始字符串
+                return row[0]
+    
+    def get_all_configs(self) -> Dict[str, Any]:
+        """获取所有配置"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT config_key, config_value FROM config ORDER BY config_key"
+            )
+            rows = cursor.fetchall()
+            
+            configs = {}
+            for config_key, config_value in rows:
+                try:
+                    configs[config_key] = json.loads(config_value)
+                except json.JSONDecodeError:
+                    configs[config_key] = config_value
+            
+            return configs
+    
+    def delete_config(self, config_key: str):
+        """删除配置"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM config WHERE config_key = ?", (config_key,))
+            conn.commit()
+            database_logger.debug(f"Config deleted: {config_key}")
 
 # 全局数据库实例
 db_manager = None

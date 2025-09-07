@@ -1,1 +1,0 @@
-{"success":true,"settings":{"chrome":{"enabled":true,"config":{},"events":["market","strategy","order","risk"]},"telegram":{"enabled":false,"config":{"bot_token":"","chat_id":""},"events":["market","strategy","order","risk"]}}}
