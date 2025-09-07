@@ -649,7 +649,89 @@ class TradingApp {
         document.getElementById('submitRiskRuleBtn').addEventListener('click', () => {
             this.addRiskRule();
         });
+    }
+    
+    // Refresh position suggestion automatically
+    async refreshPositionSuggestion() {
+        const symbol = document.getElementById('orderSymbol').value;
+        const action = document.getElementById('orderAction').value;
+        const orderType = document.getElementById('orderType').value;
+        const stopLossPrice = parseFloat(document.getElementById('stopLossPrice').value);
         
+        if (!symbol) {
+            this.clearPositionSuggestion();
+            return;
+        }
+        
+        // Check if this is opening position
+        const isOpening = this.isOpeningPosition(symbol, action);
+        if (!isOpening) {
+            this.clearPositionSuggestion();
+            return;
+        }
+        
+        if (!stopLossPrice || stopLossPrice <= 0) {
+            this.clearPositionSuggestion();
+            return;
+        }
+        
+        let price;
+        if (orderType === 'MARKET') {
+            // Get current price for market orders
+            try {
+                price = await this.fetchCurrentPrice(symbol);
+                if (!price) {
+                    this.clearPositionSuggestion();
+                    return;
+                }
+            } catch (error) {
+                console.error('Error fetching current price:', error);
+                this.clearPositionSuggestion();
+                return;
+            }
+        } else {
+            price = parseFloat(document.getElementById('orderPrice').value);
+            if (!price || price <= 0) {
+                this.clearPositionSuggestion();
+                return;
+            }
+        }
+        
+        // Calculate stop distance
+        const stopDistance = Math.abs(price - stopLossPrice);
+        
+        try {
+            const response = await this.apiCall('/position-sizing', {
+                method: 'POST',
+                body: JSON.stringify({
+                    symbol: symbol,
+                    price: price,
+                    stop_distance: stopDistance,
+                    action: action
+                })
+            });
+            
+            if (response.success) {
+                this.updatePositionSuggestionUI(response);
+            } else {
+                this.clearPositionSuggestion();
+            }
+        } catch (error) {
+            console.error('Position sizing error:', error);
+            this.clearPositionSuggestion();
+        }
+    }
+    
+    // Clear position suggestion UI
+    clearPositionSuggestion() {
+        document.getElementById('suggestedQuantity').textContent = '-';
+        document.getElementById('calculationMethod').textContent = '-';
+        document.getElementById('riskPercentage').textContent = '-';
+        document.getElementById('estimatedInvestment').textContent = '-';
+        document.getElementById('maxRisk').textContent = '-';
+    }
+    
+    setupOrderFormListeners() {
         // Order form
         document.getElementById('orderForm').addEventListener('submit', (e) => {
             e.preventDefault();
@@ -687,9 +769,14 @@ class TradingApp {
             this.updateRiskPrices().catch(console.error);
         });
         
-        // Stop loss and take profit price changes - calculate expected PnL
+        // Stop loss and take profit price changes - calculate expected PnL and refresh position suggestion
         document.getElementById('stopLossPrice').addEventListener('input', () => {
             this.updateExpectedPnL();
+            // Auto refresh position suggestion when SL price changes
+            clearTimeout(this.positionRefreshTimeout);
+            this.positionRefreshTimeout = setTimeout(() => {
+                this.refreshPositionSuggestion().catch(console.error);
+            }, 500);
         });
         
         document.getElementById('takeProfitPrice').addEventListener('input', () => {
@@ -701,12 +788,16 @@ class TradingApp {
             this.updateExpectedPnL();
         });
         
-        // Order action change - update expected PnL
+        // Order action change - update expected PnL, recalculate SL/TP and refresh position suggestion
         document.getElementById('orderAction').addEventListener('change', () => {
-            this.updateExpectedPnL();
+            this.updateRiskPrices().catch(console.error);
+            // Auto refresh position suggestion when action changes
+            setTimeout(() => {
+                this.refreshPositionSuggestion().catch(console.error);
+            }, 100);
         });
         
-        // Order symbol change - check portfolio status and update risk rule visibility
+        // Order symbol change - check portfolio status, update risk rule visibility and refresh position suggestion
         document.getElementById('orderSymbol').addEventListener('input', () => {
             const orderType = document.getElementById('orderType').value;
             const riskRuleSection = document.getElementById('riskRuleSection');
@@ -740,6 +831,12 @@ class TradingApp {
                     this.updateRiskPrices().catch(console.error);
                 }
             }
+            
+            // Auto refresh position suggestion when symbol changes
+            clearTimeout(this.positionRefreshTimeout);
+            this.positionRefreshTimeout = setTimeout(() => {
+                this.refreshPositionSuggestion().catch(console.error);
+            }, 800);
         });
         
         // Market data
@@ -1445,19 +1542,87 @@ class TradingApp {
         }
     }
 
-    // Update risk prices based on limit price
+    // Check if this is an opening or closing position
+    isOpeningPosition(symbol, action) {
+        if (!this.positions || !symbol) return true;
+        
+        const position = this.positions.find(pos => pos.symbol === symbol.toUpperCase());
+        if (!position || position.position === 0) {
+            return true; // No existing position, this is opening
+        }
+        
+        // Check if action is opposite to current position
+        const currentPosition = position.position;
+        if ((currentPosition > 0 && action === 'SELL') || (currentPosition < 0 && action === 'BUY')) {
+            return false; // This is closing position
+        }
+        
+        return true; // This is adding to existing position (opening)
+    }
+    
+    // Get trading price based on order type
+    async getTradingPrice(symbol, orderType, limitPrice = null) {
+        if (orderType === 'LIMIT' && limitPrice && limitPrice > 0) {
+            return limitPrice;
+        }
+        
+        // For market orders, get current market price
+        try {
+            const response = await this.apiCall('/historical_data', {
+                method: 'POST',
+                body: JSON.stringify({
+                    symbol: symbol,
+                    duration: '1 D',
+                    bar_size: '1 min',
+                    exchange: 'SMART'
+                })
+            });
+            
+            if (response.success && response.data && response.data.length > 0) {
+                const latestData = response.data[response.data.length - 1];
+                return latestData.close || latestData.price;
+            }
+        } catch (error) {
+            console.error('Failed to get current price:', error);
+        }
+        
+        return null;
+    }
+    
+    // Update risk prices based on trading price and order details
     async updateRiskPrices() {
+        const orderSymbol = document.getElementById('orderSymbol').value;
+        const orderType = document.getElementById('orderType').value;
+        const orderAction = document.getElementById('orderAction').value;
         const orderPrice = parseFloat(document.getElementById('orderPrice').value);
-        if (!orderPrice || orderPrice <= 0) {
+        
+        // Clear SL/TP if no symbol
+        if (!orderSymbol) {
             document.getElementById('stopLossPrice').value = '';
             document.getElementById('takeProfitPrice').value = '';
             this.updateExpectedPnL();
             return;
         }
         
-        // Get order symbol
-        const orderSymbol = document.getElementById('orderSymbol').value;
-        if (!orderSymbol) {
+        // Check if this is opening or closing position
+        const isOpening = this.isOpeningPosition(orderSymbol, orderAction);
+        
+        // If closing position, don't calculate SL/TP and hide suggestions
+        if (!isOpening) {
+            document.getElementById('stopLossPrice').value = '';
+            document.getElementById('takeProfitPrice').value = '';
+            document.getElementById('suggestedPositionSection').style.display = 'none';
+            this.updateExpectedPnL();
+            return;
+        }
+        
+        // Show suggestions for opening positions
+        document.getElementById('suggestedPositionSection').style.display = 'block';
+        
+        // Get trading price
+        const tradingPrice = await this.getTradingPrice(orderSymbol, orderType, orderPrice);
+        
+        if (!tradingPrice || tradingPrice <= 0) {
             document.getElementById('stopLossPrice').value = '';
             document.getElementById('takeProfitPrice').value = '';
             this.updateExpectedPnL();
@@ -1484,21 +1649,39 @@ class TradingApp {
                 adjustedTakeProfitRatio = takeProfitRatio / lev;
             }
             
-            // Calculate stop loss and take profit using leverage-adjusted ratios
-            const stopLoss = (orderPrice * (1 - adjustedStopLossRatio)).toFixed(2);
-            const takeProfit = (orderPrice * (1 + adjustedTakeProfitRatio)).toFixed(2);
+            // Calculate stop loss and take profit based on action direction
+            let stopLoss, takeProfit;
+            if (orderAction === 'BUY') {
+                stopLoss = (tradingPrice * (1 - adjustedStopLossRatio)).toFixed(2);
+                takeProfit = (tradingPrice * (1 + adjustedTakeProfitRatio)).toFixed(2);
+            } else { // SELL
+                stopLoss = (tradingPrice * (1 + adjustedStopLossRatio)).toFixed(2);
+                takeProfit = (tradingPrice * (1 - adjustedTakeProfitRatio)).toFixed(2);
+            }
             
             document.getElementById('stopLossPrice').value = stopLoss;
             document.getElementById('takeProfitPrice').value = takeProfit;
+            
+            // Auto-refresh position suggestions with calculated SL/TP
+            this.refreshPositionSuggestion();
             
         } catch (error) {
             console.warn('Failed to get risk config, using defaults:', error);
             // Use default ratios without leverage adjustment
-            const stopLoss = (orderPrice * (1 - stopLossRatio)).toFixed(2);
-            const takeProfit = (orderPrice * (1 + takeProfitRatio)).toFixed(2);
+            let stopLoss, takeProfit;
+            if (orderAction === 'BUY') {
+                stopLoss = (tradingPrice * (1 - stopLossRatio)).toFixed(2);
+                takeProfit = (tradingPrice * (1 + takeProfitRatio)).toFixed(2);
+            } else { // SELL
+                stopLoss = (tradingPrice * (1 + stopLossRatio)).toFixed(2);
+                takeProfit = (tradingPrice * (1 - takeProfitRatio)).toFixed(2);
+            }
             
             document.getElementById('stopLossPrice').value = stopLoss;
             document.getElementById('takeProfitPrice').value = takeProfit;
+            
+            // Auto-refresh position suggestions with calculated SL/TP
+            this.refreshPositionSuggestion();
         }
         
         this.updateExpectedPnL();
@@ -6656,8 +6839,14 @@ class TradingApp {
                 stopDistance = Math.abs(stopLoss - effectivePrice);
             }
         } else {
-            // Default stop distance as 2% of price if no stop loss provided
-            stopDistance = effectivePrice * 0.02;
+            // Default stop distance based on symbol type
+            if (symbol.includes('ES') || symbol.includes('NQ') || symbol.includes('YM') || symbol.includes('RTY')) {
+                // For futures, use a smaller default stop distance (e.g., 10 points)
+                stopDistance = 10;
+            } else {
+                // For stocks, use 2% of price as default
+                stopDistance = effectivePrice * 0.02;
+            }
         }
         
         if (stopDistance <= 0) {

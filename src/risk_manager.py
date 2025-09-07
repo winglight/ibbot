@@ -1579,6 +1579,7 @@ class RiskManager:
             net_liq = float(account_info.get('net_liquidation', 0.0) or 0.0)
             realized_pnl = float(account_info.get('realized_pnl', 0.0) or 0.0)
 
+
             # 日切换处理：重置当日损益，记录开盘权益
             if getattr(self, 'today_date', None) != today:
                 self.today_date = today
@@ -1589,6 +1590,7 @@ class RiskManager:
 
             # 更新权益与峰值
             self.equity_last = net_liq
+
             if net_liq > 0:
                 self.equity_peak = max(self.equity_peak, net_liq)
 
@@ -1739,11 +1741,12 @@ class RiskManager:
                 account_info = self.ibkr_client._cached_account_info or {}
             else:
                 # 如果没有缓存，使用默认值避免阻塞
-                account_info = {'NetLiquidation': 100000.0}  # 默认值
+                account_info = {'net_liquidation': 100000.0}  # 默认值
                 risk_logger.warning(f"[PS] Using default account info for position sizing")
         except Exception as e:
             risk_logger.error(f"[PS] get_account_info error: {e}")
         self.update_equity_state(account_info)
+        risk_logger.info(f"[PS] After update_equity_state: equity_last={self.equity_last}, account_info={account_info}")
 
         equity = self.equity_last
         point_value = self._get_point_value(symbol)
