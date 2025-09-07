@@ -258,7 +258,7 @@ class RiskManager:
     # 新增：从数据库加载风控运行时配置
     def _load_risk_config_from_db(self) -> None:
         try:
-            settings = self.db_manager.load_strategy_settings() or {}
+            settings = self.db_manager.load_strategy_config() or {}
             cfg = settings.get('risk_config') or {}
 
             # 读取及回退默认
@@ -401,10 +401,10 @@ class RiskManager:
                 if pv_new:
                     self.point_value_map.update(pv_new)
 
-            # 持久化到数据库（与 strategy_settings 共表，使用 risk_config 命名空间）
-            settings = self.db_manager.load_strategy_settings() or {}
+            # 持久化到数据库（使用 config 表，strategy_settings 键下的 risk_config 命名空间）
+            settings = self.db_manager.load_strategy_config() or {}
             settings['risk_config'] = self.get_config()
-            self.db_manager.save_strategy_settings(settings)
+            self.db_manager.save_strategy_config(settings)
 
             return self.get_config()
         except Exception as e:

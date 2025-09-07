@@ -109,7 +109,7 @@ class StrategySettingsRequest(BaseModel):
     """策略设置请求模型"""
     api_endpoint: Optional[str] = None
     api_method: Optional[str] = None
-    api_payload_template: Optional[str] = None
+    api_payload_template: Optional[Dict[str, Any]] = None
     strategy_path: Optional[str] = None
     enable_auth: Optional[bool] = None
     auth_token: Optional[str] = None

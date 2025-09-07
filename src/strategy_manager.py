@@ -97,7 +97,7 @@ class StrategyManager:
         """从数据库加载策略设置、策略和执行记录"""
         try:
             # 加载策略设置
-            self.settings = self.db_manager.load_strategy_settings()
+            self.settings = self.db_manager.load_strategy_config()
             
             # 设置默认值
             if not self.settings:
@@ -117,7 +117,7 @@ class StrategyManager:
                     "auth_token": None
                 }
                 # 保存默认设置到数据库
-                self.db_manager.save_strategy_settings(self.settings)
+                self.db_manager.save_strategy_config(self.settings)
             
             # 更新实例变量
             self.api_endpoint = self.settings["api_endpoint"]
@@ -184,7 +184,7 @@ class StrategyManager:
         # 迁移到数据库
         try:
             # 保存设置到数据库
-            self.db_manager.save_strategy_settings(self.settings)
+            self.db_manager.save_strategy_config(self.settings)
             
             # 保存策略到数据库
             for strategy in self.strategies.values():
@@ -265,7 +265,7 @@ class StrategyManager:
     def _save_settings(self):
         """Save strategy settings - 现在保存到数据库"""
         try:
-            self.db_manager.save_strategy_settings(self.settings)
+            self.db_manager.save_strategy_config(self.settings)
             strategy_logger.info("Strategy settings saved to database")
         except Exception as e:
             strategy_logger.error(f"Failed to save settings to database: {e}")
@@ -468,7 +468,7 @@ class StrategyManager:
                 sl_tp_settings[f"{name}_tp_type"] = strategy_data.get('tp_type', 'amount')
                 
             if sl_tp_settings:
-                self.db_manager.save_strategy_settings(sl_tp_settings)
+                self.db_manager.save_strategy_config(sl_tp_settings)
                 # 同步到内存中的 settings，确保后续 get_strategy 能直接读取
                 self.settings.update(sl_tp_settings)
                 strategy_logger.info(f"Saved SL/TP settings for strategy {name}")
@@ -499,7 +499,7 @@ class StrategyManager:
                 strategy_dict['last_triggered'] = strategy_dict['last_triggered'].isoformat()
             # 合并SL/TP设置
             try:
-                settings = self.db_manager.load_strategy_settings()
+                settings = self.db_manager.load_strategy_config()
             except Exception:
                 settings = getattr(self, 'settings', {}) or {}
             sl_enabled = settings.get(f"{name}_sl_enabled", False)
@@ -540,7 +540,7 @@ class StrategyManager:
             
             # 持久化SL/TP设置
             if settings_to_save:
-                self.db_manager.save_strategy_settings(settings_to_save)
+                self.db_manager.save_strategy_config(settings_to_save)
                 # 更新内存
                 self.settings.update(settings_to_save)
             

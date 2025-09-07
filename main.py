@@ -2957,7 +2957,7 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
     """获取通知设置"""
     try:
         db = get_db_manager()
-        settings = db.load_notification_settings()
+        settings = db.load_notification_config()
         
         # 如果没有设置，返回默认配置
         if not settings:
@@ -2987,7 +2987,7 @@ async def update_notification_settings(settings: Dict[str, Any], user: Optional[
     """更新通知设置"""
     try:
         db = get_db_manager()
-        db.save_notification_settings(settings)
+        db.save_notification_config(settings)
         
         # 更新Telegram通知器配置
         if "telegram" in settings and telegram_notifier:

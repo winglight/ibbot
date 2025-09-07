@@ -6869,9 +6869,6 @@ class TradingApp {
 
             const response = await this.apiCall('/notifications/settings', {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
                 body: JSON.stringify(settings)
             });
 
@@ -7061,7 +7058,7 @@ class TradingApp {
         }
     }
 
-    showConfigModal(activeTab = 'g-rules') {
+    async showConfigModal(activeTab = 'g-rules') {
         // 激活指定的标签页
         const gRulesTab = document.getElementById('config-g-rules-tab');
         const sRulesTab = document.getElementById('config-s-rules-tab');
@@ -7083,6 +7080,9 @@ class TradingApp {
             sRulesPane.classList.add('show', 'active');
             gRulesPane.classList.remove('show', 'active');
         }
+        
+        // 加载现有配置数据
+        await this.loadConfigData();
         
         // 添加保存事件监听器
         const saveBtn = document.getElementById('saveConfigRulesBtn');
@@ -7214,6 +7214,40 @@ class TradingApp {
                 if (positionValueHelp) {
                     positionValueHelp.textContent = '';
                 }
+        }
+    }
+
+    async loadConfigData() {
+        try {
+            const response = await this.apiCall('/config/rules', {
+                method: 'GET'
+            });
+            
+            if (response && response.g_rules) {
+                // 填充G Rules配置
+                const gRules = response.g_rules;
+                document.getElementById('g0MaxDrawdown').value = gRules.g0_max_drawdown || 5.0;
+                document.getElementById('g1MaxLoss').value = gRules.g1_max_loss || 2.0;
+                document.getElementById('g2MaxPositionPerSymbol').value = gRules.g2_max_position_per_symbol || 10.0;
+                document.getElementById('g3CorrelationCheck').value = gRules.g3_correlation_check ? 'enabled' : 'disabled';
+                document.getElementById('g4LiquidityCheck').value = gRules.g4_liquidity_check ? 'enabled' : 'disabled';
+                document.getElementById('g5TimeWindow').value = gRules.g5_time_window ? 'enabled' : 'disabled';
+            }
+            
+            if (response && response.s_rules) {
+                // 填充S Rules配置
+                const sRules = response.s_rules;
+                document.getElementById('s0PositionSizing').value = sRules.s0_position_sizing || 'fixed';
+                document.getElementById('s1PositionValue').value = sRules.s1_risk_percentage || 1.0;
+                document.getElementById('s2MaxPositions').value = sRules.s2_max_positions || 10;
+                document.getElementById('s3Rebalancing').value = sRules.s3_volatility_adjustment ? 'enabled' : 'disabled';
+                document.getElementById('s4VolatilityAdjustment').value = sRules.s4_volatility_adjustment ? 'enabled' : 'disabled';
+            }
+            
+        } catch (error) {
+            console.error('加载配置数据失败:', error);
+            // 如果加载失败，使用默认值
+            this.resetConfigFromModal();
         }
     }
 }

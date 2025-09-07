@@ -273,16 +273,6 @@ class DatabaseManager:
                 """)
                 database_logger.info("Migrated existing historical_data to new schema")
             
-            # 创建设置表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    key TEXT UNIQUE NOT NULL,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-            
             # 创建配置表（用于存储系统配置参数）
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS config (
@@ -319,18 +309,6 @@ class DatabaseManager:
             except sqlite3.OperationalError:
                 # 字段已存在，忽略错误
                 pass
-            
-            # 创建通知设置表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS notification_settings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    channel TEXT NOT NULL,
-                    enabled INTEGER DEFAULT 1,
-                    config TEXT,
-                    events TEXT,
-                    updated_at TEXT NOT NULL
-                )
-            """)
             
             # 创建通知历史表
             cursor.execute("""
@@ -872,38 +850,7 @@ class DatabaseManager:
             return df
     
     # 策略设置相关方法
-    def save_strategy_settings(self, settings: Dict[str, Any]):
-        """保存策略设置"""
-        now = datetime.now().isoformat()
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            for key, value in settings.items():
-                cursor.execute("""
-                    INSERT OR REPLACE INTO strategy_settings (key, value, updated_at)
-                    VALUES (?, ?, ?)
-                """, (key, json.dumps(value), now))
-            
-            conn.commit()
-            database_logger.debug(f"Strategy settings saved: {list(settings.keys())}")
-    
-    def load_strategy_settings(self) -> Dict[str, Any]:
-        """加载策略设置"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT key, value FROM strategy_settings")
-            rows = cursor.fetchall()
-            
-            settings = {}
-            for key, value in rows:
-                try:
-                    settings[key] = json.loads(value)
-                except json.JSONDecodeError:
-                    settings[key] = value
-            
-            database_logger.debug(f"Loaded strategy settings: {list(settings.keys())}")
-            return settings
+    # 旧的策略设置方法已删除，请使用 save_strategy_config 和 load_strategy_config
 
     def save_sizing_history(self, symbol: str, action: str, suggested_quantity: int, 
                            current_price: float = None, account_value: float = None,
@@ -988,51 +935,7 @@ class DatabaseManager:
             return history
     
     # 通知相关方法
-    def save_notification_settings(self, settings: Dict[str, Any]):
-        """保存通知设置"""
-        now = datetime.now().isoformat()
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            for channel, config in settings.items():
-                enabled = config.get('enabled', True)
-                events = json.dumps(config.get('events', []))
-                channel_config = json.dumps(config.get('config', {}))
-                
-                cursor.execute("""
-                    INSERT OR REPLACE INTO notification_settings 
-                    (channel, enabled, config, events, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (channel, int(enabled), channel_config, events, now))
-            
-            conn.commit()
-            database_logger.debug(f"Notification settings saved: {list(settings.keys())}")
-    
-    def load_notification_settings(self) -> Dict[str, Any]:
-        """加载通知设置"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT channel, enabled, config, events FROM notification_settings")
-            rows = cursor.fetchall()
-            
-            settings = {}
-            for channel, enabled, config, events in rows:
-                try:
-                    settings[channel] = {
-                        'enabled': bool(enabled),
-                        'config': json.loads(config) if config else {},
-                        'events': json.loads(events) if events else []
-                    }
-                except json.JSONDecodeError:
-                    settings[channel] = {
-                        'enabled': bool(enabled),
-                        'config': {},
-                        'events': []
-                    }
-            
-            database_logger.debug(f"Loaded notification settings: {list(settings.keys())}")
-            return settings
+    # 旧的通知设置方法已删除，请使用 save_notification_config 和 load_notification_config
     
     def save_notification_history(self, channel: str, event_type: str, message: str, 
                                  status: str = 'pending', error_message: str = None):
@@ -1159,6 +1062,28 @@ class DatabaseManager:
             )
             conn.commit()
             database_logger.debug(f"Config saved: {config_key}")
+    
+    def save_notification_config(self, settings: Dict[str, Any]):
+        """保存通知配置到config表"""
+        self.save_config('notification_settings', settings, 'Notification configuration settings')
+        database_logger.debug(f"Notification config saved to config table: {list(settings.keys())}")
+    
+    def load_notification_config(self) -> Dict[str, Any]:
+        """从config表加载通知配置"""
+        config = self.get_config('notification_settings', {})
+        database_logger.debug(f"Loaded notification config from config table: {list(config.keys()) if config else 'empty'}")
+        return config
+    
+    def save_strategy_config(self, settings: Dict[str, Any]):
+        """保存策略配置到config表"""
+        self.save_config('strategy_settings', settings, 'Strategy configuration settings')
+        database_logger.debug(f"Strategy config saved to config table: {list(settings.keys())}")
+    
+    def load_strategy_config(self) -> Dict[str, Any]:
+        """从config表加载策略配置"""
+        config = self.get_config('strategy_settings', {})
+        database_logger.debug(f"Loaded strategy config from config table: {list(config.keys()) if config else 'empty'}")
+        return config
     
     def get_config(self, config_key: str, default_value: Any = None) -> Any:
         """获取配置"""
