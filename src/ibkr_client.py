@@ -1306,26 +1306,22 @@ class IBKRClient:
                         price_source = "cache"
                         ibkr_logger.debug(f"Using cached price for {sym}: {current_price}")
                 
-                # 2) 如果缓存无效，尝试获取实时价格（仅在非快速模式下）
+                # 2) 如果缓存无效，尝试获取实时价格（仅在非快速模式下且不在ThreadPoolExecutor中）
                 if current_price is None and not fast:
                     try:
                         # 检查是否在ThreadPoolExecutor中运行
                         current_thread = threading.current_thread()
                         is_in_thread_pool = isinstance(current_thread, threading.Thread) and 'ThreadPoolExecutor' in current_thread.name
                         
-                        # 即使在ThreadPoolExecutor中也尝试获取实时价格
+                        # 只在主线程或非ThreadPoolExecutor线程中获取实时价格
                         if not is_in_thread_pool:
                             data = self.get_real_time_data(sym)
                             if data and data.get('last'):
                                 current_price = data['last']
                                 price_source = "realtime"
                         else:
-                            # 在ThreadPoolExecutor中，尝试快速获取实时价格
-                            ibkr_logger.debug(f"Attempting quick real-time fetch for {sym} in ThreadPoolExecutor")
-                            data = self.get_real_time_data(sym)
-                            if data and data.get('last'):
-                                current_price = data['last']
-                                price_source = "realtime_thread"
+                            # 在ThreadPoolExecutor中，完全跳过实时价格获取以避免阻塞
+                            ibkr_logger.debug(f"Skipping real-time fetch for {sym} in ThreadPoolExecutor to avoid blocking")
                     except Exception as e:
                         ibkr_logger.debug(f"Realtime price fetch error for {sym}: {e}")
                 

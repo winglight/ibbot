@@ -6632,6 +6632,10 @@ class TradingApp {
                 }
             } catch (error) {
                 console.log('Could not get market price:', error);
+                // Don't show alert for authentication errors when getting price
+                if (error.message !== 'Authentication required') {
+                    console.warn('Price fetch failed:', error.message);
+                }
             }
             
             // If still no price, show error and return
@@ -6664,7 +6668,6 @@ class TradingApp {
         try {
             const data = await this.apiCall('/sizing/preview', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     symbol: symbol,
                     stop_distance: stopDistance,
