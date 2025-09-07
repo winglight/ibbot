@@ -95,3 +95,45 @@
 #monitorModal .card-body .fw-bold.text-danger {
     color: #dc3545 !important;
 }
+
+/* 统一面板标题栏按钮样式 - 蓝底白字 */
+.card-header .btn,
+.modal-header .btn:not(.btn-close),
+.navbar .btn,
+.card-title .btn,
+.d-flex .btn {
+    background-color: #0d6efd !important;
+    border-color: #0d6efd !important;
+    color: white !important;
+}
+
+.card-header .btn:hover,
+.modal-header .btn:not(.btn-close):hover,
+.navbar .btn:hover,
+.card-title .btn:hover,
+.d-flex .btn:hover {
+    background-color: #0b5ed7 !important;
+    border-color: #0a58ca !important;
+    color: white !important;
+}
+
+.card-header .btn:focus,
+.modal-header .btn:not(.btn-close):focus,
+.navbar .btn:focus,
+.card-title .btn:focus,
+.d-flex .btn:focus {
+    background-color: #0b5ed7 !important;
+    border-color: #0a58ca !important;
+    color: white !important;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25) !important;
+}
+
+.card-header .btn:active,
+.modal-header .btn:not(.btn-close):active,
+.navbar .btn:active,
+.card-title .btn:active,
+.d-flex .btn:active {
+    background-color: #0a58ca !important;
+    border-color: #0a53be !important;
+    color: white !important;
+}

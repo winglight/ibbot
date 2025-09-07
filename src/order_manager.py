@@ -92,10 +92,10 @@ class OrderManager:
         # 初始化完成日志
         order_logger.info(f"OrderManager initialized with {len(self.orders)} orders")
 
-    def set_dependencies(self, websocket_manager, telegram_notifier, risk_manager=None):
+    def set_dependencies(self, websocket_manager, notification_manager, risk_manager=None):
         """设置依赖注入"""
         self.websocket_manager = websocket_manager
-        self.telegram_notifier = telegram_notifier
+        self.notification_manager = notification_manager
         self.risk_manager = risk_manager
         order_logger.info("OrderManager dependencies set")
 
@@ -399,14 +399,14 @@ class OrderManager:
                 except Exception as e:
                     order_logger.error(f"发送浏览器通知失败: {e}")
             
-            # 发送Telegram消息
-            if hasattr(self, 'telegram_notifier') and self.telegram_notifier:
+            # 发送通知消息
+            if hasattr(self, 'notification_manager') and self.notification_manager:
                 try:
                     import asyncio
-                    # 修复参数传递问题
+                    # 使用统一的通知管理器发送订单通知
                     try:
                         loop = asyncio.get_running_loop()
-                        asyncio.create_task(self.telegram_notifier.send_order_alert(
+                        asyncio.create_task(self.notification_manager.send_order_notification(
                             order_type=order.order_type,
                             symbol=order.symbol,
                             quantity=order.quantity,
@@ -416,7 +416,7 @@ class OrderManager:
                         ))
                     except RuntimeError:
                         # 没有运行中的事件循环，创建新的
-                        asyncio.run(self.telegram_notifier.send_order_alert(
+                        asyncio.run(self.notification_manager.send_order_notification(
                             order_type=order.order_type,
                             symbol=order.symbol,
                             quantity=order.quantity,
@@ -503,10 +503,23 @@ class OrderManager:
                 order_logger.info(f"🔒 已停用风险规则: {symbol} ({deactivate_reason})")
                 
                 # 发送通知
-                if hasattr(self, 'telegram_notifier') and self.telegram_notifier:
+                if hasattr(self, 'notification_manager') and self.notification_manager:
                     try:
                         message = f"🔒 风险规则已自动停用\n资产: {symbol}\n原因: {deactivate_reason}"
-                        self.telegram_notifier.send_message(message)
+                        import asyncio
+                        try:
+                            loop = asyncio.get_running_loop()
+                            asyncio.create_task(self.notification_manager.send(
+                                message=message,
+                                event_type="risk_rule_deactivated",
+                                category="risk"
+                            ))
+                        except RuntimeError:
+                            asyncio.run(self.notification_manager.send(
+                                message=message,
+                                event_type="risk_rule_deactivated",
+                                category="risk"
+                            ))
                     except Exception as e:
                         order_logger.error(f"发送风险规则停用通知失败: {e}")
                 

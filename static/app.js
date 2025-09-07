@@ -5489,9 +5489,15 @@ class TradingApp {
             
             const actionsCell = document.createElement('td');
             actionsCell.innerHTML = `
-                <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editStrategy('${strategy.name}')">Edit</button>
-                <button class="btn btn-sm btn-outline-info me-1" onclick="app.openStrategyDetails('${strategy.name}')">Details</button>
-                <button class="btn btn-sm btn-outline-danger" onclick="app.deleteStrategy('${strategy.name}')">Delete</button>
+                <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editStrategy('${strategy.name}')" title="Edit">
+                    <i class="fas fa-edit"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-info me-1" onclick="app.openStrategyDetails('${strategy.name}')" title="Details">
+                    <i class="fas fa-list"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger" onclick="app.deleteStrategy('${strategy.name}')" title="Delete">
+                    <i class="fas fa-trash"></i>
+                </button>
             `;
             
             row.appendChild(nameCell);

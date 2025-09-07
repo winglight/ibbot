@@ -52,6 +52,7 @@ from src.queue_manager import queue_manager
 from src.order_manager import OrderManager
 from src.models import HistoricalDataRequest, ChartDataRequest, OrderRequest, ExternalStrategyOrderRequest, StrategySettingsRequest, StrategyRequest, RiskRuleRequest, RiskConfigUpdateRequest, PositionSizingRequest, CurrentPriceRequest
 from src.websocket_manager import websocket_manager  # 新增导入
+from src.notification_manager import NotificationManager
 
 # Global variables
 load_dotenv()
@@ -567,7 +568,8 @@ app.add_middleware(
 # Global instances
 ibkr_client = None
 telegram_notifier = TelegramNotifier()  # 初始化
-risk_manager = RiskManager(ibkr_client=None, telegram_notifier=telegram_notifier)  # 先用None占位，连接成功后依赖连接管理器
+notification_manager = NotificationManager(telegram_notifier=telegram_notifier, websocket_manager=websocket_manager, db_manager=get_db_manager())  # 统一通知管理器
+risk_manager = RiskManager(ibkr_client=None, notification_manager=notification_manager)  # 使用NotificationManager
 strategy_manager = StrategyManager()  # 初始化
 # 注入依赖：让 StrategyManager 能访问 RiskManager（用于自动创建风控规则）
 try:
@@ -738,7 +740,7 @@ except Exception as _dep_err:
 try:
     order_manager.set_dependencies(
         websocket_manager=websocket_manager,
-        telegram_notifier=telegram_notifier,
+        notification_manager=notification_manager,
         risk_manager=risk_manager
     )
 except Exception as _dep_err:
@@ -868,10 +870,10 @@ class NotificationTestRequest(BaseModel):
 async def send_notification(req: NotificationRequest, user: Optional[str] = Depends(get_current_user)):
     """发送Telegram通知"""
     try:
-        success = await telegram_notifier.send_message(req.message)
+        success = await notification_manager.send(req.message, "api", "test")
         if not success:
             # 返回200状态码但标记为失败，避免前端报错
-            return {"success": False, "message": "Telegram notification disabled or failed to send"}
+            return {"success": False, "message": "Notification disabled or failed to send"}
         return {"success": True}
     except Exception as e:
         logger.error(f"Error sending notification: {e}")
@@ -1429,9 +1431,19 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        # Run in executor to avoid blocking event loop
-        # 直接调用取消订单方法，避免嵌套的事件循环调用
-        success, message = ibkr_client.cancel_order(order_id)
+        # Run in executor to avoid blocking event loop with timeout
+        loop = asyncio.get_event_loop()
+        try:
+            success, message = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: ibkr_client.cancel_order(order_id)
+                ),
+                timeout=20.0  # 20-second timeout for order cancellation
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Order cancellation timed out for order {order_id}")
+            return {"success": False, "error": "Order cancellation timed out"}
         
         if success:
             # 更新 OrderManager 本地状态
@@ -3086,34 +3098,16 @@ async def test_notification(
 ):
     """测试通知发送"""
     try:
-        db = get_db_manager()
-        
-        if req.channel == "telegram" and telegram_notifier:
-            # 测试Telegram通知
-            success = await telegram_notifier.send_notification(req.message)
-            status = "sent" if success else "failed"
-            error_msg = None if success else "Failed to send Telegram notification"
-        elif req.channel == "chrome":
-            # 浏览器通知通过WebSocket发送
-            await websocket_manager.broadcast_notification({
-                "type": "test",
-                "message": req.message,
-                "timestamp": datetime.now().isoformat()
-            })
-            status = "sent"
-            error_msg = None
-        else:
-            status = "failed"
-            error_msg = f"Unsupported channel: {req.channel}"
-        
-        # 保存测试通知历史
-        db.save_notification_history(
-            channel=req.channel,
-            event_type="test",
+        # 使用统一的NotificationManager发送测试通知
+        success = await notification_manager.send(
             message=req.message,
-            status=status,
-            error_message=error_msg
+            event_type="test",
+            category="api",
+            channel=req.channel
         )
+        
+        status = "sent" if success else "failed"
+        error_msg = None if success else f"Failed to send {req.channel} notification"
         
         return {
             "success": status == "sent",

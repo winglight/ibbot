@@ -17,7 +17,7 @@ risk_logger = logger.bind(module="risk_manager", request_id="-")
 from dotenv import load_dotenv
 
 from .ibkr_client import IBKRClient
-from .telegram_notifier import TelegramNotifier
+from .notification_manager import NotificationManager
 from .database import DatabaseManager, get_db_manager
 from .database import AutoOrder as DatabaseAutoOrder
 from .database import RiskRule as DatabaseRiskRule
@@ -85,9 +85,9 @@ class PositionSizingResult:
     explanation: str = ""
 
 class RiskManager:
-    def __init__(self, ibkr_client: IBKRClient, telegram_notifier: TelegramNotifier):
+    def __init__(self, ibkr_client: IBKRClient, notification_manager: NotificationManager):
         self.ibkr_client = ibkr_client
-        self.telegram_notifier = telegram_notifier
+        self.notification_manager = notification_manager
         self.db_manager = get_db_manager()
         
         # 内存中的缓存，从数据库加载
@@ -674,7 +674,7 @@ class RiskManager:
             
             # Send alert only once per hour to avoid spam
             if not last_alert or (current_time - last_alert).seconds > 3600:
-                await self.telegram_notifier.send_loss_alert(
+                await self.notification_manager.send_loss_alert(
                     symbol=symbol,
                     position=position['position'],
                     current_price=position['current_price'],
@@ -1311,7 +1311,7 @@ class RiskManager:
             account_info = await self.ibkr_client.get_account_info()
             positions = await self.ibkr_client.get_positions()
             
-            await self.telegram_notifier.send_daily_summary(account_info, positions)
+            await self.notification_manager.send_daily_summary(account_info, positions)
             
         except Exception as e:
             risk_logger.error(f"Error sending daily summary: {e}")
