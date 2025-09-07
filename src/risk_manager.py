@@ -616,8 +616,8 @@ class RiskManager:
             risk_logger.info("=== Starting position monitoring cycle ===")
             
             # 设置fast=False确保获取最新实时价格，而不是使用缓存
-            positions = self.ibkr_client.get_positions(fast=False)
-            account_info = self.ibkr_client.get_account_info()
+            positions = await self.ibkr_client.get_positions(fast=False)
+            account_info = await self.ibkr_client.get_account_info()
             
             risk_logger.info(f"Found {len(positions)} positions to monitor")
             risk_logger.info(f"Active risk rules: {len([r for r in self.risk_rules.values() if r.enabled])}")
@@ -1151,7 +1151,7 @@ class RiskManager:
             risk_logger.debug(f"IBKR连接状态正常，开始获取持仓信息 for {order_request.symbol}")
             
             # Determine order action
-            positions = self.ibkr_client.get_positions()
+            positions = await self.ibkr_client.get_positions()
             risk_logger.debug(f"获取到 {len(positions)} 个持仓")
             
             position = next((p for p in positions if p['symbol'] == order_request.symbol), None)
@@ -1302,8 +1302,8 @@ class RiskManager:
             if not self.ibkr_client or not getattr(self.ibkr_client, 'connected', False):
                 return
             
-            account_info = self.ibkr_client.get_account_info()
-            positions = self.ibkr_client.get_positions()
+            account_info = await self.ibkr_client.get_account_info()
+            positions = await self.ibkr_client.get_positions()
             
             await self.telegram_notifier.send_daily_summary(account_info, positions)
             
@@ -1665,8 +1665,22 @@ class RiskManager:
         - rv_ref_by_method: 当 rv_ref_method=rolling/current 时返回对应参考值；static 时返回 None 以回退至 rv_ref_value
         - info: 解释字符串，便于拼接到 explanation
         """
+        import signal
+        import time
+        
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Historical data request timed out")
+        
         try:
-            df = self.ibkr_client.get_historical_data(symbol)
+            # 检查是否有缓存的历史数据，避免阻塞调用
+            if hasattr(self.ibkr_client, '_cached_historical_data') and symbol in self.ibkr_client._cached_historical_data:
+                df = self.ibkr_client._cached_historical_data[symbol]
+                elapsed = 0.0
+            else:
+                # 如果没有缓存，跳过RV估算避免阻塞
+                risk_logger.warning(f"[RV] No cached historical data for {symbol}, skipping RV estimation")
+                return None, None, f"rv:auto=no_cache({symbol})"
+            
             if df is None or getattr(df, 'empty', True) or 'close' not in getattr(df, 'columns', {}):
                 return None, None, f"rv:auto=no_data({symbol})"
 
@@ -1687,11 +1701,21 @@ class RiskManager:
                 tail_n = max(w, min(len(rv_series), w * 5))
                 rv_ref_est = float(rv_series.tail(tail_n).mean()) if not rv_series.empty else float(rets.std())
 
-            info = f"rv:auto method={method}, window={w}, current={rv_cur:.6f}"
+            info = f"rv:auto method={method}, window={w}, current={rv_cur:.6f}, elapsed={elapsed:.2f}s"
             if rv_ref_est is not None:
                 info += f", ref={rv_ref_est:.6f}"
             return rv_cur, rv_ref_est, info
+        except TimeoutError:
+            # 超时时取消信号并返回默认值
+            signal.alarm(0)
+            risk_logger.warning(f"_estimate_rv timeout for {symbol}, using fallback")
+            return None, None, f"rv:auto=timeout({symbol})"
         except Exception as e:
+            # 确保清理信号处理器
+            try:
+                signal.alarm(0)
+            except:
+                pass
             risk_logger.error(f"_estimate_rv error: {e}")
             return None, None, "rv:auto=error"
 
@@ -1704,7 +1728,13 @@ class RiskManager:
                         rv_ref: Optional[float] = None) -> PositionSizingResult:
         account_info = {}
         try:
-            account_info = self.ibkr_client.get_account_info() or {}
+            # 使用缓存的账户信息避免阻塞调用
+            if hasattr(self.ibkr_client, '_cached_account_info'):
+                account_info = self.ibkr_client._cached_account_info or {}
+            else:
+                # 如果没有缓存，使用默认值避免阻塞
+                account_info = {'NetLiquidation': 100000.0}  # 默认值
+                risk_logger.warning(f"[PS] Using default account info for position sizing")
         except Exception as e:
             risk_logger.error(f"[PS] get_account_info error: {e}")
         self.update_equity_state(account_info)

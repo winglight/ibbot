@@ -341,10 +341,25 @@ class ConnectionManager:
             return False
             
         try:
-            is_connected = self.ib.isConnected()
-            self.connected = is_connected
-            return is_connected
-        except:
+            # 使用线程池执行超时检查，避免阻塞
+            import concurrent.futures
+            
+            def check_connection():
+                return self.ib.isConnected()
+            
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(check_connection)
+                try:
+                    is_connected = future.result(timeout=2.0)  # 2秒超时
+                    self.connected = is_connected
+                    return is_connected
+                except concurrent.futures.TimeoutError:
+                    connection_logger.warning("Connection check timeout after 2 seconds")
+                    self.connected = False
+                    return False
+                
+        except Exception as e:
+            connection_logger.warning(f"Connection check failed: {e}")
             self.connected = False
             return False
     

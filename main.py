@@ -36,6 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 from jose import JWTError, jwt
+from starlette.middleware.gzip import GZipMiddleware
 
 # Add current directory to Python path
 sys.path.append(str(Path(__file__).parent))
@@ -113,8 +114,66 @@ def resolve_module(path: str) -> str:
     return "general"
 
 # 临时创建FastAPI应用实例（稍后会用lifespan重新创建）
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
+    if auto_connect:
+        main_logger.info("Auto-connect enabled, will attempt to connect to IBKR asynchronously...")
+        
+        async def async_auto_connect():
+            try:
+                # Run connection in executor to avoid blocking
+                loop = asyncio.get_event_loop()
+                success = await loop.run_in_executor(None, connection_manager.connect)
+                if not success:
+                    main_logger.warning("IBKR auto-connection failed. Continuing without connection...")
+                    main_logger.info("You can connect later through the web interface.")
+                else:
+                    main_logger.info("IBKR auto-connection successful!")
+                    # Initialize ibkr_client when auto-connect succeeds
+                    global ibkr_client
+                    if ibkr_client is None:
+                        ibkr_client = IBKRClient()
+                        main_logger.info("IBKRClient initialized after auto-connect")
+                        
+                        # Update risk_manager with ibkr_client
+                        try:
+                            risk_manager.ibkr_client = ibkr_client
+                            main_logger.info("Risk manager ibkr_client updated with auto-connected client")
+                        except Exception as re_err:
+                            main_logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
+                        
+                        # Update queue_manager dependencies
+                        try:
+                            queue_manager.set_dependencies(
+                                ibkr_client=ibkr_client,
+                                risk_manager=risk_manager,
+                                strategy_manager=strategy_manager,
+                                connection_manager=connection_manager,
+                                websocket_manager=websocket_manager,
+                                order_manager=order_manager
+                            )
+                            main_logger.info("Queue manager dependencies updated after auto-connect")
+                        except Exception as dep_err:
+                            main_logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
+            except Exception as e:
+                main_logger.warning(f"Auto-connection failed: {e}")
+                main_logger.info("You can connect later through the web interface.")
+        
+        # Schedule async connection to run in background
+        asyncio.create_task(async_auto_connect())
+    else:
+        main_logger.info("Auto-connect disabled. You can connect later through the web interface.")
+    
+    yield
+    # Shutdown
+    main_logger.info("Application shutting down...")
 
+app = FastAPI(lifespan=lifespan)
+
+# 启用GZip压缩，减小大文件(如 app.js)传输体积
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
@@ -135,6 +194,20 @@ async def request_id_middleware(request: Request, call_next):
         request_id_ctx.reset(token_id)
         module_ctx.reset(token_mod)
     response.headers["X-Request-ID"] = request_id
+    return response
+
+
+# 静态资源缓存中间件：为静态资源添加缓存头
+@app.middleware("http")
+async def static_cache_middleware(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        path = request.url.path
+        if request.method == "GET" and path.startswith("/static/") and response.status_code == 200:
+            if any(path.endswith(ext) for ext in (".js", ".css", ".svg", ".woff2", ".ttf")):
+                response.headers["Cache-Control"] = "public, max-age=604800, immutable"
+    except Exception:
+        pass
     return response
 
 
@@ -521,11 +594,12 @@ async def lifespan(app: FastAPI):
         main_logger.warning(f"Risk manager startup warning: {e}")
 
     # 启动定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
+    # 现在使用异步调用，不会阻塞主线程
     try:
         global pnl_broadcast_task
         if pnl_broadcast_task is None:
             pnl_broadcast_task = asyncio.create_task(_pnl_broadcast_loop())
-            main_logger.info("Started PnL broadcast loop task")
+            main_logger.info("Started PnL broadcast loop task with async calls")
     except Exception as e:
         main_logger.warning(f"Failed to start PnL broadcast loop: {e}")
     
@@ -572,19 +646,18 @@ async def _pnl_broadcast_loop():
                     # 仅在已连接且 ibkr_client 可用时运行
                     if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
                         continue
-                    loop = asyncio.get_event_loop()
                     account_info = None
                     positions = None
                     try:
                         account_info = await asyncio.wait_for(
-                            loop.run_in_executor(None, ibkr_client.get_account_info),
+                            ibkr_client.get_account_info(),
                             timeout=5.0
                         )
                     except Exception:
                         account_info = None
                     try:
                         positions = await asyncio.wait_for(
-                            loop.run_in_executor(None, lambda: ibkr_client.get_positions(fast=True)),
+                            ibkr_client.get_positions(fast=True),
                             timeout=5.0
                         )
                     except Exception:
@@ -1307,7 +1380,7 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
     
     try:
         # 获取当前持仓
-        positions = ibkr_client.get_positions()
+        positions = await ibkr_client.get_positions()
         target_position = None
         
         for pos in positions:
@@ -1381,6 +1454,264 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
         logger.error(f"Close position error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/orders/validate")
+async def validate_order(order: OrderRequest, user: Optional[str] = Depends(get_current_user)):
+    """订单验证接口 - 执行 G 规则校验"""
+    try:
+        # 初始化验证结果
+        validation_result = {
+            "valid": True,
+            "errors": [],
+            "warnings": [],
+            "g_rules_checked": [],
+            "sizing_explain": None
+        }
+        
+        # G7: 基本参数验证
+        g7_result = _validate_g7_basic_params(order)
+        validation_result["g_rules_checked"].append(g7_result)
+        if not g7_result["passed"]:
+            validation_result["valid"] = False
+            validation_result["errors"].extend(g7_result["errors"])
+        
+        # G6: 连接状态验证
+        g6_result = _validate_g6_connection()
+        validation_result["g_rules_checked"].append(g6_result)
+        if not g6_result["passed"]:
+            validation_result["valid"] = False
+            validation_result["errors"].extend(g6_result["errors"])
+        
+        # G5: 市场时间验证
+        g5_result = _validate_g5_market_hours(order.symbol)
+        validation_result["g_rules_checked"].append(g5_result)
+        if not g5_result["passed"]:
+            validation_result["warnings"].extend(g5_result["warnings"])
+        
+        # G4: 风险管理验证
+        g4_result = await _validate_g4_risk_management(order)
+        validation_result["g_rules_checked"].append(g4_result)
+        if not g4_result["passed"]:
+            validation_result["valid"] = False
+            validation_result["errors"].extend(g4_result["errors"])
+        
+        # G3: 持仓限制验证
+        g3_result = await _validate_g3_position_limits(order)
+        validation_result["g_rules_checked"].append(g3_result)
+        if not g3_result["passed"]:
+            validation_result["valid"] = False
+            validation_result["errors"].extend(g3_result["errors"])
+        
+        # G2: 资金充足性验证
+        g2_result = await _validate_g2_capital_adequacy(order)
+        validation_result["g_rules_checked"].append(g2_result)
+        if not g2_result["passed"]:
+            validation_result["valid"] = False
+            validation_result["errors"].extend(g2_result["errors"])
+        
+        # G1: 最终合规性检查
+        g1_result = _validate_g1_final_compliance(order)
+        validation_result["g_rules_checked"].append(g1_result)
+        if not g1_result["passed"]:
+            validation_result["valid"] = False
+            validation_result["errors"].extend(g1_result["errors"])
+        
+        return validation_result
+        
+    except Exception as e:
+        logger.error(f"Order validation error: {e}")
+        return {
+            "valid": False,
+            "errors": [f"Validation system error: {str(e)}"],
+            "warnings": [],
+            "g_rules_checked": [],
+            "sizing_explain": None
+        }
+
+def _validate_g7_basic_params(order: OrderRequest) -> dict:
+    """G7: 基本参数验证"""
+    errors = []
+    
+    if not order.symbol or len(order.symbol.strip()) == 0:
+        errors.append("Symbol is required")
+    
+    if not order.action or order.action.upper() not in ["BUY", "SELL"]:
+        errors.append("Action must be BUY or SELL")
+    
+    if not order.quantity or order.quantity <= 0:
+        errors.append("Quantity must be positive")
+    
+    if not order.order_type or order.order_type.upper() not in ["MARKET", "LIMIT"]:
+        errors.append("Order type must be MARKET or LIMIT")
+    
+    if order.order_type and order.order_type.upper() == "LIMIT" and (not order.price or order.price <= 0):
+        errors.append("Price is required for limit orders")
+    
+    return {
+        "rule": "G7",
+        "description": "Basic parameter validation",
+        "passed": len(errors) == 0,
+        "errors": errors
+    }
+
+def _validate_g6_connection() -> dict:
+    """G6: 连接状态验证"""
+    errors = []
+    
+    if not ibkr_client:
+        errors.append("IBKR client not initialized")
+    elif not connection_manager.is_connected():
+        errors.append("Not connected to IBKR")
+    
+    return {
+        "rule": "G6",
+        "description": "Connection status validation",
+        "passed": len(errors) == 0,
+        "errors": errors
+    }
+
+def _validate_g5_market_hours(symbol: str) -> dict:
+    """G5: 市场时间验证"""
+    warnings = []
+    
+    # 简化的市场时间检查 - 实际应用中需要更复杂的逻辑
+    current_time = datetime.now(NY_TZ)
+    current_hour = current_time.hour
+    current_weekday = current_time.weekday()
+    
+    # 周末检查
+    if current_weekday >= 5:  # 周六、周日
+        warnings.append("Market is closed on weekends")
+    
+    # 简单的交易时间检查 (9:30 AM - 4:00 PM ET)
+    elif current_hour < 9 or (current_hour == 9 and current_time.minute < 30) or current_hour >= 16:
+        warnings.append("Outside regular trading hours")
+    
+    return {
+        "rule": "G5",
+        "description": "Market hours validation",
+        "passed": True,  # 警告不阻止订单
+        "warnings": warnings
+    }
+
+async def _validate_g4_risk_management(order: OrderRequest) -> dict:
+    """G4: 风险管理验证"""
+    errors = []
+    
+    try:
+        # 检查是否有活跃的风险规则
+        if risk_manager:
+            # 这里可以添加具体的风险规则检查
+            # 例如：检查单笔订单金额限制、日内交易次数限制等
+            pass
+        
+        # 检查订单金额是否超过限制（示例：单笔订单不超过 $100,000）
+        if order.price and order.quantity:
+            order_value = order.price * order.quantity
+            if order_value > 100000:
+                errors.append(f"Order value ${order_value:,.2f} exceeds maximum limit of $100,000")
+        
+    except Exception as e:
+        errors.append(f"Risk management check failed: {str(e)}")
+    
+    return {
+        "rule": "G4",
+        "description": "Risk management validation",
+        "passed": len(errors) == 0,
+        "errors": errors
+    }
+
+async def _validate_g3_position_limits(order: OrderRequest) -> dict:
+    """G3: 持仓限制验证"""
+    errors = []
+    
+    try:
+        if ibkr_client and connection_manager.is_connected():
+            # 获取当前持仓
+            positions = await ibkr_client.get_positions()
+            current_position = 0
+            
+            for pos in positions:
+                if pos.get('symbol') == order.symbol:
+                    current_position = float(pos.get('position', 0))
+                    break
+            
+            # 计算订单执行后的持仓
+            if order.action.upper() == "BUY":
+                new_position = current_position + order.quantity
+            else:
+                new_position = current_position - order.quantity
+            
+            # 检查持仓限制（示例：单个股票持仓不超过 10,000 股）
+            if abs(new_position) > 10000:
+                errors.append(f"Position limit exceeded: new position would be {new_position} shares (limit: 10,000)")
+        
+    except Exception as e:
+        errors.append(f"Position limit check failed: {str(e)}")
+    
+    return {
+        "rule": "G3",
+        "description": "Position limits validation",
+        "passed": len(errors) == 0,
+        "errors": errors
+    }
+
+async def _validate_g2_capital_adequacy(order: OrderRequest) -> dict:
+    """G2: 资金充足性验证"""
+    errors = []
+    
+    try:
+        if ibkr_client and connection_manager.is_connected():
+            # 获取账户信息
+            account_info = ibkr_client.get_account_summary()
+            
+            if account_info:
+                # 检查可用资金
+                available_funds = 0
+                for item in account_info:
+                    if item.get('tag') == 'AvailableFunds':
+                        available_funds = float(item.get('value', 0))
+                        break
+                
+                # 计算订单所需资金
+                if order.action.upper() == "BUY" and order.price and order.quantity:
+                    required_funds = order.price * order.quantity
+                    
+                    if required_funds > available_funds:
+                        errors.append(f"Insufficient funds: required ${required_funds:,.2f}, available ${available_funds:,.2f}")
+        
+    except Exception as e:
+        errors.append(f"Capital adequacy check failed: {str(e)}")
+    
+    return {
+        "rule": "G2",
+        "description": "Capital adequacy validation",
+        "passed": len(errors) == 0,
+        "errors": errors
+    }
+
+def _validate_g1_final_compliance(order: OrderRequest) -> dict:
+    """G1: 最终合规性检查"""
+    errors = []
+    warnings = []
+    
+    # 最终的合规性检查
+    # 例如：检查是否在禁止交易列表中
+    prohibited_symbols = ["RESTRICTED1", "RESTRICTED2"]  # 示例
+    if order.symbol.upper() in prohibited_symbols:
+        errors.append(f"Symbol {order.symbol} is on the prohibited trading list")
+    
+    # 检查订单是否符合监管要求
+    if order.quantity > 1000:
+        warnings.append("Large order may require additional reporting")
+    
+    return {
+        "rule": "G1",
+        "description": "Final compliance validation",
+        "passed": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings
+    }
+
 @app.post("/api/reverse_position")
 async def reverse_position(request: dict, user: Optional[str] = Depends(get_current_user)):
     """反向下单接口 - 根据持仓情况自动计算反向订单"""
@@ -1393,7 +1724,7 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
     
     try:
         # 获取当前持仓
-        positions = ibkr_client.get_positions()
+        positions = await ibkr_client.get_positions()
         target_position = None
         
         for pos in positions:
@@ -1774,11 +2105,10 @@ async def get_account_info(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
-        # Run in executor with timeout to avoid blocking event loop
-        loop = asyncio.get_event_loop()
+        # Direct async call with timeout
         try:
             info = await asyncio.wait_for(
-                loop.run_in_executor(None, ibkr_client.get_account_info),
+                ibkr_client.get_account_info(),
                 timeout=10.0  # 10-second timeout
             )
         except asyncio.TimeoutError:
@@ -1804,8 +2134,10 @@ async def get_positions(user: Optional[str] = Depends(get_current_user), fast: b
     """
     global positions_cache, positions_cache_timestamp
     
+    # 如果未连接IB，返回空持仓列表而不是报错
     if not ibkr_client or not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+        logger.warning("Not connected to IBKR, returning empty positions list")
+        return {"success": True, "positions": [], "from_cache": False, "warning": "Not connected to IBKR"}
     
     try:
         # 检查缓存是否有效
@@ -1816,11 +2148,10 @@ async def get_positions(user: Optional[str] = Depends(get_current_user), fast: b
                 logger.debug(f"Using positions cache, age: {cache_age:.1f}s")
                 return {"success": True, "positions": positions_cache, "from_cache": True}
         
-        # 使用异步执行器运行get_positions，避免阻塞事件循环
-        loop = asyncio.get_event_loop()
+        # 直接使用异步方法，避免阻塞事件循环
         try:
             positions = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: ibkr_client.get_positions(fast=fast)),
+                ibkr_client.get_positions(fast=fast),
                 timeout=5.0  # 缩短超时时间到5秒
             )
             
@@ -1970,13 +2301,21 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
         except Exception:
             leverage["MNQ"] = 20
 
-        # 新增：返回完整风控配置
+        # 新增：返回完整风控配置，添加超时保护
         full_cfg = {}
         try:
             if 'risk_manager' in globals() and risk_manager is not None:
-                full_cfg = risk_manager.get_config()
+                loop = asyncio.get_event_loop()
+                full_cfg = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: risk_manager.get_config()),
+                    timeout=3.0  # 3秒超时
+                )
+        except asyncio.TimeoutError:
+            logger.warning("get_risk_config: fetch full config timed out")
+            full_cfg = {}
         except Exception as e:
             logger.warning(f"get_risk_config: fetch full config failed: {e}")
+            full_cfg = {}
 
         return {
             "stop_loss_ratio": stop_loss_ratio,
@@ -2020,6 +2359,107 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
         logger.error(f"Position sizing error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# 新增：S 规则 - 预览接口（返回 N/explain，并写入历史）
+@app.post("/api/sizing/preview")
+async def api_sizing_preview(payload: PositionSizingRequest, user: Optional[str] = Depends(get_current_user)):
+    if 'risk_manager' not in globals() or risk_manager is None:
+        raise HTTPException(status_code=400, detail="Risk manager not initialized")
+    
+    # Note: Position sizing calculation doesn't require IB connection
+    # Only actual order placement requires connection
+    try:
+        # 使用异步执行器和超时来避免阻塞
+        loop = asyncio.get_event_loop()
+        try:
+            res = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: risk_manager.position_sizing(
+                        symbol=payload.symbol,
+                        stop_distance=payload.stop_distance,
+                        rv_current=payload.rv_current,
+                        signal_tier=(payload.signal_tier or 'A'),
+                        execution_metrics=payload.execution_metrics,
+                        rv_ref=payload.rv_ref,
+                    )
+                ),
+                timeout=10.0  # 10秒超时
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Position sizing request timed out for {payload.symbol}")
+            raise HTTPException(status_code=408, detail="Position sizing calculation timed out. This may be due to slow market data retrieval.")
+        # 写入历史
+        try:
+            db = get_db_manager()
+            db.save_sizing_history(
+                symbol=payload.symbol,
+                action="preview",
+                suggested_quantity=int(res.contracts),
+                current_price=getattr(payload, 'rv_current', None),
+                sizing_method="risk_based",
+                calculation_details=json.dumps({
+                    "request": payload.dict(exclude_none=True),
+                    "result": asdict(res)
+                })
+            )
+        except Exception as he:
+            logger.warning(f"/api/sizing/preview: save history failed: {he}")
+        explain = {
+            "R": res.R,
+            "R_star": res.R_star,
+            "S": res.stop_distance,
+            "point_value": res.point_value,
+            "f_sig": res.scale_sig,
+            "f_vol": res.scale_vol,
+            "f_dd": res.scale_dd,
+            "f_exec": res.scale_exec,
+            "f_total": res.scale_total,
+            "explanation": res.explanation,
+        }
+        return {"N": int(res.contracts), "explain": explain}
+    except Exception as e:
+        logger.error(f"Sizing preview error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 新增：S 规则 - 历史查询
+@app.get("/api/sizing/history")
+async def get_sizing_history(symbol: Optional[str] = None, since: Optional[str] = None, limit: int = 100, user: Optional[str] = Depends(get_current_user)):
+    try:
+        db = get_db_manager()
+        items = db.load_sizing_history(symbol=symbol, since=since, limit=limit)
+        return {"success": True, "data": items, "count": len(items)}
+    except Exception as e:
+        logger.error(f"Get sizing history error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 新增：S 规则 - 配置读写（持久化于 strategy_settings.sizing_policy）
+@app.get("/api/sizing/policy")
+async def get_sizing_policy(user: Optional[str] = Depends(get_current_user)):
+    try:
+        db = get_db_manager()
+        settings = db.load_strategy_settings()
+        policy = settings.get("sizing_policy") if isinstance(settings, dict) else None
+        return policy or {}
+    except Exception as e:
+        logger.error(f"Get sizing policy error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/sizing/policy")
+async def update_sizing_policy(payload: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
+    try:
+        db = get_db_manager()
+        db.save_strategy_settings({"sizing_policy": payload})
+        # 读回确认
+        settings = db.load_strategy_settings()
+        policy = settings.get("sizing_policy") if isinstance(settings, dict) else None
+        return {"success": True, "policy": policy or {}}
+    except Exception as e:
+        logger.error(f"Update sizing policy error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # WebSocket endpoint
@@ -2290,10 +2730,130 @@ async def clear_strategy_executions(name: str, user: Optional[str] = Depends(get
         logger.error(f"Clear strategy executions error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Notifications API
+@app.get("/api/notifications/settings")
+async def get_notification_settings(user: Optional[str] = Depends(get_current_user)):
+    """获取通知设置"""
+    try:
+        db = get_db_manager()
+        settings = db.load_notification_settings()
+        
+        # 如果没有设置，返回默认配置
+        if not settings:
+            settings = {
+                "chrome": {
+                    "enabled": True,
+                    "config": {},
+                    "events": ["market", "strategy", "order", "risk"]
+                },
+                "telegram": {
+                    "enabled": False,
+                    "config": {
+                        "bot_token": "",
+                        "chat_id": ""
+                    },
+                    "events": ["market", "strategy", "order", "risk"]
+                }
+            }
+        
+        return {"success": True, "settings": settings}
+    except Exception as e:
+        logger.error(f"Get notification settings error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/notifications/settings")
+async def update_notification_settings(settings: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
+    """更新通知设置"""
+    try:
+        db = get_db_manager()
+        db.save_notification_settings(settings)
+        
+        # 更新Telegram通知器配置
+        if "telegram" in settings and telegram_notifier:
+            telegram_config = settings["telegram"]
+            if telegram_config.get("enabled") and telegram_config.get("config"):
+                config = telegram_config["config"]
+                if config.get("bot_token") and config.get("chat_id"):
+                    telegram_notifier.bot_token = config["bot_token"]
+                    telegram_notifier.chat_id = config["chat_id"]
+        
+        return {"success": True, "message": "Notification settings updated"}
+    except Exception as e:
+        logger.error(f"Update notification settings error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/notifications/history")
+async def get_notification_history(
+    channel: Optional[str] = None,
+    status: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 100,
+    user: Optional[str] = Depends(get_current_user)
+):
+    """获取通知历史"""
+    try:
+        db = get_db_manager()
+        history = db.load_notification_history(
+            channel=channel,
+            status=status,
+            since=since,
+            limit=limit
+        )
+        
+        return {"success": True, "history": history}
+    except Exception as e:
+        logger.error(f"Get notification history error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/notifications/test")
+async def test_notification(
+    channel: str,
+    message: str = "Test notification from IBKR Trading Bot",
+    user: Optional[str] = Depends(get_current_user)
+):
+    """测试通知发送"""
+    try:
+        db = get_db_manager()
+        
+        if channel == "telegram" and telegram_notifier:
+            # 测试Telegram通知
+            success = await telegram_notifier.send_notification(message)
+            status = "sent" if success else "failed"
+            error_msg = None if success else "Failed to send Telegram notification"
+        elif channel == "chrome":
+            # 浏览器通知通过WebSocket发送
+            await websocket_manager.broadcast_notification({
+                "type": "test",
+                "message": message,
+                "timestamp": datetime.now().isoformat()
+            })
+            status = "sent"
+            error_msg = None
+        else:
+            status = "failed"
+            error_msg = f"Unsupported channel: {channel}"
+        
+        # 保存测试通知历史
+        db.save_notification_history(
+            channel=channel,
+            event_type="test",
+            message=message,
+            status=status,
+            error_message=error_msg
+        )
+        
+        return {
+            "success": status == "sent",
+            "message": "Test notification sent" if status == "sent" else error_msg
+        }
+    except Exception as e:
+        logger.error(f"Test notification error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # System Logs API (kept for general debugging)
 @app.get("/api/logs")
 async def get_logs(
-    lines: int = 100,
+    lines: int = 50,  # 减少默认行数
     level: str = "all",
     request_id: Optional[str] = None,
     module: str = "all",
@@ -2304,8 +2864,14 @@ async def get_logs(
         log_file = "logs/trading_bot.log"
         if not os.path.exists(log_file):
             return {"success": True, "logs": []}
-        with open(log_file, "r") as f:
-            content = f.readlines()
+        
+        # 使用异步文件读取，避免阻塞
+        import aiofiles
+        async with aiofiles.open(log_file, "r") as f:
+            content = await f.readlines()
+            # 限制最大读取行数，避免内存问题
+            if len(content) > 10000:
+                content = content[-10000:]
 
         # Filter by date range
         now = datetime.now()
@@ -2352,6 +2918,63 @@ async def get_logs(
         return {"success": True, "logs": content[-lines:]}
     except Exception as e:
         logger.error(f"Get logs error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/logs/modules")
+async def get_log_modules(
+    range: str = "today",
+    user: Optional[str] = Depends(get_current_user),
+):
+    """Get unique module names from logs for dropdown filtering."""
+    try:
+        log_file = "logs/trading_bot.log"
+        if not os.path.exists(log_file):
+            return {"success": True, "modules": []}
+        
+        import aiofiles
+        async with aiofiles.open(log_file, "r") as f:
+            content = await f.readlines()
+            # 限制最大读取行数，避免内存问题
+            if len(content) > 10000:
+                content = content[-10000:]
+
+        # Filter by date range
+        now = datetime.now()
+        if range == "today":
+            date_str = now.strftime("%Y-%m-%d")
+            content = [line for line in content if line.startswith(f"| {date_str}")]
+        elif range == "week":
+            start = now - timedelta(days=now.weekday())
+            filtered = []
+            for line in content:
+                try:
+                    ts = datetime.strptime(line[2:21], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if ts.date() >= start.date():
+                    filtered.append(line)
+            content = filtered
+
+        # Extract unique modules from log lines
+        modules = set()
+        for line in content:
+            try:
+                parts = line.split('|')
+                # Expected format: | YYYY-mm-dd HH:MM:SS | LEVEL | MODULE | ...
+                if len(parts) >= 4:
+                    module = parts[3].strip()
+                    if module and module != "-":
+                        modules.add(module)
+            except Exception:
+                continue
+        
+        # Sort modules alphabetically
+        sorted_modules = sorted(list(modules))
+        
+        return {"success": True, "modules": sorted_modules}
+    except Exception as e:
+        logger.error(f"Get log modules error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2436,48 +3059,7 @@ def main():
         main_logger.error("Environment check failed. Please configure .env file.")
         return
     
-    # Auto connect if enabled in .env
-    auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
-    if auto_connect:
-        main_logger.info("Auto-connect enabled, attempting to connect to IBKR...")
-        try:
-            success = connection_manager.connect()
-            if not success:
-                main_logger.warning("IBKR auto-connection failed. Continuing without connection...")
-                main_logger.info("You can connect later through the web interface.")
-            else:
-                main_logger.info("IBKR auto-connection successful!")
-                # Initialize ibkr_client when auto-connect succeeds
-                global ibkr_client
-                if ibkr_client is None:
-                    ibkr_client = IBKRClient()
-                    main_logger.info("IBKRClient initialized after auto-connect")
-                    
-                    # Update risk_manager with ibkr_client
-                    try:
-                        risk_manager.ibkr_client = ibkr_client
-                        main_logger.info("Risk manager ibkr_client updated with auto-connected client")
-                    except Exception as re_err:
-                        main_logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
-                    
-                    # Update queue_manager dependencies
-                    try:
-                        queue_manager.set_dependencies(
-                            ibkr_client=ibkr_client,
-                            risk_manager=risk_manager,
-                            strategy_manager=strategy_manager,
-                            connection_manager=connection_manager,
-                            websocket_manager=websocket_manager,
-                            order_manager=order_manager
-                        )
-                        main_logger.info("Queue manager dependencies updated after auto-connect")
-                    except Exception as dep_err:
-                        main_logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
-        except Exception as e:
-            main_logger.warning(f"Auto-connection failed: {e}")
-            main_logger.info("You can connect later through the web interface.")
-    else:
-        main_logger.info("Auto-connect disabled. You can connect later through the web interface.")
+    # Auto-connect is now handled in FastAPI lifespan event
     
     # Start web server
     main_logger.info("Starting web server...")

@@ -283,6 +283,50 @@ class DatabaseManager:
                 )
             """)
             
+            # 创建仓位历史表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sizing_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    suggested_quantity INTEGER NOT NULL,
+                    current_price REAL,
+                    account_value REAL,
+                    position_size REAL,
+                    risk_percent REAL,
+                    sizing_method TEXT NOT NULL,
+                    calculation_details TEXT,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            
+            # 创建通知设置表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS notification_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1,
+                    config TEXT,
+                    events TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            
+            # 创建通知历史表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS notification_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    retry_count INTEGER DEFAULT 0,
+                    error_message TEXT,
+                    sent_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            
             conn.commit()
 
     # 自动订单相关方法 -> 重命名为订单相关方法（保留兼容包装）
@@ -364,11 +408,6 @@ class DatabaseManager:
                 orders.append(Order(*row))
             database_logger.debug(f"Loaded {len(orders)} orders")
             return orders
-
-    def load_auto_orders(self) -> List[AutoOrder]:
-        """[兼容] 加载所有自动订单，已弃用，请使用 load_orders"""
-        database_logger.warning("load_auto_orders() is deprecated; use load_orders()")
-        return self.load_orders()  # type: ignore[return-value]
 
     def load_risk_rules(self) -> List[RiskRule]:
         """加载所有风险规则"""
@@ -845,167 +884,225 @@ class DatabaseManager:
             
             database_logger.debug(f"Loaded strategy settings: {list(settings.keys())}")
             return settings
-    
-    # 数据迁移方法
-    def migrate_from_csv_json(self, data_dir: str = "data"):
-        """从CSV和JSON文件迁移数据到SQLite"""
-        data_path = Path(data_dir)
-        if not data_path.exists():
-            database_logger.warning(f"Data directory not found: {data_dir}")
-            return
-        
-        database_logger.info("Starting data migration from CSV/JSON to SQLite...")
-        
-        # 迁移订单数据
-        orders_file = data_path / "orders.csv"
-        if orders_file.exists():
-            self._migrate_orders_csv(orders_file)
-        
-        # 迁移风险规则
-        risk_rules_file = data_path / "risk_rules.csv"
-        if risk_rules_file.exists():
-            self._migrate_risk_rules_csv(risk_rules_file)
-        
-        # 迁移策略数据
-        strategies_file = data_path / "strategies.csv"
-        if strategies_file.exists():
-            self._migrate_strategies_csv(strategies_file)
-        
-        # 迁移策略执行数据
-        executions_file = data_path / "strategy_executions.csv"
-        if executions_file.exists():
-            self._migrate_strategy_executions_csv(executions_file)
-        
-        # 迁移策略设置
-        settings_file = data_path / "strategy_settings.json"
-        if settings_file.exists():
-            self._migrate_strategy_settings_json(settings_file)
-        
-        # 迁移历史数据
-        for csv_file in data_path.glob("*_historical.csv"):
-            symbol = csv_file.name.replace("_historical.csv", "")
-            self._migrate_historical_csv(csv_file, symbol)
-        
-        database_logger.info("Data migration completed successfully!")
-    
-    def _migrate_orders_csv(self, file_path: Path):
-        """迁移订单CSV文件"""
-        try:
-            df = pd.read_csv(file_path)
-            for _, row in df.iterrows():
-                order = Order(
-                    order_id=str(row.get('order_id', '')),
-                    symbol=row.get('symbol', ''),
-                    quantity=int(row.get('quantity', 0)),
-                    action=row.get('action', ''),
-                    order_type=row.get('order_type', ''),
-                    price=row.get('price'),
-                    timestamp=row.get('timestamp', datetime.now().isoformat()),
-                    exchange=row.get('exchange', 'SMART'),
-                    sec_type=row.get('sec_type', 'STK')
-                )
-                self.save_order(order)
-            database_logger.info(f"Migrated {len(df)} orders from {file_path}")
-        except Exception as e:
-            database_logger.error(f"Failed to migrate orders from {file_path}: {e}")
-    
-    def _migrate_risk_rules_csv(self, file_path: Path):
-        """迁移风险规则CSV文件"""
-        try:
-            df = pd.read_csv(file_path)
-            for _, row in df.iterrows():
-                rule = RiskRule(
-                    symbol=row.get('symbol', ''),
-                    stop_loss_price=row.get('stop_loss_price'),
-                    take_profit_price=row.get('take_profit_price'),
-                    max_loss_percent=row.get('max_loss_percent'),
-                    timestamp=row.get('timestamp', datetime.now().isoformat())
-                )
-                self.save_risk_rule(rule)
-            database_logger.info(f"Migrated {len(df)} risk rules from {file_path}")
-        except Exception as e:
-            database_logger.error(f"Failed to migrate risk rules from {file_path}: {e}")
-    
-    def _migrate_strategies_csv(self, file_path: Path):
-        """迁移策略CSV文件"""
-        try:
-            df = pd.read_csv(file_path)
-            for _, row in df.iterrows():
-                strategy = Strategy(
-                    name=row.get('name', ''),
-                    strategy_type=row.get('strategy_type', ''),
-                    enabled=bool(row.get('enabled', True)),
-                    api_endpoint=row.get('api_endpoint'),
-                    file_path=row.get('file_path'),
-                    description=row.get('description'),
-                    created_at=row.get('created_at', datetime.now().isoformat()),
-                    updated_at=row.get('updated_at', datetime.now().isoformat())
-                )
-                self.save_strategy(strategy)
-            database_logger.info(f"Migrated {len(df)} strategies from {file_path}")
-        except Exception as e:
-            database_logger.error(f"Failed to migrate strategies from {file_path}: {e}")
-    
-    def _migrate_strategy_executions_csv(self, file_path: Path):
-        """迁移策略执行CSV文件"""
-        try:
-            df = pd.read_csv(file_path)
-            for _, row in df.iterrows():
-                execution = StrategyExecution(
-                    name=row.get('name', ''),
-                    symbol=row.get('symbol', ''),
-                    action=row.get('action', ''),
-                    quantity=int(row.get('quantity', 0)),
-                    price=row.get('price'),
-                    timestamp=row.get('timestamp', datetime.now().isoformat()),
-                    order_id=row.get('order_id'),
-                    profit=row.get('profit'),
-                    status=row.get('status', 'pending')
-                )
-                self.save_strategy_execution(execution)
-            database_logger.info(f"Migrated {len(df)} strategy executions from {file_path}")
-        except Exception as e:
-            database_logger.error(f"Failed to migrate strategy executions from {file_path}: {e}")
-    
-    def _migrate_strategy_settings_json(self, file_path: Path):
-        """迁移策略设置JSON文件"""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
-            self.save_strategy_settings(settings)
-            database_logger.info(f"Migrated strategy settings from {file_path}")
-        except Exception as e:
-            database_logger.error(f"Failed to migrate strategy settings from {file_path}: {e}")
-    
-    def _migrate_historical_csv(self, file_path: Path, symbol: str):
-        """迁移历史数据CSV文件"""
-        try:
-            df = pd.read_csv(file_path)
-            
-            # 确保列名正确
-            required_columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            if not all(col in df.columns for col in required_columns):
-                # 尝试常见的列名映射
-                column_mapping = {
-                    'date': 'timestamp',
-                    'datetime': 'timestamp',
-                    'time': 'timestamp',
-                    'Open': 'open',
-                    'High': 'high',
-                    'Low': 'low',
-                    'Close': 'close',
-                    'Volume': 'volume'
-                }
-                df = df.rename(columns=column_mapping)
-            
-            if all(col in df.columns for col in required_columns):
-                self.save_historical_data(symbol, df)
-                database_logger.info(f"Migrated {len(df)} historical records for {symbol} from {file_path}")
-            else:
-                database_logger.warning(f"Historical data file {file_path} missing required columns")
-        except Exception as e:
-            database_logger.error(f"Failed to migrate historical data from {file_path}: {e}")
 
+    def save_sizing_history(self, symbol: str, action: str, suggested_quantity: int, 
+                           current_price: float = None, account_value: float = None,
+                           position_size: float = None, risk_percent: float = None,
+                           sizing_method: str = "default", calculation_details: str = None):
+        """保存仓位计算历史"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            timestamp = datetime.now().isoformat()
+            
+            cursor.execute(
+                """
+                INSERT INTO sizing_history 
+                (symbol, action, suggested_quantity, current_price, account_value, 
+                 position_size, risk_percent, sizing_method, calculation_details, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (symbol, action, suggested_quantity, current_price, account_value,
+                 position_size, risk_percent, sizing_method, calculation_details, timestamp)
+            )
+            conn.commit()
+            database_logger.debug(f"Sizing history saved for {symbol}: {suggested_quantity} shares")
+
+    def load_sizing_history(self, symbol: str = None, since: str = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """加载仓位计算历史"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 构建查询条件
+            conditions = []
+            params = []
+            
+            if symbol:
+                conditions.append("symbol = ?")
+                params.append(symbol)
+            
+            if since:
+                conditions.append("timestamp >= ?")
+                params.append(since)
+            
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+            
+            query = f"""
+                SELECT symbol, action, suggested_quantity, current_price, account_value,
+                       position_size, risk_percent, sizing_method, calculation_details, timestamp
+                FROM sizing_history 
+                {where_clause}
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """
+            
+            params.append(limit)
+            cursor.execute(query, params)
+            
+            rows = cursor.fetchall()
+            history = []
+            for row in rows:
+                history.append({
+                    'symbol': row[0],
+                    'action': row[1],
+                    'suggested_quantity': row[2],
+                    'current_price': row[3],
+                    'account_value': row[4],
+                    'position_size': row[5],
+                    'risk_percent': row[6],
+                    'sizing_method': row[7],
+                    'calculation_details': row[8],
+                    'timestamp': row[9]
+                })
+            
+            database_logger.debug(f"Loaded {len(history)} sizing history records")
+            return history
+    
+    # 通知相关方法
+    def save_notification_settings(self, settings: Dict[str, Any]):
+        """保存通知设置"""
+        now = datetime.now().isoformat()
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            for channel, config in settings.items():
+                enabled = config.get('enabled', True)
+                events = json.dumps(config.get('events', []))
+                channel_config = json.dumps(config.get('config', {}))
+                
+                cursor.execute("""
+                    INSERT OR REPLACE INTO notification_settings 
+                    (channel, enabled, config, events, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (channel, int(enabled), channel_config, events, now))
+            
+            conn.commit()
+            database_logger.debug(f"Notification settings saved: {list(settings.keys())}")
+    
+    def load_notification_settings(self) -> Dict[str, Any]:
+        """加载通知设置"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT channel, enabled, config, events FROM notification_settings")
+            rows = cursor.fetchall()
+            
+            settings = {}
+            for channel, enabled, config, events in rows:
+                try:
+                    settings[channel] = {
+                        'enabled': bool(enabled),
+                        'config': json.loads(config) if config else {},
+                        'events': json.loads(events) if events else []
+                    }
+                except json.JSONDecodeError:
+                    settings[channel] = {
+                        'enabled': bool(enabled),
+                        'config': {},
+                        'events': []
+                    }
+            
+            database_logger.debug(f"Loaded notification settings: {list(settings.keys())}")
+            return settings
+    
+    def save_notification_history(self, channel: str, event_type: str, message: str, 
+                                 status: str = 'pending', error_message: str = None):
+        """保存通知历史"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            sent_at = now if status == 'sent' else None
+            
+            cursor.execute("""
+                INSERT INTO notification_history 
+                (channel, event_type, message, status, error_message, sent_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (channel, event_type, message, status, error_message, sent_at, now))
+            
+            conn.commit()
+            database_logger.debug(f"Notification history saved: {channel} - {event_type}")
+    
+    def load_notification_history(self, channel: str = None, status: str = None, 
+                                 since: str = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """加载通知历史"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 构建查询条件
+            conditions = []
+            params = []
+            
+            if channel:
+                conditions.append("channel = ?")
+                params.append(channel)
+            
+            if status:
+                conditions.append("status = ?")
+                params.append(status)
+            
+            if since:
+                conditions.append("created_at >= ?")
+                params.append(since)
+            
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+            
+            query = f"""
+                SELECT channel, event_type, message, status, retry_count, 
+                       error_message, sent_at, created_at
+                FROM notification_history 
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            
+            params.append(limit)
+            cursor.execute(query, params)
+            
+            rows = cursor.fetchall()
+            
+            history = []
+            for row in rows:
+                history.append({
+                    'channel': row[0],
+                    'event_type': row[1],
+                    'message': row[2],
+                    'status': row[3],
+                    'retry_count': row[4],
+                    'error_message': row[5],
+                    'sent_at': row[6],
+                    'created_at': row[7]
+                })
+            
+            database_logger.debug(f"Loaded notification history: {len(history)} records")
+            return history
+    
+    def update_notification_status(self, notification_id: int, status: str, 
+                                  error_message: str = None, retry_count: int = None):
+        """更新通知状态"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            updates = ["status = ?"]
+            params = [status]
+            
+            if status == 'sent':
+                updates.append("sent_at = ?")
+                params.append(datetime.now().isoformat())
+            
+            if error_message is not None:
+                updates.append("error_message = ?")
+                params.append(error_message)
+            
+            if retry_count is not None:
+                updates.append("retry_count = ?")
+                params.append(retry_count)
+            
+            params.append(notification_id)
+            
+            query = f"UPDATE notification_history SET {', '.join(updates)} WHERE id = ?"
+            cursor.execute(query, params)
+            
+            conn.commit()
+            database_logger.debug(f"Notification status updated: {notification_id} -> {status}")
 
 # 全局数据库实例
 db_manager = None

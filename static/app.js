@@ -28,6 +28,8 @@ class TradingApp {
         this.monitorRealtimeSymbol = null;
         // 缓存当日订单列表，供监控时查找最新建仓/加仓时间
         this.orders = [];
+        // 通知列表
+        this.notifications = [];
         this.init();
     }
 
@@ -44,12 +46,27 @@ class TradingApp {
         this.initSymbolCombobox();
         this.connectWebSocket();
         this.toggleAuthButtons(!!localStorage.getItem('access_token'));
-        await this.ensureDefaultConnectionConfig();
-        await this.tryAutoLogin();
-        await this.checkConnectionStatus();
-        await this.loadStrategies();
-        await this.loadLogs();
         this.scheduleTradingReminders();
+        
+        // 延迟执行所有网络请求，避免阻塞首页渲染
+        setTimeout(async () => {
+            // 优化：并行初始化，降低关键接口超时与重试，避免串行等待叠加
+            const cfgPromise = this.ensureDefaultConnectionConfig({ timeout: 3000, maxRetries: 0 });
+            // 不阻塞首屏：自动登录与自动连接在后台进行
+            void this.tryAutoLogin({ timeout: 7000, maxRetries: 0, connectTimeout: 10000, connectRetries: 0 });
+            await this.checkConnectionStatus({ timeout: 4000, maxRetries: 0 });
+            this.loadStrategies();
+            this.loadLogModules();
+            this.loadLogs();
+            // 初始化通知面板
+            this.updateNotificationPanel();
+            // 加载 G Rules 配置和状态
+            this.loadGRulesConfig();
+            this.loadGRulesStatus();
+            // 加载风险规则
+            this.loadRiskRules();
+            await cfgPromise.catch(() => {});
+        }, 50);
     }
 
     // Show login modal
@@ -99,23 +116,30 @@ class TradingApp {
                 this.showAlert('success', '登录成功');
                 this.checkConnectionStatus();
                 this.loadStrategies();
-                this.loadOrders();
-                this.loadPortfolio();
-                this.loadRiskRules();
                 this.loadLogs();
+                
+                // 只在连接成功后加载需要IB连接的数据
+                if (this.connected) {
+                    this.loadOrders();
+                    this.loadPortfolio();
+                    this.loadRiskRules();
+                }
             }
         } catch (e) {}
     }
 
-    async tryAutoLogin() {
+    async tryAutoLogin(options = {}) {
         const auto = localStorage.getItem('enableAutoLogin') === '1';
         const savedUser = localStorage.getItem('loginUsername');
         const savedPass = localStorage.getItem('loginPassword');
         if (!auto || !savedUser || !savedPass) return;
+        const { timeout = 7000, maxRetries = 0, connectTimeout = 10000, connectRetries = 0 } = options;
         try {
             const res = await this.apiCall('/login', {
                 method: 'POST',
-                body: JSON.stringify({ username: savedUser, password: savedPass })
+                body: JSON.stringify({ username: savedUser, password: savedPass }),
+                timeout,
+                maxRetries
             });
             if (res?.access_token) {
                 localStorage.setItem('access_token', res.access_token);
@@ -135,15 +159,19 @@ class TradingApp {
                                 port: parseInt(port),
                                 client_id: parseInt(clientId),
                                 paper_trading: accountType === 'paper'
-                            })
+                            }),
+                            timeout: connectTimeout,
+                            maxRetries: connectRetries
                         });
-                        // After successful connect, load data
-                        this.loadAccountInfo();
-                        this.loadOrders();
-                        this.loadPortfolio();
-                        this.loadRiskRules();
-                        this.loadStrategies();
-                        this.loadLogs();
+                        // After successful connect, load data asynchronously
+                        setTimeout(() => {
+                            this.loadAccountInfo();
+                            this.loadOrders();
+                            this.loadPortfolio();
+                            this.loadRiskRules();
+                            this.loadStrategies();
+                            this.loadLogs();
+                        }, 200);
                     } catch (e) {
                         console.warn('Auto-connect failed:', e);
                     }
@@ -256,13 +284,63 @@ class TradingApp {
         if (logModule) logModule.addEventListener('change', () => this.loadLogs());
 
         const logRange = document.getElementById('logRange');
-        if (logRange) logRange.addEventListener('change', () => this.loadLogs());
+        if (logRange) logRange.addEventListener('change', () => {
+            this.loadLogModules();
+            this.loadLogs();
+        });
 
         const logLevel = document.getElementById('logLevel');
         if (logLevel) logLevel.addEventListener('change', () => this.loadLogs());
 
         const logStatsBtn = document.getElementById('logStatsBtn');
         if (logStatsBtn) logStatsBtn.addEventListener('click', () => this.showLogStats());
+        // S Rules (Sizing Policy) event listeners
+        const saveSizingPolicyBtn = document.getElementById('saveSizingPolicyBtn');
+        if (saveSizingPolicyBtn) {
+            saveSizingPolicyBtn.addEventListener('click', () => this.saveSizingPolicy());
+        }
+        
+        // Tab switching event listeners
+        const sRulesTab = document.getElementById('s-rules-tab');
+        if (sRulesTab) {
+            sRulesTab.addEventListener('click', () => {
+                this.loadRiskRules();
+                this.loadSizingPolicy();
+                this.loadSizingHistory();
+            });
+        }
+        
+        // Suggested Position Size event listeners
+        const applySuggestedQuantityBtn = document.getElementById('applySuggestedQuantity');
+        if (applySuggestedQuantityBtn) {
+            applySuggestedQuantityBtn.addEventListener('click', () => this.applySuggestedQuantity());
+        }
+        
+        const refreshSuggestionBtn = document.getElementById('refreshSuggestion');
+        if (refreshSuggestionBtn) {
+            console.log('Refresh suggestion button found and event listener attached');
+            refreshSuggestionBtn.addEventListener('click', () => {
+                console.log('Refresh suggestion button clicked!');
+                this.refreshPositionSuggestion();
+            });
+        } else {
+            console.log('Refresh suggestion button not found!');
+        }
+        
+        // Auto-refresh suggestion when order parameters change
+        const orderSymbol = document.getElementById('orderSymbol');
+        const orderAction = document.getElementById('orderAction');
+        const orderPrice = document.getElementById('orderPrice');
+        if (orderSymbol) {
+            orderSymbol.addEventListener('input', () => this.debounceRefreshSuggestion());
+        }
+        if (orderAction) {
+            orderAction.addEventListener('change', () => this.refreshPositionSuggestion());
+        }
+        if (orderPrice) {
+            orderPrice.addEventListener('input', () => this.debounceRefreshSuggestion());
+        }
+
         // WebSocket updates logs and strategies automatically
         const addStrategyBtn = document.getElementById('addStrategyBtn');
         if (addStrategyBtn) {
@@ -437,10 +515,135 @@ class TradingApp {
             this.openRiskRuleModal();
         });
         
+        // Add risk rule button 2 (for independent panel)
+        document.getElementById('addRiskRuleBtn2').addEventListener('click', () => {
+            this.openRiskRuleModal();
+        });
+        
         // Submit order button
         document.getElementById('submitOrderBtn').addEventListener('click', () => {
             this.placeOrder();
         });
+        
+        // Position sizing button
+        const positionSizingBtn = document.getElementById('positionSizingBtn');
+        if (positionSizingBtn) {
+            positionSizingBtn.addEventListener('click', async () => {
+                const btn = positionSizingBtn;
+                const originalHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Calculating...';
+                try {
+                    const symbolInput = document.getElementById('orderSymbol');
+                    const symbol = (symbolInput?.value || '').trim().toUpperCase();
+                    if (!symbol) {
+                        this.showAlert('warning', '请输入标的符号');
+                        return;
+                    }
+
+                    const stopLossInput = document.getElementById('stopLossPrice');
+                    const stopLossVal = stopLossInput && stopLossInput.value !== '' ? parseFloat(stopLossInput.value) : NaN;
+                    if (!isFinite(stopLossVal) || stopLossVal <= 0) {
+                        this.showAlert('warning', '请先设置止损价格');
+                        return;
+                    }
+
+                    const orderType = document.getElementById('orderType')?.value || 'MARKET';
+                    let entryPrice = NaN;
+                    if (orderType === 'LIMIT') {
+                        const orderPriceVal = document.getElementById('orderPrice')?.value || '';
+                        entryPrice = parseFloat(orderPriceVal);
+                        if (!isFinite(entryPrice) || entryPrice <= 0) {
+                            this.showAlert('warning', '请输入有效的限价或切换为市价');
+                            return;
+                        }
+                    } else {
+                        // MARKET：直接查询最新价格，避免从DOM解析格式化文本
+                        const resp = await this.apiCall('/historical_data', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                symbol,
+                                duration: '1 D',
+                                bar_size: '1 min',
+                                exchange: 'SMART'
+                            })
+                        });
+                        if (resp && resp.success && Array.isArray(resp.data) && resp.data.length > 0) {
+                            const latest = resp.data[resp.data.length - 1];
+                            entryPrice = latest.close || latest.price || NaN;
+                        }
+                        if (!isFinite(entryPrice) || entryPrice <= 0) {
+                            this.showAlert('danger', '获取当前价格失败，无法计算仓位建议');
+                            return;
+                        }
+                    }
+
+                    // 绝对价差，始终为正
+                    const stopDistance = Math.abs(entryPrice - stopLossVal);
+                    if (!isFinite(stopDistance) || stopDistance <= 0) {
+                        this.showAlert('warning', '止损距离为 0，无法计算仓位建议');
+                        return;
+                    }
+
+                    const payload = {
+                        symbol,
+                        stop_distance: stopDistance
+                        // 其余参数（rv_current、rv_ref、signal_tier、execution_metrics）留空使用后端默认
+                    };
+
+                    const data = await this.apiCall('/position-sizing', {
+                        method: 'POST',
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!data || !data.success) {
+                        throw new Error(data?.message || 'Position sizing request failed');
+                    }
+
+                    const res = data.result || {};
+                    const safeNum = (v) => (typeof v === 'number' && isFinite(v)) ? v : null;
+                    const setText = (id, val, digits = null) => {
+                        const el = document.getElementById(id);
+                        if (!el) return;
+                        if (val == null || (typeof val === 'number' && !isFinite(val))) {
+                            el.textContent = '-';
+                        } else if (typeof val === 'number' && digits !== null) {
+                            el.textContent = Number(val).toFixed(digits);
+                        } else if (typeof val === 'number') {
+                            el.textContent = this.formatNumber(val);
+                        } else {
+                            el.textContent = String(val);
+                        }
+                    };
+
+                    setText('psContracts', safeNum(res.contracts));
+                    setText('psStopDistance', safeNum(res.stop_distance) ?? stopDistance, 4);
+                    setText('psPointValue', safeNum(res.point_value), 4);
+                    setText('psScaleTotal', safeNum(res.scale_total), 3);
+                    setText('psScaleVol', safeNum(res.scale_vol), 3);
+                    setText('psScaleDd', safeNum(res.scale_dd), 3);
+                    setText('psScaleSig', safeNum(res.scale_sig), 3);
+                    setText('psScaleExec', safeNum(res.scale_exec), 3);
+                    setText('psR', safeNum(res.R), 2);
+                    setText('psRStar', safeNum(res.R_star), 2);
+
+                    const expl = document.getElementById('psExplanation');
+                    if (expl) expl.textContent = (res.explanation && String(res.explanation).trim()) ? res.explanation : '-';
+
+                    const psModalEl = document.getElementById('positionSizingModal');
+                    if (psModalEl) {
+                        const psModal = new bootstrap.Modal(psModalEl);
+                        psModal.show();
+                    }
+                } catch (err) {
+                    console.error(err);
+                    this.showAlert('danger', `仓位建议失败：${err?.message || err}`);
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                }
+            });
+        }
         
         // Submit risk rule button
         document.getElementById('submitRiskRuleBtn').addEventListener('click', () => {
@@ -564,6 +767,23 @@ class TradingApp {
         const checkReminderStatusBtn = document.getElementById('checkReminderStatusBtn');
         if (checkReminderStatusBtn) {
             checkReminderStatusBtn.addEventListener('click', () => this.checkReminderStatus());
+        }
+        
+        // 通知面板事件监听器
+        const clearNotificationsBtn = document.getElementById('clearNotificationsBtn');
+        if (clearNotificationsBtn) {
+            clearNotificationsBtn.addEventListener('click', () => this.clearNotifications());
+        }
+        
+        // G Rules 配置表单事件监听器
+        const saveGRulesBtn = document.getElementById('saveGRulesBtn');
+        if (saveGRulesBtn) {
+            saveGRulesBtn.addEventListener('click', () => this.saveGRulesConfig());
+        }
+        
+        const resetGRulesBtn = document.getElementById('resetGRulesBtn');
+        if (resetGRulesBtn) {
+            resetGRulesBtn.addEventListener('click', () => this.resetGRulesConfig());
         }
         
         console.log('All event listeners bound successfully');
@@ -905,7 +1125,7 @@ class TradingApp {
         }
         
         // 设置重试参数
-        const maxRetries = options.maxRetries || 2;
+        const maxRetries = options.maxRetries ?? 2;
         let retries = 0;
         
         while (true) {
@@ -925,7 +1145,7 @@ class TradingApp {
                 const response = await this.fetchWithTimeout(`/api${endpoint}`, {
                     headers,
                     ...options,
-                    timeout: options.timeout || 15000 // 默认15秒超时
+                    timeout: options.timeout ?? 15000 // 默认15秒超时
                 });
                 
                 // 处理401未授权 - 重定向到登录
@@ -978,14 +1198,17 @@ class TradingApp {
         }
     }
 
-    async ensureDefaultConnectionConfig() {
+    async ensureDefaultConnectionConfig(options = {}) {
         try {
             const hasHost = !!localStorage.getItem('conn_host');
             const hasPort = !!localStorage.getItem('conn_port');
             const hasClient = !!localStorage.getItem('conn_clientId');
             const hasAcct = !!localStorage.getItem('conn_accountType');
             if (hasHost && hasPort && hasClient && hasAcct) return;
-            const res = await this.apiCall('/connection_config');
+            const res = await this.apiCall('/connection_config', {
+                timeout: options.timeout ?? 5000,
+                maxRetries: options.maxRetries ?? 1
+            });
             if (res) {
                 if (!hasHost && res.host) localStorage.setItem('conn_host', res.host);
                 if (!hasPort && res.port != null) localStorage.setItem('conn_port', String(res.port));
@@ -1076,20 +1299,27 @@ class TradingApp {
         }
     }
 
-    async checkConnectionStatus() {
+    async checkConnectionStatus(options = {}) {
         try {
             // 未登录则跳过，避免产生401以及触发登录弹窗循环
             const token = localStorage.getItem('access_token');
             if (!token) return;
-            const data = await this.apiCall('/connection_status');
+            const data = await this.apiCall('/connection_status', {
+                timeout: options.timeout ?? 4000,
+                maxRetries: options.maxRetries ?? 0,
+                useCache: false
+            });
             this.updateConnectionStatus(data.connected, data.account_type);
             
             if (data.connected) {
-                this.loadAccountInfo();
-                this.loadOrders();
-                this.loadPortfolio();
-                this.loadRiskRules();
-                this.loadStrategies();
+                // Load data asynchronously to avoid blocking
+                setTimeout(() => {
+                    this.loadAccountInfo();
+                    this.loadOrders();
+                    this.loadPortfolio();
+                    this.loadRiskRules();
+                    this.loadStrategies();
+                }, 300);
             }
         } catch (error) {
             console.error('Failed to check connection status:', error);
@@ -1111,6 +1341,11 @@ class TradingApp {
             disconnectBtn.disabled = false;
             if (connectBtn) connectBtn.style.display = 'none';
             if (disconnectBtn) disconnectBtn.style.display = 'inline-block';
+            
+            // 连接成功后加载需要IB连接的数据
+            this.loadOrders();
+            this.loadPortfolio();
+            this.loadRiskRules();
         } else {
             statusIndicator.className = 'status-indicator status-disconnected';
             statusText.textContent = 'Disconnected';
@@ -1353,6 +1588,12 @@ class TradingApp {
             return;
         }
         
+        // Check IB connection status before placing order
+        if (!this.connected) {
+            this.showAlert('warning', 'Please connect to Interactive Brokers first');
+            return;
+        }
+        
         try {
             await this.apiCall('/place_order', {
                 method: 'POST',
@@ -1394,10 +1635,11 @@ class TradingApp {
         }
     }
 
-    openRiskRuleModal(symbol = '', stopLoss = '', takeProfit = '', position = 0, currentPrice = 0, avgCost = 0, isEditMode = false) {
+    openRiskRuleModal(symbol = '', stopLoss = '', takeProfit = '', maxTime = '', position = 0, currentPrice = 0, avgCost = 0, isEditMode = false) {
         document.getElementById('riskSymbol').value = symbol;
         document.getElementById('riskStopLossPrice').value = stopLoss;
         document.getElementById('riskTakeProfitPrice').value = takeProfit;
+        document.getElementById('riskMaxTime').value = maxTime;
         
         // Store position data for PnL calculations
         this.currentRiskRuleData = {
@@ -1548,7 +1790,7 @@ class TradingApp {
                 }
             }
             
-            this.openRiskRuleModal(symbol, stopLoss, takeProfit, position, currentPrice, avgCost, true);
+            this.openRiskRuleModal(symbol, stopLoss, takeProfit, '', position, currentPrice, avgCost, true);
         } catch (error) {
             console.error('Failed to get risk config:', error);
             // Fallback to preset values or default calculated values with leverage consideration
@@ -1587,7 +1829,7 @@ class TradingApp {
                 }
             }
             
-            this.openRiskRuleModal(symbol, stopLoss, takeProfit, position, currentPrice, avgCost, true);
+            this.openRiskRuleModal(symbol, stopLoss, takeProfit, '', position, currentPrice, avgCost, true);
         }
     }
 
@@ -1732,10 +1974,13 @@ class TradingApp {
                     try {
                         const cfg = await this.apiCall('/risk-config');
                         stopLossRatio = cfg.stop_loss_ratio || 0.025;
-            takeProfitRatio = cfg.take_profit_ratio || 0.025;
+                        takeProfitRatio = cfg.take_profit_ratio || 0.025;
                         const leverageMap = (cfg && cfg.leverage) ? cfg.leverage : {};
                         lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || null;
-                    } catch (e) { /* keep defaults */ }
+                    } catch (e) { 
+                        console.warn('Failed to load risk config for fallback calculation:', e);
+                        /* keep defaults */ 
+                    }
                     const adjSL = lev && lev > 0 ? (stopLossRatio / lev) : stopLossRatio;
                     const adjTP = lev && lev > 0 ? (takeProfitRatio / lev) : takeProfitRatio;
                     if (posQty > 0) {
@@ -4171,7 +4416,8 @@ class TradingApp {
         const rule = {
             symbol: document.getElementById('riskSymbol').value.toUpperCase(),
             stop_loss_price: document.getElementById('riskStopLossPrice').value ? parseFloat(document.getElementById('riskStopLossPrice').value) : null,
-            take_profit_price: document.getElementById('riskTakeProfitPrice').value ? parseFloat(document.getElementById('riskTakeProfitPrice').value) : null
+            take_profit_price: document.getElementById('riskTakeProfitPrice').value ? parseFloat(document.getElementById('riskTakeProfitPrice').value) : null,
+            max_time_span: document.getElementById('riskMaxTime').value || null
         };
         
         if (!rule.symbol) {
@@ -4431,15 +4677,26 @@ class TradingApp {
 
     async loadRiskRules() {
         try {
-            const [riskData, portfolioData] = await Promise.all([
-                this.apiCall('/risk_rules'),
-                this.apiCall('/positions')
-            ]);
+            // Risk rules can be loaded from database without IB connection
+            const riskData = await this.apiCall('/risk_rules');
+            
+            // Positions require IB connection, handle gracefully if not connected
+            let portfolioData = { positions: [] };
+            if (this.connected) {
+                try {
+                    portfolioData = await this.apiCall('/positions');
+                } catch (error) {
+                    console.warn('Failed to load positions (IB not connected):', error.message);
+                    portfolioData = { positions: [] };
+                }
+            } else {
+                console.log('IB not connected, showing risk rules without position data');
+            }
             
             // Cache risk rules for quick access elsewhere (e.g., monitor modal)
             this.riskRules = riskData.rules || {};
             
-            const tbody = document.querySelector('#riskRulesTable tbody');
+            const tbody = document.querySelector('#riskRulesTable2 tbody');
             
             // Create a map of portfolio by symbol for quick lookup
             const portfolioMap = {};
@@ -4453,23 +4710,29 @@ class TradingApp {
                 const avgCost = portfolioItem ? portfolioItem.avg_cost : 0;
                 const positionSize = portfolioItem ? portfolioItem.position : 0;
                 
+                // Safely handle null/undefined values for onclick parameters
+                const stopLossValue = rule.stop_loss_price || '';
+                const takeProfitValue = rule.take_profit_price || '';
+                const symbolEscaped = rule.symbol.replace(/'/g, "\\'");
+                
                 return `
                 <tr>
                     <td>${rule.symbol}</td>
                     <td>${rule.stop_loss_price ? '$' + this.formatNumber(rule.stop_loss_price) : 'N/A'}</td>
                     <td>${rule.take_profit_price ? '$' + this.formatNumber(rule.take_profit_price) : 'N/A'}</td>
+                    <td>${rule.max_time_span || 'N/A'}</td>
                     <td><span class="badge bg-${rule.enabled ? 'success' : 'secondary'}">${rule.enabled ? 'Active' : 'Disabled'}</span></td>
                     <td>
-                        <button class="btn btn-sm btn-outline-info me-1" onclick="app.showRiskRuleOrders('${rule.symbol}')" title="Details">
+                        <button class="btn btn-sm btn-outline-info me-1" onclick="app.showRiskRuleOrders('${symbolEscaped}')" title="Details">
                             <i class="fas fa-list"></i>
                         </button>
-                        <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editPositionRiskRule('${rule.symbol}', ${currentPrice}, ${avgCost}, ${positionSize}, '${rule.stop_loss_price || ''}', '${rule.take_profit_price || ''}')" title="Edit">
+                        <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editPositionRiskRule('${symbolEscaped}', ${currentPrice || 0}, ${avgCost || 0}, ${positionSize || 0}, '${stopLossValue}', '${takeProfitValue}')" title="Edit">
                             <i class="fas fa-edit"></i>
                         </button>
-                        <button class="btn btn-sm btn-outline-${rule.enabled ? 'warning' : 'success'} me-1" onclick="app.toggleRiskRule('${rule.symbol}', ${!rule.enabled})" title="${rule.enabled ? 'Disable Rule' : 'Enable Rule'}">
+                        <button class="btn btn-sm btn-outline-${rule.enabled ? 'warning' : 'success'} me-1" onclick="app.toggleRiskRule('${symbolEscaped}', ${!rule.enabled})" title="${rule.enabled ? 'Disable Rule' : 'Enable Rule'}">
                             <i class="fas fa-${rule.enabled ? 'pause' : 'play'}"></i>
                         </button>
-                        <button class="btn btn-sm btn-danger" onclick="app.removeRiskRule('${rule.symbol}')" title="Delete">
+                        <button class="btn btn-sm btn-danger" onclick="app.removeRiskRule('${symbolEscaped}')" title="Delete">
                             <i class="fas fa-trash"></i>
                         </button>
                     </td>
@@ -4821,6 +5084,9 @@ class TradingApp {
         `;
         
         alertContainer.insertAdjacentHTML('beforeend', alertHtml);
+        
+        // 同时添加到通知面板
+        this.addNotification(type, message);
         
         // Auto-dismiss after 5 seconds
         setTimeout(() => {
@@ -5645,7 +5911,7 @@ class TradingApp {
         document.querySelector('#ordersTable tbody').innerHTML = '';
         document.querySelector('#positionsTable tbody').innerHTML = '';
         document.querySelector('#autoOrdersTable tbody').innerHTML = '';
-        document.querySelector('#riskRulesTable tbody').innerHTML = '';
+        document.querySelector('#riskRulesTable2 tbody').innerHTML = '';
 
 
     }
@@ -6017,6 +6283,33 @@ class TradingApp {
         }
     }
 
+    async loadLogModules() {
+        try {
+            const range = document.getElementById('logRange')?.value || 'today';
+            const res = await this.apiCall(`/logs/modules?range=${range}`);
+            const moduleSelect = document.getElementById('logModule');
+            if (moduleSelect && res?.modules) {
+                const currentValue = moduleSelect.value;
+                // Clear existing options except "All Modules"
+                moduleSelect.innerHTML = '<option value="all">All Modules</option>';
+                // Add dynamic modules from logs
+                res.modules.forEach(module => {
+                    const option = document.createElement('option');
+                    option.value = module;
+                    option.textContent = module;
+                    moduleSelect.appendChild(option);
+                });
+                // Restore previous selection if it still exists
+                if (currentValue && [...moduleSelect.options].some(opt => opt.value === currentValue)) {
+                    moduleSelect.value = currentValue;
+                }
+            }
+        } catch (e) {
+            console.error('Load log modules error:', e);
+            // Fallback to static options if API fails
+        }
+    }
+
     async loadLogs() {
         try {
             const module = document.getElementById('logModule')?.value || 'all';
@@ -6218,6 +6511,776 @@ class TradingApp {
         } catch (error) {
             console.error('Failed to load risk rule orders:', error);
             this.showAlert('danger', '加载风险规则订单详情时发生错误');
+        }
+    }
+
+    // S Rules (Sizing Policy) related functions
+    async loadSizingPolicy() {
+        try {
+            const data = await this.apiCall('/sizing/policy');
+            const policy = data.policy || {};
+            
+            // Populate form fields
+            const methodSelect = document.getElementById('defaultSizingMethod');
+            const valueInput = document.getElementById('defaultSizingValue');
+            const maxPositionInput = document.getElementById('maxPositionSize');
+            const riskPerTradeInput = document.getElementById('riskPerTrade');
+            
+            if (methodSelect) methodSelect.value = policy.default_method || 'fixed';
+            if (valueInput) valueInput.value = policy.default_value || 1000;
+            if (maxPositionInput) maxPositionInput.value = policy.max_position_size || 10000;
+            if (riskPerTradeInput) riskPerTradeInput.value = policy.risk_per_trade || 2.0;
+        } catch (error) {
+            console.error('Failed to load sizing policy:', error);
+        }
+    }
+
+    async saveSizingPolicy() {
+        try {
+            const methodSelect = document.getElementById('defaultSizingMethod');
+            const valueInput = document.getElementById('defaultSizingValue');
+            const maxPositionInput = document.getElementById('maxPositionSize');
+            const riskPerTradeInput = document.getElementById('riskPerTrade');
+            
+            const policy = {
+                default_method: methodSelect?.value || 'fixed',
+                default_value: parseFloat(valueInput?.value) || 1000,
+                max_position_size: parseFloat(maxPositionInput?.value) || 10000,
+                risk_per_trade: parseFloat(riskPerTradeInput?.value) || 2.0
+            };
+            
+            await this.apiCall('/sizing/policy', {
+                method: 'PUT',
+                body: JSON.stringify({ policy })
+            });
+            
+            this.showAlert('success', 'Sizing policy saved successfully');
+        } catch (error) {
+            console.error('Failed to save sizing policy:', error);
+            this.showAlert('danger', 'Failed to save sizing policy');
+        }
+    }
+
+    async loadSizingHistory() {
+        try {
+            const data = await this.apiCall('/sizing/history?limit=50');
+            const history = data.data || [];
+            
+            const tbody = document.querySelector('#sizingHistoryTable tbody');
+            if (!tbody) return;
+            
+            tbody.innerHTML = history.map(item => {
+                const timestamp = new Date(item.timestamp).toLocaleString();
+                return `
+                <tr>
+                    <td>${timestamp}</td>
+                    <td>${item.symbol}</td>
+                    <td><span class="badge bg-${item.action === 'BUY' ? 'success' : 'danger'}">${item.action}</span></td>
+                    <td>${item.suggested_quantity}</td>
+                    <td>${item.sizing_method}</td>
+                    <td>$${this.formatNumber(item.current_price)}</td>
+                </tr>
+                `;
+            }).join('');
+            
+            if (history.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6" class="text-center text-muted">
+                            No sizing history available
+                        </td>
+                    </tr>
+                `;
+            }
+        } catch (error) {
+            console.error('Failed to load sizing history:', error);
+        }
+    }
+    
+    // Suggested Position Size functions
+    async refreshPositionSuggestion() {
+        const symbol = document.getElementById('orderSymbol')?.value?.trim();
+        const action = document.getElementById('orderAction')?.value;
+        const priceInput = document.getElementById('orderPrice')?.value?.trim();
+        const price = parseFloat(priceInput) || 0;
+        const stopLoss = parseFloat(document.getElementById('orderStopLoss')?.value) || 0;
+        
+        console.log('refreshPositionSuggestion called with:', { symbol, action, price, stopLoss });
+        
+        // Note: Position sizing calculation doesn't require IB connection
+        // Only actual order placement requires connection
+        
+        if (!symbol || !action) {
+            console.log('Missing symbol or action, clearing suggestion');
+            this.clearPositionSuggestion();
+            return;
+        }
+        
+        // If no price is provided, try to get current market price
+        let effectivePrice = price;
+        if (!effectivePrice || effectivePrice <= 0) {
+            console.log('No price provided, attempting to get current market price for', symbol);
+            try {
+                // Try to get current price from positions or market data
+                const positions = await this.apiCall('/positions');
+                if (positions.success && positions.positions) {
+                    const position = positions.positions.find(p => p.symbol === symbol);
+                    if (position && position.current_price > 0) {
+                        effectivePrice = position.current_price;
+                        console.log('Using current market price:', effectivePrice);
+                    }
+                }
+            } catch (error) {
+                console.log('Could not get market price:', error);
+            }
+            
+            // If still no price, show error and return
+            if (!effectivePrice || effectivePrice <= 0) {
+                console.log('No valid price available, clearing suggestion');
+                this.showAlert('warning', '请输入价格或确保该股票有当前市场价格');
+                this.clearPositionSuggestion();
+                return;
+            }
+        }
+        
+        // Calculate stop_distance based on action and stop loss
+        let stopDistance = 0;
+        if (stopLoss > 0) {
+            if (action === 'BUY') {
+                stopDistance = Math.abs(effectivePrice - stopLoss);
+            } else if (action === 'SELL') {
+                stopDistance = Math.abs(stopLoss - effectivePrice);
+            }
+        } else {
+            // Default stop distance as 2% of price if no stop loss provided
+            stopDistance = effectivePrice * 0.02;
+        }
+        
+        if (stopDistance <= 0) {
+            this.clearPositionSuggestion();
+            return;
+        }
+        
+        try {
+            const data = await this.apiCall('/sizing/preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    symbol: symbol,
+                    stop_distance: stopDistance,
+                    rv_current: effectivePrice,
+                    rv_ref: null,
+                    signal_tier: 'A',
+                    execution_metrics: null
+                })
+            });
+            
+            this.updatePositionSuggestionUI(data);
+        } catch (error) {
+            console.error('Failed to get position suggestion:', error);
+            this.clearPositionSuggestion();
+        }
+    }
+    
+    debounceRefreshSuggestion() {
+        clearTimeout(this.suggestionTimeout);
+        this.suggestionTimeout = setTimeout(() => {
+            this.refreshPositionSuggestion();
+        }, 500);
+    }
+    
+    updatePositionSuggestionUI(data) {
+        const suggestedQuantity = document.getElementById('suggestedQuantity');
+        const sizingMethod = document.getElementById('sizingMethod');
+        const riskRatio = document.getElementById('riskRatio');
+        const estimatedInvestment = document.getElementById('estimatedInvestment');
+        const maxRisk = document.getElementById('maxRisk');
+        
+        console.log('Updating position suggestion UI with data:', data);
+        
+        // Extract data from the response - data structure: {N: number, explain: {...}}
+        const contracts = data.N || 0;
+        const explain = data.explain || {};
+        
+        if (suggestedQuantity) suggestedQuantity.textContent = contracts || '--';
+        if (sizingMethod) sizingMethod.textContent = 'Position Sizing';
+        if (riskRatio) riskRatio.textContent = explain.f_total ? `${(explain.f_total * 100).toFixed(2)}%` : '--';
+        if (estimatedInvestment) estimatedInvestment.textContent = explain.R_star ? `$${explain.R_star.toFixed(2)}` : '--';
+        if (maxRisk) maxRisk.textContent = explain.R ? `$${explain.R.toFixed(2)}` : '--';
+        
+        // Store suggested quantity for apply button
+        this.lastSuggestedQuantity = contracts;
+    }
+    
+    clearPositionSuggestion() {
+        const elements = ['suggestedQuantity', 'sizingMethod', 'riskRatio', 'estimatedInvestment', 'maxRisk'];
+        elements.forEach(id => {
+            const element = document.getElementById(id);
+            if (element) element.textContent = '--';
+        });
+        this.lastSuggestedQuantity = null;
+    }
+    
+    applySuggestedQuantity() {
+        if (this.lastSuggestedQuantity) {
+            const quantityInput = document.getElementById('orderQuantity');
+            if (quantityInput) {
+                quantityInput.value = this.lastSuggestedQuantity;
+                this.showAlert('success', '已应用建议数量');
+            }
+        } else {
+            this.showAlert('warning', '没有可用的建议数量');
+        }
+    }
+
+    // 通知管理方法
+    addNotification(type, message, timestamp = null) {
+        const notification = {
+            id: Date.now() + Math.random(),
+            type: type, // 'success', 'warning', 'danger', 'info'
+            message: message,
+            timestamp: timestamp || new Date().toLocaleString()
+        };
+        
+        this.notifications.unshift(notification);
+        
+        // 限制通知数量，最多保留50条
+        if (this.notifications.length > 50) {
+            this.notifications = this.notifications.slice(0, 50);
+        }
+        
+        this.updateNotificationPanel();
+    }
+
+    clearNotifications() {
+        this.notifications = [];
+        this.updateNotificationPanel();
+    }
+
+    updateNotificationPanel() {
+        const notificationList = document.getElementById('notificationsList');
+        if (!notificationList) return;
+        
+        notificationList.innerHTML = '';
+        
+        if (this.notifications.length === 0) {
+            notificationList.innerHTML = `
+                <div class="text-muted text-center py-3">
+                    <i class="fas fa-bell-slash"></i>
+                    <p class="mb-0">No notifications</p>
+                </div>
+                <div class="mt-3">
+                    <button class="btn btn-sm btn-outline-primary" onclick="app.showNotificationSettings()">
+                        <i class="fas fa-cog"></i> Settings
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary ms-2" onclick="app.showNotificationHistory()">
+                        <i class="fas fa-history"></i> History
+                    </button>
+                </div>
+            `;
+            return;
+        }
+        
+        // Add settings and history buttons at the top
+        const headerDiv = document.createElement('div');
+        headerDiv.className = 'mb-3 d-flex justify-content-between align-items-center';
+        headerDiv.innerHTML = `
+            <span class="text-muted small">${this.notifications.length} notification(s)</span>
+            <div>
+                <button class="btn btn-sm btn-outline-primary" onclick="app.showNotificationSettings()">
+                    <i class="fas fa-cog"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-secondary ms-1" onclick="app.showNotificationHistory()">
+                    <i class="fas fa-history"></i>
+                </button>
+            </div>
+        `;
+        notificationList.appendChild(headerDiv);
+        
+        this.notifications.forEach(notification => {
+            const notificationElement = document.createElement('div');
+            notificationElement.className = `alert alert-${notification.type} alert-dismissible fade show mb-2`;
+            notificationElement.innerHTML = `
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <div>${notification.message}</div>
+                        <small class="text-muted">${notification.timestamp}</small>
+                    </div>
+                    <button type="button" class="btn-close" onclick="app.removeNotification('${notification.id}')"></button>
+                </div>
+            `;
+            notificationList.appendChild(notificationElement);
+        });
+    }
+
+    removeNotification(notificationId) {
+        this.notifications = this.notifications.filter(n => n.id != notificationId);
+        this.updateNotificationPanel();
+    }
+
+    // 通知设置功能
+    async showNotificationSettings() {
+        try {
+            const response = await this.apiCall('/notifications/settings');
+            const defaultSettings = {
+                telegram_enabled: false,
+                telegram_chat_id: '',
+                email_enabled: false,
+                email_address: '',
+                events: {
+                    order_filled: true,
+                    position_opened: true,
+                    position_closed: true,
+                    risk_rule_triggered: true,
+                    strategy_started: true,
+                    strategy_stopped: true
+                }
+            };
+            const settings = {
+                ...defaultSettings,
+                ...(response.settings || {}),
+                events: {
+                    ...defaultSettings.events,
+                    ...((response.settings && response.settings.events) || {})
+                }
+            };
+
+            const modalHtml = `
+                <div class="modal fade" id="notificationSettingsModal" tabindex="-1">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title"><i class="fas fa-cog"></i> Notification Settings</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <form id="notificationSettingsForm">
+                                    <!-- Telegram Settings -->
+                                    <div class="card mb-3">
+                                        <div class="card-header">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="telegramEnabled" ${settings.telegram_enabled ? 'checked' : ''}>
+                                                <label class="form-check-label" for="telegramEnabled">
+                                                    <i class="fab fa-telegram"></i> Telegram Notifications
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <div class="card-body">
+                                            <div class="mb-3">
+                                                <label class="form-label">Chat ID</label>
+                                                <input type="text" class="form-control" id="telegramChatId" value="${settings.telegram_chat_id}" placeholder="Enter your Telegram chat ID">
+                                                <div class="form-text">Get your chat ID by messaging @userinfobot on Telegram</div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Email Settings -->
+                                    <div class="card mb-3">
+                                        <div class="card-header">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="emailEnabled" ${settings.email_enabled ? 'checked' : ''}>
+                                                <label class="form-check-label" for="emailEnabled">
+                                                    <i class="fas fa-envelope"></i> Email Notifications
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <div class="card-body">
+                                            <div class="mb-3">
+                                                <label class="form-label">Email Address</label>
+                                                <input type="email" class="form-control" id="emailAddress" value="${settings.email_address}" placeholder="Enter your email address">
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Event Settings -->
+                                    <div class="card">
+                                        <div class="card-header">
+                                            <h6 class="mb-0"><i class="fas fa-bell"></i> Event Notifications</h6>
+                                        </div>
+                                        <div class="card-body">
+                                            <div class="row">
+                                                <div class="col-md-6">
+                                                    <div class="form-check mb-2">
+                                                        <input class="form-check-input" type="checkbox" id="orderFilled" ${settings.events.order_filled ? 'checked' : ''}>
+                                                        <label class="form-check-label" for="orderFilled">Order Filled</label>
+                                                    </div>
+                                                    <div class="form-check mb-2">
+                                                        <input class="form-check-input" type="checkbox" id="positionOpened" ${settings.events.position_opened ? 'checked' : ''}>
+                                                        <label class="form-check-label" for="positionOpened">Position Opened</label>
+                                                    </div>
+                                                    <div class="form-check mb-2">
+                                                        <input class="form-check-input" type="checkbox" id="positionClosed" ${settings.events.position_closed ? 'checked' : ''}>
+                                                        <label class="form-check-label" for="positionClosed">Position Closed</label>
+                                                    </div>
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <div class="form-check mb-2">
+                                                        <input class="form-check-input" type="checkbox" id="riskRuleTriggered" ${settings.events.risk_rule_triggered ? 'checked' : ''}>
+                                                        <label class="form-check-label" for="riskRuleTriggered">Risk Rule Triggered</label>
+                                                    </div>
+                                                    <div class="form-check mb-2">
+                                                        <input class="form-check-input" type="checkbox" id="strategyStarted" ${settings.events.strategy_started ? 'checked' : ''}>
+                                                        <label class="form-check-label" for="strategyStarted">Strategy Started</label>
+                                                    </div>
+                                                    <div class="form-check mb-2">
+                                                        <input class="form-check-input" type="checkbox" id="strategyStopped" ${settings.events.strategy_stopped ? 'checked' : ''}>
+                                                        <label class="form-check-label" for="strategyStopped">Strategy Stopped</label>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </form>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                <button type="button" class="btn btn-success" onclick="app.testNotification()">Test</button>
+                                <button type="button" class="btn btn-primary" onclick="app.saveNotificationSettings()">Save</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Remove existing modal if any
+            const existingModal = document.getElementById('notificationSettingsModal');
+            if (existingModal) {
+                existingModal.remove();
+            }
+
+            // Add modal to body
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+            // Show modal
+            const modal = new bootstrap.Modal(document.getElementById('notificationSettingsModal'));
+            modal.show();
+
+        } catch (error) {
+            console.error('Failed to load notification settings:', error);
+            this.showAlert('danger', 'Failed to load notification settings');
+        }
+    }
+
+    async saveNotificationSettings() {
+        try {
+            const settings = {
+                telegram_enabled: document.getElementById('telegramEnabled').checked,
+                telegram_chat_id: document.getElementById('telegramChatId').value,
+                email_enabled: document.getElementById('emailEnabled').checked,
+                email_address: document.getElementById('emailAddress').value,
+                events: {
+                    order_filled: document.getElementById('orderFilled').checked,
+                    position_opened: document.getElementById('positionOpened').checked,
+                    position_closed: document.getElementById('positionClosed').checked,
+                    risk_rule_triggered: document.getElementById('riskRuleTriggered').checked,
+                    strategy_started: document.getElementById('strategyStarted').checked,
+                    strategy_stopped: document.getElementById('strategyStopped').checked
+                }
+            };
+
+            const response = await this.apiCall('/notifications/settings', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(settings)
+            });
+
+            if (response.success) {
+                this.showAlert('success', 'Notification settings saved successfully');
+                const modal = bootstrap.Modal.getInstance(document.getElementById('notificationSettingsModal'));
+                modal.hide();
+            } else {
+                this.showAlert('danger', 'Failed to save notification settings: ' + (response.error || 'Unknown error'));
+            }
+        } catch (error) {
+            console.error('Failed to save notification settings:', error);
+            this.showAlert('danger', 'Failed to save notification settings: ' + error.message);
+        }
+    }
+
+    async testNotification() {
+        try {
+            const response = await this.apiCall('/notifications/test', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    message: 'This is a test notification from IBBot',
+                    type: 'info'
+                })
+            });
+
+            if (response.success) {
+                this.showAlert('success', 'Test notification sent successfully');
+            } else {
+                this.showAlert('warning', 'Test notification sent but may have failed: ' + (response.error || 'Check your settings'));
+            }
+        } catch (error) {
+            console.error('Failed to send test notification:', error);
+            this.showAlert('danger', 'Failed to send test notification: ' + error.message);
+        }
+    }
+
+    // 通知历史记录功能
+    async showNotificationHistory() {
+        try {
+            const response = await this.apiCall('/notifications/history?limit=50');
+            const history = response.history || [];
+
+            const modalHtml = `
+                <div class="modal fade" id="notificationHistoryModal" tabindex="-1">
+                    <div class="modal-dialog modal-xl">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title"><i class="fas fa-history"></i> Notification History</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="mb-3">
+                                    <div class="row">
+                                        <div class="col-md-3">
+                                            <select class="form-select" id="historyStatusFilter">
+                                                <option value="">All Status</option>
+                                                <option value="sent">Sent</option>
+                                                <option value="failed">Failed</option>
+                                                <option value="pending">Pending</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <select class="form-select" id="historyChannelFilter">
+                                                <option value="">All Channels</option>
+                                                <option value="telegram">Telegram</option>
+                                                <option value="email">Email</option>
+                                                <option value="websocket">WebSocket</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <input type="date" class="form-control" id="historySinceFilter" placeholder="Since date">
+                                        </div>
+                                        <div class="col-md-2">
+                                            <button class="btn btn-primary" onclick="app.filterNotificationHistory()">Filter</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="table-responsive" style="max-height: 400px;">
+                                    <table class="table table-sm" id="notificationHistoryTable">
+                                        <thead>
+                                            <tr>
+                                                <th>Time</th>
+                                                <th>Channel</th>
+                                                <th>Event</th>
+                                                <th>Message</th>
+                                                <th>Status</th>
+                                                <th>Error</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            ${this.renderNotificationHistoryRows(history)}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                ${history.length === 0 ? '<div class="text-center text-muted py-3">No notification history found</div>' : ''}
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Remove existing modal if any
+            const existingModal = document.getElementById('notificationHistoryModal');
+            if (existingModal) {
+                existingModal.remove();
+            }
+
+            // Add modal to body
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+            // Show modal
+            const modal = new bootstrap.Modal(document.getElementById('notificationHistoryModal'));
+            modal.show();
+
+        } catch (error) {
+            console.error('Failed to load notification history:', error);
+            this.showAlert('danger', 'Failed to load notification history');
+        }
+    }
+
+    renderNotificationHistoryRows(history) {
+        if (!history || history.length === 0) {
+            return '';
+        }
+
+        return history.map(item => {
+            const statusBadge = this.getNotificationStatusBadge(item.status);
+            const channelIcon = this.getChannelIcon(item.channel);
+            const timestamp = new Date(item.timestamp).toLocaleString();
+            
+            return `
+                <tr>
+                    <td><small>${timestamp}</small></td>
+                    <td>${channelIcon} ${item.channel}</td>
+                    <td><span class="badge bg-secondary">${item.event_type}</span></td>
+                    <td><small>${item.message}</small></td>
+                    <td>${statusBadge}</td>
+                    <td><small class="text-danger">${item.error_message || ''}</small></td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    getNotificationStatusBadge(status) {
+        const badges = {
+            'sent': '<span class="badge bg-success">Sent</span>',
+            'failed': '<span class="badge bg-danger">Failed</span>',
+            'pending': '<span class="badge bg-warning">Pending</span>'
+        };
+        return badges[status] || '<span class="badge bg-secondary">Unknown</span>';
+    }
+
+    getChannelIcon(channel) {
+        const icons = {
+            'telegram': '<i class="fab fa-telegram"></i>',
+            'email': '<i class="fas fa-envelope"></i>',
+            'websocket': '<i class="fas fa-wifi"></i>'
+        };
+        return icons[channel] || '<i class="fas fa-bell"></i>';
+    }
+
+    async filterNotificationHistory() {
+        try {
+            const status = document.getElementById('historyStatusFilter').value;
+            const channel = document.getElementById('historyChannelFilter').value;
+            const since = document.getElementById('historySinceFilter').value;
+            
+            let url = '/notifications/history?limit=50';
+            if (status) url += `&status=${status}`;
+            if (channel) url += `&channel=${channel}`;
+            if (since) url += `&since=${since}`;
+
+            const response = await this.apiCall(url);
+            const history = response.history || [];
+
+            const tbody = document.querySelector('#notificationHistoryTable tbody');
+            tbody.innerHTML = this.renderNotificationHistoryRows(history);
+
+        } catch (error) {
+            console.error('Failed to filter notification history:', error);
+            this.showAlert('danger', 'Failed to filter notification history');
+        }
+    }
+
+    // G Rules 配置管理方法
+    async saveGRulesConfig() {
+        try {
+            const config = {
+                g0_enabled: document.getElementById('g0_enabled').checked,
+                g0_max_position_pct: parseFloat(document.getElementById('g0_max_position_pct').value) || 10,
+                g1_enabled: document.getElementById('g1_enabled').checked,
+                g1_max_daily_loss_pct: parseFloat(document.getElementById('g1_max_daily_loss_pct').value) || 5,
+                g2_enabled: document.getElementById('g2_enabled').checked,
+                g2_max_total_exposure_pct: parseFloat(document.getElementById('g2_max_total_exposure_pct').value) || 80,
+                g3_enabled: document.getElementById('g3_enabled').checked,
+                g3_max_sector_exposure_pct: parseFloat(document.getElementById('g3_max_sector_exposure_pct').value) || 30,
+                g4_enabled: document.getElementById('g4_enabled').checked,
+                g4_max_correlation: parseFloat(document.getElementById('g4_max_correlation').value) || 0.7
+            };
+
+            const response = await this.apiCall('/sizing/policy', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ g_rules: config })
+            });
+
+            if (response.success) {
+                this.showAlert('success', 'G Rules 配置已保存');
+                this.loadGRulesStatus();
+            } else {
+                this.showAlert('danger', 'G Rules 配置保存失败: ' + (response.error || '未知错误'));
+            }
+        } catch (error) {
+            console.error('保存 G Rules 配置失败:', error);
+            this.showAlert('danger', 'G Rules 配置保存失败: ' + error.message);
+        }
+    }
+
+    async resetGRulesConfig() {
+        if (confirm('确定要重置 G Rules 配置为默认值吗？')) {
+            // 重置为默认值
+            document.getElementById('g0_enabled').checked = true;
+            document.getElementById('g0_max_position_pct').value = 10;
+            document.getElementById('g1_enabled').checked = true;
+            document.getElementById('g1_max_daily_loss_pct').value = 5;
+            document.getElementById('g2_enabled').checked = true;
+            document.getElementById('g2_max_total_exposure_pct').value = 80;
+            document.getElementById('g3_enabled').checked = true;
+            document.getElementById('g3_max_sector_exposure_pct').value = 30;
+            document.getElementById('g4_enabled').checked = true;
+            document.getElementById('g4_max_correlation').value = 0.7;
+            
+            this.showAlert('info', 'G Rules 配置已重置为默认值');
+        }
+    }
+
+    async loadGRulesConfig() {
+        try {
+            const response = await this.apiCall('/sizing/policy');
+            if (response.success && response.data && response.data.g_rules) {
+                const config = response.data.g_rules;
+                
+                // 加载配置到表单
+                document.getElementById('g0_enabled').checked = config.g0_enabled !== false;
+                document.getElementById('g0_max_position_pct').value = config.g0_max_position_pct || 10;
+                document.getElementById('g1_enabled').checked = config.g1_enabled !== false;
+                document.getElementById('g1_max_daily_loss_pct').value = config.g1_max_daily_loss_pct || 5;
+                document.getElementById('g2_enabled').checked = config.g2_enabled !== false;
+                document.getElementById('g2_max_total_exposure_pct').value = config.g2_max_total_exposure_pct || 80;
+                document.getElementById('g3_enabled').checked = config.g3_enabled !== false;
+                document.getElementById('g3_max_sector_exposure_pct').value = config.g3_max_sector_exposure_pct || 30;
+                document.getElementById('g4_enabled').checked = config.g4_enabled !== false;
+                document.getElementById('g4_max_correlation').value = config.g4_max_correlation || 0.7;
+            }
+        } catch (error) {
+            console.error('加载 G Rules 配置失败:', error);
+        }
+    }
+
+    async loadGRulesStatus() {
+        try {
+            const response = await this.apiCall('/sizing/history?limit=1');
+            if (response.success && response.data && response.data.length > 0) {
+                const latest = response.data[0];
+                const status = latest.g_rules_status || {};
+                
+                // 更新状态表格
+                this.updateGRuleStatus('g0', status.g0 || { passed: true, message: '正常' });
+                this.updateGRuleStatus('g1', status.g1 || { passed: true, message: '正常' });
+                this.updateGRuleStatus('g2', status.g2 || { passed: true, message: '正常' });
+                this.updateGRuleStatus('g3', status.g3 || { passed: true, message: '正常' });
+                this.updateGRuleStatus('g4', status.g4 || { passed: true, message: '正常' });
+            }
+        } catch (error) {
+            console.error('加载 G Rules 状态失败:', error);
+        }
+    }
+
+    updateGRuleStatus(ruleId, status) {
+        const statusElement = document.getElementById(`${ruleId}_status`);
+        const messageElement = document.getElementById(`${ruleId}_message`);
+        
+        if (statusElement) {
+            statusElement.className = `badge ${status.passed ? 'bg-success' : 'bg-danger'}`;
+            statusElement.textContent = status.passed ? '通过' : '违规';
+        }
+        
+        if (messageElement) {
+            messageElement.textContent = status.message || (status.passed ? '正常' : '违规');
         }
     }
 }

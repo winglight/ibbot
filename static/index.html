@@ -152,23 +152,25 @@
 
         <div class="row mt-4">
             <div class="col-md-6">
+                <!-- Risk Rules Panel -->
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-shield-alt"></i> Risk Rules</h5>
                         <div>
-                            <button class="btn btn-sm btn-warning me-2" id="addRiskRuleBtn">
+                            <button class="btn btn-sm btn-warning" id="addRiskRuleBtn2">
                                 <i class="fas fa-plus"></i>
                             </button>
                         </div>
                     </div>
                     <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-sm" id="riskRulesTable">
+                        <div class="table-responsive" style="max-height: 300px;">
+                            <table class="table table-sm" id="riskRulesTable2">
                                 <thead>
                                     <tr>
                                         <th>Symbol</th>
                                         <th>Stop Loss</th>
                                         <th>Take Profit</th>
+                                        <th>Max Time</th>
                                         <th>Status</th>
                                         <th>Actions</th>
                                     </tr>
@@ -194,11 +196,9 @@
                         <thead>
                           <tr>
                             <th>Name</th>
-                            <th>Type</th>
-                            <th>Enabled</th>
-                            <th>Trigger Count</th>
-                            <th>Last Triggered</th>
-                            <th>Description</th>
+                            <th>Symbol</th>
+                            <th>Status</th>
+                            <th>P&L</th>
                             <th>Actions</th>
                           </tr>
                         </thead>
@@ -206,6 +206,258 @@
                       </table>
                     </div>
                   </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-shield-alt"></i> Position & Risk Controls</h5>
+                        <div>
+                            <button class="btn btn-sm btn-warning me-2" id="addRiskRuleBtn">
+                                <i class="fas fa-plus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <!-- Tabs for G Rules and S Rules -->
+                        <ul class="nav nav-tabs" id="riskControlTabs" role="tablist">
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link active" id="g-rules-tab" data-bs-toggle="tab" data-bs-target="#g-rules" type="button" role="tab" aria-controls="g-rules" aria-selected="true">
+                                    <i class="fas fa-gavel"></i> G Rules
+                                </button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="s-rules-tab" data-bs-toggle="tab" data-bs-target="#s-rules" type="button" role="tab" aria-controls="s-rules" aria-selected="false">
+                                    <i class="fas fa-calculator"></i> S Rules
+                                </button>
+                            </li>
+                        </ul>
+                        
+                        <div class="tab-content mt-3" id="riskControlTabContent">
+                            <!-- G Rules Tab -->
+                            <div class="tab-pane fade show active" id="g-rules" role="tabpanel" aria-labelledby="g-rules-tab">
+                                <!-- G Rules Configuration Form -->
+                                <div class="mb-3">
+                                    <h6><i class="fas fa-cog"></i> G Rules Configuration</h6>
+                                    <form id="gRulesForm">
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">G0: 账户级断路器 (%)</label>
+                                                    <input type="number" class="form-control form-control-sm" id="g0AccountBreaker" step="0.1" placeholder="5.0" max="20">
+                                                    <small class="form-text text-muted">当日总亏损超过此比例时停止交易</small>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">G1: 单笔最大风险 (%)</label>
+                                                    <input type="number" class="form-control form-control-sm" id="g1MaxRiskPerTrade" step="0.1" placeholder="2.0" max="10">
+                                                    <small class="form-text text-muted">单笔交易最大风险占账户比例</small>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">G2: 单标的最大仓位 (%)</label>
+                                                    <input type="number" class="form-control form-control-sm" id="g2MaxPositionPerSymbol" step="0.1" placeholder="10.0" max="50">
+                                                    <small class="form-text text-muted">单个标的最大仓位占账户比例</small>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">G3: 相关性检查</label>
+                                                    <select class="form-select form-select-sm" id="g3CorrelationCheck">
+                                                        <option value="enabled">启用</option>
+                                                        <option value="disabled">禁用</option>
+                                                    </select>
+                                                    <small class="form-text text-muted">检查持仓标的间相关性</small>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">G4: 流动性检查</label>
+                                                    <select class="form-select form-select-sm" id="g4LiquidityCheck">
+                                                        <option value="enabled">启用</option>
+                                                        <option value="disabled">禁用</option>
+                                                    </select>
+                                                    <small class="form-text text-muted">检查标的流动性是否充足</small>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">G5: 时间窗口限制</label>
+                                                    <select class="form-select form-select-sm" id="g5TimeWindow">
+                                                        <option value="enabled">启用</option>
+                                                        <option value="disabled">禁用</option>
+                                                    </select>
+                                                    <small class="form-text text-muted">限制交易时间窗口</small>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <button type="button" class="btn btn-primary btn-sm" id="saveGRulesBtn">
+                                            <i class="fas fa-save"></i> Save G Rules
+                                        </button>
+                                    </form>
+                                </div>
+                                
+                                <hr>
+                                
+                                <!-- G Rules Status Display -->
+                                <div class="mb-3">
+                                    <h6><i class="fas fa-list"></i> G Rules Status</h6>
+                                    <div class="table-responsive">
+                                        <table class="table table-sm" id="gRulesStatusTable">
+                                            <thead>
+                                                <tr>
+                                                    <th>Rule</th>
+                                                    <th>Description</th>
+                                                    <th>Status</th>
+                                                    <th>Current Value</th>
+                                                    <th>Last Check</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr>
+                                                    <td>G0</td>
+                                                    <td>账户级断路器</td>
+                                                    <td><span class="badge bg-success">正常</span></td>
+                                                    <td>-1.2%</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>G1</td>
+                                                    <td>单笔最大风险</td>
+                                                    <td><span class="badge bg-success">正常</span></td>
+                                                    <td>1.5%</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>G2</td>
+                                                    <td>单标的最大仓位</td>
+                                                    <td><span class="badge bg-success">正常</span></td>
+                                                    <td>8.3%</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>G3</td>
+                                                    <td>相关性检查</td>
+                                                    <td><span class="badge bg-success">正常</span></td>
+                                                    <td>0.65</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>G4</td>
+                                                    <td>流动性检查</td>
+                                                    <td><span class="badge bg-success">正常</span></td>
+                                                    <td>充足</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>G5</td>
+                                                    <td>时间窗口限制</td>
+                                                    <td><span class="badge bg-success">正常</span></td>
+                                                    <td>交易时间内</td>
+                                                    <td>刚刚</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- S Rules Tab -->
+                            <div class="tab-pane fade" id="s-rules" role="tabpanel" aria-labelledby="s-rules-tab">
+                                <!-- Sizing Policy Form -->
+                                <div class="mb-3">
+                                    <h6><i class="fas fa-cog"></i> Sizing Policy Settings</h6>
+                                    <form id="sizingPolicyForm">
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">Default Method</label>
+                                                    <select class="form-select form-select-sm" id="defaultSizingMethod">
+                                                        <option value="fixed">Fixed Amount</option>
+                                                        <option value="percent">Percent of Portfolio</option>
+                                                        <option value="kelly">Kelly Criterion</option>
+                                                        <option value="volatility">Volatility Based</option>
+                                                    </select>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">Default Value</label>
+                                                    <input type="number" class="form-control form-control-sm" id="defaultSizingValue" step="0.01" placeholder="1000">
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">Max Position Size</label>
+                                                    <input type="number" class="form-control form-control-sm" id="maxPositionSize" step="0.01" placeholder="10000">
+                                                </div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label class="form-label">Risk Per Trade (%)</label>
+                                                    <input type="number" class="form-control form-control-sm" id="riskPerTrade" step="0.1" placeholder="2.0" max="10">
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <button type="button" class="btn btn-primary btn-sm" id="saveSizingPolicyBtn">
+                                            <i class="fas fa-save"></i> Save Policy
+                                        </button>
+                                    </form>
+                                </div>
+                                
+                                <hr>
+                                
+                                <!-- Sizing History -->
+                                <div class="mb-3">
+                                    <h6><i class="fas fa-history"></i> Sizing History</h6>
+                                    <div class="table-responsive" style="max-height: 200px;">
+                                        <table class="table table-sm" id="sizingHistoryTable">
+                                            <thead>
+                                                <tr>
+                                                    <th>Time</th>
+                                                    <th>Symbol</th>
+                                                    <th>Action</th>
+                                                    <th>Suggested Qty</th>
+                                                    <th>Method</th>
+                                                    <th>Price</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <!-- Notifications Panel -->
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-bell"></i> Notifications</h5>
+                        <div>
+                            <button class="btn btn-sm btn-outline-secondary" id="clearNotificationsBtn">
+                                <i class="fas fa-trash"></i> Clear All
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div id="notificationsList" style="max-height: 400px; overflow-y: auto;">
+                            <div class="text-muted text-center py-3">
+                                <i class="fas fa-bell-slash"></i>
+                                <p class="mb-0">No notifications</p>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -466,9 +718,59 @@
                                 </label>
                             </div>
                         </div>
+                        
+                        <!-- Suggested Position Size Section -->
+                        <div id="suggestedPositionSection" class="border rounded p-3 mb-3" style="background-color: #e8f5e8;">
+                            <h6 class="mb-3"><i class="fas fa-balance-scale"></i> 建议仓位 (S)</h6>
+                            <div class="row">
+                                <div class="col-md-4">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">建议数量</label>
+                                        <div class="fw-bold text-success" id="suggestedQuantity">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">计算方法</label>
+                                        <div class="fw-bold" id="sizingMethod">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">风险比例</label>
+                                        <div class="fw-bold" id="riskRatio">--</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">预估投入</label>
+                                        <div class="fw-bold text-primary" id="estimatedInvestment">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-2">
+                                        <label class="form-label text-muted small">最大风险</label>
+                                        <div class="fw-bold text-danger" id="maxRisk">--</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mt-2">
+                                <button type="button" class="btn btn-sm btn-outline-success" id="applySuggestedQuantity">
+                                    <i class="fas fa-check"></i> 应用建议数量
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshSuggestion">
+                                    <i class="fas fa-sync"></i> 刷新建议
+                                </button>
+                            </div>
+                        </div>
                     </form>
                 </div>
                 <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-primary" id="positionSizingBtn">
+                        <i class="fas fa-calculator"></i> Position Sizing
+                    </button>
                     <button type="button" class="btn btn-primary" id="submitOrderBtn">
                         <i class="fas fa-paper-plane"></i> Place Order
                     </button>
@@ -476,6 +778,63 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- Position Sizing Result Modal -->
+    <div class="modal fade" id="positionSizingModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title"><i class="fas fa-balance-scale"></i> Position Sizing Suggestion</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div class="row g-3 mb-3">
+              <div class="col-md-3">
+                <div><small class="text-muted">Contracts</small><div class="fw-bold" id="psContracts">-</div></div>
+              </div>
+              <div class="col-md-3">
+                <div><small class="text-muted">Stop Distance</small><div class="fw-bold" id="psStopDistance">-</div></div>
+              </div>
+              <div class="col-md-3">
+                <div><small class="text-muted">Point Value</small><div class="fw-bold" id="psPointValue">-</div></div>
+              </div>
+              <div class="col-md-3">
+                <div><small class="text-muted">Scale Total</small><div class="fw-bold" id="psScaleTotal">-</div></div>
+              </div>
+            </div>
+            <div class="row g-3 mb-3">
+              <div class="col-md-3">
+                <div><small class="text-muted">scale_vol</small><div class="fw-bold" id="psScaleVol">-</div></div>
+              </div>
+              <div class="col-md-3">
+                <div><small class="text-muted">scale_dd</small><div class="fw-bold" id="psScaleDd">-</div></div>
+              </div>
+              <div class="col-md-3">
+                <div><small class="text-muted">scale_sig</small><div class="fw-bold" id="psScaleSig">-</div></div>
+              </div>
+              <div class="col-md-3">
+                <div><small class="text-muted">scale_exec</small><div class="fw-bold" id="psScaleExec">-</div></div>
+              </div>
+            </div>
+            <div class="row g-3 mb-3">
+              <div class="col-md-3">
+                <div><small class="text-muted">R</small><div class="fw-bold" id="psR">-</div></div>
+              </div>
+              <div class="col-md-3">
+                <div><small class="text-muted">R*</small><div class="fw-bold" id="psRStar">-</div></div>
+              </div>
+            </div>
+            <div>
+              <small class="text-muted">Explanation</small>
+              <pre class="bg-light p-2 rounded small" id="psExplanation" style="white-space: pre-wrap;">-</pre>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Strategy Details Modal -->
@@ -696,6 +1055,11 @@
                         <div class="mb-3">
                             <label class="form-label">Take Profit Price</label>
                             <input type="number" class="form-control" id="riskTakeProfitPrice" step="0.01">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Max Time (optional)</label>
+                            <input type="text" class="form-control" id="riskMaxTime" placeholder="e.g., 1d, 2h, 30m">
+                            <div class="form-text">Maximum time to hold position before auto-close</div>
                         </div>
                         
                         <!-- PnL Preview Section -->
@@ -1325,13 +1689,13 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/luxon"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2"></script>
-    <script src="/static/app.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/luxon" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2" defer></script>
+    <script src="/static/app.js" defer></script>
 </body>
 </html>

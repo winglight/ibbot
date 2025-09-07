@@ -1183,7 +1183,7 @@ class IBKRClient:
             ibkr_logger.error(f"Failed to get orders: {e}")
             return []
 
-    def get_account_info(self) -> Dict:
+    async def get_account_info(self) -> Dict:
         """获取账户信息"""
         try:
             # 确保连接
@@ -1198,7 +1198,7 @@ class IBKRClient:
                 ibkr_logger.error(f"IBKR connection lost for get account info")
                 return {}
             
-            # Use synchronous methods to avoid event loop issues
+            # Use synchronous methods in async context
             account_values = ib.accountValues()
             
             info = {
@@ -1234,7 +1234,7 @@ class IBKRClient:
             ibkr_logger.error(f"Failed to get account info: {e}")
             return {}
     
-    def get_positions(self, fast: bool = False) -> List[Dict]:
+    async def get_positions(self, fast: bool = False) -> List[Dict]:
         """获取持仓列表
         fast=False 时会尝试获取实时价格，确保价格数据最新
         fast=True 时仅使用缓存或 portfolio 的 marketPrice/averageCost，跳过逐个实时行情请求以显著降低延迟"""

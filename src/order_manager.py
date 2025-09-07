@@ -429,12 +429,17 @@ class OrderManager:
                     order_logger.error(f"发送Telegram通知失败: {e}")
             
             # 检查并停用已平仓资产的风险规则
-            self._check_and_deactivate_risk_rules(order.symbol, order.order_source)
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.create_task(self._check_and_deactivate_risk_rules(order.symbol, order.order_source))
+            except RuntimeError:
+                # 没有运行中的事件循环，创建新的
+                asyncio.run(self._check_and_deactivate_risk_rules(order.symbol, order.order_source))
                     
         except Exception as e:
             order_logger.error(f"发送订单成交通知失败: {e}")
     
-    def _check_and_deactivate_risk_rules(self, symbol: str, order_source: str = None):
+    async def _check_and_deactivate_risk_rules(self, symbol: str, order_source: str = None, ibkr_client=None):
         """检查指定资产的持仓状态和订单来源，决定是否停用相关的风险规则"""
         try:
             if not hasattr(self, 'risk_manager') or not self.risk_manager:
@@ -457,9 +462,13 @@ class OrderManager:
                 deactivate_reason = "手动下单"
             else:
                 # 获取当前持仓信息
-                from .ibkr_client import IBKRClient
-                ibkr_client = IBKRClient()
-                positions = ibkr_client.get_positions()
+                if ibkr_client:
+                    positions = await ibkr_client.get_positions()
+                else:
+                    # 如果没有传入ibkr_client，创建新实例（保持向后兼容）
+                    from .ibkr_client import IBKRClient
+                    temp_client = IBKRClient()
+                    positions = temp_client.get_positions()
                 
                 # 查找指定资产的持仓
                 position_qty = 0
@@ -640,57 +649,6 @@ class OrderManager:
         """获取特定策略的所有订单"""
         return [order for order in self.orders.values() if order.strategy_name == strategy_name]
 
-    # 其余方法保持不变...
-    def _save_order_to_database(self, order: Order):
-        """保存订单到数据库"""
-        try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT OR REPLACE INTO orders (
-                        order_id, symbol, action, quantity, order_type, price,
-                        status, created_at, updated_at, executed_at, fill_price,
-                        order_source, strategy_name, rule_id, parent_order_id,
-                        exchange, sec_type, notes, commission, is_deleted
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    order.order_id, order.symbol, order.action, order.quantity,
-                    order.order_type, order.price, order.status,
-                    order.created_at.isoformat(), order.updated_at.isoformat(),
-                    order.executed_at.isoformat() if order.executed_at else None,
-                    order.fill_price, order.order_source, order.strategy_name,
-                    order.rule_id, order.parent_order_id, order.exchange,
-                    order.sec_type, order.notes, order.commission, order.is_deleted
-                ))
-                conn.commit()
-        except Exception as e:
-            order_logger.error(f"Error saving order {order.order_id} to database: {e}")
-
-    def _update_order_in_database(self, order: Order):
-        """更新数据库中的订单"""
-        try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    UPDATE orders SET
-                        symbol=?, action=?, quantity=?, order_type=?, price=?,
-                        status=?, updated_at=?, executed_at=?, fill_price=?,
-                        order_source=?, strategy_name=?, rule_id=?, parent_order_id=?,
-                        exchange=?, sec_type=?, notes=?, commission=?, is_deleted=?
-                    WHERE order_id=?
-                """, (
-                    order.symbol, order.action, order.quantity, order.order_type,
-                    order.price, order.status, order.updated_at.isoformat(),
-                    order.executed_at.isoformat() if order.executed_at else None,
-                    order.fill_price, order.order_source, order.strategy_name,
-                    order.rule_id, order.parent_order_id, order.exchange,
-                    order.sec_type, order.notes, order.commission, order.is_deleted,
-                    order.order_id
-                ))
-                conn.commit()
-        except Exception as e:
-            order_logger.error(f"Error updating order {order.order_id} in database: {e}")
-    
     def find_potential_match(self, symbol, sec_type, action, quantity, time_window_seconds=300):
         """根据合约符号、证券类型、操作和数量在指定时间窗口内查找潜在匹配的订单
         
@@ -756,7 +714,7 @@ class OrderManager:
             
             # 更新数据库中的订单ID
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with sqlite3.connect(self.db_manager.db_path) as conn:
                     conn.execute(
                         "UPDATE orders SET order_id = ? WHERE order_id = ?",
                         (new_order_id, old_order_id)

@@ -67,6 +67,14 @@ def ensure_server_running():
 
     # 未运行则启动 uvicorn main:app
     env = os.environ.copy()
+    # 测试会话隔离数据库：若未显式指定，设置 DB_PATH 指向临时测试数据库
+    if 'DB_PATH' not in env and 'TRADING_BOT_DB_PATH' not in env:
+        try:
+            test_db_dir = os.path.join(os.getcwd(), ".pytest_tmp_db")
+            os.makedirs(test_db_dir, exist_ok=True)
+            env['DB_PATH'] = os.path.join(test_db_dir, f"test_{API_PORT}.db")
+        except Exception:
+            pass
     cmd = [
         'uvicorn', 'main:app',
         '--host', API_HOST,
