@@ -64,6 +64,7 @@ class Order:
     # 附加字段
     notes: Optional[str] = None
     commission: Optional[float] = None
+    pnl: Optional[float] = None  # 新增：订单盈亏（来自IB API）
     # 新增：软删除标记，防止被 IBKR 同步重新创建
     is_deleted: int = 0
     
@@ -127,6 +128,7 @@ class OrderManager:
                         sec_type TEXT DEFAULT 'STK',
                         notes TEXT,
                         commission REAL,
+                        pnl REAL,
                         is_deleted INTEGER DEFAULT 0
                     )
                 """)
@@ -170,6 +172,14 @@ class OrderManager:
                         migrated_count = cursor.rowcount
                         order_logger.info(f"Migrated {migrated_count} orders from auto_orders to orders")
                 
+                # 检查并添加缺失的列（用于数据库迁移）
+                cursor.execute("PRAGMA table_info(orders)")
+                columns = [column[1] for column in cursor.fetchall()]
+                
+                if 'pnl' not in columns:
+                    cursor.execute("ALTER TABLE orders ADD COLUMN pnl REAL")
+                    order_logger.info("Added pnl column to orders table")
+                
                 conn.commit()
                 order_logger.info("Orders table initialized successfully")
                 
@@ -186,7 +196,7 @@ class OrderManager:
                     SELECT order_id, symbol, action, quantity, order_type, price,
                            status, created_at, updated_at, executed_at, fill_price,
                            order_source, strategy_name, rule_id, parent_order_id,
-                           exchange, sec_type, notes, commission, is_deleted
+                           exchange, sec_type, notes, commission, pnl, is_deleted
                     FROM orders
                     ORDER BY created_at DESC
                 """)
@@ -194,7 +204,7 @@ class OrderManager:
                 rows = cursor.fetchall()
                 
                 for row in rows:
-                    if row[19]:
+                    if row[20]:  # is_deleted字段现在是第20个（索引19）
                         # 软删除的订单，记录其ID用于去重，避免IBKR重新创建
                         self.deleted_order_ids.add(row[0])
                         continue
@@ -218,6 +228,7 @@ class OrderManager:
                         sec_type=row[16] or "STK",
                         notes=row[17],
                         commission=row[18],
+                        pnl=row[19],
                         is_deleted=0
                     )
                     self.orders[order.order_id] = order
@@ -307,7 +318,8 @@ class OrderManager:
                           status: str,
                           fill_price: Optional[float] = None,
                           executed_at: Optional[datetime] = None,
-                          commission: Optional[float] = None) -> bool:
+                          commission: Optional[float] = None,
+                          pnl: Optional[float] = None) -> bool:
         """更新订单状态"""
         try:
             if order_id not in self.orders:
@@ -351,6 +363,11 @@ class OrderManager:
             
             if commission is not None:
                 order.commission = commission
+                order_logger.debug(f"Updated order {order_id} commission: {commission}")
+            
+            if pnl is not None:
+                order.pnl = pnl
+                order_logger.debug(f"Updated order {order_id} PnL: {pnl}")
             
             # 更新数据库
             self._update_order_in_database(order)
@@ -381,8 +398,12 @@ class OrderManager:
                 "fill_price": order.fill_price,
                 "order_type": order.order_type,
                 "executed_at": order.executed_at.isoformat() if order.executed_at else None,
+                "commission": order.commission,
+                "pnl": order.pnl,
                 "message": f"订单已成交: {order.symbol} {order.action} {order.quantity}股 @ {order.fill_price or 'N/A'}"
             }
+            
+            order_logger.info(f"Sending WebSocket message for order {order.order_id}: commission={order.commission}, pnl={order.pnl}")
             
             # 发送浏览器通知
             if hasattr(self, 'websocket_manager') and self.websocket_manager:
@@ -488,7 +509,7 @@ class OrderManager:
                 rule.enabled = False
                 
                 # 更新数据库中的风险规则状态
-                from .database import DatabaseRiskRule
+                from .database import RiskRule as DatabaseRiskRule
                 from datetime import datetime
                 db_rule = DatabaseRiskRule(
                     symbol=rule.symbol,
@@ -748,3 +769,65 @@ class OrderManager:
         except Exception as e:
             order_logger.error(f"更新订单ID时出错: {e}")
             return False
+    
+    def _save_order_to_database(self, order: Order):
+        """保存订单到数据库"""
+        try:
+            with sqlite3.connect(self.db_manager.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO orders 
+                    (order_id, symbol, action, quantity, order_type, price, status, 
+                     created_at, updated_at, executed_at, fill_price, order_source, 
+                     strategy_name, rule_id, parent_order_id, exchange, sec_type, 
+                     notes, commission, is_deleted)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        order.order_id, order.symbol, order.action, order.quantity,
+                        order.order_type, order.price, order.status,
+                        order.created_at.isoformat() if order.created_at else datetime.now().isoformat(),
+                        order.updated_at.isoformat() if order.updated_at else datetime.now().isoformat(),
+                        order.executed_at.isoformat() if order.executed_at else None,
+                        order.fill_price, order.order_source, order.strategy_name,
+                        order.rule_id, order.parent_order_id, order.exchange,
+                        order.sec_type, order.notes, order.commission, order.is_deleted
+                    )
+                )
+                conn.commit()
+                order_logger.debug(f"Order {order.order_id} saved to database")
+        except Exception as e:
+            order_logger.error(f"Error saving order {order.order_id} to database: {e}")
+            raise
+    
+    def _update_order_in_database(self, order: Order):
+        """更新数据库中的订单"""
+        try:
+            with sqlite3.connect(self.db_manager.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE orders SET 
+                        symbol=?, action=?, quantity=?, order_type=?, price=?, status=?,
+                        updated_at=?, executed_at=?, fill_price=?, order_source=?,
+                        strategy_name=?, rule_id=?, parent_order_id=?, exchange=?,
+                        sec_type=?, notes=?, commission=?, pnl=?, is_deleted=?
+                    WHERE order_id=?
+                    """,
+                    (
+                        order.symbol, order.action, order.quantity, order.order_type,
+                        order.price, order.status, 
+                        order.updated_at.isoformat() if order.updated_at else datetime.now().isoformat(),
+                        order.executed_at.isoformat() if order.executed_at else None,
+                        order.fill_price, order.order_source, order.strategy_name,
+                        order.rule_id, order.parent_order_id, order.exchange,
+                        order.sec_type, order.notes, order.commission, order.pnl, order.is_deleted,
+                        order.order_id
+                    )
+                )
+                conn.commit()
+                order_logger.debug(f"Order {order.order_id} updated in database")
+        except Exception as e:
+            order_logger.error(f"Error updating order {order.order_id} in database: {e}")
+            raise

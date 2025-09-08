@@ -184,6 +184,87 @@ class ConnectionManager:
                 except Exception as e:
                     connection_logger.debug(f"Failed to patch wrapper.completedOrder: {e}")
                 
+                # 添加错误处理机制来捕获IBKR错误
+                try:
+                    def error_handler(reqId, errorCode, errorString, advancedOrderRejectJson=""):
+                        """处理IBKR错误，特别是订单相关错误"""
+                        connection_logger.info(f"IBKR Error - ReqId: {reqId}, Code: {errorCode}, Message: {errorString}")
+                        
+                        # 检查是否是订单相关错误
+                        if reqId and reqId > 0:  # reqId > 0 通常表示订单相关
+                            # 常见的订单错误代码：
+                            # 201: Order rejected - reason
+                            # 202: Order cancelled - reason  
+                            # 203: The security is not available or allowed for this account
+                            # 399: Order Message
+                            # 434: The order size is too small
+                            # 478: Order size does not conform to market rule
+                            # 10147: OrderId that GetOpenOrder is attempting to query does not exist
+                            # 10148: Requested market data is not subscribed
+                            # 保证金不足相关错误代码
+                            margin_error_codes = [10148, 10149, 10150, 399, 400, 401, 402]
+                            # 订单被拒绝相关错误代码
+                            rejection_error_codes = [201, 202, 203, 434, 478, 10147, 300] + margin_error_codes
+                            
+                            # 保证金不足相关关键词
+                            margin_keywords = [
+                                'insufficient', 'margin', 'buying power', 'rejected', 'not enough',
+                                'order rejected', 'insufficient funds', 'insufficient buying power',
+                                'margin requirement', 'account restriction', 'position limit'
+                            ]
+                            
+                            is_order_error = (errorCode in rejection_error_codes or 
+                                            any(keyword.lower() in errorString.lower() for keyword in margin_keywords))
+                            
+                            if is_order_error:
+                                connection_logger.error(f"Order {reqId} rejected - Code: {errorCode}, Reason: {errorString}")
+                                # 异步更新订单状态为失败
+                                asyncio.create_task(self._handle_order_error(reqId, errorCode, errorString))
+                    
+                        # 绑定错误处理器到wrapper
+                    self.ib.wrapper.error = error_handler
+                    connection_logger.debug("Added IBKR error handler for order rejection detection")
+                    
+                    # 添加订单状态变化事件监听器
+                    def order_status_handler(trade):
+                        """处理订单状态变化事件"""
+                        try:
+                            order_id = trade.order.orderId
+                            status = trade.orderStatus.status
+                            connection_logger.info(f"Order status update: {order_id} -> {status}")
+                            
+                            # 如果订单已成交，处理佣金和PnL
+                            if status == 'Filled':
+                                asyncio.create_task(self._handle_order_filled(trade))
+                        except Exception as e:
+                            connection_logger.error(f"Error in order status handler: {e}")
+                    
+                    # 添加成交事件监听器
+                    def fill_handler(trade, fill):
+                        """处理订单成交事件"""
+                        try:
+                            order_id = trade.order.orderId
+                            connection_logger.info(f"Order fill event: {order_id}, fill: {fill}")
+                            
+                            # 处理佣金报告
+                            if hasattr(fill, 'commissionReport') and fill.commissionReport:
+                                commission = fill.commissionReport.commission
+                                pnl = getattr(fill.commissionReport, 'realizedPNL', None)
+                                connection_logger.info(f"Commission report for order {order_id}: commission={commission}, pnl={pnl}")
+                                
+                                # 异步更新订单的佣金和PnL
+                                asyncio.create_task(self._update_order_commission_pnl(order_id, commission, pnl))
+                        except Exception as e:
+                            connection_logger.error(f"Error in fill handler: {e}")
+                    
+                    # 绑定事件监听器
+                    self.ib.orderStatusEvent += order_status_handler
+                    self.ib.fillEvent += fill_handler
+                    connection_logger.debug("Added order status and fill event handlers")
+                    
+                except Exception as e:
+                    connection_logger.warning(f"Failed to setup event handlers: {e}")
+                
                 self.connected = True
                 account_type = "Paper" if self.config.paper_trading else "Live"
                 connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
@@ -406,6 +487,76 @@ class ConnectionManager:
         except Exception as e:
             connection_logger.error(f"Failed to get account info: {e}")
             raise
+    
+    async def _handle_order_error(self, req_id, error_code, error_string):
+        """处理订单错误，更新订单状态为失败"""
+        try:
+            from .order_manager import OrderManager
+            from .models import OrderStatus
+            
+            # 记录错误信息
+            connection_logger.error(f"Order error - ReqId: {req_id}, Code: {error_code}, Message: {error_string}")
+            
+            # 从IBKRClient获取reqId到订单ID的映射
+            if hasattr(self, '_ibkr_client_ref') and self._ibkr_client_ref:
+                ibkr_client = self._ibkr_client_ref()
+                if ibkr_client and hasattr(ibkr_client, 'req_id_to_order_id'):
+                    order_id = ibkr_client.req_id_to_order_id.get(req_id)
+                    if order_id:
+                        # 更新订单状态为失败
+                        order_manager = OrderManager()
+                        order_manager.update_order_status(
+                            order_id=order_id,
+                            status=OrderStatus.REJECTED.value,
+                            notes=f"IBKR Error {error_code}: {error_string}"
+                        )
+                        connection_logger.info(f"Updated order {order_id} status to REJECTED due to error {error_code}")
+                        
+                        # 清理映射
+                        del ibkr_client.req_id_to_order_id[req_id]
+                    else:
+                        connection_logger.warning(f"No order mapping found for reqId {req_id}")
+                else:
+                    connection_logger.warning(f"IBKRClient reference not available for error handling")
+            
+        except Exception as e:
+            connection_logger.error(f"Failed to handle order error: {e}")
+    
+    async def _handle_order_filled(self, trade):
+        """处理订单成交事件"""
+        try:
+            order_id = trade.order.orderId
+            connection_logger.info(f"Handling filled order: {order_id}")
+            
+            # 获取佣金和PnL信息
+            total_commission = 0
+            total_pnl = 0
+            
+            for fill in trade.fills:
+                if hasattr(fill, 'commissionReport') and fill.commissionReport:
+                    total_commission += fill.commissionReport.commission
+                    if hasattr(fill.commissionReport, 'realizedPNL'):
+                        total_pnl += fill.commissionReport.realizedPNL or 0
+            
+            connection_logger.info(f"Order {order_id} commission: {total_commission}, pnl: {total_pnl}")
+            
+            # 更新数据库中的订单信息
+            await self._update_order_commission_pnl(order_id, total_commission, total_pnl)
+            
+        except Exception as e:
+            connection_logger.error(f"Error handling filled order: {e}")
+    
+    async def _update_order_commission_pnl(self, order_id, commission, pnl):
+        """更新订单的佣金和PnL到数据库"""
+        try:
+            from .database import get_db_manager
+            
+            db = get_db_manager()
+            await db.update_order_commission_pnl(order_id, commission, pnl)
+            connection_logger.info(f"Updated order {order_id} commission={commission}, pnl={pnl} in database")
+            
+        except Exception as e:
+            connection_logger.error(f"Error updating order commission/pnl in database: {e}")
     
     def get_config(self) -> ConnectionConfig:
         """获取当前配置"""

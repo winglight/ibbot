@@ -450,7 +450,7 @@ def setup_logging():
     )
 
     # 控制台
-    logger.add(sys.stderr, level="INFO", format=log_format, enqueue=True, backtrace=False, diagnose=False)
+    logger.add(sys.stderr, level="DEBUG", format=log_format, enqueue=True, backtrace=False, diagnose=False)
 
     # 文件
     logger.add(
@@ -459,7 +459,7 @@ def setup_logging():
         retention="14 days",
         encoding="utf-8",
         enqueue=True,
-        level="INFO",
+        level="DEBUG",
         format=log_format,
         backtrace=False,
         diagnose=False,
@@ -578,6 +578,15 @@ except Exception as _sm_dep_err:
     logger.warning(f"StrategyManager set_dependencies at startup failed: {_sm_dep_err}")
 websocket_connections = []
 order_manager = OrderManager()
+# 注入依赖到 OrderManager
+try:
+    order_manager.set_dependencies(
+        websocket_manager=websocket_manager,
+        notification_manager=notification_manager,
+        risk_manager=risk_manager
+    )
+except Exception as _om_dep_err:
+    logger.warning(f"OrderManager set_dependencies at startup failed: {_om_dep_err}")
 # 注入 OrderManager 到 RiskManager（用于软删除等操作）
 try:
     risk_manager.set_dependencies(order_manager=order_manager)
@@ -676,7 +685,7 @@ async def _pnl_broadcast_loop():
                         })
                     if positions is not None:
                         await websocket_manager.broadcast({
-                            "type": "positions_update",
+                            "type": "position_update",
                             "positions": positions
                         })
             except Exception as be:
@@ -1302,6 +1311,8 @@ async def get_current_price(request: CurrentPriceRequest, user: Optional[str] = 
         
         # 最后尝试从历史数据获取最新价格（1分钟数据）
         try:
+            # 对MNQ合约使用更长的超时时间
+            timeout_duration = 15.0 if request.symbol == "MNQ" else 10.0
             df = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
@@ -1312,7 +1323,7 @@ async def get_current_price(request: CurrentPriceRequest, user: Optional[str] = 
                         exchange=request.exchange
                     )
                 ),
-                timeout=10.0
+                timeout=timeout_duration
             )
             
             if df is not None and not df.empty:
@@ -1327,8 +1338,18 @@ async def get_current_price(request: CurrentPriceRequest, user: Optional[str] = 
         except asyncio.TimeoutError:
             logger.warning(f"Historical data fallback for {request.symbol} timed out")
         
-        raise HTTPException(status_code=404, detail="Unable to get current price")
+        # 如果所有方法都失败，返回404而不是抛出异常
+        return {
+            "success": False,
+            "symbol": request.symbol,
+            "price": None,
+            "timestamp": datetime.now().isoformat(),
+            "error": "Unable to get current price"
+        }
         
+    except HTTPException:
+        # 重新抛出HTTP异常（如连接错误等）
+        raise
     except Exception as e:
         logger.error(f"Current price error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2088,7 +2109,9 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                     'remaining': 0 if o.status == 'Filled' else o.quantity,
                     'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
                     'order_source': getattr(o, 'order_source', 'manual'),
-                    'trigger_type': trigger_type
+                    'trigger_type': trigger_type,
+                    'commission': getattr(o, 'commission', None),  # 新增：佣金
+                    'pnl': getattr(o, 'pnl', None)  # 新增：盈亏
                 }
                 converted_orders.append(converted_order)
             
@@ -2119,7 +2142,7 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/orders/{order_id}")
-async def get_order_detail(order_id: int, user: Optional[str] = Depends(get_current_user)):
+async def get_order_detail(order_id: str, user: Optional[str] = Depends(get_current_user)):
     """获取单个订单详情"""
     try:
         if 'order_manager' not in globals() or not order_manager:

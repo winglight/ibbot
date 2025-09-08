@@ -619,7 +619,11 @@ class RiskManager:
             # get_positions 是异步方法，直接await调用
             # get_account_info 是同步阻塞方法，使用 asyncio.to_thread 在后台线程执行
             positions = await self.ibkr_client.get_positions(fast=False)
-            account_info = await asyncio.to_thread(self.ibkr_client.get_account_info)
+            try:
+                account_info = await asyncio.to_thread(self.ibkr_client.get_account_info)
+            except Exception as e:
+                risk_logger.warning(f"Failed to get account info: {e}")
+                account_info = {}
             
             risk_logger.info(f"Found {len(positions)} positions to monitor")
             risk_logger.info(f"Active risk rules: {len([r for r in self.risk_rules.values() if r.enabled])}")
@@ -1061,7 +1065,7 @@ class RiskManager:
                 return  # 触发市价单后立即返回，不再检查止盈
     
     def _auto_sync_market_orders(self):
-        """自动同步市价单状态和成交价格（仅检查特定订单，避免全量同步）"""
+        """自动同步所有活跃订单状态和成交价格（包括市价单和限价单）"""
         try:
             if not self.ibkr_client or not self.ibkr_client.is_connected():
                 return
@@ -1071,21 +1075,20 @@ class RiskManager:
             if not order_manager:
                 return
             
-            # 获取所有状态为Submitted的市价单（包括手动、平仓、反向下单）
-            submitted_market_orders = []
+            # 获取所有活跃状态的订单（包括Submitted、PreSubmitted、PendingSubmit等）
+            active_orders = []
+            active_statuses = ["Submitted", "PreSubmitted", "PendingSubmit", "PendingCancel"]
             for order_id, order in order_manager.orders.items():
-                if (order.order_type == "MKT" and 
-                    order.status == "Submitted" and 
-                    order.order_source in ["manual", "close_position", "reverse_position"]):
-                    submitted_market_orders.append(order)
+                if order.status in active_statuses:
+                    active_orders.append(order)
             
-            if not submitted_market_orders:
+            if not active_orders:
                 return
             
-            # 检查特定订单状态（避免全量同步）
+            # 检查活跃订单状态（避免全量同步）
             try:
                 synced_count = 0
-                for order in submitted_market_orders:
+                for order in active_orders:
                     # 检查订单是否在IBKR的trades中
                     order_id_int = int(order.order_id)
                     trade = None
@@ -1098,7 +1101,7 @@ class RiskManager:
                     
                     if trade:
                         current_status = trade.orderStatus.status
-                        if current_status != "Submitted":
+                        if current_status != order.status:
                             # 更新订单状态
                             fill_price = None
                             if current_status == "Filled" and trade.orderStatus.avgFillPrice:
@@ -1111,10 +1114,10 @@ class RiskManager:
                                 executed_at=datetime.now() if current_status == "Filled" else None
                             )
                             synced_count += 1
-                            risk_logger.debug(f"Market order {order.order_id} status updated: {current_status}")
+                            risk_logger.debug(f"Order {order.order_id} status updated: {order.status} -> {current_status}")
                 
                 if synced_count > 0:
-                    risk_logger.debug(f"Auto-synced {synced_count} market orders")
+                    risk_logger.debug(f"Auto-synced {synced_count} active orders")
                     
             except Exception as sync_err:
                 risk_logger.warning(f"Failed to auto-sync market orders: {sync_err}")

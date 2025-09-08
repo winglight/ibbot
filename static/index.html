@@ -34,6 +34,30 @@
             z-index: 1050;
             min-width: 300px;
         }
+        .notes-tooltip {
+            position: fixed;
+            background-color: #333;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            max-width: 300px;
+            word-wrap: break-word;
+            z-index: 1060;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            display: none;
+            pointer-events: none;
+        }
+        .notes-tooltip::before {
+            content: '';
+            position: absolute;
+            bottom: -5px;
+            left: 50%;
+            transform: translateX(-50%);
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid #333;
+        }
     </style>
 </head>
 <body>
@@ -2036,6 +2060,9 @@
 <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2" defer></script>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/login.js" defer></script>
+<script src="/static/ibkr.js" defer></script>
+<script src="/static/ibkr_data.js" defer></script>
+<script src="/static/app.js" defer></script>
 </body>
 </html>

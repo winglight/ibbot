@@ -32,6 +32,8 @@ class Order:
     executed_at: Optional[str] = None
     rule_id: Optional[str] = None
     order_source: str = "auto"
+    commission: Optional[float] = None
+    pnl: Optional[float] = None
 
 # 兼容旧代码：保留 AutoOrder 名称
 AutoOrder = Order
@@ -113,61 +115,12 @@ class DatabaseManager:
                     sec_type TEXT DEFAULT 'STK',
                     notes TEXT,
                     commission REAL,
+                    pnl REAL,
                     is_deleted INTEGER DEFAULT 0
                 )
                 """
             )
             
-            # 兼容老库：缺失 is_deleted 列则补齐
-            cursor.execute("PRAGMA table_info('orders')")
-            cols = [row[1] for row in cursor.fetchall()]
-            if 'is_deleted' not in cols:
-                cursor.execute("ALTER TABLE orders ADD COLUMN is_deleted INTEGER DEFAULT 0")
-                database_logger.info("Added is_deleted column to orders table")
-            # 兼容旧库：缺失 created_at/updated_at 列则补齐并回填
-            if 'created_at' not in cols:
-                cursor.execute("ALTER TABLE orders ADD COLUMN created_at TEXT")
-                if 'timestamp' in cols:
-                    cursor.execute("UPDATE orders SET created_at = COALESCE(timestamp, datetime('now'))")
-                else:
-                    cursor.execute("UPDATE orders SET created_at = datetime('now')")
-                database_logger.info("Added created_at column to orders table and backfilled")
-            if 'updated_at' not in cols:
-                cursor.execute("ALTER TABLE orders ADD COLUMN updated_at TEXT")
-                cursor.execute("UPDATE orders SET updated_at = COALESCE(updated_at, created_at)")
-                database_logger.info("Added updated_at column to orders table and backfilled")
-
-            # 如存在旧表 auto_orders，则迁移数据至 orders（当 orders 为空时）
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='auto_orders'")
-            if cursor.fetchone():
-                cursor.execute("SELECT COUNT(*) FROM orders")
-                orders_count = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM auto_orders")
-                legacy_count = cursor.fetchone()[0]
-                if legacy_count > 0:
-                    if orders_count == 0:
-                        cursor.execute(
-                            """
-                            INSERT INTO orders (
-                                order_id, symbol, action, quantity, order_type, price,
-                                status, created_at, updated_at, executed_at, order_source, rule_id, exchange, sec_type
-                            )
-                            SELECT 
-                                order_id, symbol, action, quantity, order_type, price,
-                                COALESCE(status, 'Submitted') as status,
-                                timestamp as created_at,
-                                timestamp as updated_at,
-                                executed_at,
-                                COALESCE(order_source, 'auto') as order_source,
-                                rule_id,
-                                COALESCE(exchange, 'SMART') as exchange,
-                                COALESCE(sec_type, 'STK') as sec_type
-                            FROM auto_orders
-                            """
-                        )
-                        database_logger.info("Migrated legacy auto_orders data into orders table")
-                    else:
-                        database_logger.warning("orders table already has data; skipped migrating from auto_orders")
 
             # 创建风险规则表
             cursor.execute(
@@ -184,19 +137,6 @@ class DatabaseManager:
                 )
                 """
             )
-            # 迁移：为已有表添加 enabled 列
-            try:
-                cursor.execute("SELECT enabled FROM risk_rules LIMIT 1")
-            except sqlite3.OperationalError:
-                cursor.execute("ALTER TABLE risk_rules ADD COLUMN enabled BOOLEAN DEFAULT 1")
-                database_logger.info("Added enabled column to risk_rules table")
-            
-            # 迁移：为已有表添加 max_time_span 列
-            cursor.execute("PRAGMA table_info('risk_rules')")
-            cols = [row[1] for row in cursor.fetchall()]
-            if 'max_time_span' not in cols:
-                cursor.execute("ALTER TABLE risk_rules ADD COLUMN max_time_span INTEGER")
-                database_logger.info("Added max_time_span column to risk_rules table")
 
             # 创建策略表
             cursor.execute("""
@@ -337,13 +277,14 @@ class DatabaseManager:
             cursor.execute(
                 """
                 INSERT INTO orders 
-                (order_id, symbol, action, quantity, order_type, price, status, created_at, updated_at, executed_at, order_source, rule_id, exchange, sec_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (order_id, symbol, action, quantity, order_type, price, status, created_at, updated_at, executed_at, order_source, rule_id, exchange, sec_type, commission, pnl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order.order_id, order.symbol, order.action, order.quantity,
                     order.order_type, order.price, status, created, created, order.executed_at,
                     order.order_source, order.rule_id, order.exchange, order.sec_type,
+                    getattr(order, 'commission', None), getattr(order, 'pnl', None),
                 ),
             )
             conn.commit()
@@ -355,7 +296,7 @@ class DatabaseManager:
         database_logger.warning("load_orders_legacy() is deprecated; use load_orders()")
         return self.load_orders()
 
-    def update_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None):
+    def update_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None, commission: float = None, pnl: float = None):
         """更新订单状态和价格（新）"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -372,6 +313,14 @@ class DatabaseManager:
             if executed_at is not None:
                 update_fields.append("executed_at = ?")
                 values.append(executed_at)
+            if commission is not None:
+                update_fields.append("commission = ?")
+                values.append(commission)
+                database_logger.debug(f"Adding commission update: {commission}")
+            if pnl is not None:
+                update_fields.append("pnl = ?")
+                values.append(pnl)
+                database_logger.debug(f"Adding pnl update: {pnl}")
             
             if update_fields:
                 # 总是更新 updated_at
@@ -379,11 +328,22 @@ class DatabaseManager:
                 values.append(datetime.now().isoformat())
                 values.append(order_id)
                 update_sql = f"UPDATE orders SET {', '.join(update_fields)} WHERE order_id = ?"
+                database_logger.debug(f"Executing SQL: {update_sql} with values: {values}")
                 cursor.execute(update_sql, values)
                 conn.commit()
+                database_logger.debug(f"SQL executed successfully, rows affected: {cursor.rowcount}")
                 database_logger.debug(
                     f"Order {order_id} updated: {dict(zip([f.split(' = ')[0] for f in update_fields], values[:-1]))}"
                 )
+    
+    async def update_order_commission_pnl(self, order_id: str, commission: float, pnl: float):
+        """异步更新订单的佣金和PnL"""
+        try:
+            self.update_order(order_id, commission=commission, pnl=pnl)
+            database_logger.info(f"Updated order {order_id} commission={commission}, pnl={pnl}")
+        except Exception as e:
+            database_logger.error(f"Error updating order {order_id} commission/pnl: {e}")
+            raise
 
     def load_orders(self) -> List[Order]:
         """加载所有订单（新）"""
@@ -396,7 +356,9 @@ class DatabaseManager:
                        COALESCE(status, 'Submitted') as status,
                        executed_at,
                        rule_id,
-                       COALESCE(order_source, 'auto') as order_source
+                       COALESCE(order_source, 'auto') as order_source,
+                       commission,
+                       pnl
                 FROM orders ORDER BY created_at DESC
                 """
             )

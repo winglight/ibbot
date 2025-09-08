@@ -33,6 +33,12 @@ class TradingApp {
         // 价格缓存机制
         this.priceCache = new Map();
         this.priceCacheTimeout = 30000; // 30秒缓存
+        
+        // 初始化登录管理器
+        this.loginManager = new LoginManager(this);
+        this.ibkrManager = new IBKRConnectionManager(this);
+        this.dataManager = new IBKRDataManager(this);
+        
         this.init();
     }
 
@@ -47,17 +53,19 @@ class TradingApp {
         } catch (e) {}
         this.setupEventListeners();
         this.initSymbolCombobox();
-        this.connectWebSocket();
-        this.toggleAuthButtons(!!localStorage.getItem('access_token'));
+        this.ibkrManager.connectWebSocket();
         this.scheduleTradingReminders();
         
         // 延迟执行所有网络请求，避免阻塞首页渲染
         setTimeout(async () => {
             // 优化：并行初始化，降低关键接口超时与重试，避免串行等待叠加
-            const cfgPromise = this.ensureDefaultConnectionConfig({ timeout: 3000, maxRetries: 0 });
+            const cfgPromise = this.ibkrManager.ensureDefaultConnectionConfig({ timeout: 3000, maxRetries: 0 });
             // 不阻塞首屏：自动登录与自动连接在后台进行
-            void this.tryAutoLogin({ timeout: 7000, maxRetries: 0, connectTimeout: 10000, connectRetries: 0 });
-            await this.checkConnectionStatus({ timeout: 4000, maxRetries: 0 });
+            void this.loginManager.tryAutoLogin({ timeout: 7000, maxRetries: 0, connectTimeout: 10000, connectRetries: 0 });
+            await this.ibkrManager.checkConnectionStatus({ timeout: 4000, maxRetries: 0 });
+            // 加载账户和投资组合数据
+            this.dataManager.loadAccountInfo();
+            this.dataManager.loadPortfolio();
             this.loadStrategies();
             this.loadLogModules();
             this.loadLogs();
@@ -67,6 +75,8 @@ class TradingApp {
             this.loadGSRulesStatus();
             // 加载风险规则
             this.loadRiskRules();
+            // 启动订单状态自动刷新
+            this.startOrdersAutoRefresh();
             await cfgPromise.catch(() => {});
         }, 50);
     }
@@ -75,128 +85,7 @@ class TradingApp {
 
 
     // Show login modal
-    showLoginModal() {
-        const modalEl = document.getElementById('loginModal');
-        if (!modalEl) return;
-        const remember = localStorage.getItem('rememberLogin') === '1';
-        const savedUser = localStorage.getItem('loginUsername') || '';
-        const savedPass = localStorage.getItem('loginPassword') || '';
-        if (remember) {
-            const u = document.getElementById('loginUsername');
-            const p = document.getElementById('loginPassword');
-            const r = document.getElementById('rememberLogin');
-            if (u) u.value = savedUser;
-            if (p) p.value = savedPass;
-            if (r) r.checked = true;
-        }
-        const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
-        modal.show();
-    }
 
-    async handleLoginSubmit() {
-        try {
-            const username = (document.getElementById('loginUsername')?.value || '').trim();
-            const password = (document.getElementById('loginPassword')?.value || '').trim();
-            const remember = !!document.getElementById('rememberLogin')?.checked;
-            if (remember) {
-                localStorage.setItem('rememberLogin', '1');
-                localStorage.setItem('loginUsername', username);
-                localStorage.setItem('loginPassword', password);
-            } else {
-                localStorage.removeItem('rememberLogin');
-                localStorage.removeItem('loginUsername');
-                localStorage.removeItem('loginPassword');
-            }
-            if (!username || !password) { this.showAlert('danger', '请输入用户名和密码'); return; }
-            const res = await this.apiCall('/login', {
-                method: 'POST',
-                body: JSON.stringify({ username, password })
-            });
-            if (res?.access_token) {
-                localStorage.setItem('access_token', res.access_token);
-                this.toggleAuthButtons(true);
-                const modalEl = document.getElementById('loginModal');
-                const modal = bootstrap.Modal.getInstance(modalEl);
-                if (modal) modal.hide();
-                this.showAlert('success', '登录成功');
-                this.checkConnectionStatus();
-                this.loadStrategies();
-                this.loadLogs();
-                
-                // 只在连接成功后加载需要IB连接的数据
-                if (this.connected) {
-                    this.loadOrders();
-                    this.loadPortfolio();
-                    this.loadRiskRules();
-                }
-            }
-        } catch (e) {}
-    }
-
-    async tryAutoLogin(options = {}) {
-        const auto = localStorage.getItem('enableAutoLogin') === '1';
-        const savedUser = localStorage.getItem('loginUsername');
-        const savedPass = localStorage.getItem('loginPassword');
-        if (!auto || !savedUser || !savedPass) return;
-        const { timeout = 7000, maxRetries = 0, connectTimeout = 10000, connectRetries = 0 } = options;
-        try {
-            const res = await this.apiCall('/login', {
-                method: 'POST',
-                body: JSON.stringify({ username: savedUser, password: savedPass }),
-                timeout,
-                maxRetries
-            });
-            if (res?.access_token) {
-                localStorage.setItem('access_token', res.access_token);
-                this.toggleAuthButtons(true);
-                await this.ensureDefaultConnectionConfig();
-                // Auto-connect using saved connection settings if available
-                const host = localStorage.getItem('conn_host');
-                const port = localStorage.getItem('conn_port');
-                const clientId = localStorage.getItem('conn_clientId');
-                const accountType = localStorage.getItem('conn_accountType') || 'paper';
-                if (host && port && clientId) {
-                    try {
-                        await this.apiCall('/connect', {
-                            method: 'POST',
-                            body: JSON.stringify({
-                                host,
-                                port: parseInt(port),
-                                client_id: parseInt(clientId),
-                                paper_trading: accountType === 'paper'
-                            }),
-                            timeout: connectTimeout,
-                            maxRetries: connectRetries
-                        });
-                        // After successful connect, load data asynchronously
-                        setTimeout(() => {
-                            this.loadAccountInfo();
-                            this.loadOrders();
-                            this.loadPortfolio();
-                            this.loadRiskRules();
-                            this.loadStrategies();
-                            this.loadLogs();
-                        }, 200);
-                    } catch (e) {
-                        console.warn('Auto-connect failed:', e);
-                    }
-                }
-            }
-        } catch {}
-    }
-
-    toggleAuthButtons(isLoggedIn) {
-        const loginBtn = document.getElementById('loginBtn');
-        const logoutBtn = document.getElementById('logoutBtn');
-        if (loginBtn) loginBtn.style.display = isLoggedIn ? 'none' : 'inline-block';
-        if (logoutBtn) logoutBtn.style.display = isLoggedIn ? 'inline-block' : 'none';
-    }
-
-    logout() {
-        localStorage.removeItem('access_token');
-        this.toggleAuthButtons(false);
-        this.showAlert('info', '已退出登录');
-    }
 
     setupEventListeners() {
         // Wait for DOM to be ready
@@ -208,58 +97,9 @@ class TradingApp {
     }
 
     bindEventListeners() {
-        // Connection
-        document.getElementById('connectBtn').addEventListener('click', () => this.connect());
-        document.getElementById('disconnectBtn').addEventListener('click', () => this.disconnect());
+        // Connection events are now handled by IBKRConnectionManager
         
-        // Settings button
-        document.getElementById('connectionSettingsBtn').addEventListener('click', async () => {
-            await this.ensureDefaultConnectionConfig();
-            // Prefill fields from localStorage
-            const hostEl = document.getElementById('host');
-            const portEl = document.getElementById('port');
-            const clientIdEl = document.getElementById('clientId');
-            const accountTypeEl = document.getElementById('accountType');
-            const autoEl = document.getElementById('enableAutoLogin');
-            if (hostEl) hostEl.value = localStorage.getItem('conn_host') || hostEl.value || '127.0.0.1';
-            if (portEl) portEl.value = localStorage.getItem('conn_port') || portEl.value || '4002';
-            if (clientIdEl) clientIdEl.value = localStorage.getItem('conn_clientId') || clientIdEl.value || '1';
-            if (accountTypeEl) accountTypeEl.value = localStorage.getItem('conn_accountType') || accountTypeEl.value || 'paper';
-            if (autoEl) autoEl.checked = localStorage.getItem('enableAutoLogin') === '1';
-            const modal = new bootstrap.Modal(document.getElementById('connectionModal'));
-            modal.show();
-        });
-        
-        // Login events
-        const loginBtn = document.getElementById('loginBtn');
-        if (loginBtn) loginBtn.addEventListener('click', () => this.showLoginModal());
-        const loginSubmitBtn = document.getElementById('loginSubmitBtn');
-        if (loginSubmitBtn) loginSubmitBtn.addEventListener('click', () => this.handleLoginSubmit());
-        const loginPasswordInput = document.getElementById('loginPassword');
-        if (loginPasswordInput) loginPasswordInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') this.handleLoginSubmit(); });
-        const logoutBtn = document.getElementById('logoutBtn');
-        if (logoutBtn) logoutBtn.addEventListener('click', () => this.logout());
-
-        // Save Connection Settings
-        const saveConnBtn = document.getElementById('saveConnectionSettings');
-        if (saveConnBtn) {
-            saveConnBtn.addEventListener('click', () => {
-                const host = document.getElementById('host')?.value || '';
-                const port = document.getElementById('port')?.value || '';
-                const clientId = document.getElementById('clientId')?.value || '';
-                const accountType = document.getElementById('accountType')?.value || '';
-                const auto = !!document.getElementById('enableAutoLogin')?.checked;
-                if (host) localStorage.setItem('conn_host', host);
-                if (port) localStorage.setItem('conn_port', port);
-                if (clientId) localStorage.setItem('conn_clientId', clientId);
-                if (accountType) localStorage.setItem('conn_accountType', accountType);
-                localStorage.setItem('enableAutoLogin', auto ? '1' : '0');
-                this.showAlert('success', 'Connection settings saved');
-                const modalEl = document.getElementById('connectionModal');
-                const modal = bootstrap.Modal.getInstance(modalEl);
-                if (modal) modal.hide();
-            });
-        }
+        // Login events are now handled by LoginManager
 
         // Config Rules Settings buttons
         const gRulesSettingsBtn = document.getElementById('gRulesSettingsBtn');
@@ -658,71 +498,7 @@ class TradingApp {
         
     }
 
-    connectWebSocket() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
-        
-        this.ws = new WebSocket(wsUrl);
-        
-        this.ws.onopen = () => {
-            console.log('WebSocket connected');
-        };
-        
-        this.ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            this.handleWebSocketMessage(data);
-        };
-        
-        this.ws.onclose = () => {
-            console.log('WebSocket disconnected');
-            // Reconnect after 5 seconds
-            setTimeout(() => this.connectWebSocket(), 5000);
-        };
-        
-        this.ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-        };
-    }
-
-    handleWebSocketMessage(data) {
-        switch (data.type) {
-            case 'connection_status':
-                this.updateConnectionStatus(data.connected, data.account_type);
-                break;
-            case 'order_placed':
-                this.loadOrders();
-                this.showAlert('success', `订单${data.order_id ? ' ' + data.order_id : ''} 下单成功`);
-                break;
-            case 'order_cancelled':
-                this.loadOrders();
-                this.showAlert('success', `订单 ${data.order_id} 已取消`);
-                break;
-            case 'all_orders_cancelled':
-                this.loadOrders();
-                this.showAlert('success', `已取消 ${typeof data.count === 'number' ? data.count : ''} 个订单`);
-                break;
-            case 'account_update':
-                if (data.account_info) {
-                    this.updateAccountInfoUI(data.account_info);
-                }
-                break;
-            case 'positions_update':
-                if (data.positions) {
-                    this.updatePositionsUI(data.positions);
-                }
-                break;
-            case 'position_reversed':
-                this.loadPortfolio();
-                this.loadOrders();
-                this.showAlert('success', `反向下单成功: ${data.symbol} ${data.action} ${data.quantity}股`);
-                break;
-            case 'realtime_data':
-                this.updateMonitorRealtime(data);
-                break;
-            default:
-                console.log('Unknown WebSocket message:', data);
-        }
-    }
+    // WebSocket functionality moved to IBKRConnectionManager
 
     scheduleTradingReminders() {
         if (typeof window === 'undefined' || !('Notification' in window)) {
@@ -896,7 +672,7 @@ class TradingApp {
         // 检查是否为GET请求且需要缓存
         const method = options.method || 'GET';
         const useCache = options.useCache !== false && method === 'GET';
-        const cacheTime = options.cacheTime || 30000; // 默认缓存30秒
+        const cacheTime = options.cacheTime || 10000; // 默认缓存10秒
         
         // 生成缓存键
         const cacheKey = useCache ? `${endpoint}_${JSON.stringify(options.body || '')}` : null;
@@ -904,9 +680,12 @@ class TradingApp {
         // 检查缓存
         if (useCache && this.apiCache[cacheKey]) {
             const cachedData = this.apiCache[cacheKey];
-            if (Date.now() - cachedData.timestamp < cacheTime) {
+            if ((Date.now() - cachedData.timestamp) < cacheTime) {
                 console.log(`Using cached data for ${endpoint}`);
                 return cachedData.data;
+            } else {
+                // 缓存已过期，删除过期缓存
+                delete this.apiCache[cacheKey];
             }
         }
         
@@ -937,8 +716,8 @@ class TradingApp {
                 // 处理401未授权 - 重定向到登录
                 if (response.status === 401) {
                     localStorage.removeItem('access_token');
-                    this.toggleAuthButtons(false);
-                    this.showLoginModal();
+                    this.loginManager.toggleAuthButtons(false);
+                    this.loginManager.showLoginModal();
                     throw new Error('Authentication required');
                 }
                 
@@ -995,305 +774,10 @@ class TradingApp {
         }
     }
 
-    async ensureDefaultConnectionConfig(options = {}) {
-        try {
-            const hasHost = !!localStorage.getItem('conn_host');
-            const hasPort = !!localStorage.getItem('conn_port');
-            const hasClient = !!localStorage.getItem('conn_clientId');
-            const hasAcct = !!localStorage.getItem('conn_accountType');
-            if (hasHost && hasPort && hasClient && hasAcct) return;
-            const res = await this.apiCall('/connection_config', {
-                timeout: options.timeout ?? 5000,
-                maxRetries: options.maxRetries ?? 1
-            });
-            if (res) {
-                if (!hasHost && res.host) localStorage.setItem('conn_host', res.host);
-                if (!hasPort && res.port != null) localStorage.setItem('conn_port', String(res.port));
-                if (!hasClient && res.client_id != null) localStorage.setItem('conn_clientId', String(res.client_id));
-                if (!hasAcct) localStorage.setItem('conn_accountType', res.paper_trading ? 'paper' : 'live');
-            }
-        } catch (e) {
-            // ignore errors, fallback remains
-        }
-    }
+    // Connection methods moved to IBKRConnectionManager
 
-    async connect() {
-        const config = {
-            host: document.getElementById('host').value,
-            port: parseInt(document.getElementById('port').value),
-            client_id: parseInt(document.getElementById('clientId').value),
-            paper_trading: (document.getElementById('accountType')?.value || 'paper') === 'paper'
-        };
-        
-        try {
-            await this.apiCall('/connect', {
-                method: 'POST',
-                body: JSON.stringify(config)
-            });
-            
-            this.showAlert('success', 'Connected successfully');
-            // Immediately update UI buttons
-            const accountType = (document.getElementById('accountType')?.value || 'paper');
-            this.updateConnectionStatus(true, accountType);
-            
-            // Close connection modal
-            const modalElement = document.getElementById('connectionModal');
-            const modal = bootstrap.Modal.getInstance(modalElement);
-            if (modal) {
-                modal.hide();
-            }
-            
-            // Force cleanup modal state
-            setTimeout(() => {
-                // Remove all modal backdrops
-                document.querySelectorAll('.modal-backdrop').forEach(backdrop => {
-                    backdrop.remove();
-                });
-                
-                // Clean body classes and styles
-                document.body.classList.remove('modal-open');
-                document.body.style.removeProperty('overflow');
-                document.body.style.removeProperty('padding-right');
-                
-                // Ensure modal is hidden
-                if (modalElement) {
-                    modalElement.style.display = 'none';
-                    modalElement.classList.remove('show');
-                    modalElement.setAttribute('aria-hidden', 'true');
-                    modalElement.removeAttribute('aria-modal');
-                }
-            }, 100);
-
-            // Persist the latest selections
-            const hostVal = document.getElementById('host')?.value;
-            const portVal = document.getElementById('port')?.value;
-            const clientIdVal = document.getElementById('clientId')?.value;
-            const acctVal = document.getElementById('accountType')?.value || 'paper';
-            if (hostVal) localStorage.setItem('conn_host', hostVal);
-            if (portVal) localStorage.setItem('conn_port', portVal);
-            if (clientIdVal) localStorage.setItem('conn_clientId', clientIdVal);
-            if (acctVal) localStorage.setItem('conn_accountType', acctVal);
-            
-            this.loadAccountInfo();
-            this.loadOrders();
-            this.loadPortfolio();
-            this.loadRiskRules();
-            this.loadStrategies();
-            // this.loadLogs();
-        } catch (error) {
-            console.error('Connection failed:', error);
-        }
-    }
-
-    async disconnect() {
-        try {
-            await this.apiCall('/disconnect', { method: 'POST' });
-            this.showAlert('info', 'Disconnected successfully');
-            this.updateConnectionStatus(false);
-            this.clearData();
-        } catch (error) {
-            console.error('Disconnection failed:', error);
-        }
-    }
-
-    async checkConnectionStatus(options = {}) {
-        try {
-            // 未登录则跳过，避免产生401以及触发登录弹窗循环
-            const token = localStorage.getItem('access_token');
-            if (!token) return;
-            const data = await this.apiCall('/connection_status', {
-                timeout: options.timeout ?? 4000,
-                maxRetries: options.maxRetries ?? 0,
-                useCache: false
-            });
-            this.updateConnectionStatus(data.connected, data.account_type);
-            
-            if (data.connected) {
-                // Load data asynchronously to avoid blocking
-                setTimeout(() => {
-                    this.loadAccountInfo();
-                    this.loadOrders();
-                    this.loadPortfolio();
-                    this.loadRiskRules();
-                    this.loadStrategies();
-                }, 300);
-            }
-        } catch (error) {
-            console.error('Failed to check connection status:', error);
-        }
-    }
-
-    updateConnectionStatus(connected, accountType = '') {
-        this.connected = connected;
-        
-        const statusIndicator = document.getElementById('connectionStatus');
-        const statusText = document.getElementById('connectionText');
-        const connectBtn = document.getElementById('connectBtn');
-        const disconnectBtn = document.getElementById('disconnectBtn');
-        
-        if (connected) {
-            statusIndicator.className = 'status-indicator status-connected';
-            statusText.textContent = `Connected (${accountType})`;
-            connectBtn.disabled = true;
-            disconnectBtn.disabled = false;
-            if (connectBtn) connectBtn.style.display = 'none';
-            if (disconnectBtn) disconnectBtn.style.display = 'inline-block';
-            
-            // 连接成功后加载需要IB连接的数据
-            this.loadOrders();
-            this.loadPortfolio();
-            this.loadRiskRules();
-        } else {
-            statusIndicator.className = 'status-indicator status-disconnected';
-            statusText.textContent = 'Disconnected';
-            connectBtn.disabled = false;
-            disconnectBtn.disabled = true;
-            if (connectBtn) connectBtn.style.display = 'inline-block';
-            if (disconnectBtn) disconnectBtn.style.display = 'none';
-        }
-    }
-
-    async loadAccountInfo() {
-        try {
-            const data = await this.apiCall('/account_info');
-            const info = data.account_info;
-            
-            const accountInfoDiv = document.getElementById('accountInfo');
-            accountInfoDiv.innerHTML = `
-                <div class="row">
-                    <div class="col-md-6">
-                        <p><strong>Account ID:</strong> ${info.account_id || 'N/A'}</p>
-                        <p><strong>Account Type:</strong> ${info.account_type}</p>
-                        <p><strong>Net Liquidation:</strong> $${this.formatNumber(info.net_liquidation)}</p>
-                    </div>
-                    <div class="col-md-6">
-                        <p><strong>Available Funds:</strong> $${this.formatNumber(info.available_funds)}</p>
-                        <p><strong>Buying Power:</strong> $${this.formatNumber(info.buying_power)}</p>
-                        <p class="${info.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
-                            <strong>Unrealized P&L:</strong> $${this.formatNumber(info.unrealized_pnl)}
-                        </p>
-                        <p class="${info.realized_pnl >= 0 ? 'profit' : 'loss'}">
-                            <strong>Realized P&L:</strong> $${this.formatNumber(info.realized_pnl)}
-                        </p>
-                    </div>
-                </div>
-            `;
-        } catch (error) {
-            console.error('Failed to load account info:', error);
-        }
-    }
-
-    updateAccountInfoUI(info) {
-        try {
-            const accountInfoDiv = document.getElementById('accountInfo');
-            if (!accountInfoDiv) return;
-            accountInfoDiv.innerHTML = `
-                <div class="row">
-                    <div class="col-md-6">
-                        <p><strong>Account ID:</strong> ${info.account_id || 'N/A'}</p>
-                        <p><strong>Account Type:</strong> ${info.account_type}</p>
-                        <p><strong>Net Liquidation:</strong> $${this.formatNumber(info.net_liquidation)}</p>
-                    </div>
-                    <div class="col-md-6">
-                        <p><strong>Available Funds:</strong> $${this.formatNumber(info.available_funds)}</p>
-                        <p><strong>Buying Power:</strong> $${this.formatNumber(info.buying_power)}</p>
-                        <p class="${info.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
-                            <strong>Unrealized P&L:</strong> $${this.formatNumber(info.unrealized_pnl)}
-                        </p>
-                        <p class="${info.realized_pnl >= 0 ? 'profit' : 'loss'}">
-                            <strong>Realized P&L:</strong> $${this.formatNumber(info.realized_pnl)}
-                        </p>
-                    </div>
-                </div>
-            `;
-        } catch (e) {
-            console.error('updateAccountInfoUI failed', e);
-        }
-    }
-
-    updatePositionsUI(positions) {
-        try {
-            const tbody = document.querySelector('#positionsTable tbody');
-            if (!tbody) return;
-            tbody.innerHTML = positions.map(pos => `
-                <tr>
-                    <td>${pos.symbol}</td>
-                    <td>${pos.position}</td>
-                    <td>$${this.formatNumber(pos.avg_cost)}</td>
-                    <td>$${this.formatNumber(pos.current_price)}</td>
-                    <td class="${pos.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
-                        $${this.formatNumber(pos.unrealized_pnl)}
-                    </td>
-                    <td class="${pos.unrealized_pnl_percent >= 0 ? 'profit' : 'loss'}">
-                        ${this.formatNumber(pos.unrealized_pnl_percent)}%
-                    </td>
-                    <td>
-                        <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editPositionRiskRule('${pos.symbol}', ${pos.current_price}, ${pos.avg_cost}, ${pos.position})" title="Set TP/SL">
-                            <i class="fas fa-shield-alt"></i>
-                        </button>
-                        <button class="btn btn-sm btn-outline-success" onclick="app.openMonitorModal('${pos.symbol}', ${pos.position}, ${pos.current_price}, ${pos.avg_cost}, ${pos.unrealized_pnl}, ${pos.unrealized_pnl_percent})" title="Monitor">
-                            <i class="fas fa-eye"></i>
-                        </button>
-                    </td>
-                </tr>
-            `).join('');
-        } catch (e) {
-            console.error('updatePositionsUI failed', e);
-        }
-    }
-
-    // Check if this is an opening or closing position
-    isOpeningPosition(symbol, action) {
-        if (!this.positions || !symbol) return true;
-        
-        const position = this.positions.find(pos => pos.symbol === symbol.toUpperCase());
-        if (!position || position.position === 0) {
-            return true; // No existing position, this is opening
-        }
-        
-        // Check if action is opposite to current position
-        const currentPosition = position.position;
-        if ((currentPosition > 0 && action === 'SELL') || (currentPosition < 0 && action === 'BUY')) {
-            return false; // This is closing position
-        }
-        
-        return true; // This is adding to existing position (opening)
-    }
-    
-    // 带缓存的价格获取方法
-    async getCachedPrice(symbol) {
-        const cacheKey = symbol.toUpperCase();
-        const now = Date.now();
-        
-        // 检查缓存
-        if (this.priceCache.has(cacheKey)) {
-            const cached = this.priceCache.get(cacheKey);
-            if (now - cached.timestamp < this.priceCacheTimeout) {
-                return cached.price;
-            }
-        }
-        
-        // 缓存过期或不存在，重新获取
-        try {
-            const response = await this.apiCall('/current_price', {
-                method: 'POST',
-                body: JSON.stringify({ symbol: symbol })
-            });
-            
-            if (response.success && response.price) {
-                // 更新缓存
-                this.priceCache.set(cacheKey, {
-                    price: response.price,
-                    timestamp: now
-                });
-                return response.price;
-            }
-        } catch (error) {
-            console.error('Failed to get current price:', error);
-        }
-        
-        return null;
-    }
+    // 数据相关方法已移至 IBKRDataManager
+    // loadAccountInfo, updateAccountInfoUI, updatePositionsUI, isOpeningPosition, getCachedPrice
 
     // Get trading price based on order type
     async getTradingPrice(symbol, orderType, limitPrice = null) {
@@ -1302,7 +786,7 @@ class TradingApp {
         }
         
         // For market orders, get current market price from cache
-        return await this.getCachedPrice(symbol);
+        return await this.dataManager.getCachedPrice(symbol);
     }
     
     // Update risk prices based on trading price and order details
@@ -1324,7 +808,7 @@ class TradingApp {
         }
 
         // Check if this is opening or closing position
-        const isOpening = this.isOpeningPosition(orderSymbol, orderAction);
+        const isOpening = this.dataManager.isOpeningPosition(orderSymbol, orderAction);
 
         // If closing position, don't calculate SL/TP but keep section visible
         if (!isOpening) {
@@ -2364,8 +1848,20 @@ class TradingApp {
 
     async openOrderDetails(orderId) {
         try {
+            // 验证订单ID
+            if (!orderId || orderId.trim() === '') {
+                this.showAlert('warning', '订单ID不能为空');
+                return;
+            }
+            
             // 获取订单详情
             let result = await this.apiCall(`/orders/${orderId}`);
+            
+            if (!result || !result.order) {
+                this.showAlert('warning', `订单 ${orderId} 不存在或已被删除`);
+                return;
+            }
+            
             const orderData = result.order;
             
             // 填充模态框内容
@@ -2439,7 +1935,22 @@ class TradingApp {
             
         } catch (error) {
             console.error('Failed to load order details:', error);
-            this.showAlert('danger', `获取订单详情失败: ${error.message || error}`);
+            
+            // 根据错误类型提供更友好的错误信息
+            let errorMessage = '获取订单详情失败';
+            if (error.message) {
+                if (error.message.includes('404') || error.message.includes('not found')) {
+                    errorMessage = `订单 ${orderId} 不存在`;
+                } else if (error.message.includes('422') || error.message.includes('Unprocessable Entity')) {
+                    errorMessage = `订单ID格式无效: ${orderId}`;
+                } else if (error.message.includes('401') || error.message.includes('Authentication')) {
+                    errorMessage = '请先登录';
+                } else {
+                    errorMessage = `获取订单详情失败: ${error.message}`;
+                }
+            }
+            
+            this.showAlert('danger', errorMessage);
         }
     }
 
@@ -4392,7 +3903,7 @@ class TradingApp {
     
     // 防抖包装方法
     async loadOrders() {
-        console.log('loadOrders method called with debounce');
+        console.log('🔄 loadOrders method called with debounce at:', new Date().toISOString());
         // 确保防抖函数已初始化
         this.initOrdersDebounce();
         
@@ -4415,12 +3926,18 @@ class TradingApp {
     
     // 实际加载订单的方法
     async _loadOrders() {
+        console.log('🔄 _loadOrders method called at:', new Date().toISOString());
         console.log('Executing actual orders loading...');
         try {
             // 检查缓存
             const cacheKey = 'orders_main';
             const now = Date.now();
             const cachedData = this.ordersCache ? this.ordersCache[cacheKey] : null;
+            
+            console.log('Cache check - cacheKey:', cacheKey, 'cachedData exists:', !!cachedData);
+            if (cachedData) {
+                console.log('Cache age:', (now - cachedData.timestamp) / 1000, 'seconds');
+            }
             
             let data;
             if (cachedData && (now - cachedData.timestamp) < 10 * 1000) { // 10秒缓存
@@ -4449,7 +3966,9 @@ class TradingApp {
             
             // 仅保留当天创建的订单，并按创建时间反序排列（最新的在前）
             let orders = (data.orders && Array.isArray(data.orders)) ? data.orders : [];
+            console.log('Raw orders from API:', orders.length);
             orders = orders.filter(order => this.isSameDay(order.submit_time || order.created_at));
+            console.log('Filtered orders for today:', orders.length);
             if (orders && Array.isArray(orders)) {
                 orders.sort((a, b) => {
                     const timeA = new Date(a.submit_time || 0).getTime();
@@ -4464,89 +3983,34 @@ class TradingApp {
             const tbody = document.querySelector('#ordersTable tbody');
             if (!tbody) return;
             
-            // 如果没有订单，显示提示信息
+            // 清除可能存在的加载提示行
+            const loadingRows = tbody.querySelectorAll('tr');
+            loadingRows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+                if (cells.length > 0 && cells[0].textContent.includes('加载订单数据中')) {
+                    row.remove();
+                }
+            });
+            
+            // 如果没有订单，使用智能差异更新来清除现有订单并显示提示信息
             if (orders.length === 0) {
-                tbody.innerHTML = `
-                    <tr>
-                        <td colspan="8" class="text-center py-3">
-                            <small>今日暂无订单</small>
-                        </td>
-                    </tr>
-                `;
+                this.updateOrdersTableSmart([], tbody);
+                // 如果表格为空，添加提示信息
+                if (tbody.children.length === 0) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="8" class="text-center py-3">
+                                <small>今日暂无订单</small>
+                            </td>
+                        </tr>
+                    `;
+                }
                 return;
             }
             
-            tbody.innerHTML = orders.map(order => {
-                // 计算价格显示
-                let priceDisplay = '';
-                if (order.order_type === 'MKT') {
-                    // 市价单显示成交价
-                    priceDisplay = order.avg_fill_price && order.avg_fill_price > 0 ? 
-                        `$${this.formatNumber(order.avg_fill_price)}` : 'Market';
-                } else {
-                    // 限价单显示设定价格
-                    priceDisplay = order.limit_price ? `$${this.formatNumber(order.limit_price)}` : 'N/A';
-                }
-                
-                // 特殊处理ID为20的risk rule触发订单状态
-                let displayStatus = order.status;
-                if (order.order_id === 20 && order.status === 'PendingSubmit') {
-                    displayStatus = 'Filled';
-                }
-                
-                // 判断是否可以编辑/取消
-                const canEdit = order.status === 'Submitted' || order.status === 'PreSubmitted';
-                const canCancel = order.status === 'Submitted' || order.status === 'PreSubmitted';
-                
-                // 来源显示逻辑
-                let sourceDisplay = '—';
-                if (order.order_source) {
-                    if (order.order_source === 'manual' || order.order_source.startsWith('manual_') || order.order_source === '人工') {
-                        // 手动单直接显示字段值
-                        sourceDisplay = order.order_source;
-                    } else if (order.order_source === 'sl') {
-                        sourceDisplay = '<span class="badge bg-danger">止损</span>';
-                    } else if (order.order_source === 'tp') {
-                        sourceDisplay = '<span class="badge bg-success">止盈</span>';
-                    } else if (order.order_source === 'strategy') {
-                        sourceDisplay = '<span class="badge bg-info">策略</span>';
-                    } else if (order.order_source === '机器人' || order.order_source === 'auto') {
-                        sourceDisplay = '<span class="badge bg-secondary">自动</span>';
-                    } else {
-                        // 其他情况直接显示字段值
-                        sourceDisplay = order.order_source;
-                    }
-                }
-                
-                return `
-                    <tr>
-                        <td>${order.order_id}</td>
-                        <td><a href="#" class="text-decoration-none" onclick="app.openMonitorModal('${order.symbol}'); return false;">${order.symbol}</a></td>
-                        <td>${order.action}</td>
-                        <td>${order.quantity}</td>
-                        <td>${priceDisplay}</td>
-                        <td><span class="badge bg-${this.getStatusColor(displayStatus)}">${displayStatus}</span></td>
-                        <td>${sourceDisplay}</td>
-                        <td>
-                            <button class="btn btn-sm btn-info me-1" onclick="app.openOrderDetails(${order.order_id})" title="Details">
-                                <i class="fas fa-info-circle"></i>
-                            </button>
-                            ${canEdit ? 
-                                `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${order.order_id}, '${order.symbol}', '${order.action}', ${order.quantity}, '${order.order_type}', ${order.limit_price || 0})" title="Edit">
-                                    <i class="fas fa-edit"></i>
-                                </button>` : ''}
-                            ${(order.order_type === 'LMT' && order.status === 'Submitted') ? 
-                                `<button class="btn btn-sm btn-outline-primary me-1" onclick="app.syncLimitOrder('${order.order_id}', null, event)" title="同步订单状态">
-                                    <i class="fas fa-sync-alt"></i>
-                                </button>` : ''}
-                            ${canCancel ? 
-                                `<button class="btn btn-sm btn-danger" onclick="app.cancelOrder(${order.order_id}, this)" title="Cancel">
-                                    <i class="fas fa-times"></i>
-                                </button>` : ''}
-                        </td>
-                    </tr>
-                `;
-            }).join('');
+            // 使用智能差异更新而不是完全重新渲染
+            this.updateOrdersTableSmart(orders, tbody);
+            
         } catch (error) {
             console.error('Failed to load orders:', error);
             const tbody = document.querySelector('#ordersTable tbody');
@@ -4562,10 +4026,282 @@ class TradingApp {
             }
         }
     }
+    
+    // 智能更新Orders表格，只更新发生变化的行
+    updateOrdersTableSmart(newOrders, tbody) {
+        console.log('🔄 updateOrdersTableSmart called with orders:', newOrders.length);
+        
+        // 获取当前表格中的所有行
+        const currentRows = Array.from(tbody.querySelectorAll('tr'));
+        const currentOrderIds = new Set();
+        
+        console.log('📋 Current rows in table:', currentRows.length);
+        console.log('📋 Current tbody innerHTML length:', tbody.innerHTML.length);
+        console.log('📋 First few chars of tbody:', tbody.innerHTML.substring(0, 200));
+        
+        // 提取当前表格中的订单ID
+        currentRows.forEach(row => {
+            const cells = row.querySelectorAll('td');
+            if (cells.length > 0 && cells[0].textContent.trim() !== '今日暂无订单' && !cells[0].textContent.includes('加载订单')) {
+                currentOrderIds.add(cells[0].textContent.trim());
+            }
+        });
+        
+        // 创建新订单的映射
+        const newOrdersMap = new Map();
+        newOrders.forEach(order => {
+            newOrdersMap.set(order.order_id.toString(), order);
+        });
+        
+        // 检查需要删除的行
+        currentRows.forEach(row => {
+            const cells = row.querySelectorAll('td');
+            if (cells.length > 0) {
+                const cellText = cells[0].textContent.trim();
+                // 如果有新订单数据，清除"今日暂无订单"提示
+                if (newOrders.length > 0 && cellText === '今日暂无订单') {
+                    row.remove();
+                    return;
+                }
+                // 删除不存在于新数据中的订单行
+                if (cellText && !newOrdersMap.has(cellText) && cellText !== '今日暂无订单' && !cellText.includes('加载订单')) {
+                    row.remove();
+                }
+            }
+        });
+        
+        // 处理新订单和更新现有订单
+        newOrders.forEach((order, index) => {
+            const orderId = order.order_id.toString();
+            const existingRow = this.findOrderRow(tbody, orderId);
+            const newRowHtml = this.generateOrderRowHtml(order);
+            console.log('🔍 Processing order:', orderId, 'existing row:', !!existingRow, 'HTML length:', newRowHtml.length);
+            
+            if (existingRow) {
+                // 检查行内容是否发生变化
+                const tempTbody = document.createElement('tbody');
+                tempTbody.innerHTML = newRowHtml;
+                const newRowContent = tempTbody.firstElementChild;
+                
+                if (!this.isRowContentEqual(existingRow, newRowContent)) {
+                    // 内容发生变化，更新行
+                    existingRow.innerHTML = newRowContent.innerHTML;
+                    existingRow.setAttribute('data-notes', newRowContent.getAttribute('data-notes') || '');
+                    existingRow.setAttribute('onmouseenter', newRowContent.getAttribute('onmouseenter') || '');
+                    existingRow.setAttribute('onmouseleave', newRowContent.getAttribute('onmouseleave') || '');
+                    
+                    // 添加更新动画效果
+                    existingRow.style.backgroundColor = '#fff3cd';
+                    setTimeout(() => {
+                        existingRow.style.backgroundColor = '';
+                    }, 1000);
+                }
+            } else {
+                // 新订单，插入到正确位置
+                console.log('📝 Inserting new order:', orderId, 'HTML length:', newRowHtml.length);
+                console.log('📝 New row HTML preview:', newRowHtml.substring(0, 100) + '...');
+                
+                // 使用<tbody>解析<tr>，确保创建出正确的表格行元素
+                const tempTbody = document.createElement('tbody');
+                tempTbody.innerHTML = newRowHtml;
+                const newRow = tempTbody.firstElementChild;
+                
+                console.log('📝 Parsed new row:', newRow ? newRow.tagName : 'null', 'children:', newRow ? newRow.children.length : 0);
+                console.log('📝 newRow type:', typeof newRow, 'instanceof Node:', newRow instanceof Node);
+                
+                if (!newRow || !(newRow instanceof Node)) {
+                    console.error('❌ Failed to create valid DOM element from HTML:', newRowHtml);
+                    return; // 跳过这个订单
+                }
+                
+                // 找到插入位置（按时间排序）
+                const insertPosition = this.findInsertPosition(tbody, index);
+                if (insertPosition) {
+                    tbody.insertBefore(newRow, insertPosition);
+                } else {
+                    tbody.appendChild(newRow);
+                }
+                
+                // 添加新增动画效果
+                newRow.style.backgroundColor = '#d1ecf1';
+                setTimeout(() => {
+                    newRow.style.backgroundColor = '';
+                }, 1000);
+            }
+        });
+    }
+    
+    // 查找指定订单ID的行
+    findOrderRow(tbody, orderId) {
+        const rows = tbody.querySelectorAll('tr');
+        for (let row of rows) {
+            const cells = row.querySelectorAll('td');
+            if (cells.length > 0 && cells[0].textContent.trim() === orderId) {
+                return row;
+            }
+        }
+        return null;
+    }
+    
+    // 比较两行内容是否相等
+    isRowContentEqual(row1, row2) {
+        const cells1 = row1.querySelectorAll('td');
+        const cells2 = row2.querySelectorAll('td');
+        
+        if (cells1.length !== cells2.length) return false;
+        
+        for (let i = 0; i < cells1.length; i++) {
+            // 对于操作列（最后一列），比较按钮的存在性而不是具体内容
+            if (i === cells1.length - 1) {
+                const buttons1 = cells1[i].querySelectorAll('button');
+                const buttons2 = cells2[i].querySelectorAll('button');
+                if (buttons1.length !== buttons2.length) return false;
+                
+                // 比较按钮的类型（通过title属性）
+                for (let j = 0; j < buttons1.length; j++) {
+                    if (buttons1[j].getAttribute('title') !== buttons2[j].getAttribute('title')) {
+                        return false;
+                    }
+                }
+            } else {
+                // 对于其他列，比较innerHTML
+                if (cells1[i].innerHTML.trim() !== cells2[i].innerHTML.trim()) {
+                    return false;
+                }
+            }
+        }
+        
+        return true;
+    }
+    
+    // 找到新行的插入位置
+    findInsertPosition(tbody, targetIndex) {
+        const rows = tbody.querySelectorAll('tr');
+        if (targetIndex >= rows.length) {
+            return null; // 插入到末尾
+        }
+        return rows[targetIndex];
+    }
+    
+    // 生成订单行的HTML
+    generateOrderRowHtml(order) {
+        // 计算价格显示
+        let priceDisplay = '';
+        if (order.order_type === 'MKT') {
+            // 市价单显示成交价
+            priceDisplay = order.avg_fill_price && order.avg_fill_price > 0 ? 
+                `$${this.formatNumber(order.avg_fill_price)}` : 'Market';
+        } else {
+            // 限价单显示设定价格，优先使用limit_price，其次使用price
+            const limitPrice = order.limit_price || order.price;
+            priceDisplay = limitPrice ? `$${this.formatNumber(limitPrice)}` : 'N/A';
+        }
+        
+        // 特殊处理ID为20的risk rule触发订单状态
+        let displayStatus = order.status;
+        if (order.order_id === 20 && order.status === 'PendingSubmit') {
+            displayStatus = 'Filled';
+        }
+        
+        // 判断是否可以编辑/取消
+        const canEdit = order.status === 'Submitted' || order.status === 'PreSubmitted';
+        const canCancel = order.status === 'Submitted' || order.status === 'PreSubmitted';
+        
+        // 来源显示逻辑
+        let sourceDisplay = '—';
+        if (order.order_source) {
+            if (order.order_source === 'manual' || order.order_source.startsWith('manual_') || order.order_source === '人工') {
+                // 手动单直接显示字段值
+                sourceDisplay = order.order_source;
+            } else if (order.order_source === 'sl') {
+                sourceDisplay = '<span class="badge bg-danger">止损</span>';
+            } else if (order.order_source === 'tp') {
+                sourceDisplay = '<span class="badge bg-success">止盈</span>';
+            } else if (order.order_source === 'strategy') {
+                sourceDisplay = '<span class="badge bg-info">策略</span>';
+            } else if (order.order_source === '机器人' || order.order_source === 'auto') {
+                sourceDisplay = '<span class="badge bg-secondary">自动</span>';
+            } else {
+                // 其他情况直接显示字段值
+                sourceDisplay = order.order_source;
+            }
+        }
+        
+        // 处理notes字段，转义HTML特殊字符
+        const notesText = order.notes ? order.notes.replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
+        
+        // 转义所有可能导致HTML解析问题的字符
+        const escapedSymbol = order.symbol.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+        const escapedAction = order.action.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+        const escapedOrderType = order.order_type.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+        
+        // 构建HTML字符串，分步骤避免复杂的嵌套
+        const detailsButton = `<button class="btn btn-sm btn-info me-1" onclick="app.openOrderDetails('${order.order_id}')" title="Details"><i class="fas fa-info-circle"></i></button>`;
+        
+        const editButton = canEdit ? 
+            `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${order.order_id}, '${escapedSymbol}', '${escapedAction}', ${order.quantity}, '${escapedOrderType}', ${(order.limit_price || order.price) || 0})" title="Edit"><i class="fas fa-edit"></i></button>` : '';
+        
+        const syncButton = (order.order_type === 'LMT' && order.status === 'Submitted') ? 
+            `<button class="btn btn-sm btn-outline-primary me-1" onclick="app.syncLimitOrder('${order.order_id}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : '';
+        
+        const cancelButton = canCancel ? 
+            `<button class="btn btn-sm btn-danger" onclick="app.cancelOrder(${order.order_id}, this)" title="Cancel"><i class="fas fa-times"></i></button>` : '';
+        
+        // 构建完整的tr元素HTML，确保所有属性都正确转义
+        const trElement = document.createElement('tr');
+        trElement.setAttribute('data-notes', order.notes || '');
+        trElement.onmouseenter = (event) => app.showNotesTooltip(event, trElement);
+        trElement.onmouseleave = () => app.hideNotesTooltip();
+        
+        trElement.innerHTML = `
+            <td>${order.order_id}</td>
+            <td><a href="#" class="text-decoration-none" onclick="app.openMonitorModal('${escapedSymbol}'); return false;">${order.symbol}</a></td>
+            <td>${escapedAction}</td>
+            <td>${order.quantity}</td>
+            <td>${priceDisplay}</td>
+            <td><span class="badge bg-${this.getStatusColor(displayStatus)}">${displayStatus}</span></td>
+            <td>${sourceDisplay}</td>
+            <td>${detailsButton}${editButton}${syncButton}${cancelButton}</td>
+        `;
+        
+        return trElement.outerHTML;
+    }
+
+    // 调试Orders表格状态的函数
+    debugOrdersTable() {
+        const tbody = document.querySelector('#ordersTable tbody');
+        if (!tbody) {
+            console.log('❌ Orders table tbody not found');
+            return;
+        }
+        
+        console.log('🔍 === Orders Table Debug Info ===');
+        console.log('📋 tbody children count:', tbody.children.length);
+        console.log('📋 tbody innerHTML length:', tbody.innerHTML.length);
+        console.log('📋 tbody innerHTML:', tbody.innerHTML);
+        
+        const rows = tbody.querySelectorAll('tr');
+        console.log('📋 Found', rows.length, 'rows');
+        
+        rows.forEach((row, index) => {
+            const cells = row.querySelectorAll('td');
+            console.log(`📋 Row ${index}:`, cells.length, 'cells');
+            if (cells.length > 0) {
+                console.log(`📋 Row ${index} first cell:`, cells[0].textContent.trim());
+                console.log(`📋 Row ${index} innerHTML:`, row.innerHTML.substring(0, 200) + '...');
+            }
+        });
+        
+        console.log('🔍 === End Debug Info ===');
+    }
 
     async loadPortfolio() {
         try {
             const data = await this.apiCall('/positions');
+            
+            // Update dataManager positions for isOpeningPosition logic
+            this.dataManager.positions = data.positions;
+            
             const tbody = document.querySelector('#positionsTable tbody');
             
             tbody.innerHTML = data.positions.map(pos => `
@@ -5792,7 +5528,7 @@ class TradingApp {
             priceValue.className = 'fw-bold text-muted';
             
             // 使用缓存的当前价格接口
-            const currentPrice = await this.getCachedPrice(symbol);
+            const currentPrice = await this.dataManager.getCachedPrice(symbol);
             
             if (currentPrice && currentPrice > 0) {
                 priceValue.textContent = `$${this.formatNumber(currentPrice)}`;
@@ -6940,9 +6676,90 @@ class TradingApp {
             this.resetConfigFromModal();
         }
     }
+
+    // 显示订单notes的浮动提示
+    showNotesTooltip(event, element) {
+        const notes = element.getAttribute('data-notes');
+        const displayNotes = (!notes || notes.trim() === '') ? 'N/A' : notes;
+
+        // 移除已存在的提示框
+        this.hideNotesTooltip();
+
+        // 创建提示框
+        const tooltip = document.createElement('div');
+        tooltip.id = 'notes-tooltip';
+        tooltip.className = 'notes-tooltip';
+        tooltip.innerHTML = displayNotes;
+        tooltip.style.position = 'fixed';
+        tooltip.style.zIndex = '9999';
+        tooltip.style.display = 'block';
+        document.body.appendChild(tooltip);
+
+        // 计算位置
+        const tooltipRect = tooltip.getBoundingClientRect();
+        
+        let left = event.clientX + 10;
+        let top = event.clientY - tooltipRect.height - 10;
+        
+        // 防止提示框超出屏幕边界
+        if (left + tooltipRect.width > window.innerWidth) {
+            left = event.clientX - tooltipRect.width - 10;
+        }
+        if (top < 0) {
+            top = event.clientY + 10;
+        }
+        
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = top + 'px';
+    }
+
+    // 隐藏订单notes的浮动提示
+    hideNotesTooltip() {
+        const tooltip = document.getElementById('notes-tooltip');
+        if (tooltip) {
+            tooltip.remove();
+        }
+    }
+
+    // 启动订单状态自动刷新
+    startOrdersAutoRefresh() {
+        // 每30秒自动刷新订单状态
+        this.ordersRefreshInterval = setInterval(() => {
+            // 只有在Orders标签页激活时才刷新
+            const ordersTab = document.querySelector('#orders-tab');
+            if (ordersTab && ordersTab.classList.contains('active')) {
+                console.log('Auto-refreshing orders status...');
+                this.loadOrders();
+            }
+        }, 30000); // 30秒间隔
+        
+        console.log('Orders auto-refresh started (30s interval)');
+    }
+
+    // 停止订单状态自动刷新
+    stopOrdersAutoRefresh() {
+        if (this.ordersRefreshInterval) {
+            clearInterval(this.ordersRefreshInterval);
+            this.ordersRefreshInterval = null;
+            console.log('Orders auto-refresh stopped');
+        }
+    }
 }
 
 // Initialize the app
 const app = new TradingApp();
 // expose for inline onclick handlers
 window.app = app;
+
+// 延迟3秒后自动执行Orders表格调试
+setTimeout(() => {
+    console.log('🔍 自动执行Orders表格调试...');
+    if (typeof app.debugOrdersTable === 'function') {
+        app.debugOrdersTable();
+    } else {
+        console.error('debugOrdersTable方法不存在');
+    }
+}, 3000);
+
+// 也可以手动在控制台执行: app.debugOrdersTable()
+console.log('💡 提示: 可以在控制台手动执行 app.debugOrdersTable() 来调试Orders表格');

@@ -20,6 +20,11 @@ from .database import get_db_manager
 class IBKRClient:
     def __init__(self):
         self.connection_manager = connection_manager
+        
+        # 设置ConnectionManager对IBKRClient的弱引用，用于错误处理
+        import weakref
+        self.connection_manager._ibkr_client_ref = weakref.ref(self)
+        
         self.order_backup_file = "data/orders_backup.csv"
         self._ensure_backup_directory()
         # Price cache to track real-time prices
@@ -27,6 +32,8 @@ class IBKRClient:
         self.price_cache_timestamp = {}
         # Cache TTL seconds (used to decide when to refresh real-time data)
         self.price_cache_ttl_seconds = 5  # 减少到5秒，确保实时按钮能获取最新价格
+        # 映射reqId到订单ID，用于错误处理
+        self.req_id_to_order_id = {}
     
     def _sanitize_float(self, value):
         """清理无效的浮点数值，将NaN和Infinity转换为None"""
@@ -460,7 +467,8 @@ class IBKRClient:
             
             # 6. 非阻塞方式检查数据，避免阻塞主线程
             import time
-            max_wait = 1.0  # 减少最大等待时间
+            # 对于期货合约（如MNQ），增加等待时间
+            max_wait = 3.0 if symbol == 'MNQ' else 1.0  # 减少最大等待时间
             wait_interval = 0.1  # 减少检查间隔
             waited = 0.0
             result_payload = None
@@ -583,7 +591,7 @@ class IBKRClient:
             return None
 
     def place_market_order(self, symbol: str, quantity: int,
-                               action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:
+                           action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:
         """下市价单"""
         # 下单前备份订单信息
         # self._backup_order(symbol, quantity, action, 'MARKET', sec_type=sec_type, exchange=exchange)
@@ -595,6 +603,12 @@ class IBKRClient:
             )
             
             if trade:
+                # 记录reqId到订单ID的映射，用于错误处理
+                req_id = trade.order.orderId
+                order_id = str(req_id)
+                self.req_id_to_order_id[req_id] = order_id
+                ibkr_logger.debug(f"Mapped reqId {req_id} to order_id {order_id}")
+                
                 # 更新订单状态
                 self._update_order_status(symbol, action, quantity, 'Submitted')
             
@@ -616,6 +630,12 @@ class IBKRClient:
             )
             
             if trade:
+                # 记录reqId到订单ID的映射，用于错误处理
+                req_id = trade.order.orderId
+                order_id = str(req_id)
+                self.req_id_to_order_id[req_id] = order_id
+                ibkr_logger.debug(f"Mapped reqId {req_id} to order_id {order_id}")
+                
                 # 更新订单状态
                 self._update_order_status(symbol, action, quantity, 'Submitted')
             
@@ -1106,11 +1126,72 @@ class IBKRClient:
                                 if current_status == "Filled" and existing_order.executed_at is None:
                                     executed_at = datetime.now()
                                 
+                                # 从Trade对象的fills中提取commission和realizedPNL
+                                commission = None
+                                pnl = None
+                                ibkr_logger.info(f"DEBUG: Processing order {order_id_str} for commission/PnL extraction")
+                                ibkr_logger.info(f"DEBUG: Trade object type: {type(trade)}")
+                                ibkr_logger.info(f"DEBUG: Trade object attributes: {dir(trade)}")
+                                ibkr_logger.info(f"DEBUG: Trade has fills attribute: {hasattr(trade, 'fills')}")
+                                
+                                # 检查Trade对象的其他可能包含commission/pnl的属性
+                                if hasattr(trade, 'orderStatus'):
+                                    ibkr_logger.info(f"DEBUG: Trade.orderStatus: {trade.orderStatus}")
+                                    ibkr_logger.info(f"DEBUG: OrderStatus attributes: {dir(trade.orderStatus)}")
+                                if hasattr(trade, 'contract'):
+                                    ibkr_logger.info(f"DEBUG: Trade.contract: {trade.contract}")
+                                if hasattr(trade, 'order'):
+                                    ibkr_logger.info(f"DEBUG: Trade.order: {trade.order}")
+                                    ibkr_logger.info(f"DEBUG: Order attributes: {dir(trade.order)}")
+                                
+                                if hasattr(trade, 'fills'):
+                                    ibkr_logger.info(f"DEBUG: Trade.fills value: {trade.fills}")
+                                    ibkr_logger.info(f"DEBUG: Trade.fills type: {type(trade.fills)}")
+                                    if trade.fills:
+                                        total_commission = 0
+                                        total_pnl = 0
+                                        ibkr_logger.info(f"Processing {len(trade.fills)} fills for order {order_id_str}")
+                                        for i, fill in enumerate(trade.fills):
+                                            ibkr_logger.info(f"DEBUG: Fill {i}: {fill}")
+                                            ibkr_logger.info(f"DEBUG: Fill {i} type: {type(fill)}")
+                                            ibkr_logger.info(f"DEBUG: Fill {i} has commissionReport: {hasattr(fill, 'commissionReport')}")
+                                            
+                                            if hasattr(fill, 'commissionReport'):
+                                                ibkr_logger.info(f"DEBUG: Fill {i} commissionReport: {fill.commissionReport}")
+                                                if fill.commissionReport:
+                                                    if hasattr(fill.commissionReport, 'commission'):
+                                                        fill_commission = fill.commissionReport.commission
+                                                        total_commission += fill_commission
+                                                        ibkr_logger.info(f"Fill {i} commission: {fill_commission}, total: {total_commission}")
+                                                    else:
+                                                        ibkr_logger.info(f"DEBUG: Fill {i} commissionReport has no commission attribute")
+                                                    
+                                                    if hasattr(fill.commissionReport, 'realizedPNL'):
+                                                        fill_pnl = fill.commissionReport.realizedPNL
+                                                        total_pnl += fill_pnl
+                                                        ibkr_logger.info(f"Fill {i} PnL: {fill_pnl}, total: {total_pnl}")
+                                                    else:
+                                                        ibkr_logger.info(f"DEBUG: Fill {i} commissionReport has no realizedPNL attribute")
+                                                else:
+                                                    ibkr_logger.info(f"DEBUG: Fill {i} commissionReport is None/empty")
+                                            else:
+                                                ibkr_logger.info(f"Fill {i} has no commissionReport attribute")
+                                        
+                                        commission = total_commission if total_commission != 0 else None
+                                        pnl = total_pnl if total_pnl != 0 else None
+                                        ibkr_logger.info(f"Order {order_id_str} final commission: {commission}, PnL: {pnl}")
+                                    else:
+                                        ibkr_logger.info(f"DEBUG: Trade.fills is empty for order {order_id_str}")
+                                else:
+                                    ibkr_logger.info(f"DEBUG: Trade has no fills attribute for order {order_id_str}")
+                                
                                 order_manager.update_order_status(
                                     order_id=order_id_str,
                                     status=current_status,
                                     fill_price=current_avg_fill_price if current_avg_fill_price and current_avg_fill_price > 0 else None,
-                                    executed_at=executed_at
+                                    executed_at=executed_at,
+                                    commission=commission,
+                                    pnl=pnl
                                 )
                                 ibkr_logger.debug(f"OrderManager: Updated order {order_id_str} status to {current_status}")
                                 
@@ -1172,11 +1253,38 @@ class IBKRClient:
                                     if current_status == "Filled":
                                         executed_at = datetime.now()
                                     
+                                    # 从Trade对象的fills中提取commission和realizedPNL
+                                    commission = None
+                                    pnl = None
+                                    if hasattr(trade, 'fills') and trade.fills:
+                                        total_commission = 0
+                                        total_pnl = 0
+                                        ibkr_logger.info(f"Processing {len(trade.fills)} fills for historical order {order_id_str}")
+                                        for fill in trade.fills:
+                                            if hasattr(fill, 'commissionReport') and fill.commissionReport:
+                                                if hasattr(fill.commissionReport, 'commission'):
+                                                    fill_commission = fill.commissionReport.commission
+                                                    total_commission += fill_commission
+                                                    ibkr_logger.info(f"Historical fill commission: {fill_commission}, total: {total_commission}")
+                                                if hasattr(fill.commissionReport, 'realizedPNL'):
+                                                    fill_pnl = fill.commissionReport.realizedPNL
+                                                    total_pnl += fill_pnl
+                                                    ibkr_logger.info(f"Historical fill PnL: {fill_pnl}, total: {total_pnl}")
+                                            else:
+                                                ibkr_logger.info(f"Historical fill has no commissionReport: {fill}")
+                                        commission = total_commission if total_commission != 0 else None
+                                        pnl = total_pnl if total_pnl != 0 else None
+                                        ibkr_logger.info(f"Historical order {order_id_str} final commission: {commission}, PnL: {pnl}")
+                                    else:
+                                        ibkr_logger.info(f"Historical order {order_id_str} has no fills or fills is empty")
+                                    
                                     order_manager.update_order_status(
                                         order_id=order_id_str,
                                         status=current_status,
                                         fill_price=current_avg_fill_price if current_avg_fill_price and current_avg_fill_price > 0 else None,
-                                        executed_at=executed_at
+                                        executed_at=executed_at,
+                                        commission=commission,
+                                        pnl=pnl
                                     )
                                 
                                 ibkr_logger.info(f"OrderManager: Created historical order {order_id_str} from IBKR sync")
