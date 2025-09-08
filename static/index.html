@@ -44,7 +44,7 @@
             </a>
             <div class="navbar-nav ms-auto">
                 <button class="btn btn-outline-light btn-sm me-2" id="connectionSettingsBtn">
-                    <i class="fas fa-cog"></i> Settings
+                    <i class="fas fa-cog"></i> IBKR
                 </button>
                 <button class="btn btn-outline-light btn-sm me-2" id="loginBtn">
                     <i class="fas fa-user"></i> Login
@@ -521,36 +521,7 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="row">
-                            <div class="col-md-6">
-                                <div class="mb-3">
-                                    <label class="form-label">Start Trading Time</label>
-                                    <input type="time" class="form-control" id="startTradingTime" value="20:30">
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="mb-3">
-                                    <label class="form-label">End Trading Time</label>
-                                    <input type="time" class="form-control" id="endTradingTime" value="22:30">
-                                </div>
-                            </div>
-                        </div>
-                        <div class="row mb-3">
-                            <div class="col-md-12">
-                                <div class="d-flex gap-2 align-items-center">
-                                    <button type="button" class="btn btn-outline-primary btn-sm" id="testReminderBtn">
-                                        🔔 测试提醒功能
-                                    </button>
-                                    <button type="button" class="btn btn-outline-info btn-sm" id="checkReminderStatusBtn">
-                                        📊 查看提醒状态
-                                    </button>
-                                    <small class="text-muted" id="reminderStatus">点击查看提醒状态</small>
-                                </div>
-                                <div class="mt-2">
-                                    <small class="text-info">💡 提示：请确保浏览器允许通知权限，并检查控制台日志</small>
-                                </div>
-                            </div>
-                        </div>
+
                         <div class="form-check form-switch mb-3">
                             <input class="form-check-input" type="checkbox" id="enableAutoLogin">
                             <label class="form-check-label" for="enableAutoLogin">Enable Auto Login</label>
@@ -1893,6 +1864,169 @@
                         <button type="button" class="btn btn-secondary me-2" data-bs-dismiss="modal">取消</button>
                         <button type="button" class="btn btn-primary" id="saveConfigRulesBtn">保存</button>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Settings Modal -->
+    <div class="modal fade" id="notificationSettingsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-cog"></i> Notification Settings</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="notificationSettingsForm">
+                        <!-- Telegram Settings -->
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="telegramEnabled">
+                                    <label class="form-check-label" for="telegramEnabled">
+                                        <i class="fab fa-telegram"></i> Telegram Notifications
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label class="form-label">Bot Token</label>
+                                    <input type="text" class="form-control" id="telegramBotToken" placeholder="Enter your Telegram bot token">
+                                    <div class="form-text">Get your bot token from @BotFather on Telegram</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Chat ID</label>
+                                    <input type="text" class="form-control" id="telegramChatId" placeholder="Enter your Telegram chat ID">
+                                    <div class="form-text">Get your chat ID by messaging @userinfobot on Telegram</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Email Settings -->
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="emailEnabled">
+                                    <label class="form-check-label" for="emailEnabled">
+                                        <i class="fas fa-envelope"></i> Email Notifications
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label class="form-label">Email Address</label>
+                                    <input type="email" class="form-control" id="emailAddress" placeholder="Enter your email address">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Trading Reminder Settings -->
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="tradingReminderEnabled">
+                                    <label class="form-check-label" for="tradingReminderEnabled">
+                                        <i class="fas fa-clock"></i> Trading Time Reminders
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="mb-3">
+                                            <label class="form-label">Start Trading Time</label>
+                                            <input type="time" class="form-control" id="startTradingTime" value="20:30">
+                                            <div class="form-text">When to send trading start reminder</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="mb-3">
+                                            <label class="form-label">End Trading Time</label>
+                                            <input type="time" class="form-control" id="endTradingTime" value="22:30">
+                                            <div class="form-text">When to send trading end reminder</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox" id="browserNotificationEnabled">
+                                            <label class="form-check-label" for="browserNotificationEnabled">
+                                                <i class="fas fa-desktop"></i> Browser Notifications
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox" id="telegramReminderEnabled">
+                                            <label class="form-check-label" for="telegramReminderEnabled">
+                                                <i class="fab fa-telegram"></i> Telegram Reminders
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="mt-3">
+                                    <div class="d-flex gap-2 align-items-center">
+                                        <button type="button" class="btn btn-outline-primary btn-sm" onclick="app.testTradingReminder()">
+                                            🔔 Test Reminder
+                                        </button>
+                                        <button type="button" class="btn btn-outline-info btn-sm" onclick="app.checkTradingReminderStatus()">
+                                            📊 Check Status
+                                        </button>
+                                        <small class="text-muted" id="tradingReminderStatus">Click to check reminder status</small>
+                                    </div>
+                                    <div class="mt-2">
+                                        <small class="text-info">💡 Tip: Ensure browser allows notifications and check console logs</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Event Settings -->
+                        <div class="card">
+                            <div class="card-header">
+                                <h6 class="mb-0"><i class="fas fa-bell"></i> Event Notifications</h6>
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox" id="orderFilled">
+                                            <label class="form-check-label" for="orderFilled">Order Filled</label>
+                                        </div>
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox" id="positionOpened">
+                                            <label class="form-check-label" for="positionOpened">Position Opened</label>
+                                        </div>
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox" id="positionClosed">
+                                            <label class="form-check-label" for="positionClosed">Position Closed</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox" id="riskRuleTriggered">
+                                            <label class="form-check-label" for="riskRuleTriggered">Risk Rule Triggered</label>
+                                        </div>
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox" id="strategyStarted">
+                                            <label class="form-check-label" for="strategyStarted">Strategy Started</label>
+                                        </div>
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox" id="strategyStopped">
+                                            <label class="form-check-label" for="strategyStopped">Strategy Stopped</label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-success" onclick="app.testNotification()">Test</button>
+                    <button type="button" class="btn btn-primary" onclick="app.saveNotificationSettings()">Save</button>
                 </div>
             </div>
         </div>

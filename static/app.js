@@ -71,6 +71,9 @@ class TradingApp {
         }, 50);
     }
 
+    // 迁移localStorage中的交易时间数据到后端
+
+
     // Show login modal
     showLoginModal() {
         const modalEl = document.getElementById('loginModal');
@@ -218,15 +221,11 @@ class TradingApp {
             const clientIdEl = document.getElementById('clientId');
             const accountTypeEl = document.getElementById('accountType');
             const autoEl = document.getElementById('enableAutoLogin');
-            const startEl = document.getElementById('startTradingTime');
-            const endEl = document.getElementById('endTradingTime');
             if (hostEl) hostEl.value = localStorage.getItem('conn_host') || hostEl.value || '127.0.0.1';
             if (portEl) portEl.value = localStorage.getItem('conn_port') || portEl.value || '4002';
             if (clientIdEl) clientIdEl.value = localStorage.getItem('conn_clientId') || clientIdEl.value || '1';
             if (accountTypeEl) accountTypeEl.value = localStorage.getItem('conn_accountType') || accountTypeEl.value || 'paper';
             if (autoEl) autoEl.checked = localStorage.getItem('enableAutoLogin') === '1';
-            if (startEl) startEl.value = localStorage.getItem('startTradingTime') || startEl.value || '20:30';
-            if (endEl) endEl.value = localStorage.getItem('endTradingTime') || endEl.value || '22:30';
             const modal = new bootstrap.Modal(document.getElementById('connectionModal'));
             modal.show();
         });
@@ -250,16 +249,11 @@ class TradingApp {
                 const clientId = document.getElementById('clientId')?.value || '';
                 const accountType = document.getElementById('accountType')?.value || '';
                 const auto = !!document.getElementById('enableAutoLogin')?.checked;
-                const startTime = document.getElementById('startTradingTime')?.value || '';
-                const endTime = document.getElementById('endTradingTime')?.value || '';
                 if (host) localStorage.setItem('conn_host', host);
                 if (port) localStorage.setItem('conn_port', port);
                 if (clientId) localStorage.setItem('conn_clientId', clientId);
                 if (accountType) localStorage.setItem('conn_accountType', accountType);
                 localStorage.setItem('enableAutoLogin', auto ? '1' : '0');
-                if (startTime) localStorage.setItem('startTradingTime', startTime);
-                if (endTime) localStorage.setItem('endTradingTime', endTime);
-                this.scheduleTradingReminders();
                 this.showAlert('success', 'Connection settings saved');
                 const modalEl = document.getElementById('connectionModal');
                 const modal = bootstrap.Modal.getInstance(modalEl);
@@ -571,124 +565,6 @@ class TradingApp {
             this.placeOrder();
         });
         
-        // Position sizing button
-        const positionSizingBtn = document.getElementById('positionSizingBtn');
-        if (positionSizingBtn) {
-            positionSizingBtn.addEventListener('click', async () => {
-                const btn = positionSizingBtn;
-                const originalHtml = btn.innerHTML;
-                btn.disabled = true;
-                btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Calculating...';
-                try {
-                    const symbolInput = document.getElementById('orderSymbol');
-                    const symbol = (symbolInput?.value || '').trim().toUpperCase();
-                    if (!symbol) {
-                        this.showAlert('warning', '请输入标的符号');
-                        return;
-                    }
-
-                    const stopLossInput = document.getElementById('stopLossPrice');
-                    const stopLossVal = stopLossInput && stopLossInput.value !== '' ? parseFloat(stopLossInput.value) : NaN;
-                    if (!isFinite(stopLossVal) || stopLossVal <= 0) {
-                        this.showAlert('warning', '请先设置止损价格');
-                        return;
-                    }
-
-                    const orderType = document.getElementById('orderType')?.value || 'MARKET';
-                    let entryPrice = NaN;
-                    if (orderType === 'LIMIT') {
-                        const orderPriceVal = document.getElementById('orderPrice')?.value || '';
-                        entryPrice = parseFloat(orderPriceVal);
-                        if (!isFinite(entryPrice) || entryPrice <= 0) {
-                            this.showAlert('warning', '请输入有效的限价或切换为市价');
-                            return;
-                        }
-                    } else {
-                        // MARKET：使用缓存的当前价格接口
-                        entryPrice = await this.getCachedPrice(symbol);
-                        if (!isFinite(entryPrice) || entryPrice <= 0) {
-                            this.showAlert('danger', '获取当前价格失败，无法计算仓位建议');
-                            return;
-                        }
-                    }
-
-                    // 绝对价差，始终为正
-                    const stopDistance = Math.abs(entryPrice - stopLossVal);
-                    if (!isFinite(stopDistance) || stopDistance <= 0) {
-                        this.showAlert('warning', '止损距离为 0，无法计算仓位建议');
-                        return;
-                    }
-
-                    // 只传递必要的参数，其余参数由后端自动估算或使用默认值
-
-                    const data = await this.apiCall('/position-sizing', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            symbol,
-                            stop_distance: stopDistance
-                        })
-                    });
-
-                    if (!data || !data.N) {
-                        throw new Error('Position sizing request failed');
-                    }
-
-                    const res = { contracts: data.N, ...data.explain || {} };
-                    const safeNum = (v) => (typeof v === 'number' && isFinite(v)) ? v : null;
-                    const setText = (id, val, digits = null) => {
-                        const el = document.getElementById(id);
-                        if (!el) return;
-                        if (val == null || (typeof val === 'number' && !isFinite(val))) {
-                            el.textContent = '-';
-                        } else if (typeof val === 'number' && digits !== null) {
-                            el.textContent = Number(val).toFixed(digits);
-                        } else if (typeof val === 'number') {
-                            el.textContent = this.formatNumber(val);
-                        } else {
-                            el.textContent = String(val);
-                        }
-                    };
-
-                    setText('suggestedQuantity', safeNum(res.contracts));
-                    setText('stopDistance', safeNum(res.stop_distance) ?? stopDistance, 4);
-                    setText('pointValue', safeNum(res.point_value), 4);
-                    setText('scaleTotal', safeNum(res.scale_total), 3);
-                    setText('scaleVol', safeNum(res.scale_vol), 3);
-                    setText('scaleDd', safeNum(res.scale_dd), 3);
-                    setText('scaleSig', safeNum(res.scale_sig), 3);
-                    setText('scaleExec', safeNum(res.scale_exec), 3);
-                    setText('maxRisk', safeNum(res.R), 2);
-                    setText('estimatedInvestment', safeNum(res.R_star), 2);
-                    setText('sizingMethod', res.method || res.explanation || '-');
-
-                    const expl = document.getElementById('psExplanation');
-                    if (expl) expl.textContent = (res.explanation && String(res.explanation).trim()) ? res.explanation : '-';
-
-                    const psModalEl = document.getElementById('positionSizingModal');
-                    if (psModalEl) {
-                        const psModal = new bootstrap.Modal(psModalEl);
-                        
-                        // Handle aria-hidden properly for accessibility
-                        psModalEl.addEventListener('shown.bs.modal', function() {
-                            psModalEl.removeAttribute('aria-hidden');
-                        });
-                        
-                        psModalEl.addEventListener('hidden.bs.modal', function() {
-                            psModalEl.setAttribute('aria-hidden', 'true');
-                        });
-                        
-                        psModal.show();
-                    }
-                } catch (err) {
-                    console.error(err);
-                    this.showAlert('danger', `仓位建议失败：${err?.message || err}`);
-                } finally {
-                    btn.disabled = false;
-                    btn.innerHTML = originalHtml;
-                }
-            });
-        }
-        
         // Submit risk rule button
         document.getElementById('submitRiskRuleBtn').addEventListener('click', () => {
             this.addRiskRule();
@@ -711,15 +587,7 @@ class TradingApp {
         document.getElementById('cancelAllOrdersBtn').addEventListener('click', () => this.cancelAllOrders());
         
         // Test reminder buttons
-        const testReminderBtn = document.getElementById('testReminderBtn');
-        if (testReminderBtn) {
-            testReminderBtn.addEventListener('click', () => this.testReminder());
-        }
-        
-        const checkReminderStatusBtn = document.getElementById('checkReminderStatusBtn');
-        if (checkReminderStatusBtn) {
-            checkReminderStatusBtn.addEventListener('click', () => this.checkReminderStatus());
-        }
+
         
         // 通知面板事件监听器
         const clearNotificationsBtn = document.getElementById('clearNotificationsBtn');
@@ -737,15 +605,6 @@ class TradingApp {
     
     // Refresh position suggestion automatically
     // Removed duplicate refreshPositionSuggestion method - using the one at line 6543
-    
-    // Clear position suggestion UI
-    clearPositionSuggestion() {
-        document.getElementById('suggestedQuantity').textContent = '-';
-        document.getElementById('calculationMethod').textContent = '-';
-        document.getElementById('riskPercentage').textContent = '-';
-        document.getElementById('estimatedInvestment').textContent = '-';
-        document.getElementById('maxRisk').textContent = '-';
-    }
     
     setupOrderFormListeners() {
         // Order form
@@ -961,92 +820,9 @@ class TradingApp {
         });
     }
     
-    testReminder() {
-        console.log('=== 测试提醒功能 ===');
-        
-        // 测试浏览器通知权限
-        if ('Notification' in window) {
-            console.log(`浏览器通知支持: 是`);
-            console.log(`当前权限状态: ${Notification.permission}`);
-            
-            if (Notification.permission === 'default') {
-                Notification.requestPermission().then(permission => {
-                    console.log(`权限请求结果: ${permission}`);
-                    if (permission === 'granted') {
-                        this.fireTradingReminder('start');
-                    }
-                });
-            } else if (Notification.permission === 'granted') {
-                this.fireTradingReminder('start');
-            } else {
-                console.warn('浏览器通知权限被拒绝');
-                this.showAlert('warning', '浏览器通知权限被拒绝，请在浏览器设置中允许通知');
-            }
-        } else {
-            console.warn('浏览器不支持通知功能');
-            this.showAlert('warning', '当前浏览器不支持通知功能');
-        }
-        
-        // 测试Telegram通知
-        const testMessage = '🧪 这是一条测试提醒消息';
-        this.apiCall('/notify', {
-            method: 'POST',
-            body: JSON.stringify({ message: testMessage })
-        }).then(response => {
-            console.log('Telegram测试通知发送成功:', response);
-            this.showAlert('success', 'Telegram测试通知已发送');
-        }).catch(error => {
-            console.error('Telegram测试通知发送失败:', error);
-            // 不再显示额外的错误提示，因为 apiCall 已经处理了
-        });
-    }
+
     
-    checkReminderStatus() {
-        console.log('=== 检查提醒状态 ===');
-        
-        const startTime = localStorage.getItem('startTradingTime') || '20:30';
-        const endTime = localStorage.getItem('endTradingTime') || '22:30';
-        const now = new Date();
-        
-        console.log(`当前时间: ${now.toLocaleString()}`);
-        console.log(`开市提醒时间: ${startTime}`);
-        console.log(`收市提醒时间: ${endTime}`);
-        
-        // 计算下次提醒时间
-        const nextStartReminder = this.getNextReminderDate(startTime, now);
-        const nextEndReminder = this.getNextReminderDate(endTime, now);
-        
-        console.log(`下次开市提醒: ${nextStartReminder.toLocaleString()}`);
-        console.log(`下次收市提醒: ${nextEndReminder.toLocaleString()}`);
-        
-        // 检查今天是否为工作日
-        const isWorkingDay = this.isWorkingDay(now);
-        const isHoliday = this.isNasdaqHoliday(now);
-        
-        console.log(`今天是工作日: ${isWorkingDay}`);
-        console.log(`今天是假期: ${isHoliday}`);
-        
-        // 检查定时器状态
-        console.log(`开市提醒定时器: ${this.startReminderTimeout ? '已设置' : '未设置'}`);
-        console.log(`收市提醒定时器: ${this.endReminderTimeout ? '已设置' : '未设置'}`);
-        
-        // 检查浏览器通知权限
-        if ('Notification' in window) {
-            console.log(`浏览器通知权限: ${Notification.permission}`);
-        } else {
-            console.log('浏览器不支持通知功能');
-        }
-        
-        // 更新UI状态显示
-        const statusEl = document.getElementById('reminderStatus');
-        if (statusEl) {
-            const statusText = `下次开市: ${nextStartReminder.toLocaleDateString()} ${nextStartReminder.toLocaleTimeString()}, 下次收市: ${nextEndReminder.toLocaleDateString()} ${nextEndReminder.toLocaleTimeString()}`;
-            statusEl.textContent = statusText;
-            statusEl.className = 'text-success';
-        }
-        
-        this.showAlert('info', '提醒状态已输出到控制台，请按F12查看详细信息');
-    }
+
 
     getNextReminderDate(timeStr, reference) {
         const [hour, minute] = timeStr.split(':').map(n => parseInt(n, 10));
@@ -5084,94 +4860,6 @@ class TradingApp {
         }
     }
 
-    async executeRiskRule(symbol, currentPrice, stopLossPrice, takeProfitPrice, positionSize) {
-        if (!positionSize || positionSize === 0) {
-            this.showAlert('No position found for ' + symbol, 'warning');
-            return;
-        }
-
-        try {
-            // Determine which rule to execute based on current price
-            let orderType = 'LIMIT';
-            let targetPrice = null;
-            let action = positionSize > 0 ? 'SELL' : 'BUY';
-            let ruleType = '';
-            let slippage = 0;
-
-            // Check stop loss condition
-            if (stopLossPrice && ((positionSize > 0 && currentPrice <= stopLossPrice) || (positionSize < 0 && currentPrice >= stopLossPrice))) {
-                targetPrice = stopLossPrice;
-                ruleType = 'Stop Loss';
-                // If price has already passed stop loss, use market order
-                if ((positionSize > 0 && currentPrice < stopLossPrice) || (positionSize < 0 && currentPrice > stopLossPrice)) {
-                    orderType = 'MARKET';
-                    slippage = Math.abs(currentPrice - stopLossPrice) / stopLossPrice * 100;
-                }
-            }
-            // Check take profit condition
-            else if (takeProfitPrice && ((positionSize > 0 && currentPrice >= takeProfitPrice) || (positionSize < 0 && currentPrice <= takeProfitPrice))) {
-                targetPrice = takeProfitPrice;
-                ruleType = 'Take Profit';
-                // If price has already passed take profit, use market order
-                if ((positionSize > 0 && currentPrice > takeProfitPrice) || (positionSize < 0 && currentPrice < takeProfitPrice)) {
-                    orderType = 'MARKET';
-                    slippage = Math.abs(currentPrice - takeProfitPrice) / takeProfitPrice * 100;
-                }
-            }
-            else {
-                this.showAlert('No rule conditions met for execution', 'info');
-                return;
-            }
-
-            // Confirm execution
-            let confirmMessage = `Execute ${ruleType} for ${symbol}?\n`;
-            confirmMessage += `Current Price: $${currentPrice.toFixed(2)}\n`;
-            confirmMessage += `Target Price: $${targetPrice.toFixed(2)}\n`;
-            confirmMessage += `Order Type: ${orderType}\n`;
-            confirmMessage += `Quantity: ${Math.abs(positionSize)}\n`;
-            if (slippage > 0) {
-                confirmMessage += `Estimated Slippage: ${slippage.toFixed(4)}%\n`;
-            }
-
-            if (!confirm(confirmMessage)) {
-                return;
-            }
-
-            // Prepare order data
-            const orderData = {
-                symbol: symbol,
-                action: action,
-                quantity: Math.abs(positionSize),
-                order_type: orderType
-            };
-
-            if (orderType === 'LIMIT') {
-                orderData.price = targetPrice;
-            }
-
-            // Place the order
-            const response = await this.apiCall('/place_order', {
-                method: 'POST',
-                body: JSON.stringify(orderData)
-            });
-            
-            let message = `${ruleType} order placed successfully for ${symbol}`;
-            if (slippage > 0) {
-                message += ` (Slippage: ${slippage.toFixed(4)}%)`;
-            }
-            
-            this.showAlert(message, 'success');
-            
-            // Refresh data
-            await Promise.all([
-                this.loadPortfolio(),
-                this.loadRiskRules()
-            ]);
-
-        } catch (error) {
-            this.showAlert('Failed to execute risk rule: ' + error.message, 'danger');
-        }
-    }
 
 
     formatNumber(num) {
@@ -5368,13 +5056,6 @@ class TradingApp {
                 }
             });
         });
-    }
-
-    // Duplicate searchSymbols method removed
-    displayAutoOrders(orders) {
-        // Auto Orders panel removed - method kept for compatibility
-        console.log('Auto orders display skipped - panel removed');
-        return;
     }
 
     // 编辑订单
@@ -6710,6 +6391,12 @@ class TradingApp {
                 telegram_chat_id: '',
                 email_enabled: false,
                 email_address: '',
+                // Trading reminder settings
+                trading_reminder_enabled: false,
+                start_trading_time: '20:30',
+                end_trading_time: '22:30',
+                browser_notification_enabled: true,
+                telegram_reminder_enabled: false,
                 events: {
                     order_filled: true,
                     position_opened: true,
@@ -6728,116 +6415,23 @@ class TradingApp {
                 }
             };
 
-            const modalHtml = `
-                <div class="modal fade" id="notificationSettingsModal" tabindex="-1">
-                    <div class="modal-dialog modal-lg">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title"><i class="fas fa-cog"></i> Notification Settings</h5>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                            </div>
-                            <div class="modal-body">
-                                <form id="notificationSettingsForm">
-                                    <!-- Telegram Settings -->
-                                    <div class="card mb-3">
-                                        <div class="card-header">
-                                            <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="telegramEnabled" ${settings.telegram_enabled ? 'checked' : ''}>
-                                                <label class="form-check-label" for="telegramEnabled">
-                                                    <i class="fab fa-telegram"></i> Telegram Notifications
-                                                </label>
-                                            </div>
-                                        </div>
-                                        <div class="card-body">
-                                            <div class="mb-3">
-                                                <label class="form-label">Bot Token</label>
-                                                <input type="text" class="form-control" id="telegramBotToken" value="${settings.telegram_bot_token || ''}" placeholder="Enter your Telegram bot token">
-                                                <div class="form-text">Get your bot token from @BotFather on Telegram</div>
-                                            </div>
-                                            <div class="mb-3">
-                                                <label class="form-label">Chat ID</label>
-                                                <input type="text" class="form-control" id="telegramChatId" value="${settings.telegram_chat_id}" placeholder="Enter your Telegram chat ID">
-                                                <div class="form-text">Get your chat ID by messaging @userinfobot on Telegram</div>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <!-- Email Settings -->
-                                    <div class="card mb-3">
-                                        <div class="card-header">
-                                            <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="emailEnabled" ${settings.email_enabled ? 'checked' : ''}>
-                                                <label class="form-check-label" for="emailEnabled">
-                                                    <i class="fas fa-envelope"></i> Email Notifications
-                                                </label>
-                                            </div>
-                                        </div>
-                                        <div class="card-body">
-                                            <div class="mb-3">
-                                                <label class="form-label">Email Address</label>
-                                                <input type="email" class="form-control" id="emailAddress" value="${settings.email_address}" placeholder="Enter your email address">
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <!-- Event Settings -->
-                                    <div class="card">
-                                        <div class="card-header">
-                                            <h6 class="mb-0"><i class="fas fa-bell"></i> Event Notifications</h6>
-                                        </div>
-                                        <div class="card-body">
-                                            <div class="row">
-                                                <div class="col-md-6">
-                                                    <div class="form-check mb-2">
-                                                        <input class="form-check-input" type="checkbox" id="orderFilled" ${settings.events.order_filled ? 'checked' : ''}>
-                                                        <label class="form-check-label" for="orderFilled">Order Filled</label>
-                                                    </div>
-                                                    <div class="form-check mb-2">
-                                                        <input class="form-check-input" type="checkbox" id="positionOpened" ${settings.events.position_opened ? 'checked' : ''}>
-                                                        <label class="form-check-label" for="positionOpened">Position Opened</label>
-                                                    </div>
-                                                    <div class="form-check mb-2">
-                                                        <input class="form-check-input" type="checkbox" id="positionClosed" ${settings.events.position_closed ? 'checked' : ''}>
-                                                        <label class="form-check-label" for="positionClosed">Position Closed</label>
-                                                    </div>
-                                                </div>
-                                                <div class="col-md-6">
-                                                    <div class="form-check mb-2">
-                                                        <input class="form-check-input" type="checkbox" id="riskRuleTriggered" ${settings.events.risk_rule_triggered ? 'checked' : ''}>
-                                                        <label class="form-check-label" for="riskRuleTriggered">Risk Rule Triggered</label>
-                                                    </div>
-                                                    <div class="form-check mb-2">
-                                                        <input class="form-check-input" type="checkbox" id="strategyStarted" ${settings.events.strategy_started ? 'checked' : ''}>
-                                                        <label class="form-check-label" for="strategyStarted">Strategy Started</label>
-                                                    </div>
-                                                    <div class="form-check mb-2">
-                                                        <input class="form-check-input" type="checkbox" id="strategyStopped" ${settings.events.strategy_stopped ? 'checked' : ''}>
-                                                        <label class="form-check-label" for="strategyStopped">Strategy Stopped</label>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </form>
-                            </div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                                <button type="button" class="btn btn-success" onclick="app.testNotification()">Test</button>
-                                <button type="button" class="btn btn-primary" onclick="app.saveNotificationSettings()">Save</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-
-            // Remove existing modal if any
-            const existingModal = document.getElementById('notificationSettingsModal');
-            if (existingModal) {
-                existingModal.remove();
-            }
-
-            // Add modal to body
-            document.body.insertAdjacentHTML('beforeend', modalHtml);
+            // Populate the existing modal with data
+            document.getElementById('telegramEnabled').checked = settings.telegram_enabled;
+            document.getElementById('telegramBotToken').value = settings.telegram_bot_token || '';
+            document.getElementById('telegramChatId').value = settings.telegram_chat_id;
+            document.getElementById('emailEnabled').checked = settings.email_enabled;
+            document.getElementById('emailAddress').value = settings.email_address;
+            document.getElementById('tradingReminderEnabled').checked = settings.trading_reminder_enabled;
+            document.getElementById('startTradingTime').value = settings.start_trading_time || '20:30';
+            document.getElementById('endTradingTime').value = settings.end_trading_time || '22:30';
+            document.getElementById('browserNotificationEnabled').checked = settings.browser_notification_enabled;
+            document.getElementById('telegramReminderEnabled').checked = settings.telegram_reminder_enabled;
+            document.getElementById('orderFilled').checked = settings.events.order_filled;
+            document.getElementById('positionOpened').checked = settings.events.position_opened;
+            document.getElementById('positionClosed').checked = settings.events.position_closed;
+            document.getElementById('riskRuleTriggered').checked = settings.events.risk_rule_triggered;
+            document.getElementById('strategyStarted').checked = settings.events.strategy_started;
+            document.getElementById('strategyStopped').checked = settings.events.strategy_stopped;
 
             // Show modal
             const modal = new bootstrap.Modal(document.getElementById('notificationSettingsModal'));
@@ -6857,6 +6451,12 @@ class TradingApp {
                 telegram_chat_id: document.getElementById('telegramChatId').value,
                 email_enabled: document.getElementById('emailEnabled').checked,
                 email_address: document.getElementById('emailAddress').value,
+                // Trading reminder settings
+                trading_reminder_enabled: document.getElementById('tradingReminderEnabled').checked,
+                start_trading_time: document.getElementById('startTradingTime').value,
+                end_trading_time: document.getElementById('endTradingTime').value,
+                browser_notification_enabled: document.getElementById('browserNotificationEnabled').checked,
+                telegram_reminder_enabled: document.getElementById('telegramReminderEnabled').checked,
                 events: {
                     order_filled: document.getElementById('orderFilled').checked,
                     position_opened: document.getElementById('positionOpened').checked,
@@ -6874,6 +6474,12 @@ class TradingApp {
 
             if (response.success) {
                 this.showAlert('success', 'Notification settings saved successfully');
+                
+                // Update trading reminder schedules if enabled
+                if (settings.trading_reminder_enabled) {
+                    this.scheduleTradingReminders();
+                }
+                
                 const modal = bootstrap.Modal.getInstance(document.getElementById('notificationSettingsModal'));
                 modal.hide();
             } else {
@@ -6882,6 +6488,90 @@ class TradingApp {
         } catch (error) {
             console.error('Failed to save notification settings:', error);
             this.showAlert('danger', 'Failed to save notification settings: ' + error.message);
+        }
+    }
+
+    async testTradingReminder() {
+        try {
+            // Test browser notification
+            if ('Notification' in window) {
+                if (Notification.permission === 'granted') {
+                    new Notification('Trading Reminder Test', {
+                        body: 'This is a test trading reminder notification',
+                        icon: '/static/favicon.ico'
+                    });
+                } else if (Notification.permission !== 'denied') {
+                    const permission = await Notification.requestPermission();
+                    if (permission === 'granted') {
+                        new Notification('Trading Reminder Test', {
+                            body: 'This is a test trading reminder notification',
+                            icon: '/static/favicon.ico'
+                        });
+                    }
+                }
+            }
+
+            // Test Telegram notification
+            const response = await this.apiCall('/test-reminder', {
+                method: 'POST',
+                body: JSON.stringify({ message: 'Trading reminder test from notification settings' })
+            });
+
+            if (response.success) {
+                this.showAlert('success', 'Test reminder sent successfully!');
+            } else {
+                this.showAlert('warning', 'Browser notification sent, but Telegram test failed: ' + (response.error || 'Unknown error'));
+            }
+        } catch (error) {
+            console.error('Test reminder failed:', error);
+            this.showAlert('danger', 'Test reminder failed: ' + error.message);
+        }
+    }
+
+    async checkTradingReminderStatus() {
+        try {
+            const statusElement = document.getElementById('tradingReminderStatus');
+            if (!statusElement) return;
+
+            const now = new Date();
+            const startTime = document.getElementById('startTradingTime').value;
+            const endTime = document.getElementById('endTradingTime').value;
+            
+            let status = [];
+            
+            // Check reminder times
+            if (startTime && endTime) {
+                status.push(`⏰ Start: ${startTime}, End: ${endTime}`);
+            } else {
+                status.push('⚠️ Trading times not set');
+            }
+            
+            // Check if today is working day
+            const isWorking = this.isWorkingDay(now);
+            status.push(isWorking ? '📅 Working day' : '🏖️ Holiday/Weekend');
+            
+            // Check browser notification permission
+            if ('Notification' in window) {
+                const permission = Notification.permission;
+                status.push(`🔔 Browser: ${permission}`);
+            } else {
+                status.push('🔔 Browser: Not supported');
+            }
+            
+            // Check if reminders are scheduled
+            const hasReminders = this.tradingReminderTimeouts && this.tradingReminderTimeouts.length > 0;
+            status.push(hasReminders ? '⏲️ Scheduled' : '⏸️ Not scheduled');
+            
+            statusElement.textContent = status.join(' | ');
+            statusElement.className = 'text-info';
+            
+        } catch (error) {
+            console.error('Check reminder status failed:', error);
+            const statusElement = document.getElementById('tradingReminderStatus');
+            if (statusElement) {
+                statusElement.textContent = 'Error checking status';
+                statusElement.className = 'text-danger';
+            }
         }
     }
 

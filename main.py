@@ -2974,6 +2974,13 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
                         "chat_id": ""
                     },
                     "events": ["market", "strategy", "order", "risk"]
+                },
+                "trading_reminder": {
+                    "enabled": False,
+                    "start_trading_time": "09:30",
+                    "end_trading_time": "16:00",
+                    "browser_notification_enabled": True,
+                    "telegram_reminder_enabled": False
                 }
             }
         
