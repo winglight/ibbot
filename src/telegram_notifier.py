@@ -39,6 +39,21 @@ class TelegramNotifier:
         except Exception as e:
             telegram_logger.error(f"Unexpected error sending Telegram message: {e}")
             return False
+
+    def update_config(self, bot_token: Optional[str], chat_id: Optional[str]):
+        """更新令牌和聊天ID，并重建Bot实例"""
+        self.bot_token = bot_token or ""
+        self.chat_id = chat_id or ""
+        if self.bot_token and self.chat_id:
+            try:
+                self.bot = Bot(token=self.bot_token)
+                telegram_logger.info("Telegram notifier reconfigured and ready")
+            except Exception as e:
+                self.bot = None
+                telegram_logger.error(f"Failed to initialize Telegram Bot with new config: {e}")
+        else:
+            self.bot = None
+            telegram_logger.warning("Telegram disabled due to missing token or chat_id")
     
     async def send_loss_alert(self, symbol: str, position: float, current_price: float, 
                             avg_cost: float, loss_percent: float, threshold: float):

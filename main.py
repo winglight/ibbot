@@ -878,9 +878,14 @@ class NotificationTestRequest(BaseModel):
 
 @app.post("/api/notify")
 async def send_notification(req: NotificationRequest, user: Optional[str] = Depends(get_current_user)):
-    """发送Telegram通知"""
+    """发送通知"""
     try:
-        success = await notification_manager.send(req.message, "api", "test")
+        results = await notification_manager.send_notification(
+            message=req.message,
+            event_type="test",
+            category="api"
+        )
+        success = any(results.values()) if isinstance(results, dict) else bool(results)
         if not success:
             # 返回200状态码但标记为失败，避免前端报错
             return {"success": False, "message": "Notification disabled or failed to send"}
@@ -3046,8 +3051,15 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
                     "end_trading_time": "16:00",
                     "browser_notification_enabled": True,
                     "telegram_reminder_enabled": False
-                }
+                },
+                # 前端需要的邮件配置默认字段（兼容旧版本）
+                "email_enabled": False,
+                "email_address": ""
             }
+        else:
+            # 兼容旧数据：补齐email字段
+            settings.setdefault("email_enabled", False)
+            settings.setdefault("email_address", "")
         
         return {"success": True, "settings": settings}
     except Exception as e:
@@ -3061,14 +3073,16 @@ async def update_notification_settings(settings: Dict[str, Any], user: Optional[
         db = get_db_manager()
         db.save_notification_config(settings)
         
-        # 更新Telegram通知器配置
+        # 更新Telegram通知器配置（使用update_config以重建Bot实例）
         if "telegram" in settings and telegram_notifier:
-            telegram_config = settings["telegram"]
-            if telegram_config.get("enabled") and telegram_config.get("config"):
-                config = telegram_config["config"]
-                if config.get("bot_token") and config.get("chat_id"):
-                    telegram_notifier.bot_token = config["bot_token"]
-                    telegram_notifier.chat_id = config["chat_id"]
+            telegram_config = settings.get("telegram", {})
+            config = telegram_config.get("config", {})
+            bot_token = (config.get("bot_token") or "").strip()
+            chat_id = (config.get("chat_id") or "").strip()
+            try:
+                telegram_notifier.update_config(bot_token=bot_token, chat_id=chat_id)
+            except Exception as e:
+                logger.error(f"Update telegram notifier config failed: {e}")
         
         return {"success": True, "message": "Notification settings updated"}
     except Exception as e:
@@ -3105,20 +3119,27 @@ async def test_notification(
 ):
     """测试通知发送"""
     try:
-        # 使用统一的NotificationManager发送测试通知
-        success = await notification_manager.send(
+        # 将前端的 'chrome' 映射为后端的 'websocket' 渠道
+        if req.channel == "all":
+            channels = ["telegram", "websocket"]
+        elif req.channel == "chrome":
+            channels = ["websocket"]
+        else:
+            channels = [req.channel]
+
+        results = await notification_manager.send_notification(
             message=req.message,
             event_type="test",
-            category="api",
-            channel=req.channel
+            channels=channels,
+            category="api"
         )
-        
-        status = "sent" if success else "failed"
+
+        success = any(results.values()) if isinstance(results, dict) else bool(results)
         error_msg = None if success else f"Failed to send {req.channel} notification"
-        
+
         return {
-            "success": status == "sent",
-            "message": "Test notification sent" if status == "sent" else error_msg
+            "success": success,
+            "message": "Test notification sent" if success else error_msg
         }
     except Exception as e:
         logger.error(f"Test notification error: {e}")
