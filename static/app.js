@@ -6261,6 +6261,10 @@ class TradingApp {
         const telegram = settings.telegram || {};
         const email = { events: [] }; // Email 暂时不支持事件级别配置
 
+        const chromeEvents = Array.isArray(chrome.events) ? chrome.events : [];
+        const telegramEvents = Array.isArray(telegram.events) ? telegram.events : [];
+        const hasChromeOverlap = chromeEvents.some(ev => modules.includes(ev));
+
         // 清空表格
         tableBody.innerHTML = '';
 
@@ -6272,12 +6276,12 @@ class TradingApp {
                 <td class="text-center">
                     <input type="checkbox" class="form-check-input" 
                            data-channel="chrome" data-module="${module}"
-                           ${((chrome.events && chrome.events.length > 0) ? chrome.events.includes(module) : true) ? 'checked' : ''}>
+                           ${((chromeEvents.length === 0 || !hasChromeOverlap) ? true : chromeEvents.includes(module)) ? 'checked' : ''}>
                 </td>
                 <td class="text-center">
                     <input type="checkbox" class="form-check-input" 
                            data-channel="telegram" data-module="${module}"
-                           ${(telegram.enabled && telegram.events?.includes(module)) ? 'checked' : ''}>
+                           ${(telegram.enabled && telegramEvents.includes(module)) ? 'checked' : ''}>
                 </td>
                 <td class="text-center">
                     <input type="checkbox" class="form-check-input" 
@@ -6289,22 +6293,15 @@ class TradingApp {
     }
 
     async getAvailableModules() {
-        // 定义默认的通知模块
-        const defaultModules = ['market', 'strategy', 'order', 'risk'];
-        
-        try {
-            // 尝试从日志模块获取更多模块
-            const res = await this.apiCall('/logs/modules?range=today');
-            if (res?.modules && res.modules.length > 0) {
-                // 合并默认模块和动态模块，去重
-                const allModules = [...new Set([...defaultModules, ...res.modules])];
-                return allModules.filter(m => m !== 'all'); // 过滤掉 'all'
-            }
-        } catch (e) {
-            console.warn('Failed to load dynamic modules, using defaults:', e);
-        }
-        
-        return defaultModules;
+        // 使用 Event Notifications 区域的事件作为模块设置的第一列
+        return [
+            'Order Filled',
+            'Position Opened',
+            'Position Closed',
+            'Risk Rule Triggered',
+            'Strategy Started',
+            'Strategy Stopped'
+        ];
     }
 
     async saveNotificationSettings() {
