@@ -4053,10 +4053,6 @@ class TradingApp {
         const currentRows = Array.from(tbody.querySelectorAll('tr'));
         const currentOrderIds = new Set();
         
-        console.log('📋 Current rows in table:', currentRows.length);
-        console.log('📋 Current tbody innerHTML length:', tbody.innerHTML.length);
-        console.log('📋 First few chars of tbody:', tbody.innerHTML.substring(0, 200));
-        
         // 提取当前表格中的订单ID
         currentRows.forEach(row => {
             const cells = row.querySelectorAll('td');
@@ -4093,7 +4089,6 @@ class TradingApp {
             const orderId = order.order_id.toString();
             const existingRow = this.findOrderRow(tbody, orderId);
             const newRowHtml = this.generateOrderRowHtml(order);
-            console.log('🔍 Processing order:', orderId, 'existing row:', !!existingRow, 'HTML length:', newRowHtml.length);
             
             if (existingRow) {
                 // 检查行内容是否发生变化
@@ -4116,16 +4111,10 @@ class TradingApp {
                 }
             } else {
                 // 新订单，插入到正确位置
-                console.log('📝 Inserting new order:', orderId, 'HTML length:', newRowHtml.length);
-                console.log('📝 New row HTML preview:', newRowHtml.substring(0, 100) + '...');
-                
                 // 使用<tbody>解析<tr>，确保创建出正确的表格行元素
                 const tempTbody = document.createElement('tbody');
                 tempTbody.innerHTML = newRowHtml;
                 const newRow = tempTbody.firstElementChild;
-                
-                console.log('📝 Parsed new row:', newRow ? newRow.tagName : 'null', 'children:', newRow ? newRow.children.length : 0);
-                console.log('📝 newRow type:', typeof newRow, 'instanceof Node:', newRow instanceof Node);
                 
                 if (!newRow || !(newRow instanceof Node)) {
                     console.error('❌ Failed to create valid DOM element from HTML:', newRowHtml);
@@ -4295,24 +4284,12 @@ class TradingApp {
             return;
         }
         
-        console.log('🔍 === Orders Table Debug Info ===');
-        console.log('📋 tbody children count:', tbody.children.length);
-        console.log('📋 tbody innerHTML length:', tbody.innerHTML.length);
-        console.log('📋 tbody innerHTML:', tbody.innerHTML);
-        
         const rows = tbody.querySelectorAll('tr');
-        console.log('📋 Found', rows.length, 'rows');
         
         rows.forEach((row, index) => {
             const cells = row.querySelectorAll('td');
-            console.log(`📋 Row ${index}:`, cells.length, 'cells');
-            if (cells.length > 0) {
-                console.log(`📋 Row ${index} first cell:`, cells[0].textContent.trim());
-                console.log(`📋 Row ${index} innerHTML:`, row.innerHTML.substring(0, 200) + '...');
-            }
         });
         
-        console.log('🔍 === End Debug Info ===');
     }
 
     renderInternalOrders() {
@@ -6572,29 +6549,32 @@ class TradingApp {
                 const latest = response.data[0];
                 const gStatus = latest.g_rules_status || {};
                 const sStatus = latest.s_rules_status || {};
+                const lastCheck = latest.timestamp;
                 
                 // 更新G Rules状态表格
-                this.updateRuleStatus('g0', gStatus.g0 || { passed: true, message: '正常' });
-                this.updateRuleStatus('g1', gStatus.g1 || { passed: true, message: '正常' });
-                this.updateRuleStatus('g2', gStatus.g2 || { passed: true, message: '正常' });
-                this.updateRuleStatus('g3', gStatus.g3 || { passed: true, message: '正常' });
-                this.updateRuleStatus('g4', gStatus.g4 || { passed: true, message: '正常' });
+                this.updateRuleStatus('g0', gStatus.g0 || { passed: true, message: '正常' }, lastCheck);
+                this.updateRuleStatus('g1', gStatus.g1 || { passed: true, message: '正常' }, lastCheck);
+                this.updateRuleStatus('g2', gStatus.g2 || { passed: true, message: '正常' }, lastCheck);
+                this.updateRuleStatus('g3', gStatus.g3 || { passed: true, message: '正常' }, lastCheck);
+                this.updateRuleStatus('g4', gStatus.g4 || { passed: true, message: '正常' }, lastCheck);
+                this.updateRuleStatus('g5', gStatus.g5 || { passed: true, message: '正常' }, lastCheck);
                 
                 // 更新S Rules状态表格
-                this.updateRuleStatus('s0', sStatus.s0 || { passed: true, message: '正常' });
-                this.updateRuleStatus('s1', sStatus.s1 || { passed: true, message: '正常' });
-                this.updateRuleStatus('s2', sStatus.s2 || { passed: true, message: '正常' });
-                this.updateRuleStatus('s3', sStatus.s3 || { passed: true, message: '正常' });
-                this.updateRuleStatus('s4', sStatus.s4 || { passed: true, message: '正常' });
+                this.updateRuleStatus('s0', sStatus.s0 || { passed: true, message: '正常' }, lastCheck);
+                this.updateRuleStatus('s1', sStatus.s1 || { passed: true, message: '正常' }, lastCheck);
+                this.updateRuleStatus('s2', sStatus.s2 || { passed: true, message: '正常' }, lastCheck);
+                this.updateRuleStatus('s3', sStatus.s3 || { passed: true, message: '正常' }, lastCheck);
+                this.updateRuleStatus('s4', sStatus.s4 || { passed: true, message: '正常' }, lastCheck);
             }
         } catch (error) {
             console.error('加载 G&S Rules 状态失败:', error);
         }
     }
 
-    updateRuleStatus(ruleId, status) {
+    updateRuleStatus(ruleId, status, lastCheck) {
         const statusElement = document.getElementById(`${ruleId}_status`);
         const messageElement = document.getElementById(`${ruleId}_message`);
+        const lastElement = document.getElementById(`${ruleId}_last`);
         
         if (statusElement) {
             statusElement.className = `badge ${status.passed ? 'bg-success' : 'bg-danger'}`;
@@ -6603,6 +6583,17 @@ class TradingApp {
         
         if (messageElement) {
             messageElement.textContent = status.message || (status.passed ? '正常' : '违规');
+        }
+        
+        if (lastElement) {
+            const ts = lastCheck || status?.timestamp || status?.lastCheck;
+            if (ts) {
+                try {
+                    lastElement.textContent = new Date(ts).toLocaleString();
+                } catch (_) {
+                    lastElement.textContent = ts;
+                }
+            }
         }
     }
 

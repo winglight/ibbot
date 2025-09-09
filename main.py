@@ -2701,6 +2701,78 @@ async def get_sizing_history(symbol: Optional[str] = None, since: Optional[str] 
     try:
         db = get_db_manager()
         items = db.load_sizing_history(symbol=symbol, since=since, limit=limit)
+        
+        # 为每个历史记录添加g_rules_status和s_rules_status
+        for item in items:
+            # 解析G Rules状态
+            g_rules_checked = item.get('g_rules_checked', [])
+            g_rules_status = {}
+            
+            # 映射G1-G7规则到g0-g6（前端从g0开始）
+            if isinstance(g_rules_checked, list):
+                for i, rule_result in enumerate(g_rules_checked):
+                    if isinstance(rule_result, dict):
+                        rule_key = f"g{i}"  # g0, g1, g2...
+                        g_rules_status[rule_key] = {
+                            "passed": rule_result.get("passed", True),
+                            "message": " | ".join(rule_result.get("errors", [])) if not rule_result.get("passed", True) else "正常"
+                        }
+            
+            # 如果没有G规则数据，提供默认状态
+            if not g_rules_status:
+                for i in range(6):  # G0-G5
+                    g_rules_status[f"g{i}"] = {"passed": True, "message": "正常"}
+            
+            # 生成S Rules状态（从配置推导）
+            s_rules_status = {}
+            try:
+                s_rules_config = db.get_config("s_rules", {})
+                
+                # S0: 仓位计算方法
+                s0_method = s_rules_config.get("s0_position_sizing", "fixed")
+                s_rules_status["s0"] = {
+                    "passed": True,
+                    "message": {"fixed": "固定金额", "percentage": "百分比", "shares": "股数"}.get(s0_method, s0_method)
+                }
+                
+                # S1: 仓位数值/百分比
+                s1_value = s_rules_config.get("s1_risk_percentage", 1.0)
+                s_rules_status["s1"] = {
+                    "passed": True,
+                    "message": f"{s1_value}{'%' if s0_method == 'percentage' else (' 股' if s0_method == 'shares' else '$')}"
+                }
+                
+                # S2: 最大仓位数量
+                s2_max = s_rules_config.get("s2_max_positions", 10)
+                s_rules_status["s2"] = {
+                    "passed": True,
+                    "message": str(s2_max)
+                }
+                
+                # S3: 仓位重平衡
+                s3_enabled = s_rules_config.get("s3_volatility_adjustment", True)
+                s_rules_status["s3"] = {
+                    "passed": True,
+                    "message": "启用" if s3_enabled else "禁用"
+                }
+                
+                # S4: 波动率调整
+                s4_enabled = s_rules_config.get("s4_volatility_adjustment", True)
+                s_rules_status["s4"] = {
+                    "passed": True,
+                    "message": "启用" if s4_enabled else "禁用"
+                }
+                
+            except Exception as config_error:
+                logger.warning(f"Failed to load S rules config: {config_error}")
+                # 提供默认S规则状态
+                for i in range(5):  # S0-S4
+                    s_rules_status[f"s{i}"] = {"passed": True, "message": "正常"}
+            
+            # 添加到历史记录中
+            item['g_rules_status'] = g_rules_status
+            item['s_rules_status'] = s_rules_status
+        
         return {"success": True, "data": items, "count": len(items)}
     except Exception as e:
         logger.error(f"Get sizing history error: {e}")

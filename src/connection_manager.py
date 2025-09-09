@@ -575,6 +575,30 @@ class ConnectionManager:
             except Exception as sync_err:
                 connection_logger.debug(f"Failed to sync in-memory order commission/pnl: {sync_err}")
             
+            # 将最新的佣金和PnL更新通过 WebSocket 广播给前端，触发订单列表刷新
+            try:
+                from .websocket_manager import websocket_manager
+                message = {
+                    "type": "order_update",
+                    "order_id": order_id,
+                    "commission": commission,
+                    "pnl": pnl,
+                }
+                # 如果拿到了内存中的订单对象，补充更多字段（与 order_filled 事件保持一致的结构）
+                if 'order' in locals() and order:
+                    message.update({
+                        "symbol": getattr(order, 'symbol', None),
+                        "action": getattr(order, 'action', None),
+                        "quantity": getattr(order, 'quantity', None),
+                        "fill_price": getattr(order, 'fill_price', None),
+                        "order_type": getattr(order, 'order_type', None),
+                        "executed_at": order.executed_at.isoformat() if getattr(order, 'executed_at', None) else None,
+                    })
+                await websocket_manager.broadcast(message)
+                connection_logger.info(f"Broadcasted order_update for order {order_id} (commission={commission}, pnl={pnl})")
+            except Exception as ws_err:
+                connection_logger.warning(f"Failed to broadcast order_update for order {order_id}: {ws_err}")
+            
         except Exception as e:
             connection_logger.error(f"Error updating order commission/pnl in database: {e}")
     

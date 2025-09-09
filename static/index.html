@@ -8,6 +8,58 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link href="/static/style.css" rel="stylesheet">
     <link href="/static/pnlcalendar.css" rel="stylesheet">
+    <style>
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-connected { background-color: #28a745; }
+        .status-disconnected { background-color: #dc3545; }
+        .card-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .profit { color: #28a745; }
+        .loss { color: #dc3545; }
+        .table-responsive {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .alert-dismissible {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1050;
+            min-width: 300px;
+        }
+        .notes-tooltip {
+            position: fixed;
+            background-color: #333;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            max-width: 300px;
+            word-wrap: break-word;
+            z-index: 1060;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            display: none;
+            pointer-events: none;
+        }
+        .notes-tooltip::before {
+            content: '';
+            position: absolute;
+            bottom: -5px;
+            left: 50%;
+            transform: translateX(-50%);
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid #333;
+        }
+    </style>
 </head>
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
@@ -244,44 +296,44 @@
                                                 <tr>
                                                     <td>G0</td>
                                                     <td>账户级断路器</td>
-                                                    <td><span class="badge bg-success">正常</span></td>
-                                                    <td>-1.2%</td>
-                                                    <td>刚刚</td>
+                                                    <td><span id="g0_status" class="badge bg-success">正常</span></td>
+                                                    <td id="g0_message">-1.2%</td>
+                                                    <td id="g0_last">刚刚</td>
                                                 </tr>
                                                 <tr>
                                                     <td>G1</td>
                                                     <td>单笔最大风险</td>
-                                                    <td><span class="badge bg-success">正常</span></td>
-                                                    <td>1.5%</td>
-                                                    <td>刚刚</td>
+                                                    <td><span id="g1_status" class="badge bg-success">正常</span></td>
+                                                    <td id="g1_message">1.5%</td>
+                                                    <td id="g1_last">刚刚</td>
                                                 </tr>
                                                 <tr>
                                                     <td>G2</td>
                                                     <td>单标的最大仓位</td>
-                                                    <td><span class="badge bg-success">正常</span></td>
-                                                    <td>8.3%</td>
-                                                    <td>刚刚</td>
+                                                    <td><span id="g2_status" class="badge bg-success">正常</span></td>
+                                                    <td id="g2_message">8.3%</td>
+                                                    <td id="g2_last">刚刚</td>
                                                 </tr>
                                                 <tr>
                                                     <td>G3</td>
                                                     <td>相关性检查</td>
-                                                    <td><span class="badge bg-success">正常</span></td>
-                                                    <td>0.65</td>
-                                                    <td>刚刚</td>
+                                                    <td><span id="g3_status" class="badge bg-success">正常</span></td>
+                                                    <td id="g3_message">0.65</td>
+                                                    <td id="g3_last">刚刚</td>
                                                 </tr>
                                                 <tr>
                                                     <td>G4</td>
                                                     <td>流动性检查</td>
-                                                    <td><span class="badge bg-success">正常</span></td>
-                                                    <td>充足</td>
-                                                    <td>刚刚</td>
+                                                    <td><span id="g4_status" class="badge bg-success">正常</span></td>
+                                                    <td id="g4_message">充足</td>
+                                                    <td id="g4_last">刚刚</td>
                                                 </tr>
                                                 <tr>
                                                     <td>G5</td>
                                                     <td>时间窗口限制</td>
-                                                    <td><span class="badge bg-success">正常</span></td>
-                                                    <td>交易时间内</td>
-                                                    <td>刚刚</td>
+                                                    <td><span id="g5_status" class="badge bg-success">正常</span></td>
+                                                    <td id="g5_message">交易时间内</td>
+                                                    <td id="g5_last">刚刚</td>
                                                 </tr>
                                             </tbody>
                                         </table>
@@ -313,35 +365,35 @@
                                                     <td>仓位计算方法</td>
                                                     <td><span id="s0_status" class="badge bg-success">正常</span></td>
                                                     <td id="s0_message">百分比</td>
-                                                    <td>刚刚</td>
+                                                    <td id="s0_last">刚刚</td>
                                                 </tr>
                                                 <tr>
                                                     <td>S1</td>
                                                     <td>仓位数值/百分比</td>
                                                     <td><span id="s1_status" class="badge bg-success">正常</span></td>
                                                     <td id="s1_message">1.0%</td>
-                                                    <td>刚刚</td>
+                                                    <td id="s1_last">刚刚</td>
                                                 </tr>
                                                 <tr>
                                                     <td>S2</td>
                                                     <td>最大仓位数量</td>
                                                     <td><span id="s2_status" class="badge bg-success">正常</span></td>
                                                     <td id="s2_message">10</td>
-                                                    <td>刚刚</td>
+                                                    <td id="s2_last">刚刚</td>
                                                 </tr>
                                                 <tr>
                                                     <td>S3</td>
                                                     <td>仓位重平衡</td>
                                                     <td><span id="s3_status" class="badge bg-success">正常</span></td>
                                                     <td id="s3_message">启用</td>
-                                                    <td>刚刚</td>
+                                                    <td id="s3_last">刚刚</td>
                                                 </tr>
                                                 <tr>
                                                     <td>S4</td>
                                                     <td>波动率调整</td>
                                                     <td><span id="s4_status" class="badge bg-success">正常</span></td>
                                                     <td id="s4_message">启用</td>
-                                                    <td>刚刚</td>
+                                                    <td id="s4_last">刚刚</td>
                                                 </tr>
                                             </tbody>
                                         </table>
@@ -2046,7 +2098,7 @@
                                   <table class="table table-sm align-middle">
                                     <thead>
                                       <tr>
-                                        <th>模块</th>
+                                        <th>事件</th>
                                         <th>Chrome 通知</th>
                                         <th>Telegram 通知</th>
                                         <th>Email 通知</th>
