@@ -1067,39 +1067,13 @@ class IBKRClient:
                                 from datetime import datetime
                                 auto_order.executed_at = datetime.now()
                                 
-                                # 创建策略执行记录，使用实际成交数量而不是下单数量
-                                strategy_name = getattr(auto_order, 'rule_id', None) or getattr(auto_order, 'strategy_name', None)
-                                if (strategy_name and strategy_name != 'manual' and 
-                                    auto_order.order_source == 'strategy' and strategy_manager):
-                                    try:
-                                        from src.strategy_manager import StrategyExecution
-                                        # 使用实际成交数量
-                                        filled_qty = trade.orderStatus.filled if hasattr(trade.orderStatus, 'filled') else auto_order.quantity
-                                        execution = StrategyExecution(
-                                            strategy_name=strategy_name,
-                                            execution_time=datetime.now(),
-                                            order_id=order_id_str,
-                                            symbol=auto_order.symbol,
-                                            action=auto_order.action,
-                                            quantity=filled_qty,  # 使用实际成交数量
-                                            price=current_avg_fill_price,
-                                            status="executed"
-                                        )
-                                        strategy_manager.record_execution(execution)
-                                        ibkr_logger.info(f"Created strategy execution record for order {order_id_str} with filled quantity {filled_qty}")
-                                    except Exception as exec_err:
-                                        ibkr_logger.warning(f"Failed to create strategy execution record for order {order_id_str}: {exec_err}")
                             
-                            # NEW: update strategy execution price & PnL when we have fill price
-                            try:
-                                if strategy_manager and current_avg_fill_price and current_avg_fill_price > 0:
-                                    strategy_manager.update_execution_price_and_pnl(order_id_str, current_avg_fill_price, ibkr_client=self)
-                            except Exception as sm_err:
-                                ibkr_logger.warning(f"Failed to update strategy execution for order {order_id_str}: {sm_err}")
-                            
-                            updated_orders = True
-                            changed_orders.append((order_id_str, current_status))
-                            ibkr_logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")
+                                # strategy execution tracking removed; orders table records fills
+                                pass
+
+                                updated_orders = True
+                                changed_orders.append((order_id_str, current_status))
+                                ibkr_logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")
                             
                     else:
                         # 如果在auto_orders中找不到记录，可能是历史订单，默认为人工

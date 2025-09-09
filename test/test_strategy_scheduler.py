@@ -76,3 +76,5 @@ def test_strategy_with_schedule(token):
         pytest.skip("No executions recorded; scheduler may not be running")
 
     assert isinstance(executions, list)
+    for exec_item in executions:
+        assert exec_item.get("order_source") == "strategy"
