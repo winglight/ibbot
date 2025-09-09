@@ -4316,6 +4316,12 @@ class TradingApp {
         console.log('🔍 === End Debug Info ===');
     }
 
+    renderInternalOrders() {
+        const tbody = document.querySelector('#internalOrdersTable tbody');
+        if (!tbody) return;
+        this.updateOrdersTableSmart(this.orders || [], tbody);
+    }
+
     async loadPortfolio() {
         try {
             const data = await this.apiCall('/positions');
@@ -5035,6 +5041,68 @@ class TradingApp {
             if (typeEl) typeEl.textContent = s?.strategy_type || '-';
             if (trigEl) trigEl.textContent = s?.trigger_count ?? 0;
             if (lastEl) lastEl.textContent = s?.last_triggered ? new Date(s.last_triggered).toLocaleString() : '-';
+
+            const isInternal = s?.strategy_type === 'internal';
+            const summaryWrap = document.getElementById('summary-tab-wrap');
+            const ordersWrap = document.getElementById('internal-orders-tab-wrap');
+            const execWrap = document.getElementById('executions-tab-wrap');
+            const apiWrap = document.getElementById('api-examples-tab-wrap');
+            const summaryPane = document.getElementById('summary');
+            const ordersPane = document.getElementById('internal-orders');
+            const chartsTabText = document.getElementById('charts-tab-text');
+            if (isInternal) {
+                summaryWrap?.classList.remove('d-none');
+                ordersWrap?.classList.remove('d-none');
+                execWrap?.classList.add('d-none');
+                apiWrap?.classList.add('d-none');
+                summaryPane?.classList.remove('d-none');
+                ordersPane?.classList.remove('d-none');
+                if (chartsTabText) chartsTabText.textContent = 'Visual Metrics';
+                new bootstrap.Tab(document.getElementById('summary-tab')).show();
+
+                try {
+                    const infoRes = await this.apiCall(`/strategies/${name}/internal-info`);
+                    if (infoRes.success) {
+                        const info = infoRes.strategy || {};
+                        const descEl = document.getElementById('summaryDescription');
+                        const pathEl = document.getElementById('summaryPath');
+                        if (descEl) descEl.textContent = info.description || '';
+                        if (pathEl) pathEl.textContent = info.file_path || '';
+                        const schedList = document.getElementById('summarySchedule');
+                        if (schedList) {
+                            schedList.innerHTML = '';
+                            (info.schedule || []).forEach(item => {
+                                const li = document.createElement('li');
+                                li.textContent = `${item.time || ''} ${item.action || ''} ${item.qty || ''} ${item.symbol || ''}`.trim();
+                                schedList.appendChild(li);
+                            });
+                        }
+                        const riskBody = document.querySelector('#summaryRiskTable tbody');
+                        if (riskBody) {
+                            riskBody.innerHTML = '';
+                            const rr = info.risk_rules || {};
+                            Object.keys(rr).forEach(sym => {
+                                const rule = rr[sym] || {};
+                                const tr = document.createElement('tr');
+                                tr.innerHTML = `<td>${sym}</td><td>${rule.stop_loss_price ?? ''}</td><td>${rule.take_profit_price ?? ''}</td>`;
+                                riskBody.appendChild(tr);
+                            });
+                        }
+                    }
+                } catch (err) {
+                    console.error('Failed to load internal strategy info:', err);
+                }
+                this.renderInternalOrders();
+            } else {
+                summaryWrap?.classList.add('d-none');
+                ordersWrap?.classList.add('d-none');
+                execWrap?.classList.remove('d-none');
+                apiWrap?.classList.remove('d-none');
+                summaryPane?.classList.add('d-none');
+                ordersPane?.classList.add('d-none');
+                if (chartsTabText) chartsTabText.textContent = 'Charts';
+                new bootstrap.Tab(document.getElementById('charts-tab')).show();
+            }
 
             // API Examples
             const container = document.getElementById('apiExampleContent');

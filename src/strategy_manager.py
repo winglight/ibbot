@@ -643,6 +643,26 @@ class StrategyManager:
             return strategy_dict
         return None
 
+    def get_internal_strategy_info(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return consolidated information for an internal strategy"""
+        strategy = self.get_strategy(name)
+        if not strategy or strategy.get("strategy_type") != "internal":
+            return None
+
+        risk_rules: Dict[str, Any] = {}
+        if self.risk_manager:
+            symbols = {
+                item.get("symbol")
+                for item in (strategy.get("schedule") or [])
+                if isinstance(item, dict) and item.get("symbol")
+            }
+            for sym in symbols:
+                rule = self.risk_manager.risk_rules.get(sym)
+                if rule:
+                    risk_rules[sym] = asdict(rule)
+        strategy["risk_rules"] = risk_rules
+        return strategy
+
     def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
         """Update a strategy"""
         try:
