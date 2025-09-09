@@ -11,11 +11,13 @@ import hmac
 import time
 import importlib.util
 import sys
+import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from loguru import logger
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Module-specific logger for strategy_manager
 strategy_logger = logger.bind(module="strategy_manager", request_id="-")
@@ -35,6 +37,7 @@ class Strategy:
     created_at: datetime = None
     trigger_count: int = 0
     last_triggered: Optional[datetime] = None
+    schedule: Optional[List[Dict[str, Any]]] = None
     
     def __post_init__(self):
         if self.created_at is None:
@@ -73,25 +76,129 @@ class StrategyManager:
         
         # Database manager
         self.db_manager = get_db_manager()
-        
+
         # Dependencies - will be injected
         self.risk_manager = None
-        
+        self.queue_manager = None
+
         # 内存缓存，从数据库加载
         self.strategies: Dict[str, Strategy] = {}
         self.executions: List[StrategyExecution] = []
         self.settings: Dict[str, Any] = {}
-        
+
         # 认证token（用于外部策略访问）
         self.auth_token = None
-        
+
+        # 调度器
+        self.scheduler = AsyncIOScheduler()
+
         # 加载数据
         self._load_from_database()
-        
-    def set_dependencies(self, risk_manager=None):
+
+    def set_dependencies(self, risk_manager=None, queue_manager=None):
         """Set dependency objects for strategy manager"""
         self.risk_manager = risk_manager
-        strategy_logger.info(f"Dependencies set for StrategyManager: risk_manager={'initialized' if risk_manager else 'None'}")
+        self.queue_manager = queue_manager
+        strategy_logger.info(
+            f"Dependencies set for StrategyManager: risk_manager={'initialized' if risk_manager else 'None'}, "
+            f"queue_manager={'initialized' if queue_manager else 'None'}"
+        )
+
+    def start(self):
+        """Start strategy manager scheduler"""
+        try:
+            asyncio.get_running_loop()
+            self._start_scheduler()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._start_scheduler()
+        strategy_logger.info("Strategy manager started")
+
+    def stop(self):
+        """Stop strategy manager scheduler"""
+        try:
+            if self.scheduler.running:
+                self.scheduler.shutdown()
+                strategy_logger.info("Strategy manager scheduler stopped")
+        except Exception as e:
+            strategy_logger.error(f"Error stopping strategy manager scheduler: {e}")
+
+    def restart_scheduler(self):
+        """Restart scheduler after strategy updates"""
+        self.stop()
+        self.start()
+
+    def _start_scheduler(self):
+        """Start scheduler and schedule jobs"""
+        if not self.scheduler.running:
+            self.scheduler.start()
+            strategy_logger.info("Strategy manager scheduler started")
+        self.schedule_strategy_orders()
+
+    def _enqueue_strategy_order(self, payload: Dict[str, Any]):
+        """Helper to add strategy order task to queue"""
+        if not self.queue_manager:
+            strategy_logger.warning("QueueManager not set; cannot enqueue strategy order")
+            return
+        try:
+            self.queue_manager.add_task("strategy_order", payload)
+            strategy_logger.info(f"Scheduled strategy order queued: {payload}")
+        except Exception as e:
+            strategy_logger.error(f"Failed to queue scheduled strategy order: {e}")
+
+    def schedule_strategy_orders(self):
+        """Parse strategy schedules and register jobs"""
+        if not self.scheduler:
+            return
+        try:
+            self.scheduler.remove_all_jobs()
+        except Exception:
+            pass
+        for strategy in self.strategies.values():
+            if not strategy.enabled or not strategy.schedule:
+                continue
+            for idx, item in enumerate(strategy.schedule):
+                time_str = item.get("time")
+                symbol = item.get("symbol")
+                action = item.get("action")
+                qty = item.get("qty")
+                order_type = item.get("type", "MARKET")
+                price = item.get("price")
+                exchange = item.get("exchange")
+                sec_type = item.get("sec_type", "STK")
+                if not time_str or not symbol or not action or qty is None:
+                    continue
+                try:
+                    hour, minute = map(int, time_str.split(":"))
+                except Exception:
+                    strategy_logger.warning(
+                        f"Invalid time format in schedule for {strategy.name}: {time_str}"
+                    )
+                    continue
+                payload = {
+                    "strategy": strategy.name,
+                    "symbol": symbol,
+                    "action": action,
+                    "qty": qty,
+                    "type": order_type,
+                    "price": price,
+                    "exchange": exchange,
+                    "sec_type": sec_type,
+                }
+                job_id = f"{strategy.name}_{idx}"
+                self.scheduler.add_job(
+                    self._enqueue_strategy_order,
+                    'cron',
+                    hour=hour,
+                    minute=minute,
+                    id=job_id,
+                    args=[payload],
+                    replace_existing=True,
+                    coalesce=True,
+                    misfire_grace_time=10,
+                    max_instances=1,
+                )
 
     def _load_from_database(self):
         """从数据库加载策略设置、策略和执行记录"""
@@ -134,6 +241,7 @@ class StrategyManager:
             db_strategies = self.db_manager.load_strategies()
             for strategy_data in db_strategies:
                 # 将数据库的策略数据类转换为本地策略数据类
+                schedule = self.settings.get(f"{strategy_data.name}_schedule")
                 strategy = Strategy(
                     name=strategy_data.name,
                     strategy_type=strategy_data.strategy_type,
@@ -143,7 +251,8 @@ class StrategyManager:
                     description=strategy_data.description,
                     created_at=datetime.fromisoformat(strategy_data.created_at) if strategy_data.created_at else datetime.now(),
                     trigger_count=0,  # 数据库数据类中没有这个字段，设为默认值
-                    last_triggered=None
+                    last_triggered=None,
+                    schedule=schedule
                 )
                 self.strategies[strategy.name] = strategy
             
@@ -429,7 +538,8 @@ class StrategyManager:
                 api_endpoint=strategy_data.get('api_endpoint'),
                 file_path=final_file_path,
                 description=strategy_data.get('description'),
-                created_at=datetime.now()
+                created_at=datetime.now(),
+                schedule=strategy_data.get('schedule')
             )
             
             # 保存到数据库
@@ -472,8 +582,16 @@ class StrategyManager:
                 # 同步到内存中的 settings，确保后续 get_strategy 能直接读取
                 self.settings.update(sl_tp_settings)
                 strategy_logger.info(f"Saved SL/TP settings for strategy {name}")
+
+            # 保存schedule配置
+            if strategy.schedule:
+                schedule_key = f"{name}_schedule"
+                self.db_manager.save_strategy_config({schedule_key: strategy.schedule})
+                self.settings[schedule_key] = strategy.schedule
                 
             strategy_logger.info(f"Strategy {name} added successfully")
+            # 重新启动调度器以应用新的调度配置
+            self.restart_scheduler()
             return True
             
         except Exception as e:
@@ -510,6 +628,7 @@ class StrategyManager:
             strategy_dict['tp_price'] = settings.get(f"{name}_tp_price") if tp_enabled else None
             strategy_dict['sl_type'] = settings.get(f"{name}_sl_type", 'amount')
             strategy_dict['tp_type'] = settings.get(f"{name}_tp_type", 'amount')
+            strategy_dict['schedule'] = settings.get(f"{name}_schedule")
             return strategy_dict
         return None
 
@@ -532,6 +651,9 @@ class StrategyManager:
                     elif key.startswith('tp_'):
                         settings_key = f"{name}_{key}"
                         settings_to_save[settings_key] = value
+                elif key == 'schedule':
+                    setattr(strategy, key, value)
+                    settings_to_save[f"{name}_schedule"] = value
                 elif hasattr(strategy, key):
                     setattr(strategy, key, value)
             
@@ -543,8 +665,9 @@ class StrategyManager:
                 self.db_manager.save_strategy_config(settings_to_save)
                 # 更新内存
                 self.settings.update(settings_to_save)
-            
+
             strategy_logger.info(f"Updated strategy: {name}")
+            self.restart_scheduler()
             return True
         except Exception as e:
             strategy_logger.error(f"Failed to update strategy {name}: {e}")
@@ -565,14 +688,11 @@ class {strategy_name.replace(' ', '').replace('-', '').replace('_', '')}Strategy
     """
     {strategy_name} Strategy Implementation
     """
-    
+
     def __init__(self):
         self.name = "{strategy_name}"
         self.description = "Strategy template for {strategy_name}"
-        
-    def __init__(self):
-        self.name = "{strategy_name}"
-        self.description = "Strategy template for {strategy_name}"
+        self.created_at = datetime.now()
         
     def initialize(self):
         """Initialize the strategy"""
