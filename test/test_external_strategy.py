@@ -108,7 +108,7 @@ class TestExternalStrategyAPI:
         settings_data = {
             "api_endpoint": f"{BASE_URL}/webhook",
             "api_method": "POST",
-            "api_payload_template": '{"symbol": "{{symbol}}", "action": "{{action}}"}',
+            "api_payload_template": {"symbol": "{{symbol}}", "action": "{{action}}"},
             "enable_auth": True
         }
         
