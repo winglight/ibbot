@@ -322,6 +322,8 @@ class OrderManager:
                           pnl: Optional[float] = None) -> bool:
         """更新订单状态"""
         try:
+            # 统一标准化为字符串，避免传入 int 导致无法匹配内存订单
+            order_id = str(order_id)
             if order_id not in self.orders:
                 order_logger.warning(f"Order {order_id} not found for status update")
                 return False
@@ -530,15 +532,17 @@ class OrderManager:
                         import asyncio
                         try:
                             loop = asyncio.get_running_loop()
-                            asyncio.create_task(self.notification_manager.send(
+                            asyncio.create_task(self.notification_manager.send_notification(
                                 message=message,
                                 event_type="risk_rule_deactivated",
+                                symbol=symbol,
                                 category="risk"
                             ))
                         except RuntimeError:
-                            asyncio.run(self.notification_manager.send(
+                            asyncio.run(self.notification_manager.send_notification(
                                 message=message,
                                 event_type="risk_rule_deactivated",
+                                symbol=symbol,
                                 category="risk"
                             ))
                     except Exception as e:
@@ -812,7 +816,7 @@ class OrderManager:
                         symbol=?, action=?, quantity=?, order_type=?, price=?, status=?,
                         updated_at=?, executed_at=?, fill_price=?, order_source=?,
                         strategy_name=?, rule_id=?, parent_order_id=?, exchange=?,
-                        sec_type=?, notes=?, commission=?, pnl=?, is_deleted=?
+                        sec_type=?, notes=?, commission=COALESCE(?, commission), pnl=COALESCE(?, pnl), is_deleted=?
                     WHERE order_id=?
                     """,
                     (
@@ -827,7 +831,7 @@ class OrderManager:
                     )
                 )
                 conn.commit()
-                order_logger.debug(f"Order {order.order_id} updated in database")
+                order_logger.debug(f"Order {order.order_id} updated in database (commission/pnl preserved when None)")
         except Exception as e:
             order_logger.error(f"Error updating order {order.order_id} in database: {e}")
             raise

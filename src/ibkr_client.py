@@ -1177,8 +1177,8 @@ class IBKRClient:
                                             else:
                                                 ibkr_logger.info(f"Fill {i} has no commissionReport attribute")
                                         
-                                        commission = total_commission if total_commission != 0 else None
-                                        pnl = total_pnl if total_pnl != 0 else None
+                                        commission = total_commission
+                                        pnl = total_pnl
                                         ibkr_logger.info(f"Order {order_id_str} final commission: {commission}, PnL: {pnl}")
                                     else:
                                         ibkr_logger.info(f"DEBUG: Trade.fills is empty for order {order_id_str}")
@@ -1272,8 +1272,8 @@ class IBKRClient:
                                                     ibkr_logger.info(f"Historical fill PnL: {fill_pnl}, total: {total_pnl}")
                                             else:
                                                 ibkr_logger.info(f"Historical fill has no commissionReport: {fill}")
-                                        commission = total_commission if total_commission != 0 else None
-                                        pnl = total_pnl if total_pnl != 0 else None
+                                        commission = total_commission
+                                        pnl = total_pnl
                                         ibkr_logger.info(f"Historical order {order_id_str} final commission: {commission}, PnL: {pnl}")
                                     else:
                                         ibkr_logger.info(f"Historical order {order_id_str} has no fills or fills is empty")

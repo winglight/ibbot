@@ -4260,6 +4260,8 @@ class TradingApp {
             <td>${order.quantity}</td>
             <td>${priceDisplay}</td>
             <td><span class="badge bg-${this.getStatusColor(displayStatus)}">${displayStatus}</span></td>
+            <td class="${(order.pnl ?? 0) > 0 ? 'text-success' : ((order.pnl ?? 0) < 0 ? 'text-danger' : 'text-muted')}">$${this.formatNumber(order.pnl ?? 0)}</td>
+            <td>$${this.formatNumber(order.commission ?? 0)}</td>
             <td>${sourceDisplay}</td>
             <td>${detailsButton}${editButton}${syncButton}${cancelButton}</td>
         `;

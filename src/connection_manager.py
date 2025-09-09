@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
-from ib_insync import IB, util
+from ib_insync import IB, util, ExecutionFilter
 from loguru import logger
 
 # 为connection模块创建专用logger
@@ -547,17 +547,112 @@ class ConnectionManager:
             connection_logger.error(f"Error handling filled order: {e}")
     
     async def _update_order_commission_pnl(self, order_id, commission, pnl):
-        """更新订单的佣金和PnL到数据库"""
+        """更新订单的佣金和PnL到数据库并同步内存对象"""
         try:
             from .database import get_db_manager
             
             db = get_db_manager()
             await db.update_order_commission_pnl(order_id, commission, pnl)
             connection_logger.info(f"Updated order {order_id} commission={commission}, pnl={pnl} in database")
+
+            # 同步内存中的订单（如果存在）
+            try:
+                from .order_manager import OrderManager
+                om = OrderManager()
+                oid = str(order_id)
+                order = om.orders.get(oid)
+                if order:
+                    prev_comm, prev_pnl = order.commission, order.pnl
+                    if commission is not None:
+                        order.commission = commission
+                    if pnl is not None:
+                        order.pnl = pnl
+                    connection_logger.debug(
+                        f"Synchronized in-memory order {oid} commission: {prev_comm} -> {order.commission}, pnl: {prev_pnl} -> {order.pnl}"
+                    )
+                else:
+                    connection_logger.debug(f"In-memory order {oid} not found for commission/pnl sync")
+            except Exception as sync_err:
+                connection_logger.debug(f"Failed to sync in-memory order commission/pnl: {sync_err}")
             
         except Exception as e:
             connection_logger.error(f"Error updating order commission/pnl in database: {e}")
     
+    def backfill_commissions(self, days: int = 7) -> int:
+        """Backfill commission and PnL for recent executions by requesting executions from IBKR.
+        This will not override existing non-null commission/pnl in DB thanks to COALESCE guards.
+        Returns the number of update attempts made.
+        """
+        try:
+            if not self.ib or not self.ib.isConnected():
+                connection_logger.error("Cannot backfill commissions: IB not connected")
+                return 0
+
+            import datetime as _dt
+
+            async def _backfill_op():
+                try:
+                    ib_local = self.ib
+                    # Compute start time for the execution filter (local time, format YYYYMMDD-HH:MM:SS)
+                    start_dt = _dt.datetime.now() - _dt.timedelta(days=max(1, int(days)))
+                    # IB API expects a hyphen between date and time, e.g. 20250131-13:45:00
+                    start_str = start_dt.strftime('%Y%m%d-%H:%M:%S')
+
+                    # Request executions; this will also trigger commissionReport events
+                    filt = ExecutionFilter(time=start_str)
+                    connection_logger.info(f"Requesting executions since {start_str} for backfilling commissions/PnL")
+                    try:
+                        await ib_local.reqExecutionsAsync(filt)
+                    except Exception as e:
+                        connection_logger.warning(f"reqExecutionsAsync failed: {e}; trying sync fallback")
+                        try:
+                            ib_local.reqExecutions(filt)
+                        except Exception as e2:
+                            connection_logger.error(f"Sync reqExecutions failed: {e2}")
+                            return 0
+
+                    # Allow some time for commission reports to arrive and pair with executions
+                    await asyncio.sleep(1.5)
+
+                    fills = ib_local.fills()
+                    if not fills:
+                        connection_logger.info("No fills returned from IBKR for the specified window")
+                        return 0
+
+                    update_count = 0
+                    for fill in fills:
+                        try:
+                            # Prefer commissionReport attached to fill
+                            cr = getattr(fill, 'commissionReport', None)
+                            exec_obj = getattr(fill, 'execution', None)
+                            if cr and exec_obj and hasattr(exec_obj, 'orderId'):
+                                order_id = exec_obj.orderId
+                                commission = cr.commission
+                                pnl = getattr(cr, 'realizedPNL', None)
+                                connection_logger.debug(
+                                    f"Backfill commission report for order {order_id}: commission={commission}, pnl={pnl}"
+                                )
+                                # Use the same updater which syncs DB and in-memory order
+                                await self._update_order_commission_pnl(order_id, commission, pnl)
+                                update_count += 1
+                        except Exception as inner_e:
+                            connection_logger.warning(f"Failed to process a fill during backfill: {inner_e}")
+
+                    connection_logger.info(f"Backfill completed. Updates attempted: {update_count}")
+                    return update_count
+                except Exception as e:
+                    connection_logger.error(f"Backfill operation failed: {e}")
+                    return 0
+
+            result = self.run_async_in_connection_thread(_backfill_op())
+            try:
+                return int(result or 0)
+            except Exception:
+                return 0
+        except Exception as e:
+            connection_logger.error(f"Backfill commissions wrapper error: {e}")
+            return 0
+
     def get_config(self) -> ConnectionConfig:
         """获取当前配置"""
         return self.config

@@ -153,7 +153,10 @@ class IBKRDataManager {
                 body: JSON.stringify({ 
                     symbol: symbol,
                     exchange: 'SMART'
-                })
+                }),
+                // 此接口为轻量级非关键查询：缩短超时并禁用重试，避免前端长时间等待
+                timeout: 6000,
+                maxRetries: 0
             });
             
             if (response.success && response.price) {

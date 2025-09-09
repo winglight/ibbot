@@ -678,13 +678,17 @@ class RiskManager:
             
             # Send alert only once per hour to avoid spam
             if not last_alert or (current_time - last_alert).seconds > 3600:
-                await self.notification_manager.send_loss_alert(
+                msg = (
+                    f"价格触发亏损阈值提醒\n"
+                    f"当前持仓: {position['position']}\n"
+                    f"当前价格: ${position['current_price']:.2f}\n"
+                    f"平均成本: ${position['avg_cost']:.2f}\n"
+                    f"亏损比例: {loss_percent*100:.2f}% (阈值: {self.loss_threshold_1*100:.2f}%)"
+                )
+                await self.notification_manager.send_risk_notification(
                     symbol=symbol,
-                    position=position['position'],
-                    current_price=position['current_price'],
-                    avg_cost=position['avg_cost'],
-                    loss_percent=loss_percent * 100,
-                    threshold=self.loss_threshold_1
+                    message=msg,
+                    risk_type="loss_threshold1"
                 )
                 
                 if symbol not in self.alert_history:
@@ -833,14 +837,29 @@ class RiskManager:
                         risk_logger.info(f"✅ Market order placed for take profit: {symbol} at market price ${current_price:.2f}")
                         risk_logger.info(f"Take profit market order successfully placed for {symbol}, rule remains active")
                         
-                        # Send notification
-                        await self.telegram_notifier.send_message(
-                            f"🟢 Market order placed for take profit\n"
-                            f"Symbol: {symbol}\n"
-                            f"Market Price: ${current_price:.2f}\n"
-                            f"Target Price: ${rule.take_profit_price:.2f}\n"
-                            f"Quantity: {abs(position_qty)}"
+                        # Send notification via NotificationManager
+                        await self.notification_manager.send_stop_loss_notification(
+                            symbol=symbol,
+                            position=position_qty,
+                            trigger_price=current_price,
+                            order_type="profit",
+                            order_id=trade.order.orderId
                         )
+                        
+                        # Disable rule and persist, then stop further checks
+                        rule.enabled = False
+                        db_rule = DatabaseRiskRule(
+                            symbol=rule.symbol,
+                            stop_loss_price=rule.stop_loss_price,
+                            take_profit_price=rule.take_profit_price,
+                            max_loss_percent=rule.max_loss_percent,
+                            enabled=rule.enabled,
+                            max_time_span=rule.max_time_span,
+                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        )
+                        self.db_manager.save_risk_rule(db_rule)
+                        risk_logger.info(f"Take profit rule disabled after market order for {symbol}")
+                        return
                     else:
                         risk_logger.warning(f"Failed to place take profit market order for {symbol}")
                         # 下单失败时禁用规则
@@ -940,17 +959,17 @@ class RiskManager:
                     if trade:
                         self.pending_orders[symbol]["stop_loss"] = True
                         
-                        # 发送Telegram通知
+                        # 发送统一通知
                         try:
-                            await self.telegram_notifier.send_message(
-                                f"🚨 STOP LOSS TRIGGERED\n\n"
-                                f"Symbol: {symbol}\n"
-                                f"Price: ${current_price:.2f}\n"
-                                f"Target Price: ${rule.stop_loss_price:.2f}\n"
-                                f"Quantity: {abs(position_qty)}"
+                            await self.notification_manager.send_stop_loss_notification(
+                                symbol=symbol,
+                                position=position_qty,
+                                trigger_price=current_price,
+                                order_type="loss",
+                                order_id=trade.order.orderId
                             )
                         except Exception as e:
-                            risk_logger.error(f"Failed to send Telegram notification for stop loss: {e}")
+                            risk_logger.error(f"Failed to send stop-loss notification: {e}")
                         order_placed = True
                         
                         # 保存订单记录到auto_orders内存和数据库
@@ -986,14 +1005,18 @@ class RiskManager:
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.warning(f"🔒 Stop loss rule disabled for {symbol} after triggering at ${current_price:.2f}")
                         
-                        # Send notification
-                        await self.telegram_notifier.send_message(
-                            f"🔴 Market order placed for stop loss\n"
-                            f"Symbol: {symbol}\n"
-                            f"Market Price: ${current_price:.2f}\n"
-                            f"Target Price: ${rule.stop_loss_price:.2f}\n"
-                            f"Quantity: {abs(position_qty)}"
-                        )
+                        # Send unified notification and return to avoid duplicate processing
+                        try:
+                            await self.notification_manager.send_stop_loss_notification(
+                                symbol=symbol,
+                                position=position_qty,
+                                trigger_price=current_price,
+                                order_type="loss",
+                                order_id=trade.order.orderId
+                            )
+                        except Exception as e:
+                            risk_logger.error(f"Failed to send stop-loss notification: {e}")
+                        return
                     else:
                         risk_logger.warning(f"Failed to place stop loss market order for {symbol}")
                         # 下单失败时禁用规则
@@ -1274,9 +1297,9 @@ class RiskManager:
                 else:
                     risk_logger.warning(f"订单管理器未初始化，无法同步订单: {order_id}")
                 
-                # Send notification based on order type
+                # Send notification based on order type (unified via NotificationManager)
                 if order_request.order_type == OrderType.STOP_LOSS:
-                    await self.telegram_notifier.send_stop_loss_alert(
+                    await self.notification_manager.send_stop_loss_notification(
                         symbol=order_request.symbol,
                         position=position['position'],
                         trigger_price=position['current_price'],
@@ -1284,7 +1307,7 @@ class RiskManager:
                         order_id=order_id
                     )
                 elif order_request.order_type == OrderType.TAKE_PROFIT:
-                    await self.telegram_notifier.send_stop_loss_alert(
+                    await self.notification_manager.send_stop_loss_notification(
                         symbol=order_request.symbol,
                         position=position['position'],
                         trigger_price=position['current_price'],
@@ -1292,7 +1315,7 @@ class RiskManager:
                         order_id=order_id
                     )
                 elif order_request.order_type == OrderType.RISK_CLOSE:
-                    await self.telegram_notifier.send_auto_close_alert(
+                    await self.notification_manager.send_auto_close_notification(
                         symbol=order_request.symbol,
                         position=position['position'],
                         order_id=order_id
@@ -1314,7 +1337,7 @@ class RiskManager:
             account_info = await self.ibkr_client.get_account_info()
             positions = await self.ibkr_client.get_positions()
             
-            await self.notification_manager.send_daily_summary(account_info, positions)
+            await self.notification_manager.send_daily_summary_notification(account_info, positions)
             
         except Exception as e:
             risk_logger.error(f"Error sending daily summary: {e}")
@@ -1742,21 +1765,13 @@ class RiskManager:
             # 使用缓存的账户信息避免阻塞调用
             if hasattr(self.ibkr_client, '_cached_account_info'):
                 account_info = self.ibkr_client._cached_account_info or {}
-            else:
-                # 如果没有缓存，尝试获取实际账户信息
-                try:
-                    account_info = self.ibkr_client.get_account_info() or {}
-                    if not account_info.get('net_liquidation'):
-                        account_info = {'net_liquidation': 100000.0}  # 最后的默认值
-                        risk_logger.warning(f"[PS] No account info available, using default value")
-                    else:
-                        risk_logger.info(f"[PS] Retrieved account info: net_liquidation={account_info.get('net_liquidation')}")
-                except Exception as inner_e:
-                    risk_logger.error(f"[PS] Failed to get account info: {inner_e}")
-                    account_info = {'net_liquidation': 100000.0}  # 默认值
-                    risk_logger.warning(f"[PS] Using default account info for position sizing")
+            # 如果没有可用缓存，则使用默认净值
+            if not account_info or not account_info.get('net_liquidation'):
+                account_info = {'net_liquidation': 100000.0}
+                risk_logger.warning(f"[PS] No cached account info, using default net_liquidation")
         except Exception as e:
             risk_logger.error(f"[PS] get_account_info error: {e}")
+            account_info = {'net_liquidation': 100000.0}
         self.update_equity_state(account_info)
         risk_logger.info(f"[PS] After update_equity_state: equity_last={self.equity_last}, account_info={account_info}")
 
@@ -1820,7 +1835,9 @@ class RiskManager:
 
     def check_circuit_breaker_before_new_order(self) -> Tuple[bool, str]:
         try:
-            info = self.ibkr_client.get_account_info() or {}
+            info = {}
+            if hasattr(self.ibkr_client, '_cached_account_info'):
+                info = self.ibkr_client._cached_account_info or {}
             self.update_equity_state(info)
         except Exception as e:
             risk_logger.error(f"[CB] get_account_info error: {e}")
@@ -1843,8 +1860,12 @@ class RiskManager:
                 pass
             risk_logger.warning(f"[CB] Circuit breaker TRIGGERED: {self.circuit_reason}")
             try:
-                if self.telegram_notifier:
-                    asyncio.create_task(self.telegram_notifier.send_message(f"[CB] 断路器触发: {self.circuit_reason}"))
+                if self.notification_manager:
+                    asyncio.create_task(self.notification_manager.send_risk_notification(
+                        symbol="ALL",
+                        message=f"断路器触发: {self.circuit_reason}",
+                        risk_type="circuit_breaker"
+                    ))
             except Exception:
                 pass
             return False, self.circuit_reason

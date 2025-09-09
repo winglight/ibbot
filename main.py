@@ -59,6 +59,7 @@ load_dotenv()
 
 # 优化：可配置的PnL广播间隔（秒），默认5秒
 PNL_BROADCAST_INTERVAL_SEC = int(os.getenv('PNL_BROADCAST_INTERVAL_SEC', '5'))
+CURRENT_PRICE_CACHE_ONLY = os.getenv('CURRENT_PRICE_CACHE_ONLY', 'False').lower() == 'true'
 
 # 内存缓存：用于缓存历史数据请求
 # 格式: {"symbol_duration_barsize": {"data": df, "timestamp": datetime, "expires_at": datetime}}
@@ -1270,9 +1271,29 @@ async def get_realtime_data(symbol: str, exchange: str = "SMART", user: Optional
 @app.post("/api/current_price")
 async def get_current_price(request: CurrentPriceRequest, user: Optional[str] = Depends(get_current_user)):
     """获取当前价格 - 轻量级接口，专门用于获取最新价格"""
+    # Cache-only mode: serve cache regardless of IBKR connection
+    if CURRENT_PRICE_CACHE_ONLY:
+        if hasattr(ibkr_client, 'price_cache') and request.symbol in ibkr_client.price_cache:
+            cached_price = ibkr_client.price_cache.get(request.symbol)
+            if cached_price is not None:
+                return {
+                    "success": True,
+                    "symbol": request.symbol,
+                    "price": cached_price,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "cache_only"
+                }
+        return {
+            "success": False,
+            "symbol": request.symbol,
+            "price": None,
+            "timestamp": datetime.now().isoformat(),
+            "error": "Cache-only mode: no cached price"
+        }
+
     if not ibkr_client or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
     try:
         # 首先尝试从价格缓存获取
         if hasattr(ibkr_client, 'price_cache') and request.symbol in ibkr_client.price_cache:
@@ -1294,7 +1315,7 @@ async def get_current_price(request: CurrentPriceRequest, user: Optional[str] = 
                     None, 
                     lambda: ibkr_client.get_real_time_data(request.symbol, request.exchange)
                 ), 
-                timeout=5.0  # 5秒超时，比realtime_data接口更短
+                timeout=2.0  # 2秒超时，更快失败以保持端点轻量
             )
             
             if data and 'last' in data:
@@ -1312,7 +1333,7 @@ async def get_current_price(request: CurrentPriceRequest, user: Optional[str] = 
         # 最后尝试从历史数据获取最新价格（1分钟数据）
         try:
             # 对MNQ合约使用更长的超时时间
-            timeout_duration = 15.0 if request.symbol == "MNQ" else 10.0
+            timeout_duration = 3.0 if request.symbol == "MNQ" else 2.0
             df = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
@@ -2274,6 +2295,27 @@ async def sync_single_order(order_id: int, user: Optional[str] = Depends(get_cur
         raise HTTPException(status_code=500, detail=str(e))
 
 # Account endpoints
+@app.post("/api/orders/backfill_commissions")
+async def backfill_commissions(days: int = 7, user: Optional[str] = Depends(get_current_user)):
+    """回填最近指定天数内成交的订单佣金与PnL（默认7天）。"""
+    if not connection_manager or not connection_manager.is_connected():
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    try:
+        loop = asyncio.get_event_loop()
+        updates = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: connection_manager.backfill_commissions(days)),
+            timeout=30.0
+        )
+        updates = int(updates or 0)
+        logger.info(f"Backfill commissions completed: updates={updates}, days={days}")
+        return {"success": True, "updates": updates, "days": days}
+    except asyncio.TimeoutError:
+        logger.warning("Backfill commissions request timed out")
+        raise HTTPException(status_code=408, detail="Backfill request timed out")
+    except Exception as e:
+        logger.error(f"Backfill commissions error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/account_info")
 async def get_account_info(user: Optional[str] = Depends(get_current_user)):
     """获取账户信息"""
