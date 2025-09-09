@@ -1636,9 +1636,8 @@ class TradingApp {
 
     async syncMonitorModalData(symbol) {
         try {
-            // 重新获取持仓数据
-            const portfolioResult = await this.apiCall('/positions');
-            const positions = portfolioResult.positions || [];
+            // 从缓存的持仓数据中查找
+            const positions = this.dataManager.getAllPositions();
             const position = positions.find(p => p.symbol === symbol);
             
             // 更新持仓信息（无论是否有持仓）
@@ -4324,35 +4323,7 @@ class TradingApp {
 
     async loadPortfolio() {
         try {
-            const data = await this.apiCall('/positions');
-            
-            // Update dataManager positions for isOpeningPosition logic
-            this.dataManager.positions = data.positions;
-            
-            const tbody = document.querySelector('#positionsTable tbody');
-            
-            tbody.innerHTML = data.positions.map(pos => `
-                <tr>
-                    <td>${pos.symbol}</td>
-                    <td>${pos.position}</td>
-                    <td>$${this.formatNumber(pos.avg_cost)}</td>
-                    <td>$${this.formatNumber(pos.current_price)}</td>
-                    <td class="${pos.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
-                        $${this.formatNumber(pos.unrealized_pnl)}
-                    </td>
-                    <td class="${pos.unrealized_pnl_percent >= 0 ? 'profit' : 'loss'}">
-                        ${this.formatNumber(pos.unrealized_pnl_percent)}%
-                    </td>
-                    <td>
-                        <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editPositionRiskRule('${pos.symbol}', ${pos.current_price}, ${pos.avg_cost}, ${pos.position})" title="Set TP/SL">
-                            <i class="fas fa-shield-alt"></i>
-                        </button>
-                        <button class="btn btn-sm btn-outline-success" onclick="app.openMonitorModal('${pos.symbol}', ${pos.position}, ${pos.current_price}, ${pos.avg_cost}, ${pos.unrealized_pnl}, ${pos.unrealized_pnl_percent})" title="Monitor">
-                            <i class="fas fa-eye"></i>
-                        </button>
-                    </td>
-                </tr>
-            `).join('');
+            this.dataManager.updatePortfolioUI(this.dataManager.getAllPositions());
         } catch (error) {
             console.error('Failed to load portfolio:', error);
         }
@@ -4363,18 +4334,8 @@ class TradingApp {
             // Risk rules can be loaded from database without IB connection
             const riskData = await this.apiCall('/risk_rules');
             
-            // Positions require IB connection, handle gracefully if not connected
-            let portfolioData = { positions: [] };
-            if (this.connected) {
-                try {
-                    portfolioData = await this.apiCall('/positions');
-                } catch (error) {
-                    console.warn('Failed to load positions (IB not connected):', error.message);
-                    portfolioData = { positions: [] };
-                }
-            } else {
-                console.log('IB not connected, showing risk rules without position data');
-            }
+            // 获取当前持仓信息（通过WebSocket维护）
+            const portfolioData = { positions: this.dataManager.getAllPositions() };
             
             // Cache risk rules for quick access elsewhere (e.g., monitor modal)
             this.riskRules = riskData.rules || {};
@@ -5776,15 +5737,12 @@ class TradingApp {
 
     async showRiskRuleOrders(symbol) {
         try {
-            // 获取今天的订单数据和持仓数据
-            const [ordersData, portfolioData] = await Promise.all([
-                this.apiCall('/orders'),
-                this.apiCall('/positions')
-            ]);
+            // 获取今天的订单数据
+            const ordersData = await this.apiCall('/orders');
             const today = new Date().toISOString().split('T')[0];
-            
+
             // 获取该symbol的持仓信息
-            const position = portfolioData.positions.find(pos => pos.symbol === symbol);
+            const position = this.dataManager.getAllPositions().find(pos => pos.symbol === symbol);
             const avgCost = position ? position.avg_cost : 0;
             
             // 过滤出今天的、由风险规则触发的、指定symbol的订单
@@ -5992,23 +5950,15 @@ class TradingApp {
         if (!effectivePrice || effectivePrice <= 0) {
             console.log('No price provided, attempting to get current market price for', symbol);
             try {
-                // Try to get current price from positions or market data
-                const positions = await this.apiCall('/positions');
-                if (positions.success && positions.positions) {
-                    const position = positions.positions.find(p => p.symbol === symbol);
-                    if (position && position.current_price > 0) {
-                        effectivePrice = position.current_price;
-                        console.log('Using current market price:', effectivePrice);
-                    }
+                const position = this.dataManager.getPosition(symbol);
+                if (position && position.current_price > 0) {
+                    effectivePrice = position.current_price;
+                    console.log('Using current market price:', effectivePrice);
                 }
             } catch (error) {
                 console.log('Could not get market price:', error);
-                // Don't show alert for authentication errors when getting price
-                if (error.message !== 'Authentication required') {
-                    console.warn('Price fetch failed:', error.message);
-                }
             }
-            
+
             // If still no price, show error and return
             if (!effectivePrice || effectivePrice <= 0) {
                 console.log('No valid price available, clearing suggestion');

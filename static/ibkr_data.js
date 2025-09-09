@@ -60,9 +60,7 @@ class IBKRDataManager {
      */
     async loadPortfolio() {
         try {
-            const data = await this.app.apiCall('/positions');
-            this.positions = data.positions;
-            this.updatePortfolioUI(data.positions);
+            this.updatePortfolioUI(this.positions);
         } catch (error) {
             console.error('Failed to load portfolio:', error);
         }
