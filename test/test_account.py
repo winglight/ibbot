@@ -5,7 +5,8 @@
 - /api/positions
 
 在无真实IBKR连接环境下：
-- 两个接口均应返回 400 (Not connected to IBKR)
+- /api/account_info 应返回 400 (Not connected to IBKR)
+- /api/positions 应返回 200，返回空列表并在 warning 字段中提示未连接
 
 若已连接：
 - 两个接口应返回 200；可能 success=True 并返回数据，或因超时返回 success=False 且带 error 信息（均视为通过）
@@ -90,16 +91,16 @@ def test_account_info(token: str):
     else:
         assert resp.status_code == 200, \
             f"已连接时期望200, 实际{resp.status_code}, body={resp.text}"
-        
+
         # 已连接时，允许 success=True（含account_info）或 success=False（如超时）。
         try:
             data = resp.json()
         except Exception:
             raise AssertionError("响应非JSON格式")
-        
+
         assert data.get('success') in (True, False), \
             f"响应结构不符合预期: {data}"
-        
+
         if data.get('success') is True:
             assert 'account_info' in data, \
                 f"缺少account_info字段: {data}"
@@ -113,21 +114,31 @@ def test_positions(token: str):
     resp = api_get('/api/positions', token, timeout=20)
 
     if not connected:
-        assert resp.status_code == 400 and 'Not connected' in resp.text, \
-            f"未连接时应返回400, 实际{resp.status_code}, body={resp.text}"
+        assert resp.status_code == 200, \
+            f"未连接时应返回200, 实际{resp.status_code}, body={resp.text}"
+
+        try:
+            data = resp.json()
+        except Exception:
+            raise AssertionError("响应非JSON格式")
+
+        assert data.get('success') is True and data.get('positions') == [], \
+            f"未连接时应返回空positions: {data}"
+        assert 'warning' in data and 'Not connected' in data['warning'], \
+            f"未连接时应包含 Not connected warning: {data}"
     else:
         assert resp.status_code == 200, \
             f"已连接时期望200, 实际{resp.status_code}, body={resp.text}"
-        
+
         # 已连接时，允许 success=True（含positions）或 success=False（如超时）。
         try:
             data = resp.json()
         except Exception:
             raise AssertionError("响应非JSON格式")
-        
+
         assert data.get('success') in (True, False), \
             f"响应结构不符合预期: {data}"
-        
+
         if data.get('success') is True:
             assert 'positions' in data, \
                 f"缺少positions字段: {data}"
