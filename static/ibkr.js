@@ -303,7 +303,7 @@ class IBKRConnectionManager {
                 break;
             case 'portfolio_update':
                 if (data.portfolio) {
-                    this.app.dataManager.updatePortfolioUI(data.portfolio);
+                    this.app.dataManager.updatePositionsUI(data.portfolio);
                 }
                 break;
             case 'order_update':
@@ -312,11 +312,11 @@ class IBKRConnectionManager {
                     delete this.app.ordersCache['orders_main'];
                 }
                 this.app.loadOrders();
-                // 订单状态更新时也刷新portfolio，确保持仓数据同步
-                this.app.loadPortfolio();
                 break;
             case 'position_update':
-                this.app.loadPortfolio();
+                if (data.positions) {
+                    this.app.dataManager.updatePositionsUI(data.positions);
+                }
                 break;
             case 'notification':
                 if (data.message) {
