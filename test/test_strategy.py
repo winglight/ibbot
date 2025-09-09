@@ -178,6 +178,8 @@ def test_strategy_execution_and_records(token):
     r_execs = api_get(f"/api/strategies/{TEST_STRATEGY_NAME}/executions", token)
     data_execs = r_execs.json()
     assert r_execs.status_code == 200 and isinstance(data_execs.get("executions", []), list)
+    for exec_item in data_execs.get("executions", []):
+        assert exec_item.get("order_source") == "strategy"
  
     # 查看性能统计
     r_perf = api_get(f"/api/strategies/{TEST_STRATEGY_NAME}/performance", token)
