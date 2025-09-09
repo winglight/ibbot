@@ -63,21 +63,6 @@ class Strategy:
     created_at: str = None
     updated_at: str = None
 
-
-@dataclass
-class StrategyExecution:
-    """策略执行数据类"""
-    name: str
-    symbol: str
-    action: str
-    quantity: int
-    price: Optional[float]
-    timestamp: str
-    order_id: Optional[str] = None
-    profit: Optional[float] = None
-    status: str = "pending"
-
-
 class DatabaseManager:
     """数据库管理器"""
     
@@ -152,23 +137,6 @@ class DatabaseManager:
                     updated_at TEXT NOT NULL
                 )
             """)
-            
-            # 创建策略执行表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS strategy_executions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    quantity INTEGER NOT NULL,
-                    price REAL,
-                    timestamp TEXT NOT NULL,
-                    order_id TEXT,
-                    profit REAL,
-                    status TEXT DEFAULT 'pending'
-                )
-            """)
-            
             # 创建历史数据表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS historical_data (
@@ -488,148 +456,47 @@ class DatabaseManager:
             conn.commit()
             database_logger.debug(f"Strategy deleted: {name}")
     
-    # 策略执行相关方法
-    def save_strategy_execution(self, execution: StrategyExecution):
-        """保存策略执行记录（按 order_id 幂等：存在则更新，不存在则插入）"""
+    # 策略执行表已移除；保留占位符以保持向后兼容接口
+    def load_strategy_orders(self, strategy_name: str, order_source: str = 'strategy', limit: int = 100) -> List[Order]:
+        """加载指定策略的订单记录"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-
-            # 如果带有 order_id，先检查是否已存在该记录
-            if execution.order_id:
-                cursor.execute("SELECT 1 FROM strategy_executions WHERE order_id = ?", (execution.order_id,))
-                exists = cursor.fetchone() is not None
-                if exists:
-                    # 按需更新可变字段
-                    update_fields = []
-                    params = []
-                    if execution.price is not None:
-                        update_fields.append("price = ?")
-                        params.append(execution.price)
-                    if execution.profit is not None:
-                        update_fields.append("profit = ?")
-                        params.append(execution.profit)
-                    if execution.status is not None:
-                        update_fields.append("status = ?")
-                        params.append(execution.status)
-
-                    # 如果没有需要更新的字段，则直接返回
-                    if not update_fields:
-                        database_logger.debug(f"Strategy execution exists (no changes) for: {execution.name}")
-                        return
-
-                    params.append(execution.order_id)
-                    cursor.execute(f"""
-                        UPDATE strategy_executions
-                        SET {', '.join(update_fields)}
-                        WHERE order_id = ?
-                    """, params)
-                    conn.commit()
-                    database_logger.debug(f"Strategy execution updated for: {execution.name}")
-                    return
-
-            # 默认插入
-            cursor.execute("""
-                INSERT INTO strategy_executions 
-                (name, symbol, action, quantity, price, timestamp, order_id, profit, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                execution.name, execution.symbol, execution.action, execution.quantity,
-                execution.price, execution.timestamp, execution.order_id, execution.profit, execution.status
-            ))
-            conn.commit()
-            database_logger.debug(f"Strategy execution saved for: {execution.name}")
-    
-    def update_strategy_execution(self, order_id: str, price: Optional[float] = None, profit: Optional[float] = None, status: Optional[str] = None):
-        """更新策略执行记录"""
-        if not order_id:
-            database_logger.warning("Cannot update strategy execution without order_id")
-            return False
-            
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # 构建动态更新语句
-            update_fields = []
-            params = []
-            
-            if price is not None:
-                update_fields.append("price = ?")
-                params.append(price)
-                
-            if profit is not None:
-                update_fields.append("profit = ?")
-                params.append(profit)
-                
-            if status is not None:
-                update_fields.append("status = ?")
-                params.append(status)
-                
-            if not update_fields:
-                database_logger.warning("No fields to update for strategy execution")
-                return False
-                
-            params.append(order_id)
-            
-            cursor.execute(f"""
-                UPDATE strategy_executions 
-                SET {', '.join(update_fields)}
-                WHERE order_id = ?
-            """, params)
-            
-            updated_rows = cursor.rowcount
-            conn.commit()
-            
-            if updated_rows > 0:
-                database_logger.debug(f"Strategy execution updated for order_id: {order_id}")
-                return True
-            else:
-                database_logger.warning(f"No strategy execution found with order_id: {order_id}")
-                return False
-    
-    def load_strategy_executions(self, strategy_name: Optional[str] = None, limit: int = 100) -> List[StrategyExecution]:
-        """加载策略执行记录"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            if strategy_name:
-                cursor.execute("""
-                    SELECT name, symbol, action, quantity, price, timestamp, order_id, profit, status 
-                    FROM strategy_executions 
-                    WHERE name = ? 
-                    ORDER BY timestamp DESC 
-                    LIMIT ?
-                """, (strategy_name, limit))
-            else:
-                cursor.execute("""
-                    SELECT name, symbol, action, quantity, price, timestamp, order_id, profit, status 
-                    FROM strategy_executions 
-                    ORDER BY timestamp DESC 
-                    LIMIT ?
-                """, (limit,))
-            
+            cursor.execute(
+                """
+                SELECT order_id, symbol, quantity, action, order_type, price,
+                       created_at as timestamp, exchange, sec_type,
+                       COALESCE(status, 'Submitted') as status,
+                       executed_at,
+                       rule_id,
+                       COALESCE(order_source, 'auto') as order_source,
+                       commission,
+                       pnl
+                FROM orders
+                WHERE strategy_name = ? AND order_source = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (strategy_name, order_source, limit),
+            )
             rows = cursor.fetchall()
-            
-            executions = []
+            orders: List[Order] = []
             for row in rows:
-                execution = StrategyExecution(*row)
-                executions.append(execution)
-            
-            database_logger.debug(f"Loaded {len(executions)} strategy executions")
-            return executions
+                orders.append(Order(*row))
+            database_logger.debug(f"Loaded {len(orders)} orders for strategy {strategy_name}")
+            return orders
 
-    def delete_strategy_executions(self, strategy_name: str) -> int:
-        """按策略名删除所有执行记录，返回删除的行数"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM strategy_executions WHERE name = ?", (strategy_name,))
-                deleted = cursor.rowcount
-                conn.commit()
-                database_logger.info(f"Deleted {deleted} executions for strategy: {strategy_name}")
-                return deleted or 0
-        except Exception as e:
-            database_logger.error(f"Failed to delete executions for {strategy_name}: {e}")
-            return 0
+    def delete_strategy_orders(self, strategy_name: str, order_source: str = 'strategy') -> int:
+        """删除指定策略的订单记录"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM orders WHERE strategy_name = ? AND order_source = ?",
+                (strategy_name, order_source),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            database_logger.info(f"Deleted {deleted} orders for strategy: {strategy_name}")
+            return deleted
     
     # 历史数据相关方法
     def save_historical_data(self, symbol: str, data: pd.DataFrame, bar_size: str = "1 day"):

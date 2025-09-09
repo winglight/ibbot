@@ -47,7 +47,6 @@ from src.risk_manager import RiskManager
 from src.connection_manager import connection_manager, ConnectionConfig
 from src.strategy_manager import StrategyManager
 from src.database import get_db_manager
-from src.strategy_manager import StrategyExecution
 from src.queue_manager import queue_manager
 from src.order_manager import OrderManager
 from src.models import HistoricalDataRequest, ChartDataRequest, OrderRequest, ExternalStrategyOrderRequest, StrategySettingsRequest, StrategyRequest, RiskRuleRequest, RiskConfigUpdateRequest, PositionSizingRequest, CurrentPriceRequest
@@ -3024,13 +3023,7 @@ async def clear_strategy_executions(name: str, user: Optional[str] = Depends(get
     """Clear all executions for a strategy"""
     try:
         db = get_db_manager()
-        deleted = db.delete_strategy_executions(name)
-        # 同步清理内存中的 executions
-        if strategy_manager:
-            before = len(strategy_manager.executions)
-            strategy_manager.executions = [e for e in strategy_manager.executions if e.strategy_name != name]
-            after = len(strategy_manager.executions)
-            logger.info(f"Cleared in-memory executions for {name}: {before - after} removed")
+        deleted = db.delete_strategy_orders(name)
         return {"success": True, "deleted": int(deleted)}
     except Exception as e:
         logger.error(f"Clear strategy executions error: {e}")
