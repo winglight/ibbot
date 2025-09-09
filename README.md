@@ -40,6 +40,7 @@
 - ✅ **用户认证**: JWT令牌认证系统
 - ✅ **多功能面板**: 交易、风险、策略、日志管理
 - ✅ **图表展示**: 实时价格图表和历史数据可视化
+- ✅ **PnL 日历**: 按策略展示每日盈亏情况
 
 ### 📱 通知系统
 - ✅ **Telegram集成**: 实时交易通知和风险警报
@@ -52,6 +53,20 @@
 - ✅ **数据迁移**: 从CSV/JSON文件自动迁移到数据库
 - ✅ **备份机制**: 订单和配置数据自动备份
 - ✅ **历史数据**: 完整的交易和策略执行历史
+
+## PnL Calendar 设置
+
+PnL Calendar 用于在策略详情页展示每日盈亏。默认前端已包含基础的日历组件，若需自定义或更新，可按以下步骤启用：
+
+1. 获取 [winglight/PNLCalendar](https://github.com/winglight/PNLCalendar) 项目的 JS 与 CSS 文件（或添加为 git submodule）。
+2. 将 `pnlcalendar.js` 和 `pnlcalendar.css` 复制到项目的 `static/` 目录。
+3. 重新加载网页后即可在策略详情的 **PnL Calendar** 标签中查看每日 PnL。
+
+自定义选项（在 `app.js` 中调用 `loadPnLCalendar` 时传入）：
+
+- `locale`：本地化语言代码（默认 `en-US`）。
+- `positiveColor`：盈利用背景色，默认 `#d4edda`。
+- `negativeColor`：亏损用背景色，默认 `#f8d7da`。
 
 ## 安装要求
 
