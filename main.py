@@ -2904,6 +2904,28 @@ async def get_strategy_performance_api(name: str, range: str = "1d", start: Opti
     metrics = strategy_manager.get_strategy_performance(name, start_date, end_date)
     return {"success": True, "metrics": metrics}
 
+
+@app.get("/api/strategies/{name}/pnl/daily")
+async def get_strategy_daily_pnl(name: str, user: Optional[str] = Depends(get_current_user)):
+    if 'order_manager' not in globals() or not order_manager:
+        raise HTTPException(status_code=500, detail="Order manager not initialized")
+    try:
+        orders = order_manager.get_orders(strategy_name=name)
+        daily: Dict[str, float] = {}
+        for o in orders:
+            if o.pnl is None:
+                continue
+            date_source = o.executed_at or o.created_at
+            if not date_source:
+                continue
+            day = date_source.date().isoformat()
+            daily[day] = daily.get(day, 0.0) + float(o.pnl)
+        data = [{"date": d, "pnl": v} for d, v in sorted(daily.items())]
+        return {"success": True, "pnl": data}
+    except Exception as e:
+        logger.error(f"Get strategy daily pnl error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # External trigger endpoint - Async queue version
 @app.post("/api/strategy")
 async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Request):

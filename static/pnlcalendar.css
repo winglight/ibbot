@@ -1,0 +1,5 @@
+.pnl-calendar-month{margin-bottom:1rem;}
+.pnl-calendar-table{width:100%;border-collapse:collapse;}
+.pnl-calendar-table th,.pnl-calendar-table td{border:1px solid #ddd;width:14.28%;height:30px;text-align:center;font-size:0.8rem;}
+.pnl-calendar-cell.positive{background:var(--pnl-positive,#d4edda);}
+.pnl-calendar-cell.negative{background:var(--pnl-negative,#f8d7da);}
