@@ -30,7 +30,7 @@ load_dotenv()
 BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000')
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change_me')
-TEST_STRATEGY_NAME = os.getenv('TEST_STRATEGY_NAME', 'strategy-internal-smoke')
+TEST_STRATEGY_NAME = os.getenv('TEST_STRATEGY_NAME', 'strategy_internal_smoke')
 
 
 def login(username: str, password: str) -> Optional[str]:
@@ -178,6 +178,8 @@ def test_strategy_execution_and_records(token):
     r_execs = api_get(f"/api/strategies/{TEST_STRATEGY_NAME}/executions", token)
     data_execs = r_execs.json()
     assert r_execs.status_code == 200 and isinstance(data_execs.get("executions", []), list)
+    for exec_item in data_execs.get("executions", []):
+        assert exec_item.get("order_source") == "strategy"
  
     # 查看性能统计
     r_perf = api_get(f"/api/strategies/{TEST_STRATEGY_NAME}/performance", token)

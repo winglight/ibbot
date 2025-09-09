@@ -405,6 +405,8 @@ class TestExternalStrategyAPI:
         assert data.get("success") is True
         assert "executions" in data
         assert isinstance(data["executions"], list)
+        for exec_item in data["executions"]:
+            assert exec_item.get("order_source") == "strategy"
 
     def test_strategy_executions_delete(self):
         """测试清除策略执行记录"""
@@ -418,6 +420,10 @@ class TestExternalStrategyAPI:
         assert response.status_code == 200
         data = response.json()
         assert data.get("success") is True
+        # Ensure executions list is now empty
+        after = api_get(f"/api/strategies/{TEST_STRATEGY_NAME}/executions", self.token)
+        assert after.status_code == 200
+        assert after.json().get("executions") == []
 
     def test_strategy_performance_stats(self):
         """测试策略性能统计接口"""

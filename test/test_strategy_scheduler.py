@@ -7,7 +7,7 @@ import pytest
 import requests
 
 BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
-STRATEGY_NAME = os.getenv("TEST_SCHEDULE_STRATEGY", "strategy-scheduler-e2e")
+STRATEGY_NAME = os.getenv("TEST_SCHEDULE_STRATEGY", "strategy_scheduler_e2e")
 
 def api_post(path: str, token: Optional[str], json: dict, timeout: int = 15):
     headers = {"Content-Type": "application/json"}
@@ -76,3 +76,5 @@ def test_strategy_with_schedule(token):
         pytest.skip("No executions recorded; scheduler may not be running")
 
     assert isinstance(executions, list)
+    for exec_item in executions:
+        assert exec_item.get("order_source") == "strategy"

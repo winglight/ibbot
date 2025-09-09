@@ -9,6 +9,14 @@ const INTERVAL_MINUTES_MAP = {
     '1hour': 60
 };
 
+function slugifyStrategyName(name) {
+    return (name || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
 class TradingApp {
     constructor() {
         this.ws = null;
@@ -232,9 +240,11 @@ class TradingApp {
                 const fileGroup = document.getElementById('strategyFileGroup');
                 const fileSelect = document.getElementById('strategyFileSelect');
                 const slTpGroup = document.getElementById('slTpGroup');
+                const filenamePreview = document.getElementById('strategyFilenamePreview');
                 if (!nameInput || !typeSelect || !descInput) return;
                 // reset form
                 nameInput.value = '';
+                if (filenamePreview) filenamePreview.textContent = '';
                 typeSelect.value = 'external';
                 descInput.value = '';
                 if (useTemplateCheckbox) useTemplateCheckbox.checked = true;
@@ -342,6 +352,15 @@ class TradingApp {
                 } catch (err) {
                     this.showAlert('danger', 'Failed to generate token');
                 }
+            });
+        }
+
+        const nameInput = document.getElementById('strategyNameInput');
+        const filenamePreview = document.getElementById('strategyFilenamePreview');
+        if (nameInput && filenamePreview) {
+            nameInput.addEventListener('input', () => {
+                const sanitized = slugifyStrategyName(nameInput.value);
+                filenamePreview.textContent = sanitized ? `${sanitized}.py` : '';
             });
         }
 
@@ -4297,6 +4316,12 @@ class TradingApp {
         console.log('🔍 === End Debug Info ===');
     }
 
+    renderInternalOrders() {
+        const tbody = document.querySelector('#internalOrdersTable tbody');
+        if (!tbody) return;
+        this.updateOrdersTableSmart(this.orders || [], tbody);
+    }
+
     async loadPortfolio() {
         try {
             const data = await this.apiCall('/positions');
@@ -5016,6 +5041,68 @@ class TradingApp {
             if (typeEl) typeEl.textContent = s?.strategy_type || '-';
             if (trigEl) trigEl.textContent = s?.trigger_count ?? 0;
             if (lastEl) lastEl.textContent = s?.last_triggered ? new Date(s.last_triggered).toLocaleString() : '-';
+
+            const isInternal = s?.strategy_type === 'internal';
+            const summaryWrap = document.getElementById('summary-tab-wrap');
+            const ordersWrap = document.getElementById('internal-orders-tab-wrap');
+            const execWrap = document.getElementById('executions-tab-wrap');
+            const apiWrap = document.getElementById('api-examples-tab-wrap');
+            const summaryPane = document.getElementById('summary');
+            const ordersPane = document.getElementById('internal-orders');
+            const chartsTabText = document.getElementById('charts-tab-text');
+            if (isInternal) {
+                summaryWrap?.classList.remove('d-none');
+                ordersWrap?.classList.remove('d-none');
+                execWrap?.classList.add('d-none');
+                apiWrap?.classList.add('d-none');
+                summaryPane?.classList.remove('d-none');
+                ordersPane?.classList.remove('d-none');
+                if (chartsTabText) chartsTabText.textContent = 'Visual Metrics';
+                new bootstrap.Tab(document.getElementById('summary-tab')).show();
+
+                try {
+                    const infoRes = await this.apiCall(`/strategies/${name}/internal-info`);
+                    if (infoRes.success) {
+                        const info = infoRes.strategy || {};
+                        const descEl = document.getElementById('summaryDescription');
+                        const pathEl = document.getElementById('summaryPath');
+                        if (descEl) descEl.textContent = info.description || '';
+                        if (pathEl) pathEl.textContent = info.file_path || '';
+                        const schedList = document.getElementById('summarySchedule');
+                        if (schedList) {
+                            schedList.innerHTML = '';
+                            (info.schedule || []).forEach(item => {
+                                const li = document.createElement('li');
+                                li.textContent = `${item.time || ''} ${item.action || ''} ${item.qty || ''} ${item.symbol || ''}`.trim();
+                                schedList.appendChild(li);
+                            });
+                        }
+                        const riskBody = document.querySelector('#summaryRiskTable tbody');
+                        if (riskBody) {
+                            riskBody.innerHTML = '';
+                            const rr = info.risk_rules || {};
+                            Object.keys(rr).forEach(sym => {
+                                const rule = rr[sym] || {};
+                                const tr = document.createElement('tr');
+                                tr.innerHTML = `<td>${sym}</td><td>${rule.stop_loss_price ?? ''}</td><td>${rule.take_profit_price ?? ''}</td>`;
+                                riskBody.appendChild(tr);
+                            });
+                        }
+                    }
+                } catch (err) {
+                    console.error('Failed to load internal strategy info:', err);
+                }
+                this.renderInternalOrders();
+            } else {
+                summaryWrap?.classList.add('d-none');
+                ordersWrap?.classList.add('d-none');
+                execWrap?.classList.remove('d-none');
+                apiWrap?.classList.remove('d-none');
+                summaryPane?.classList.add('d-none');
+                ordersPane?.classList.add('d-none');
+                if (chartsTabText) chartsTabText.textContent = 'Charts';
+                new bootstrap.Tab(document.getElementById('charts-tab')).show();
+            }
 
             // API Examples
             const container = document.getElementById('apiExampleContent');
@@ -6137,54 +6224,15 @@ class TradingApp {
     async showNotificationSettings() {
         try {
             const response = await this.apiCall('/notifications/settings');
-            const defaultSettings = {
-                telegram_enabled: false,
-                telegram_chat_id: '',
-                email_enabled: false,
-                email_address: '',
-                // Trading reminder settings
-                trading_reminder_enabled: false,
-                start_trading_time: '20:30',
-                end_trading_time: '22:30',
-                browser_notification_enabled: true,
-                telegram_reminder_enabled: false,
-                events: {
-                    order_filled: true,
-                    position_opened: true,
-                    position_closed: true,
-                    risk_rule_triggered: true,
-                    strategy_started: true,
-                    strategy_stopped: true
-                }
-            };
-            const settings = {
-                ...defaultSettings,
-                ...(response.settings || {}),
-                events: {
-                    ...defaultSettings.events,
-                    ...((response.settings && response.settings.events) || {})
-                }
-            };
+            const settings = response.settings || {};
+            
+            // 填充基础设置标签页
+            await this.populateBasicSettings(settings);
+            
+            // 填充模块设置标签页
+            await this.populateModuleSettings(settings);
 
-            // Populate the existing modal with data
-            document.getElementById('telegramEnabled').checked = settings.telegram_enabled;
-            document.getElementById('telegramBotToken').value = settings.telegram_bot_token || '';
-            document.getElementById('telegramChatId').value = settings.telegram_chat_id;
-            document.getElementById('emailEnabled').checked = settings.email_enabled;
-            document.getElementById('emailAddress').value = settings.email_address;
-            document.getElementById('tradingReminderEnabled').checked = settings.trading_reminder_enabled;
-            document.getElementById('startTradingTime').value = settings.start_trading_time || '20:30';
-            document.getElementById('endTradingTime').value = settings.end_trading_time || '22:30';
-            document.getElementById('browserNotificationEnabled').checked = settings.browser_notification_enabled;
-            document.getElementById('telegramReminderEnabled').checked = settings.telegram_reminder_enabled;
-            document.getElementById('orderFilled').checked = settings.events.order_filled;
-            document.getElementById('positionOpened').checked = settings.events.position_opened;
-            document.getElementById('positionClosed').checked = settings.events.position_closed;
-            document.getElementById('riskRuleTriggered').checked = settings.events.risk_rule_triggered;
-            document.getElementById('strategyStarted').checked = settings.events.strategy_started;
-            document.getElementById('strategyStopped').checked = settings.events.strategy_stopped;
-
-            // Show modal
+            // 显示模态框
             const modal = new bootstrap.Modal(document.getElementById('notificationSettingsModal'));
             modal.show();
 
@@ -6194,28 +6242,136 @@ class TradingApp {
         }
     }
 
+    async populateBasicSettings(settings) {
+        // Telegram 设置
+        const telegramConfig = settings.telegram || {};
+        document.getElementById('telegramEnabled').checked = telegramConfig.enabled || false;
+        document.getElementById('telegramBotToken').value = telegramConfig.config?.bot_token || '';
+        document.getElementById('telegramChatId').value = telegramConfig.config?.chat_id || '';
+
+        // Email 设置 (兼容旧版)
+        document.getElementById('emailEnabled').checked = settings.email_enabled || false;
+        document.getElementById('emailAddress').value = settings.email_address || '';
+
+        // Trading Reminder 设置
+        const tradingReminder = settings.trading_reminder || {};
+        document.getElementById('tradingReminderEnabled').checked = tradingReminder.enabled || false;
+        document.getElementById('startTradingTime').value = tradingReminder.start_trading_time || '09:30';
+        document.getElementById('endTradingTime').value = tradingReminder.end_trading_time || '16:00';
+        document.getElementById('browserNotificationEnabled').checked = tradingReminder.browser_notification_enabled !== false;
+        document.getElementById('telegramReminderEnabled').checked = tradingReminder.telegram_reminder_enabled || false;
+    }
+
+    async populateModuleSettings(settings) {
+        const tableBody = document.getElementById('moduleSettingsTableBody');
+        if (!tableBody) return;
+
+        // 获取可用模块列表
+        const modules = await this.getAvailableModules();
+        
+        // 从设置中提取模块配置
+        const chrome = settings.chrome || {};
+        const telegram = settings.telegram || {};
+        const email = { events: [] }; // Email 暂时不支持事件级别配置
+
+        // 清空表格
+        tableBody.innerHTML = '';
+
+        // 为每个模块创建行
+        modules.forEach(module => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td class="fw-bold">${module}</td>
+                <td class="text-center">
+                    <input type="checkbox" class="form-check-input" 
+                           data-channel="chrome" data-module="${module}"
+                           ${((chrome.events && chrome.events.length > 0) ? chrome.events.includes(module) : true) ? 'checked' : ''}>
+                </td>
+                <td class="text-center">
+                    <input type="checkbox" class="form-check-input" 
+                           data-channel="telegram" data-module="${module}"
+                           ${(telegram.enabled && telegram.events?.includes(module)) ? 'checked' : ''}>
+                </td>
+                <td class="text-center">
+                    <input type="checkbox" class="form-check-input" 
+                           data-channel="email" data-module="${module}" disabled>
+                </td>
+            `;
+            tableBody.appendChild(row);
+        });
+    }
+
+    async getAvailableModules() {
+        // 定义默认的通知模块
+        const defaultModules = ['market', 'strategy', 'order', 'risk'];
+        
+        try {
+            // 尝试从日志模块获取更多模块
+            const res = await this.apiCall('/logs/modules?range=today');
+            if (res?.modules && res.modules.length > 0) {
+                // 合并默认模块和动态模块，去重
+                const allModules = [...new Set([...defaultModules, ...res.modules])];
+                return allModules.filter(m => m !== 'all'); // 过滤掉 'all'
+            }
+        } catch (e) {
+            console.warn('Failed to load dynamic modules, using defaults:', e);
+        }
+        
+        return defaultModules;
+    }
+
     async saveNotificationSettings() {
         try {
-            const settings = {
-                telegram_enabled: document.getElementById('telegramEnabled').checked,
-                telegram_bot_token: document.getElementById('telegramBotToken').value,
-                telegram_chat_id: document.getElementById('telegramChatId').value,
-                email_enabled: document.getElementById('emailEnabled').checked,
-                email_address: document.getElementById('emailAddress').value,
-                // Trading reminder settings
-                trading_reminder_enabled: document.getElementById('tradingReminderEnabled').checked,
-                start_trading_time: document.getElementById('startTradingTime').value,
-                end_trading_time: document.getElementById('endTradingTime').value,
-                browser_notification_enabled: document.getElementById('browserNotificationEnabled').checked,
-                telegram_reminder_enabled: document.getElementById('telegramReminderEnabled').checked,
-                events: {
-                    order_filled: document.getElementById('orderFilled').checked,
-                    position_opened: document.getElementById('positionOpened').checked,
-                    position_closed: document.getElementById('positionClosed').checked,
-                    risk_rule_triggered: document.getElementById('riskRuleTriggered').checked,
-                    strategy_started: document.getElementById('strategyStarted').checked,
-                    strategy_stopped: document.getElementById('strategyStopped').checked
+            // 收集基础设置
+            const telegram_enabled = document.getElementById('telegramEnabled').checked;
+            const telegram_bot_token = document.getElementById('telegramBotToken').value;
+            const telegram_chat_id = document.getElementById('telegramChatId').value;
+            const email_enabled = document.getElementById('emailEnabled').checked;
+            const email_address = document.getElementById('emailAddress').value;
+            const trading_reminder_enabled = document.getElementById('tradingReminderEnabled').checked;
+            const start_trading_time = document.getElementById('startTradingTime').value;
+            const end_trading_time = document.getElementById('endTradingTime').value;
+            const browser_notification_enabled = document.getElementById('browserNotificationEnabled').checked;
+            const telegram_reminder_enabled = document.getElementById('telegramReminderEnabled').checked;
+
+            // 收集模块设置
+            const chromeModules = [];
+            const telegramModules = [];
+            const rows = document.querySelectorAll('#moduleSettingsTableBody input[type="checkbox"]');
+            rows.forEach(input => {
+                const module = input.getAttribute('data-module');
+                const channel = input.getAttribute('data-channel');
+                if (input.checked) {
+                    if (channel === 'chrome') chromeModules.push(module);
+                    if (channel === 'telegram') telegramModules.push(module);
                 }
+            });
+
+            // 构造后端需要的结构
+            const settings = {
+                chrome: {
+                    enabled: true, // UI要求默认Chrome全部选中，允许用户全不选也行
+                    config: {},
+                    events: chromeModules.length ? chromeModules : await this.getAvailableModules() // 如果未选，则默认全选
+                },
+                telegram: {
+                    enabled: telegram_enabled,
+                    config: {
+                        bot_token: telegram_bot_token,
+                        chat_id: telegram_chat_id
+                    },
+                    events: telegramModules
+                },
+                trading_reminder: {
+                    enabled: trading_reminder_enabled,
+                    start_trading_time,
+                    end_trading_time,
+                    browser_notification_enabled,
+                    telegram_reminder_enabled
+                },
+                // 兼容旧版字段
+                email_enabled,
+                email_address
             };
 
             const response = await this.apiCall('/notifications/settings', {
@@ -6227,7 +6383,7 @@ class TradingApp {
                 this.showAlert('success', 'Notification settings saved successfully');
                 
                 // Update trading reminder schedules if enabled
-                if (settings.trading_reminder_enabled) {
+                if (settings.trading_reminder && settings.trading_reminder.enabled) {
                     this.scheduleTradingReminders();
                 }
                 
@@ -6244,13 +6400,15 @@ class TradingApp {
 
     async testTradingReminder() {
         try {
-            // Test browser notification
+            // 测试浏览器通知
+            let browserSent = false;
             if ('Notification' in window) {
                 if (Notification.permission === 'granted') {
                     new Notification('Trading Reminder Test', {
                         body: 'This is a test trading reminder notification',
                         icon: '/static/favicon.ico'
                     });
+                    browserSent = true;
                 } else if (Notification.permission !== 'denied') {
                     const permission = await Notification.requestPermission();
                     if (permission === 'granted') {
@@ -6258,20 +6416,22 @@ class TradingApp {
                             body: 'This is a test trading reminder notification',
                             icon: '/static/favicon.ico'
                         });
+                        browserSent = true;
                     }
                 }
             }
 
-            // Test Telegram notification
-            const response = await this.apiCall('/test-reminder', {
-                method: 'POST',
-                body: JSON.stringify({ message: 'Trading reminder test from notification settings' })
-            });
+            // Telegram测试：不调用后端不存在的接口，仅给出提示
+            const telegramEnabled = document.getElementById('telegramEnabled')?.checked;
+            const botToken = document.getElementById('telegramBotToken')?.value.trim();
+            const chatId = document.getElementById('telegramChatId')?.value.trim();
 
-            if (response.success) {
-                this.showAlert('success', 'Test reminder sent successfully!');
+            if (telegramEnabled && botToken && chatId) {
+                this.showAlert('info', '浏览器通知测试已发送。Telegram将在发生实际事件时按模块设置发送通知（保存设置后生效）。');
+            } else if (browserSent) {
+                this.showAlert('success', '浏览器通知测试已发送。');
             } else {
-                this.showAlert('warning', 'Browser notification sent, but Telegram test failed: ' + (response.error || 'Unknown error'));
+                this.showAlert('warning', '无法发送浏览器通知（可能未授权）。请允许通知或在地址栏权限设置中启用。');
             }
         } catch (error) {
             console.error('Test reminder failed:', error);
