@@ -573,7 +573,7 @@ risk_manager = RiskManager(ibkr_client=None, notification_manager=notification_m
 strategy_manager = StrategyManager()  # 初始化
 # 注入依赖：让 StrategyManager 能访问 RiskManager（用于自动创建风控规则）
 try:
-    strategy_manager.set_dependencies(risk_manager=risk_manager)
+    strategy_manager.set_dependencies(risk_manager=risk_manager, queue_manager=queue_manager)
 except Exception as _sm_dep_err:
     logger.warning(f"StrategyManager set_dependencies at startup failed: {_sm_dep_err}")
 websocket_connections = []
@@ -608,6 +608,12 @@ async def lifespan(app: FastAPI):
         main_logger.info("Risk manager started during application startup")
     except Exception as e:
         main_logger.warning(f"Risk manager startup warning: {e}")
+
+    try:
+        strategy_manager.start()
+        main_logger.info("Strategy manager started during application startup")
+    except Exception as e:
+        main_logger.warning(f"Strategy manager startup warning: {e}")
 
     # 启动定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
     # 现在使用异步调用，不会阻塞主线程
