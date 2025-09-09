@@ -46,6 +46,7 @@ class TradingApp {
         this.loginManager = new LoginManager(this);
         this.ibkrManager = new IBKRConnectionManager(this);
         this.dataManager = new IBKRDataManager(this);
+        this.orderManager = new OrderManager(this);
         
         this.init();
     }
@@ -917,108 +918,6 @@ class TradingApp {
     
     // Update expected PnL based on current inputs
     // 旧版本的updateExpectedPnL已删除，使用新版本的方法
-
-    async placeOrder() {
-        // 如果是编辑订单，先取消原订单
-        if (this.editingOrderId) {
-            try {
-                await this.cancelOrder(this.editingOrderId);
-                this.showAlert('info', `原订单 ${this.editingOrderId} 已取消，正在提交新订单...`);
-            } catch (error) {
-                console.error('Failed to cancel original order:', error);
-                this.showAlert('warning', '取消原订单失败，但将继续提交新订单');
-            }
-            this.editingOrderId = null; // 清除编辑状态
-        }
-        
-        const symbol = document.getElementById('orderSymbol').value.toUpperCase();
-        
-        // 自动检测证券类型
-        const futureSymbols = ['MNQ', 'NQ', 'ES', 'MES', 'YM', 'MYM', 'RTY', 'M2K'];
-        const secType = futureSymbols.includes(symbol) ? 'FUT' : 'STK';
-        
-        const quantityValue = parseInt(document.getElementById('orderQuantity').value);
-        const order = {
-            symbol: symbol,
-            quantity: quantityValue,
-            action: document.getElementById('orderAction').value,
-            order_type: document.getElementById('orderType').value,
-            price: document.getElementById('orderPrice').value ? parseFloat(document.getElementById('orderPrice').value) : null,
-            sec_type: secType
-        };
-        
-        // Add risk rule data for limit orders only if symbol not in portfolio
-        const symbolInPortfolio = this.positions && this.positions.some(pos => pos.symbol === symbol);
-        if (order.order_type === 'LIMIT' && document.getElementById('enableRiskRule').checked && !symbolInPortfolio) {
-            const stopLossPrice = parseFloat(document.getElementById('stopLossPrice').value);
-            const takeProfitPrice = parseFloat(document.getElementById('takeProfitPrice').value);
-            
-            if (stopLossPrice > 0 || takeProfitPrice > 0) {
-                order.risk_rule = {
-                    stop_loss_price: stopLossPrice > 0 ? stopLossPrice : null,
-                    take_profit_price: takeProfitPrice > 0 ? takeProfitPrice : null
-                };
-            }
-        }
-        
-        if (!order.symbol || !order.quantity) {
-            this.showAlert('warning', 'Please fill in all required fields');
-            return;
-        }
-        
-        if (order.order_type === 'LIMIT' && !order.price) {
-            this.showAlert('warning', 'Price is required for limit orders');
-            return;
-        }
-        
-        // Check IB connection status before placing order
-        if (!this.connected) {
-            this.showAlert('warning', 'Please connect to Interactive Brokers first');
-            return;
-        }
-        
-        try {
-            await this.apiCall('/place_order', {
-                method: 'POST',
-                body: JSON.stringify(order)
-            });
-            
-            this.showAlert('success', 'Order placed successfully');
-            
-            // Save the quantity and symbol values before resetting
-            localStorage.setItem('lastOrderQuantity', quantityValue);
-            localStorage.setItem('lastOrderSymbol', symbol);
-            
-            document.getElementById('orderForm').reset();
-            // Reset to market order default state
-            document.getElementById('orderType').value = 'MARKET';
-            document.getElementById('orderPrice').disabled = true;
-            
-            // Restore the quantity value
-            document.getElementById('orderQuantity').value = quantityValue;
-            
-            // Close modal
-            const modal = bootstrap.Modal.getInstance(document.getElementById('orderModal'));
-            if (modal) {
-                modal.hide();
-                // Force remove backdrop if it exists
-                setTimeout(() => {
-                    const backdrop = document.querySelector('.modal-backdrop');
-                    if (backdrop) {
-                        backdrop.remove();
-                    }
-                    document.body.classList.remove('modal-open');
-                    document.body.style.removeProperty('overflow');
-                    document.body.style.removeProperty('padding-right');
-                }, 300);
-            }
-            
-            // Refresh orders list
-            this.loadOrders();
-        } catch (error) {
-            console.error('Failed to place order:', error);
-        }
-    }
 
     openRiskRuleModal(symbol = '', stopLoss = '', takeProfit = '', maxTime = '', position = 0, currentPrice = 0, avgCost = 0, isEditMode = false) {
         document.getElementById('riskSymbol').value = symbol;
@@ -3919,383 +3818,36 @@ class TradingApp {
         }
     }
     
-    // 防抖包装方法
+    // 委托给OrderManager
     async loadOrders() {
-        console.log('🔄 loadOrders method called with debounce at:', new Date().toISOString());
-        // 确保防抖函数已初始化
-        this.initOrdersDebounce();
-        
-        const tbody = document.querySelector('#ordersTable tbody');
-        if (tbody) {
-            // 显示加载状态
-            tbody.innerHTML = `
-                <tr>
-                    <td colspan="8" class="text-center py-3">
-                        <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
-                        <small>加载订单数据中...</small>
-                    </td>
-                </tr>
-            `;
-        }
-        
-        // 调用防抖版本的方法
-        this.debouncedLoadOrders();
+        return this.orderManager.loadOrders();
     }
     
-    // 实际加载订单的方法
-    async _loadOrders() {
-        console.log('🔄 _loadOrders method called at:', new Date().toISOString());
-        console.log('Executing actual orders loading...');
-        try {
-            // 检查缓存
-            const cacheKey = 'orders_main';
-            const now = Date.now();
-            const cachedData = this.ordersCache ? this.ordersCache[cacheKey] : null;
-            
-            console.log('Cache check - cacheKey:', cacheKey, 'cachedData exists:', !!cachedData);
-            if (cachedData) {
-                console.log('Cache age:', (now - cachedData.timestamp) / 1000, 'seconds');
-            }
-            
-            let data;
-            if (cachedData && (now - cachedData.timestamp) < 10 * 1000) { // 10秒缓存
-                console.log('Using cached orders data for main list');
-                data = cachedData.data;
-            } else {
-                console.log('Fetching fresh orders data from API...');
-                // 获取订单数据，使用缓存机制
-                data = await this.apiCall('/orders', {
-                    useCache: true,
-                    cacheTime: 10000, // 10秒缓存
-                    timeout: 20000 // 20秒超时
-                });
-                
-                // 确保ordersCache已初始化
-                if (!this.ordersCache) {
-                    this.ordersCache = {};
-                }
-                
-                // 更新缓存
-                this.ordersCache[cacheKey] = {
-                    data: data,
-                    timestamp: now
-                };
-            }
-            
-            // 仅保留当天创建的订单，并按创建时间反序排列（最新的在前）
-            let orders = (data.orders && Array.isArray(data.orders)) ? data.orders : [];
-            console.log('Raw orders from API:', orders.length);
-            orders = orders.filter(order => this.isSameDay(order.submit_time || order.created_at));
-            console.log('Filtered orders for today:', orders.length);
-            if (orders && Array.isArray(orders)) {
-                orders.sort((a, b) => {
-                    const timeA = new Date(a.submit_time || 0).getTime();
-                    const timeB = new Date(b.submit_time || 0).getTime();
-                    return timeB - timeA; // 反序排列
-                });
-            }
-
-            // 缓存排序后的订单列表，供其他功能使用
-            this.orders = orders;
-            
-            const tbody = document.querySelector('#ordersTable tbody');
-            if (!tbody) return;
-            
-            // 清除可能存在的加载提示行
-            const loadingRows = tbody.querySelectorAll('tr');
-            loadingRows.forEach(row => {
-                const cells = row.querySelectorAll('td');
-                if (cells.length > 0 && cells[0].textContent.includes('加载订单数据中')) {
-                    row.remove();
-                }
-            });
-            
-            // 如果没有订单，使用智能差异更新来清除现有订单并显示提示信息
-            if (orders.length === 0) {
-                this.updateOrdersTableSmart([], tbody);
-                // 如果表格为空，添加提示信息
-                if (tbody.children.length === 0) {
-                    tbody.innerHTML = `
-                        <tr>
-                            <td colspan="8" class="text-center py-3">
-                                <small>今日暂无订单</small>
-                            </td>
-                        </tr>
-                    `;
-                }
-                return;
-            }
-            
-            // 使用智能差异更新而不是完全重新渲染
-            this.updateOrdersTableSmart(orders, tbody);
-            
-        } catch (error) {
-            console.error('Failed to load orders:', error);
-            const tbody = document.querySelector('#ordersTable tbody');
-            if (tbody) {
-                tbody.innerHTML = `
-                    <tr>
-                        <td colspan="8" class="text-center py-3">
-                            <div class="text-danger">加载订单失败</div>
-                            <small class="text-muted">${error.message || '未知错误'}</small>
-                        </td>
-                    </tr>
-                `;
-            }
-        }
+    async placeOrder() {
+        return this.orderManager.placeOrder();
     }
+    
+    async cancelOrder(orderId, button) {
+        return this.orderManager.cancelOrder(orderId, button);
+    }
+    
+    async cancelAllOrders() {
+        return this.orderManager.cancelAllOrders();
+    }
+    
+    async syncLimitOrder(orderId, button, event) {
+        return this.orderManager.syncLimitOrder(orderId, button, event);
+    }
+    
+    // _loadOrders方法已迁移到OrderManager
     
     // 智能更新Orders表格，只更新发生变化的行
-    updateOrdersTableSmart(newOrders, tbody) {
-        console.log('🔄 updateOrdersTableSmart called with orders:', newOrders.length);
-        
-        // 获取当前表格中的所有行
-        const currentRows = Array.from(tbody.querySelectorAll('tr'));
-        const currentOrderIds = new Set();
-        
-        // 提取当前表格中的订单ID
-        currentRows.forEach(row => {
-            const cells = row.querySelectorAll('td');
-            if (cells.length > 0 && cells[0].textContent.trim() !== '今日暂无订单' && !cells[0].textContent.includes('加载订单')) {
-                currentOrderIds.add(cells[0].textContent.trim());
-            }
-        });
-        
-        // 创建新订单的映射
-        const newOrdersMap = new Map();
-        newOrders.forEach(order => {
-            newOrdersMap.set(order.order_id.toString(), order);
-        });
-        
-        // 检查需要删除的行
-        currentRows.forEach(row => {
-            const cells = row.querySelectorAll('td');
-            if (cells.length > 0) {
-                const cellText = cells[0].textContent.trim();
-                // 如果有新订单数据，清除"今日暂无订单"提示
-                if (newOrders.length > 0 && cellText === '今日暂无订单') {
-                    row.remove();
-                    return;
-                }
-                // 删除不存在于新数据中的订单行
-                if (cellText && !newOrdersMap.has(cellText) && cellText !== '今日暂无订单' && !cellText.includes('加载订单')) {
-                    row.remove();
-                }
-            }
-        });
-        
-        // 处理新订单和更新现有订单
-        newOrders.forEach((order, index) => {
-            const orderId = order.order_id.toString();
-            const existingRow = this.findOrderRow(tbody, orderId);
-            const newRowHtml = this.generateOrderRowHtml(order);
-            
-            if (existingRow) {
-                // 检查行内容是否发生变化
-                const tempTbody = document.createElement('tbody');
-                tempTbody.innerHTML = newRowHtml;
-                const newRowContent = tempTbody.firstElementChild;
-                
-                if (!this.isRowContentEqual(existingRow, newRowContent)) {
-                    // 内容发生变化，更新行
-                    existingRow.innerHTML = newRowContent.innerHTML;
-                    existingRow.setAttribute('data-notes', newRowContent.getAttribute('data-notes') || '');
-                    existingRow.setAttribute('onmouseenter', newRowContent.getAttribute('onmouseenter') || '');
-                    existingRow.setAttribute('onmouseleave', newRowContent.getAttribute('onmouseleave') || '');
-                    
-                    // 添加更新动画效果
-                    existingRow.style.backgroundColor = '#fff3cd';
-                    setTimeout(() => {
-                        existingRow.style.backgroundColor = '';
-                    }, 1000);
-                }
-            } else {
-                // 新订单，插入到正确位置
-                // 使用<tbody>解析<tr>，确保创建出正确的表格行元素
-                const tempTbody = document.createElement('tbody');
-                tempTbody.innerHTML = newRowHtml;
-                const newRow = tempTbody.firstElementChild;
-                
-                if (!newRow || !(newRow instanceof Node)) {
-                    console.error('❌ Failed to create valid DOM element from HTML:', newRowHtml);
-                    return; // 跳过这个订单
-                }
-                
-                // 找到插入位置（按时间排序）
-                const insertPosition = this.findInsertPosition(tbody, index);
-                if (insertPosition) {
-                    tbody.insertBefore(newRow, insertPosition);
-                } else {
-                    tbody.appendChild(newRow);
-                }
-                
-                // 添加新增动画效果
-                newRow.style.backgroundColor = '#d1ecf1';
-                setTimeout(() => {
-                    newRow.style.backgroundColor = '';
-                }, 1000);
-            }
-        });
-    }
-    
-    // 查找指定订单ID的行
-    findOrderRow(tbody, orderId) {
-        const rows = tbody.querySelectorAll('tr');
-        for (let row of rows) {
-            const cells = row.querySelectorAll('td');
-            if (cells.length > 0 && cells[0].textContent.trim() === orderId) {
-                return row;
-            }
-        }
-        return null;
-    }
-    
-    // 比较两行内容是否相等
-    isRowContentEqual(row1, row2) {
-        const cells1 = row1.querySelectorAll('td');
-        const cells2 = row2.querySelectorAll('td');
-        
-        if (cells1.length !== cells2.length) return false;
-        
-        for (let i = 0; i < cells1.length; i++) {
-            // 对于操作列（最后一列），比较按钮的存在性而不是具体内容
-            if (i === cells1.length - 1) {
-                const buttons1 = cells1[i].querySelectorAll('button');
-                const buttons2 = cells2[i].querySelectorAll('button');
-                if (buttons1.length !== buttons2.length) return false;
-                
-                // 比较按钮的类型（通过title属性）
-                for (let j = 0; j < buttons1.length; j++) {
-                    if (buttons1[j].getAttribute('title') !== buttons2[j].getAttribute('title')) {
-                        return false;
-                    }
-                }
-            } else {
-                // 对于其他列，比较innerHTML
-                if (cells1[i].innerHTML.trim() !== cells2[i].innerHTML.trim()) {
-                    return false;
-                }
-            }
-        }
-        
-        return true;
-    }
-    
-    // 找到新行的插入位置
-    findInsertPosition(tbody, targetIndex) {
-        const rows = tbody.querySelectorAll('tr');
-        if (targetIndex >= rows.length) {
-            return null; // 插入到末尾
-        }
-        return rows[targetIndex];
-    }
-    
-    // 生成订单行的HTML
-    generateOrderRowHtml(order) {
-        // 计算价格显示
-        let priceDisplay = '';
-        if (order.order_type === 'MKT') {
-            // 市价单显示成交价
-            priceDisplay = order.avg_fill_price && order.avg_fill_price > 0 ? 
-                `$${this.formatNumber(order.avg_fill_price)}` : 'Market';
-        } else {
-            // 限价单显示设定价格，优先使用limit_price，其次使用price
-            const limitPrice = order.limit_price || order.price;
-            priceDisplay = limitPrice ? `$${this.formatNumber(limitPrice)}` : 'N/A';
-        }
-        
-        // 特殊处理ID为20的risk rule触发订单状态
-        let displayStatus = order.status;
-        if (order.order_id === 20 && order.status === 'PendingSubmit') {
-            displayStatus = 'Filled';
-        }
-        
-        // 判断是否可以编辑/取消
-        const canEdit = order.status === 'Submitted' || order.status === 'PreSubmitted';
-        const canCancel = order.status === 'Submitted' || order.status === 'PreSubmitted';
-        
-        // 来源显示逻辑
-        let sourceDisplay = '—';
-        if (order.order_source) {
-            if (order.order_source === 'manual' || order.order_source.startsWith('manual_') || order.order_source === '人工') {
-                // 手动单直接显示字段值
-                sourceDisplay = order.order_source;
-            } else if (order.order_source === 'sl') {
-                sourceDisplay = '<span class="badge bg-danger">止损</span>';
-            } else if (order.order_source === 'tp') {
-                sourceDisplay = '<span class="badge bg-success">止盈</span>';
-            } else if (order.order_source === 'strategy') {
-                sourceDisplay = '<span class="badge bg-info">策略</span>';
-            } else if (order.order_source === '机器人' || order.order_source === 'auto') {
-                sourceDisplay = '<span class="badge bg-secondary">自动</span>';
-            } else {
-                // 其他情况直接显示字段值
-                sourceDisplay = order.order_source;
-            }
-        }
-        
-        // 处理notes字段，转义HTML特殊字符
-        const notesText = order.notes ? order.notes.replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
-        
-        // 转义所有可能导致HTML解析问题的字符
-        const escapedSymbol = order.symbol.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
-        const escapedAction = order.action.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
-        const escapedOrderType = order.order_type.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
-        
-        // 构建HTML字符串，分步骤避免复杂的嵌套
-        const detailsButton = `<button class="btn btn-sm btn-info me-1" onclick="app.openOrderDetails('${order.order_id}')" title="Details"><i class="fas fa-info-circle"></i></button>`;
-        
-        const editButton = canEdit ? 
-            `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${order.order_id}, '${escapedSymbol}', '${escapedAction}', ${order.quantity}, '${escapedOrderType}', ${(order.limit_price || order.price) || 0})" title="Edit"><i class="fas fa-edit"></i></button>` : '';
-        
-        const syncButton = (order.order_type === 'LMT' && order.status === 'Submitted') ? 
-            `<button class="btn btn-sm btn-outline-primary me-1" onclick="app.syncLimitOrder('${order.order_id}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : '';
-        
-        const cancelButton = canCancel ? 
-            `<button class="btn btn-sm btn-danger" onclick="app.cancelOrder(${order.order_id}, this)" title="Cancel"><i class="fas fa-times"></i></button>` : '';
-        
-        // 构建完整的tr元素HTML，确保所有属性都正确转义
-        const trElement = document.createElement('tr');
-        trElement.setAttribute('data-notes', order.notes || '');
-        trElement.onmouseenter = (event) => app.showNotesTooltip(event, trElement);
-        trElement.onmouseleave = () => app.hideNotesTooltip();
-        
-        trElement.innerHTML = `
-            <td>${order.order_id}</td>
-            <td><a href="#" class="text-decoration-none" onclick="app.openMonitorModal('${escapedSymbol}'); return false;">${order.symbol}</a></td>
-            <td>${escapedAction}</td>
-            <td>${order.quantity}</td>
-            <td>${priceDisplay}</td>
-            <td><span class="badge bg-${this.getStatusColor(displayStatus)}">${displayStatus}</span></td>
-            <td class="${(order.pnl ?? 0) > 0 ? 'text-success' : ((order.pnl ?? 0) < 0 ? 'text-danger' : 'text-muted')}">$${this.formatNumber(order.pnl ?? 0)}</td>
-            <td>$${this.formatNumber(order.commission ?? 0)}</td>
-            <td>${sourceDisplay}</td>
-            <td>${detailsButton}${editButton}${syncButton}${cancelButton}</td>
-        `;
-        
-        return trElement.outerHTML;
-    }
-
-    // 调试Orders表格状态的函数
-    debugOrdersTable() {
-        const tbody = document.querySelector('#ordersTable tbody');
-        if (!tbody) {
-            console.log('❌ Orders table tbody not found');
-            return;
-        }
-        
-        const rows = tbody.querySelectorAll('tr');
-        
-        rows.forEach((row, index) => {
-            const cells = row.querySelectorAll('td');
-        });
-        
-    }
+    // 订单表格相关方法已迁移到OrderManager
 
     renderInternalOrders() {
         const tbody = document.querySelector('#internalOrdersTable tbody');
         if (!tbody) return;
-        this.updateOrdersTableSmart(this.orders || [], tbody);
+        this.orderManager.updateOrdersTableSmart(this.orders || [], tbody);
     }
 
     async loadPortfolio() {
@@ -4410,92 +3962,7 @@ class TradingApp {
         }
     }
 
-    async cancelAllOrders() {
-        if (!confirm('Are you sure you want to cancel all orders?')) {
-            return;
-        }
-        
-        try {
-            const result = await this.apiCall('/cancel_all_orders', { method: 'DELETE' });
-            if (result.success) {
-                const cancelledCount = result.cancelled_count || 0;
-                if (cancelledCount > 0) {
-                    this.showAlert('success', `Successfully cancelled ${cancelledCount} orders`);
-                } else {
-                    this.showAlert('info', 'No cancellable orders found');
-                }
-                this.loadOrders(); // 刷新订单列表
-            } else {
-                this.showAlert('danger', `Failed to cancel orders: ${result.error || 'Unknown error'}`);
-            }
-        } catch (error) {
-            console.error('Failed to cancel all orders:', error);
-            this.showAlert('danger', 'Error occurred while cancelling orders');
-        }
-    }
-    
-    async syncLimitOrder(orderId, buttonElement = null, event = null) {
-        try {
-            // 显示加载状态
-            let button = buttonElement;
-            if (!button && event && event.target) {
-                button = event.target.closest('button');
-            }
-            
-            let originalHtml = '<i class="fas fa-sync-alt"></i>';
-            if (button) {
-                originalHtml = button.innerHTML;
-                button.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-                button.disabled = true;
-            }
-            
-            const result = await this.apiCall(`/orders/${orderId}/sync`, {
-                method: 'POST'
-            });
-            
-            if (result.success) {
-                this.showAlert('success', '订单状态已同步');
-                // 刷新当前监控弹窗的订单列表
-                const modal = document.getElementById('monitorModal');
-                if (modal && modal.classList.contains('show')) {
-                    const symbolElement = modal.querySelector('.modal-title');
-                    if (symbolElement) {
-                        const symbol = symbolElement.textContent.replace('监控 - ', '');
-                        const activeRadio = modal.querySelector('input[name="orderStatusFilter"]:checked');
-                        if (activeRadio) {
-                            await this.loadMonitorOrdersList(symbol, activeRadio.value);
-                        }
-                    }
-                }
-                // 同时刷新主订单列表
-                this.loadOrders();
-            } else {
-                this.showAlert('danger', result.message || '同步订单失败');
-            }
-            
-            // 恢复按钮状态
-            if (button) {
-                button.innerHTML = originalHtml;
-                button.disabled = false;
-            }
-            
-        } catch (error) {
-            console.error('同步限价单失败:', error);
-            this.showAlert('danger', '同步订单失败');
-            
-            // 恢复按钮状态
-            if (buttonElement) {
-                buttonElement.innerHTML = '<i class="fas fa-sync-alt"></i>';
-                buttonElement.disabled = false;
-            } else if (event && event.target) {
-                const button = event.target.closest('button');
-                if (button) {
-                    button.innerHTML = '<i class="fas fa-sync-alt"></i>';
-                    button.disabled = false;
-                }
-            }
-        }
-    }
+    // cancelAllOrders和syncLimitOrder方法已迁移到OrderManager
 
     async removeRiskRule(symbol) {
         if (!confirm(`Are you sure you want to remove the risk rule for ${symbol}?`)) {
@@ -5599,41 +5066,7 @@ class TradingApp {
 
     // Duplicate editOrder method removed
 
-    // 取消订单
-    async cancelOrder(orderId, btn) {
-        if (!orderId && orderId !== 0) return;
-        if (!this.cancellingOrders) this.cancellingOrders = new Set();
-        if (this.cancellingOrders.has(orderId)) {
-            return; // 已在处理中，避免重复请求
-        }
-        this.cancellingOrders.add(orderId);
-        const originalDisabled = btn ? btn.disabled : undefined;
-        try {
-            if (btn) {
-                btn.disabled = true;
-                btn.classList.add('disabled');
-            }
-            const result = await this.apiCall('/cancel_order', {
-                method: 'POST',
-                body: JSON.stringify({ order_id: orderId })
-            });
-            if (result.success) {
-                this.showAlert('success', `订单 ${orderId} 已成功取消`);
-            } else {
-                this.showAlert('danger', `取消订单失败: ${result.error || '未知错误'}`);
-            }
-            await this.loadOrders(); // 刷新订单列表
-        } catch (error) {
-            console.error('Cancel order error:', error);
-            this.showAlert('danger', '取消订单时发生错误');
-        } finally {
-            this.cancellingOrders.delete(orderId);
-            if (btn) {
-                btn.disabled = !!originalDisabled;
-                btn.classList.remove('disabled');
-            }
-        }
-    }
+    // cancelOrder方法已迁移到OrderManager
 
     async loadLogModules() {
         try {
@@ -6867,12 +6300,17 @@ window.app = app;
 // 延迟3秒后自动执行Orders表格调试
 setTimeout(() => {
     console.log('🔍 自动执行Orders表格调试...');
-    if (typeof app.debugOrdersTable === 'function') {
-        app.debugOrdersTable();
-    } else {
-        console.error('debugOrdersTable方法不存在');
+    if (app && app.orderManager) {
+        if (typeof app.orderManager.attachOrdersTbodyGuard === 'function') {
+            app.orderManager.attachOrdersTbodyGuard();
+        }
+        if (typeof app.orderManager.debugOrdersTable === 'function') {
+            app.orderManager.debugOrdersTable();
+        } else {
+            console.error('debugOrdersTable方法不存在于 app.orderManager 上');
+        }
     }
 }, 3000);
 
-// 也可以手动在控制台执行: app.debugOrdersTable()
-console.log('💡 提示: 可以在控制台手动执行 app.debugOrdersTable() 来调试Orders表格');
+// 也可以手动在控制台执行: app.orderManager.debugOrdersTable()
+console.log('💡 提示: 可以在控制台手动执行 app.orderManager.debugOrdersTable() 来调试Orders表格');

@@ -363,6 +363,7 @@ class OrderManager:
             elif status == OrderStatus.FILLED.value:
                 order.executed_at = datetime.now()
             
+            # 只有在新值不为None时才更新commission和pnl，避免覆盖已有的有效值
             if commission is not None:
                 order.commission = commission
                 order_logger.debug(f"Updated order {order_id} commission: {commission}")
