@@ -5194,7 +5194,8 @@ class TradingApp {
 
             await Promise.all([
                 this.loadStrategyPerformance(name, { range: '1d' }),
-                this.loadStrategyExecutions(name)
+                this.loadStrategyExecutions(name),
+                this.loadPnLCalendar(name)
             ]);
         } catch (e) {
             console.error('Open details error:', e);
@@ -5264,6 +5265,18 @@ class TradingApp {
             this.renderExecutionsPagination();
         } catch (e) {
             console.error('Load executions error:', e);
+        }
+    }
+
+    async loadPnLCalendar(name, options = {}) {
+        try {
+            const res = await this.apiCall(`/strategies/${name}/pnl/daily`);
+            if (!res.success) return;
+            if (window.PnLCalendar) {
+                PnLCalendar.init('pnlCalendarContainer', res.pnl || [], options);
+            }
+        } catch (e) {
+            console.error('Load PnL calendar error:', e);
         }
     }
 
