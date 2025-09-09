@@ -565,14 +565,11 @@ class {strategy_name.replace(' ', '').replace('-', '').replace('_', '')}Strategy
     """
     {strategy_name} Strategy Implementation
     """
-    
+
     def __init__(self):
         self.name = "{strategy_name}"
         self.description = "Strategy template for {strategy_name}"
-        
-    def __init__(self):
-        self.name = "{strategy_name}"
-        self.description = "Strategy template for {strategy_name}"
+        self.created_at = datetime.now()
         
     def initialize(self):
         """Initialize the strategy"""
