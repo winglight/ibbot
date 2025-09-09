@@ -19,6 +19,8 @@ from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from .utils import slugify_strategy_name
+
 # Module-specific logger for strategy_manager
 strategy_logger = logger.bind(module="strategy_manager", request_id="-")
 
@@ -529,7 +531,16 @@ class StrategyManager:
                             counter += 1
                 elif use_template or selected_file == "new":
                     # 创建新文件或使用模板
-                    final_file_path = f"{name}.py"
+                    if selected_file == "new":
+                        name = slugify_strategy_name(name)
+                        counter = 1
+                        original_name = name
+                        while name in self.strategies:
+                            name = f"{original_name}_{counter}"
+                            counter += 1
+                        final_file_path = f"{name}.py"
+                    else:
+                        final_file_path = f"{name}.py"
                 
             strategy = Strategy(
                 name=name,
