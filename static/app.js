@@ -9,6 +9,14 @@ const INTERVAL_MINUTES_MAP = {
     '1hour': 60
 };
 
+function slugifyStrategyName(name) {
+    return (name || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
 class TradingApp {
     constructor() {
         this.ws = null;
@@ -232,9 +240,11 @@ class TradingApp {
                 const fileGroup = document.getElementById('strategyFileGroup');
                 const fileSelect = document.getElementById('strategyFileSelect');
                 const slTpGroup = document.getElementById('slTpGroup');
+                const filenamePreview = document.getElementById('strategyFilenamePreview');
                 if (!nameInput || !typeSelect || !descInput) return;
                 // reset form
                 nameInput.value = '';
+                if (filenamePreview) filenamePreview.textContent = '';
                 typeSelect.value = 'external';
                 descInput.value = '';
                 if (useTemplateCheckbox) useTemplateCheckbox.checked = true;
@@ -342,6 +352,15 @@ class TradingApp {
                 } catch (err) {
                     this.showAlert('danger', 'Failed to generate token');
                 }
+            });
+        }
+
+        const nameInput = document.getElementById('strategyNameInput');
+        const filenamePreview = document.getElementById('strategyFilenamePreview');
+        if (nameInput && filenamePreview) {
+            nameInput.addEventListener('input', () => {
+                const sanitized = slugifyStrategyName(nameInput.value);
+                filenamePreview.textContent = sanitized ? `${sanitized}.py` : '';
             });
         }
 
