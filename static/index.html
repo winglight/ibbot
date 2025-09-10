@@ -630,15 +630,16 @@
         <div class="modal-dialog">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-shopping-cart"></i> Place Order</h5>
+                    <h5 class="modal-title" id="orderModalLabel"><i class="fas fa-shopping-cart"></i> Place Order</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
                     <form id="orderForm">
+                        <input type="hidden" id="editOrderId" value="">
                         <div class="mb-3">
                             <label class="form-label">Symbol</label>
                             <div class="position-relative">
-                                <input type="text" class="form-control" id="orderSymbol" placeholder="Type to search symbols..." autocomplete="off">
+                                <input type="text" class="form-control" id="orderSymbol" name="symbol" placeholder="Type to search symbols..." autocomplete="off">
                                 <div class="dropdown-menu w-100" id="orderSymbolDropdown" style="max-height: 300px; overflow-y: auto;">
                                     <!-- Historical symbols will be populated here -->
                                     <!-- Search results will be populated here -->
@@ -652,7 +653,7 @@
                             <div class="col-md-6">
                                 <div class="mb-3">
                                     <label class="form-label">Action</label>
-                                    <select class="form-select" id="orderAction">
+                                    <select class="form-select" id="orderAction" name="action">
                                         <option value="BUY">BUY</option>
                                         <option value="SELL">SELL</option>
                                     </select>
@@ -661,7 +662,7 @@
                             <div class="col-md-6">
                                 <div class="mb-3">
                                     <label class="form-label">Quantity</label>
-                                    <input type="number" class="form-control" id="orderQuantity" value="1">
+                                    <input type="number" class="form-control" id="orderQuantity" name="quantity" value="1">
                                 </div>
                             </div>
                         </div>
@@ -669,7 +670,7 @@
                             <div class="col-md-6">
                                 <div class="mb-3">
                                     <label class="form-label">Order Type</label>
-                                    <select class="form-select" id="orderType">
+                                    <select class="form-select" id="orderType" name="order_type">
                                         <option value="MARKET">Market</option>
                                         <option value="LIMIT">Limit</option>
                                     </select>
@@ -678,7 +679,7 @@
                             <div class="col-md-6">
                                 <div class="mb-3">
                                     <label class="form-label">Price</label>
-                                    <input type="number" class="form-control" id="orderPrice" step="0.01">
+                                    <input type="number" class="form-control" id="orderPrice" name="price" step="0.01">
                                 </div>
                             </div>
                         </div>
@@ -690,14 +691,14 @@
                                 <div class="col-md-6">
                                     <div class="mb-3">
                                         <label class="form-label">Stop Loss Price</label>
-                                        <input type="number" class="form-control" id="stopLossPrice" step="0.01">
+                                        <input type="number" class="form-control" id="stopLossPrice" name="stop_loss" step="0.01">
                                         <div class="form-text">Auto-calculated based on risk settings</div>
                                     </div>
                                 </div>
                                 <div class="col-md-6">
                                     <div class="mb-3">
                                         <label class="form-label">Take Profit Price</label>
-                                        <input type="number" class="form-control" id="takeProfitPrice" step="0.01">
+                                        <input type="number" class="form-control" id="takeProfitPrice" name="take_profit" step="0.01">
                                         <div class="form-text">Auto-calculated based on risk settings</div>
                                     </div>
                                 </div>
@@ -811,6 +812,10 @@
                                     <i class="fas fa-sync"></i> 刷新建议
                                 </button>
                             </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Notes</label>
+                            <textarea id="orderNotes" name="notes" class="form-control" rows="2" placeholder="Optional notes for this order"></textarea>
                         </div>
                     </form>
                 </div>
@@ -1169,7 +1174,7 @@
                         </div>
                         <div class="mb-3">
                             <label class="form-label">Max Time (optional)</label>
-                            <input type="text" class="form-control" id="riskMaxTime" placeholder="e.g., 1d, 2h, 30m">
+                            <input type="text" class="form-control" id="riskMaxTime" name="max_time_span" placeholder="e.g., 1d, 2h, 30m">
                             <div class="form-text">Maximum time to hold position before auto-close</div>
                         </div>
                         
@@ -2132,7 +2137,8 @@
     <script src="/static/login.js" defer></script>
 <script src="/static/ibkr.js" defer></script>
 <script src="/static/ibkr_data.js" defer></script>
-<script src="/static/js/orders.js?v=2025-09-09-1" defer></script>
+<script src="/static/js/orders.js?v=2025-09-10-3" defer></script>
+<script src="/static/js/portfolio.js" defer></script>
 <script src="/static/pnlcalendar.js" defer></script>
 <script src="/static/app.js" defer></script>
 </body>

@@ -10,6 +10,11 @@ class IBKRConnectionManager {
         this.setupEventListeners();
     }
 
+    // 兼容旧代码：提供 isConnected 只读属性
+    get isConnected() {
+        return this.connected;
+    }
+
     setupEventListeners() {
         // Connection buttons
         document.getElementById('connectBtn').addEventListener('click', () => this.connect());

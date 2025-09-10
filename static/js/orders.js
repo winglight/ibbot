@@ -58,25 +58,25 @@ class OrderManager {
             
             const cacheKey = 'orders_main';
             
-            // 检查缓存
-            if (this.ordersCache[cacheKey] && Date.now() - this.ordersCache[cacheKey].timestamp < 5000) {
-                console.log('📋 Using cached orders data');
-                this.orders = this.ordersCache[cacheKey].data;
-            } else {
-                console.log('🌐 Fetching fresh orders data');
-                const data = await this.app.apiCall('/orders');
-                this.orders = data.orders || [];
-                
-                // 更新缓存
-                this.ordersCache[cacheKey] = {
-                    data: this.orders,
-                    timestamp: Date.now()
-                };
-            }
+            // 始终拉取最新数据，禁用多级缓存确保pnl/commission及时更新
+            console.log('🌐 Fetching fresh orders data (no cache)');
+            const data = await this.app.apiCall('/orders?limit=300&use_cache=false', {
+                method: 'GET',
+                useCache: false,
+                cacheTime: 0
+            });
+            this.orders = data.orders || [];
             
             // 过滤和排序
             const filteredOrders = this.orders.filter(order => order.order_id !== 0);
-            const sortedOrders = filteredOrders.sort((a, b) => b.order_id - a.order_id);
+            const sortedOrders = filteredOrders.sort((a, b) => {
+                const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
+                const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;
+                if (bt !== at) return bt - at; // 按创建时间降序
+                const aid = Number(a.order_id) || 0;
+                const bid = Number(b.order_id) || 0;
+                return bid - aid; // 次级按ID降序
+            });
             
             // 更新表格
             const tbody = document.querySelector('#ordersTable tbody');
@@ -379,7 +379,7 @@ class OrderManager {
             const maxTimeSpan = formData.get('max_time_span');
             
             if (stopLoss || takeProfit || maxTimeSpan) {
-                orderData.risk_rules = {
+                orderData.risk_rule = {
                     stop_loss_price: stopLoss ? parseFloat(stopLoss) : null,
                     take_profit_price: takeProfit ? parseFloat(takeProfit) : null,
                     max_time_span: maxTimeSpan || null
@@ -392,14 +392,22 @@ class OrderManager {
                 return;
             }
             
-            if (orderData.order_type === 'LMT' && (!orderData.price || orderData.price <= 0)) {
+            if ((orderData.order_type === 'LMT' || orderData.order_type === 'LIMIT') && (!orderData.price || orderData.price <= 0)) {
                 this.app.showAlert('error', 'Limit orders require a valid price');
                 return;
             }
             
             // 检查IB连接
             if (!this.app.ibkrManager.isConnected) {
-                this.app.showAlert('error', 'Please connect to IBKR first');
+                this.app.showAlert('error', '未连接 IBKR，请先点击右上角“连接”或在“连接设置”中配置后连接。');
+                // 打开连接设置弹窗，帮助用户快速连接
+                const modalEl = document.getElementById('connectionModal');
+                if (modalEl) {
+                    const modal = new bootstrap.Modal(modalEl);
+                    modal.show();
+                }
+                // 滚动到页面顶部，确保提示可见
+                window.scrollTo({ top: 0, behavior: 'smooth' });
                 return;
             }
             
@@ -409,13 +417,11 @@ class OrderManager {
                 orderData.order_id = parseInt(isEdit);
                 response = await this.app.apiCall('/orders/modify', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(orderData)
                 });
             } else {
-                response = await this.app.apiCall('/orders', {
+                response = await this.app.apiCall('/place_order', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(orderData)
                 });
             }
@@ -423,11 +429,15 @@ class OrderManager {
             if (response.success) {
                 this.app.showAlert('success', isEdit ? 'Order modified successfully' : 'Order placed successfully');
                 
-                // 保存到本地存储
-                this.app.saveToLocalStorage('lastOrderSymbol', orderData.symbol);
-                this.app.saveToLocalStorage('lastOrderAction', orderData.action);
-                this.app.saveToLocalStorage('lastOrderQuantity', orderData.quantity.toString());
-                this.app.saveToLocalStorage('lastOrderType', orderData.order_type);
+                // 缓存上一次下单的关键字段，便于下次填充
+                try {
+                    localStorage.setItem('lastOrderSymbol', orderData.symbol || '');
+                    localStorage.setItem('lastOrderAction', orderData.action || '');
+                    localStorage.setItem('lastOrderQuantity', String(orderData.quantity ?? ''));
+                    localStorage.setItem('lastOrderType', orderData.order_type || '');
+                } catch (e) {
+                    console.warn('Failed to save last order fields to localStorage:', e);
+                }
                 
                 // 重置表单
                 form.reset();

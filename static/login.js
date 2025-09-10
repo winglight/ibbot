@@ -92,7 +92,8 @@ class LoginManager {
      */
     onLoginSuccess() {
         // 检查连接状态
-        this.app.checkConnectionStatus();
+-        this.app.checkConnectionStatus();
++        this.app.ibkrManager.checkConnectionStatus();
         
         // 加载基础数据
         this.app.loadStrategies();

@@ -47,8 +47,27 @@ class TradingApp {
         this.ibkrManager = new IBKRConnectionManager(this);
         this.dataManager = new IBKRDataManager(this);
         this.orderManager = new OrderManager(this);
+        this.portfolioManager = new PortfolioManager(this);
         
         this.init();
+    }
+
+    // Detect security type based on symbol (simple heuristic for common cases)
+    detectSecurityType(symbol) {
+        try {
+            if (!symbol) return null;
+            const s = String(symbol).trim().toUpperCase();
+            // Common futures roots and FX futures roots
+            const FUT_ROOTS = new Set(['MNQ','NQ','ES','MES','YM','MYM','RTY','M2K','CL','NG','GC','SI','HG','ZB','ZN','ZF','ZT','6E','6J','6B','6A','6C','6S']);
+            // Root only (e.g., MNQ), or root+month code like MNQZ4 / MNQZ24
+            if (FUT_ROOTS.has(s) || /^[A-Z]{1,3}[FGHJKMNQUVXZ][0-9]$/.test(s) || /^[A-Z]{1,3}[FGHJKMNQUVXZ][0-9]{2}$/.test(s)) {
+                return 'FUT';
+            }
+            // Default to stock
+            return 'STK';
+        } catch (e) {
+            return null;
+        }
     }
 
     async init() {
@@ -74,7 +93,7 @@ class TradingApp {
             await this.ibkrManager.checkConnectionStatus({ timeout: 4000, maxRetries: 0 });
             // 加载账户和投资组合数据
             this.dataManager.loadAccountInfo();
-            this.dataManager.loadPortfolio();
+            this.portfolioManager.loadPortfolio();
             this.loadStrategies();
             this.loadLogModules();
             this.loadLogs();
@@ -3852,7 +3871,7 @@ class TradingApp {
 
     async loadPortfolio() {
         try {
-            this.dataManager.updatePortfolioUI(this.dataManager.getAllPositions());
+            return this.portfolioManager.loadPortfolio();
         } catch (error) {
             console.error('Failed to load portfolio:', error);
         }
@@ -4076,9 +4095,26 @@ class TradingApp {
         const alertContainer = document.getElementById('alertContainer');
         const alertId = 'alert-' + Date.now();
         
+        // 提升容器层级，确保不被模态遮挡
+        if (alertContainer) {
+            alertContainer.style.position = 'fixed';
+            alertContainer.style.top = document.querySelector('.modal.show') ? '10px' : '20px';
+            alertContainer.style.right = '20px';
+            alertContainer.style.zIndex = '20000';
+            alertContainer.style.maxWidth = '420px';
+        }
+        
+        const iconClass = type === 'success' ? 'fa-check-circle text-success'
+            : (type === 'danger' || type === 'error') ? 'fa-times-circle text-danger'
+            : type === 'warning' ? 'fa-exclamation-triangle text-warning'
+            : 'fa-info-circle text-info';
+        
         const alertHtml = `
-            <div id="${alertId}" class="alert alert-${type} alert-dismissible fade show" role="alert">
-                ${message}
+            <div id="${alertId}" class="alert alert-${type} alert-dismissible fade show" role="alert" style="background:#ffffff; color:#212529; border:1px solid rgba(0,0,0,.125); box-shadow:0 0.5rem 1rem rgba(0,0,0,.15); opacity:1;">
+                <div style="display:flex; align-items:center; gap:.5rem;">
+                    <i class="fas ${iconClass}"></i>
+                    <span>${message}</span>
+                </div>
                 <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
             </div>
         `;
