@@ -96,14 +96,14 @@ class LoginManager {
 +        this.app.ibkrManager.checkConnectionStatus();
         
         // 加载基础数据
-        this.app.loadStrategies();
+        this.app.strategiesManager.loadStrategies();
         this.app.loadLogs();
         
         // 只在连接成功后加载需要IB连接的数据
         if (this.app.connected) {
             this.app.loadOrders();
             this.app.loadPortfolio();
-            this.app.loadRiskRules();
+            this.app.riskRulesManager.loadRiskRules();
         }
     }
 
@@ -169,8 +169,8 @@ class LoginManager {
                     this.app.loadAccountInfo();
                     this.app.loadOrders();
                     this.app.loadPortfolio();
-                    this.app.loadRiskRules();
-                    this.app.loadStrategies();
+                    this.app.riskRulesManager.loadRiskRules();
+                    this.app.strategiesManager.loadStrategies();
                     this.app.loadLogs();
                 }, 200);
             } catch (e) {

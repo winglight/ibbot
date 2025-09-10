@@ -152,8 +152,8 @@ class IBKRConnectionManager {
             this.app.dataManager.loadAccountInfo();
             this.app.loadOrders();
             this.app.loadPortfolio();
-            this.app.loadRiskRules();
-            this.app.loadStrategies();
+            this.app.riskRulesManager.loadRiskRules();
+            this.app.strategiesManager.loadStrategies();
         } catch (error) {
             console.error('Connection failed:', error);
         }
@@ -196,8 +196,8 @@ class IBKRConnectionManager {
                     this.app.dataManager.loadAccountInfo();
                     this.app.loadOrders();
                     this.app.loadPortfolio();
-                    this.app.loadRiskRules();
-                    this.app.loadStrategies();
+                    this.app.riskRulesManager.loadRiskRules();
+                    this.app.strategiesManager.loadStrategies();
                 }, 300);
             }
         } catch (error) {
@@ -228,7 +228,7 @@ class IBKRConnectionManager {
             // 连接成功后加载需要IB连接的数据
             this.app.loadOrders();
             this.app.loadPortfolio();
-            this.app.loadRiskRules();
+            this.app.riskRulesManager.loadRiskRules();
         } else {
             statusIndicator.className = 'status-indicator status-disconnected';
             statusText.textContent = 'Disconnected';

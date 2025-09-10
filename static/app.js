@@ -48,6 +48,8 @@ class TradingApp {
         this.dataManager = new IBKRDataManager(this);
         this.orderManager = new OrderManager(this);
         this.portfolioManager = new PortfolioManager(this);
+        this.riskRulesManager = new RiskRulesManager(this);
+        this.strategiesManager = new StrategiesManager(this);
         
         this.init();
     }
@@ -94,7 +96,7 @@ class TradingApp {
             // 加载账户和投资组合数据
             this.dataManager.loadAccountInfo();
             this.portfolioManager.loadPortfolio();
-            this.loadStrategies();
+            this.strategiesManager.loadStrategies();
             this.loadLogModules();
             this.loadLogs();
             // 初始化通知面板
@@ -102,7 +104,7 @@ class TradingApp {
             // 加载配置和状态
             this.loadGSRulesStatus();
             // 加载风险规则
-            this.loadRiskRules();
+            this.riskRulesManager.loadRiskRules();
             // 启动订单状态自动刷新
             this.startOrdersAutoRefresh();
             await cfgPromise.catch(() => {});
@@ -149,7 +151,7 @@ class TradingApp {
         const strategyBtn = document.getElementById('strategyBtn');
         if (strategyBtn) {
             strategyBtn.addEventListener('click', () => {
-                this.loadStrategies();
+                this.strategiesManager.loadStrategies();
                 const panel = document.getElementById('strategiesTable');
                 if (panel) {
                     panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -178,7 +180,7 @@ class TradingApp {
         const sRulesTab = document.getElementById('s-rules-tab');
         if (sRulesTab) {
             sRulesTab.addEventListener('click', () => {
-                this.loadRiskRules();
+                this.riskRulesManager.loadRiskRules();
                 this.loadSizingHistory();
             });
         }
@@ -338,7 +340,7 @@ class TradingApp {
                     const modalEl = document.getElementById('addStrategyModal');
                     const modal = bootstrap.Modal.getInstance(modalEl);
                     if (modal) modal.hide();
-                    this.loadStrategies();
+                    this.strategiesManager.loadStrategies();
                 } catch (e) {}
             });
         }
@@ -347,7 +349,7 @@ class TradingApp {
         const strategySettingsBtn = document.getElementById('strategySettingsBtn');
         if (strategySettingsBtn) {
             strategySettingsBtn.addEventListener('click', async () => {
-                await this.loadStrategySettings();
+                await this.strategiesManager.loadStrategySettings();
                 const modal = new bootstrap.Modal(document.getElementById('strategySettingsModal'));
                 modal.show();
             });
@@ -355,7 +357,7 @@ class TradingApp {
         const saveStrategySettingsBtn = document.getElementById('saveStrategySettingsBtn');
         if (saveStrategySettingsBtn) {
             saveStrategySettingsBtn.addEventListener('click', async () => {
-                await this.saveStrategySettings();
+                await this.strategiesManager.saveStrategySettings();
             });
         }
         const generateStrategyTokenBtn = document.getElementById('generateStrategyTokenBtn');
@@ -3805,7 +3807,7 @@ class TradingApp {
             
             this.showAlert('success', 'Risk rule added successfully');
             document.getElementById('riskRuleForm').reset();
-            this.loadRiskRules();
+            this.riskRulesManager.loadRiskRules();
             
             // Close modal
             const modal = bootstrap.Modal.getInstance(document.getElementById('riskRuleModal'));
@@ -3877,64 +3879,7 @@ class TradingApp {
         }
     }
 
-    async loadRiskRules() {
-        try {
-            // Risk rules can be loaded from database without IB connection
-            const riskData = await this.apiCall('/risk_rules');
-            
-            // 获取当前持仓信息（通过WebSocket维护）
-            const portfolioData = { positions: this.dataManager.getAllPositions() };
-            
-            // Cache risk rules for quick access elsewhere (e.g., monitor modal)
-            this.riskRules = riskData.rules || {};
-            
-            const tbody = document.querySelector('#riskRulesTable2 tbody');
-            
-            // Create a map of portfolio by symbol for quick lookup
-            const portfolioMap = {};
-            portfolioData.positions.forEach(pos => {
-                portfolioMap[pos.symbol] = pos;
-            });
-            
-            tbody.innerHTML = Object.values(riskData.rules).map(rule => {
-                const portfolioItem = portfolioMap[rule.symbol];
-                const currentPrice = portfolioItem ? portfolioItem.current_price : 0;
-                const avgCost = portfolioItem ? portfolioItem.avg_cost : 0;
-                const positionSize = portfolioItem ? portfolioItem.position : 0;
-                
-                // Safely handle null/undefined values for onclick parameters
-                const stopLossValue = rule.stop_loss_price || '';
-                const takeProfitValue = rule.take_profit_price || '';
-                const symbolEscaped = rule.symbol.replace(/'/g, "\\'");
-                
-                return `
-                <tr>
-                    <td>${rule.symbol}</td>
-                    <td>${rule.stop_loss_price ? '$' + this.formatNumber(rule.stop_loss_price) : 'N/A'}</td>
-                    <td>${rule.take_profit_price ? '$' + this.formatNumber(rule.take_profit_price) : 'N/A'}</td>
-                    <td>${rule.max_time_span || 'N/A'}</td>
-                    <td><span class="badge bg-${rule.enabled ? 'success' : 'secondary'}">${rule.enabled ? 'Active' : 'Disabled'}</span></td>
-                    <td>
-                        <button class="btn btn-sm btn-outline-info me-1" onclick="app.showRiskRuleOrders('${symbolEscaped}')" title="Details">
-                            <i class="fas fa-list"></i>
-                        </button>
-                        <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editPositionRiskRule('${symbolEscaped}', ${currentPrice || 0}, ${avgCost || 0}, ${positionSize || 0}, '${stopLossValue}', '${takeProfitValue}')" title="Edit">
-                            <i class="fas fa-edit"></i>
-                        </button>
-                        <button class="btn btn-sm btn-outline-${rule.enabled ? 'warning' : 'success'} me-1" onclick="app.toggleRiskRule('${symbolEscaped}', ${!rule.enabled})" title="${rule.enabled ? 'Disable Rule' : 'Enable Rule'}">
-                            <i class="fas fa-${rule.enabled ? 'pause' : 'play'}"></i>
-                        </button>
-                        <button class="btn btn-sm btn-danger" onclick="app.removeRiskRule('${symbolEscaped}')" title="Delete">
-                            <i class="fas fa-trash"></i>
-                        </button>
-                    </td>
-                </tr>
-                `;
-            }).join('');
-        } catch (error) {
-            console.error('Failed to load risk rules:', error);
-        }
-    }
+    async loadRiskRules() { return this.riskRulesManager.loadRiskRules(); }
 
 
 
@@ -3983,69 +3928,9 @@ class TradingApp {
 
     // cancelAllOrders和syncLimitOrder方法已迁移到OrderManager
 
-    async removeRiskRule(symbol) {
-        if (!confirm(`Are you sure you want to remove the risk rule for ${symbol}?`)) {
-            return;
-        }
-        
-        try {
-            await this.apiCall(`/risk_rules/${symbol}`, { method: 'DELETE' });
-            this.showAlert('success', 'Risk rule removed successfully');
-            this.loadRiskRules();
-        } catch (error) {
-            console.error('Failed to remove risk rule:', error);
-        }
-    }
+    async removeRiskRule(symbol) { return this.riskRulesManager.removeRiskRule(symbol); }
 
-    async toggleRiskRule(symbol, enabled) {
-        try {
-            // 当启用规则时：优先尝试保存监控输入框中的SL/TP，再切换启用状态
-            if (enabled) {
-                const slInputEl = document.getElementById('monitorStopLoss');
-                const tpInputEl = document.getElementById('monitorTakeProfit');
-                const sl = slInputEl && slInputEl.value ? parseFloat(slInputEl.value) : null;
-                const tp = tpInputEl && tpInputEl.value ? parseFloat(tpInputEl.value) : null;
-
-                const existingRule = this.riskRules && this.riskRules[symbol] ? this.riskRules[symbol] : null;
-                const hasExistingPrice = !!(existingRule && ((existingRule.stop_loss_price && existingRule.stop_loss_price > 0) || (existingRule.take_profit_price && existingRule.take_profit_price > 0)));
-                const hasInputPrice = !!((sl && sl > 0) || (tp && tp > 0));
-
-                // 若既没有已存在的有效价格，也没有新的输入价格，则禁止启用
-                if (!hasExistingPrice && !hasInputPrice) {
-                    throw new Error('请先输入止损或止盈价，并点击“保存规则”或直接在监控框输入后再启用。');
-                }
-
-                // 若有新的输入，则进行保存（后端POST为幂等的按symbol保存/更新）
-                if (hasInputPrice) {
-                    await this.apiCall('/risk_rules', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            symbol,
-                            stop_loss_price: sl || undefined,
-                            take_profit_price: tp || undefined
-                        })
-                    });
-
-                    // 更新本地缓存，改善UX
-                    if (!this.riskRules) this.riskRules = {};
-                    this.riskRules[symbol] = Object.assign({}, existingRule || {}, {
-                        symbol,
-                        stop_loss_price: sl ?? existingRule?.stop_loss_price,
-                        take_profit_price: tp ?? existingRule?.take_profit_price
-                    });
-                }
-            }
-
-            await this.apiCall(`/risk_rules/${symbol}?enabled=${enabled}`, { method: 'PUT' });
-            this.showAlert('success', `Risk rule for ${symbol} ${enabled ? 'enabled' : 'disabled'} successfully`);
-            await this.loadRiskRules();
-        } catch (error) {
-            console.error('Failed to update risk rule:', error);
-            const msg = error && error.message ? error.message : `Failed to ${enabled ? 'enable' : 'disable'} risk rule`;
-            this.showAlert('danger', msg);
-            throw error;
-        }
-    }
+    async toggleRiskRule(symbol, enabled) { return this.riskRulesManager.toggleRiskRule(symbol, enabled); }
 
 
 
@@ -4315,7 +4200,7 @@ class TradingApp {
         try {
             const data = await this.apiCall('/strategies');
             if (data.success) {
-                this.displayStrategies(data.strategies);
+                this.strategiesManager.displayStrategies(data.strategies);
                 this.strategiesLoaded = true;
             }
         } catch (error) {
@@ -4343,7 +4228,7 @@ class TradingApp {
             toggleSwitch.className = 'form-check form-switch';
             toggleSwitch.innerHTML = `
                 <input class="form-check-input" type="checkbox" ${strategy.enabled ? 'checked' : ''} 
-                       onchange="app.toggleStrategy('${strategy.name}', this.checked)">
+                       onchange="app.strategiesManager.toggleStrategy('${strategy.name}', this.checked)">
             `;
             enabledCell.appendChild(toggleSwitch);
             
@@ -4363,13 +4248,13 @@ class TradingApp {
             
             const actionsCell = document.createElement('td');
             actionsCell.innerHTML = `
-                <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editStrategy('${strategy.name}')" title="Edit">
+                <button class="btn btn-sm btn-outline-primary me-1" onclick="app.strategiesManager.editStrategy('${strategy.name}')" title="Edit">
                     <i class="fas fa-edit"></i>
                 </button>
-                <button class="btn btn-sm btn-outline-info me-1" onclick="app.openStrategyDetails('${strategy.name}')" title="Details">
+                <button class="btn btn-sm btn-outline-info me-1" onclick="app.strategiesManager.openStrategyDetails('${strategy.name}')" title="Details">
                     <i class="fas fa-list"></i>
                 </button>
-                <button class="btn btn-sm btn-outline-danger" onclick="app.deleteStrategy('${strategy.name}')" title="Delete">
+                <button class="btn btn-sm btn-outline-danger" onclick="app.strategiesManager.deleteStrategy('${strategy.name}')" title="Delete">
                     <i class="fas fa-trash"></i>
                 </button>
             `;
@@ -4394,7 +4279,7 @@ class TradingApp {
             console.error('Failed to toggle strategy:', error);
             this.showAlert('danger', 'Failed to toggle strategy');
             // Reload to revert the switch
-            this.loadStrategies();
+            this.strategiesManager.loadStrategies();
         }
     }
 
@@ -4454,7 +4339,7 @@ class TradingApp {
                         const modalEl = document.getElementById('editStrategyModal');
                         const inst = bootstrap.Modal.getInstance(modalEl);
                         if (inst) inst.hide();
-                        this.loadStrategies();
+                        this.strategiesManager.loadStrategies();
                     } catch (e) {
                         console.error(e);
                         this.showAlert('danger', 'Failed to update strategy');
@@ -4872,7 +4757,7 @@ class TradingApp {
         try {
             await this.apiCall(`/strategies/${name}`, { method: 'DELETE' });
             this.showAlert('success', `Strategy ${name} deleted`);
-            this.loadStrategies();
+            this.strategiesManager.loadStrategies();
         } catch (error) {
             console.error('Failed to delete strategy:', error);
             this.showAlert('danger', 'Failed to delete strategy');
