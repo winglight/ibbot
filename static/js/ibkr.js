@@ -7,7 +7,9 @@ class IBKRConnectionManager {
         this.app = app;
         this.connected = false;
         this.ws = null;
+        this.statusCheckInterval = null;
         this.setupEventListeners();
+        this.startPeriodicStatusCheck();
     }
 
     // 兼容旧代码：提供 isConnected 只读属性
@@ -168,6 +170,8 @@ class IBKRConnectionManager {
             this.app.showAlert('info', 'Disconnected successfully');
             this.updateConnectionStatus(false);
             this.app.clearData();
+            // 停止定期状态检查
+            this.stopPeriodicStatusCheck();
         } catch (error) {
             console.error('Disconnection failed:', error);
         }
@@ -229,6 +233,9 @@ class IBKRConnectionManager {
             this.app.loadOrders();
             this.app.loadPortfolio();
             this.app.riskRulesManager.loadRiskRules();
+            // 重新启动定期状态检查
+            this.stopPeriodicStatusCheck();
+            this.startPeriodicStatusCheck();
         } else {
             statusIndicator.className = 'status-indicator status-disconnected';
             statusText.textContent = 'Disconnected';
@@ -236,6 +243,68 @@ class IBKRConnectionManager {
             disconnectBtn.disabled = true;
             if (connectBtn) connectBtn.style.display = 'inline-block';
             if (disconnectBtn) disconnectBtn.style.display = 'none';
+        }
+    }
+
+    /**
+     * 启动定期状态检查
+     */
+    startPeriodicStatusCheck() {
+        // 每30秒检查一次连接状态
+        this.statusCheckInterval = setInterval(() => {
+            this.checkConnectionStatus({ timeout: 3000, maxRetries: 0 });
+        }, 30000);
+    }
+
+    /**
+     * 停止定期状态检查
+     */
+    stopPeriodicStatusCheck() {
+        if (this.statusCheckInterval) {
+            clearInterval(this.statusCheckInterval);
+            this.statusCheckInterval = null;
+        }
+    }
+
+    /**
+     * 调试工具：检查前后端连接状态
+     */
+    async debugConnectionStatus() {
+        console.log('=== IB连接状态调试 ===');
+        console.log('前端状态:');
+        console.log('  this.connected:', this.connected);
+        console.log('  this.app.connected:', this.app.connected);
+        
+        try {
+            const backendStatus = await this.app.apiCall('/connection_status', {
+                timeout: 3000,
+                maxRetries: 0,
+                useCache: false
+            });
+            console.log('后端状态:');
+            console.log('  connected:', backendStatus.connected);
+            console.log('  account_type:', backendStatus.account_type);
+            
+            const statusMatch = this.connected === backendStatus.connected;
+            console.log('状态一致性:', statusMatch ? '✓ 一致' : '✗ 不一致');
+            
+            if (!statusMatch) {
+                console.log('正在同步状态...');
+                this.updateConnectionStatus(backendStatus.connected, backendStatus.account_type);
+            }
+            
+            return {
+                frontend: { connected: this.connected, app_connected: this.app.connected },
+                backend: backendStatus,
+                consistent: statusMatch
+            };
+        } catch (error) {
+            console.error('无法获取后端状态:', error);
+            return {
+                frontend: { connected: this.connected, app_connected: this.app.connected },
+                backend: { error: error.message },
+                consistent: false
+            };
         }
     }
 
@@ -276,6 +345,9 @@ class IBKRConnectionManager {
         switch (data.type) {
             case 'connection_status':
                 this.updateConnectionStatus(data.connected, data.account_type);
+                // 同步连接状态到主应用
+                this.connected = data.connected;
+                this.app.connected = data.connected;
                 break;
             case 'order_placed':
                 // 清除订单缓存以强制刷新
@@ -406,3 +478,16 @@ class IBKRConnectionManager {
 
 // 导出模块
 window.IBKRConnectionManager = IBKRConnectionManager;
+
+// 全局调试工具
+window.debugIBConnection = function() {
+    if (window.app && window.app.ibkrManager) {
+        return window.app.ibkrManager.debugConnectionStatus();
+    } else {
+        console.error('IBKR Manager not available');
+        return null;
+    }
+};
+
+// 使用说明
+console.log('IB连接调试工具已加载，使用 debugIBConnection() 检查连接状态');

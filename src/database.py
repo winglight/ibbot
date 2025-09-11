@@ -259,11 +259,6 @@ class DatabaseManager:
             database_logger.debug(f"Order saved: {order.order_id}")
 
 
-    def load_orders_legacy(self) -> List[Order]:
-        """[兼容] 旧实现，已弃用，请使用 load_orders"""
-        database_logger.warning("load_orders_legacy() is deprecated; use load_orders()")
-        return self.load_orders()
-
     def update_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None, commission: float = None, pnl: float = None):
         """更新订单状态和价格（新）"""
         with sqlite3.connect(self.db_path) as conn:

@@ -6,8 +6,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
+import core
 from core import (
-    ibkr_client,
     connection_manager,
     risk_manager,
     order_manager,
@@ -23,13 +23,13 @@ NY_TZ = ZoneInfo("America/New_York")
 @router.post("/api/place_order")
 async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_current_user)):
     """下单"""
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
         # 直接调用下单方法，避免嵌套的事件循环调用
         if order.order_type.upper() == "MARKET":
-            trade = ibkr_client.place_market_order(
+            trade = core.ibkr_client.place_market_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 action=order.action,
@@ -39,7 +39,7 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
         elif order.order_type.upper() == "LIMIT":
             if not order.price:
                 raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = ibkr_client.place_limit_order(
+            trade = core.ibkr_client.place_limit_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 price=order.price,
@@ -113,7 +113,7 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
 @router.delete("/api/cancel_order/{order_id}")
 async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_user)):
     """取消订单"""
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
@@ -123,7 +123,7 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
             success, message = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: ibkr_client.cancel_order(order_id)
+                    lambda: core.ibkr_client.cancel_order(order_id)
                 ),
                 timeout=20.0  # 20-second timeout for order cancellation
             )
@@ -160,7 +160,7 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
 @router.post("/api/cancel_order")
 async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_current_user)):
     """取消订单 (POST方法)"""
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
@@ -174,7 +174,7 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
             success, message = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: ibkr_client.cancel_order(int(order_id))
+                    lambda: core.ibkr_client.cancel_order(int(order_id))
                 ),
                 timeout=20.0  # 20-second timeout for order cancellation
             )
@@ -214,12 +214,12 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
     
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
         # 获取当前持仓
-        positions = await ibkr_client.get_positions()
+        positions = await core.ibkr_client.get_positions()
         target_position = None
         
         for pos in positions:
@@ -239,7 +239,7 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
         quantity = abs(int(position_qty))
         
         # 执行平仓市价单
-        trade = ibkr_client.place_market_order(
+        trade = core.ibkr_client.place_market_order(
             symbol=symbol,
             quantity=quantity,
             action=action,
@@ -396,9 +396,7 @@ def _validate_g6_connection() -> dict:
     """G6: 连接状态验证"""
     errors = []
     
-    if not ibkr_client:
-        errors.append("IBKR client not initialized")
-    elif not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         errors.append("Not connected to IBKR")
     
     return {
@@ -464,9 +462,9 @@ async def _validate_g3_position_limits(order: OrderRequest) -> dict:
     errors = []
     
     try:
-        if ibkr_client and connection_manager.is_connected():
+        if connection_manager.is_connected():
             # 获取当前持仓
-            positions = await ibkr_client.get_positions()
+            positions = await core.ibkr_client.get_positions()
             current_position = 0
             
             for pos in positions:
@@ -499,9 +497,9 @@ async def _validate_g2_capital_adequacy(order: OrderRequest) -> dict:
     errors = []
     
     try:
-        if ibkr_client and connection_manager.is_connected():
+        if connection_manager.is_connected():
             # 获取账户信息
-            account_info = ibkr_client.get_account_summary()
+            account_info = core.ibkr_client.get_account_summary()
             
             if account_info:
                 # 检查可用资金
@@ -558,12 +556,12 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
     
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
         # 获取当前持仓
-        positions = await ibkr_client.get_positions()
+        positions = await core.ibkr_client.get_positions()
         target_position = None
         
         for pos in positions:
@@ -615,7 +613,7 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
             logger.warning(f"反向下单前停用风险规则失败: {e}")
         
         # 执行反向市价单
-        trade = ibkr_client.place_market_order(
+        trade = core.ibkr_client.place_market_order(
             symbol=symbol,
             quantity=quantity,
             action=action,
@@ -674,12 +672,12 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
 @router.delete("/api/cancel_all_orders")
 async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
     """取消所有订单"""
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
         # 直接调用取消所有订单方法，避免嵌套的事件循环调用
-        cancelled_count = ibkr_client.cancel_all_orders()
+        cancelled_count = core.ibkr_client.cancel_all_orders()
         
         await websocket_manager.broadcast({  # 替换 manager
             "type": "all_orders_cancelled",
@@ -883,7 +881,7 @@ async def get_order_detail(order_id: str, user: Optional[str] = Depends(get_curr
 @router.post("/api/orders/sync")
 async def sync_orders(user: Optional[str] = Depends(get_current_user)):
     """手动同步订单状态和价格字段从IB"""
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
     
     try:
@@ -895,7 +893,7 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
         await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                lambda: ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
+                lambda: core.ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
             ),
             timeout=10.0
         )

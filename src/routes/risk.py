@@ -8,7 +8,8 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
-from core import ibkr_client, connection_manager, risk_manager
+import core
+from core import connection_manager, risk_manager
 from .auth import get_current_user
 from src.models import (
     RiskRuleRequest,
@@ -202,10 +203,10 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
     try:
         # 获取实时账户信息
         account_info = {}
-        if ibkr_client and connection_manager.is_connected():
+        if connection_manager.is_connected():
             try:
                 account_response = await asyncio.wait_for(
-                    ibkr_client.get_account_info(),
+                    core.ibkr_client.get_account_info(),
                     timeout=5.0
                 )
                 if account_response:

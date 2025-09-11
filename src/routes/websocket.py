@@ -5,7 +5,8 @@ from typing import Dict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
-from core import connection_manager, ibkr_client, websocket_manager, order_manager
+import core
+from core import connection_manager, websocket_manager, order_manager
 
 router = APIRouter()
 
@@ -13,12 +14,12 @@ async def _realtime_price_sender(ws: WebSocket, symbol: str, interval: float = 2
     try:
         loop = asyncio.get_event_loop()
         while True:
-            if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
+            if not connection_manager.is_connected():
                 await asyncio.sleep(interval)
                 continue
             try:
                 data = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: ibkr_client.get_real_time_data(symbol, "SMART")),
+                    loop.run_in_executor(None, lambda: core.ibkr_client.get_real_time_data(symbol, "SMART")),
                     timeout=10.0
                 )
                 await ws.send_text(json.dumps({
@@ -48,9 +49,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # 初次连接后，向该连接单播账户信息快照
     try:
-        if connection_manager.is_connected() and 'ibkr_client' in globals() and ibkr_client:
+        if connection_manager.is_connected():
             try:
-                info = await asyncio.wait_for(ibkr_client.get_account_info(), timeout=8.0)
+                info = await asyncio.wait_for(core.ibkr_client.get_account_info(), timeout=8.0)
                 await websocket.send_text(json.dumps({
                     "type": "account_update",
                     "account_info": info
@@ -128,6 +129,23 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(json.dumps({'type': 'orders_snapshot', 'orders': converted_orders}))
     except Exception as e:
         logger.warning(f"Failed to send initial orders snapshot: {e}")
+    
+    # 初次连接后，向该连接单播发送positions快照
+    try:
+        if connection_manager.is_connected():
+            try:
+                positions = await asyncio.wait_for(core.ibkr_client.get_positions(fast=True), timeout=8.0)
+                await websocket.send_text(json.dumps({
+                    "type": "position_update",
+                    "positions": positions
+                }))
+            except asyncio.TimeoutError:
+                logger.warning("Initial positions snapshot timed out on websocket connect")
+            except Exception as e:
+                logger.warning(f"Failed to get/send initial positions snapshot: {e}")
+    except Exception as e:
+        logger.debug(f"Failed to send initial positions snapshot: {e}")
+    
     realtime_tasks: Dict[str, asyncio.Task] = {}
     try:
         while True:

@@ -95,7 +95,7 @@ class TradingApp {
             await this.ibkrManager.checkConnectionStatus({ timeout: 4000, maxRetries: 0 });
             // 加载账户和投资组合数据
             // this.dataManager.loadAccountInfo(); // 改为由 WebSocket account_update 推送
-            this.portfolioManager.loadPortfolio();
+            // this.portfolioManager.loadPortfolio(); // 移到登录成功后调用
             this.strategiesManager.loadStrategies();
             this.loadLogModules();
             this.loadLogs();
@@ -418,9 +418,11 @@ class TradingApp {
                     // 设置输入框的值
                     symbolInput.value = lastSymbol;
                     
-                    // 触发 input 事件以更新组合框
-                    const event = new Event('input');
-                    symbolInput.dispatchEvent(event);
+                    // 延迟触发 input 事件，避免在弹窗刚打开时立即获取价格导致连接问题
+                    setTimeout(() => {
+                        const event = new Event('input');
+                        symbolInput.dispatchEvent(event);
+                    }, 500); // 延迟500ms
                 }
             }
             
@@ -4774,13 +4776,30 @@ class TradingApp {
     // Logs functionality removed - panel no longer exists
 
     clearData() {
-        document.getElementById('accountInfo').innerHTML = '<p class="text-muted">Connect to view account information</p>';
-        document.querySelector('#ordersTable tbody').innerHTML = '';
-        document.querySelector('#positionsTable tbody').innerHTML = '';
-        document.querySelector('#autoOrdersTable tbody').innerHTML = '';
-        document.querySelector('#riskRulesTable2 tbody').innerHTML = '';
-
-
+        const accountInfo = document.getElementById('accountInfo');
+        if (accountInfo) {
+            accountInfo.innerHTML = '<p class="text-muted">Connect to view account information</p>';
+        }
+        
+        const ordersTableBody = document.querySelector('#ordersTable tbody');
+        if (ordersTableBody) {
+            ordersTableBody.innerHTML = '';
+        }
+        
+        const positionsTableBody = document.querySelector('#positionsTable tbody');
+        if (positionsTableBody) {
+            positionsTableBody.innerHTML = '';
+        }
+        
+        const autoOrdersTableBody = document.querySelector('#autoOrdersTable tbody');
+        if (autoOrdersTableBody) {
+            autoOrdersTableBody.innerHTML = '';
+        }
+        
+        const riskRulesTableBody = document.querySelector('#riskRulesTable2 tbody');
+        if (riskRulesTableBody) {
+            riskRulesTableBody.innerHTML = '';
+        }
     }
 
     getStatusColor(status) {
@@ -4953,6 +4972,14 @@ class TradingApp {
         }
         if (!symbol) {
             priceDisplay.style.display = 'none';
+            return;
+        }
+        
+        // 检查连接状态，避免在连接不稳定时进行价格获取
+        if (!this.connected) {
+            priceDisplay.style.display = 'block';
+            priceValue.textContent = '连接中...';
+            priceValue.className = 'fw-bold text-warning';
             return;
         }
         
@@ -5592,11 +5619,11 @@ class TradingApp {
                 <td class="text-center">
                     <input type="checkbox" class="form-check-input" 
                            data-channel="telegram" data-module="${module}"
-                           ${(telegram.enabled && telegramEvents.includes(module)) ? 'checked' : ''} ${telegram.enabled ? '' : 'disabled'}>
+                           ${(telegram.enabled && telegramEvents.includes(module)) ? 'checked' : ''}>
                 </td>
                 <td class="text-center">
                     <input type="checkbox" class="form-check-input" 
-                           data-channel="email" data-module="${module}" disabled>
+                           data-channel="email" data-module="${module}">
                 </td>
             `;
             tableBody.appendChild(row);
@@ -5628,6 +5655,11 @@ class TradingApp {
             // 模块设置表格中禁用/启用 Telegram 列
             document.querySelectorAll('#moduleSettingsTableBody input[data-channel="telegram"]').forEach(el=>{
                 el.disabled = !tgEnabled;
+            });
+            
+            // 模块设置表格中禁用/启用 Email 列
+            document.querySelectorAll('#moduleSettingsTableBody input[data-channel="email"]').forEach(el=>{
+                el.disabled = !emailEnabled;
             });
         }catch(err){ console.error('updateNotificationInputStates error:', err); }
     }

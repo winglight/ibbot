@@ -98,9 +98,17 @@ class IBKRDataManager {
      */
     async loadPortfolio() {
         try {
-            this.updatePortfolioUI(this.positions);
+            const response = await fetch('/api/positions?fast=false&use_cache=false');
+            if (response.ok) {
+                const positions = await response.json();
+                this.updatePositionsUI(positions);
+            } else {
+                console.error('Failed to fetch positions:', response.statusText);
+                this.updatePortfolioUI(this.positions || []);
+            }
         } catch (error) {
             console.error('Failed to load portfolio:', error);
+            this.updatePortfolioUI(this.positions || []);
         }
     }
 

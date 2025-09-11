@@ -241,8 +241,8 @@ def main():
     # 取消订单测试
     if limit_order_id is not None or is_connected(token) is False:
         tests.extend([
-            ("DELETE取消订单", lambda: test_cancel_order_delete(token, limit_order_id)),
-            ("POST取消订单", lambda: test_cancel_order_post(token, limit_order_id)),
+            ("DELETE取消订单", lambda: test_cancel_order_delete(token)),
+            ("POST取消订单", lambda: test_cancel_order_post(token)),
         ])
 
     all_passed = True

@@ -119,12 +119,16 @@ class ConnectionManager:
                             clientId=try_client_id,
                             timeout=10
                         )
-                        # 连接成功，更新配置中的客户端ID
-                        self.config.client_id = try_client_id
-                        connected = True
-                        self._last_connect_error = None
-                        connection_logger.info(f"成功连接IBKR，使用客户端ID: {try_client_id}")
-                        break
+                                # 验证连接是否真正建立
+                        if self.ib.isConnected():
+                            # 连接成功，更新配置中的客户端ID
+                            self.config.client_id = try_client_id
+                            connected = True
+                            self._last_connect_error = None
+                            connection_logger.info(f"成功连接IBKR，使用客户端ID: {try_client_id}")
+                            break
+                        else:
+                            raise Exception(f"连接建立失败 - 端口 {self.config.port} 不可达或TWS/Gateway未运行")
                     except Exception as conn_error:
                         error_msg = str(conn_error)
                         if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():

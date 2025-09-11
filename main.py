@@ -119,6 +119,8 @@ def resolve_module(path: str) -> str:
 async def lifespan(app: FastAPI):
     # Startup
     auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
+    main_logger = get_module_logger("main")
+    
     if auto_connect:
         main_logger.info("Auto-connect enabled, will attempt to connect to IBKR asynchronously...")
         
@@ -171,10 +173,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     main_logger.info("Application shutting down...")
 
-app = FastAPI(lifespan=lifespan)
-
-# 启用GZip压缩，减小大文件(如 app.js)传输体积
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+# 重新创建带有lifespan的FastAPI应用
+app = FastAPI(title="IBKR Trading Bot", version="1.0.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
@@ -352,6 +352,49 @@ def custom_openapi():
 # 覆盖默认 openapi 生成器
 app.openapi = custom_openapi
 
+# 启用GZip压缩，减小大文件(如 app.js)传输体积
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "*"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
+app.add_api_route("/", index_page)
+app.add_api_route("/api-docs.json", get_api_docs_main, include_in_schema=False)
+app.add_api_route("/rapidoc", rapidoc_html_main, include_in_schema=False)
+
+# Register routers
+app.include_router(auth_router)
+app.include_router(connection_router)
+app.include_router(market_data_router)
+app.include_router(account_router)
+app.include_router(orders_router)
+app.include_router(risk_router)
+app.include_router(strategy_router)
+app.include_router(notifications_router)
+app.include_router(queue_router)
+app.include_router(logs_router)
+app.include_router(websocket_router)
+app.include_router(market_data_router)
+app.include_router(account_router)
+app.include_router(orders_router)
+app.include_router(risk_router)
+app.include_router(strategy_router)
+app.include_router(notifications_router)
+app.include_router(queue_router)
+app.include_router(logs_router)
+app.include_router(websocket_router)
+
 # Utility helpers
 
 def print_banner():
@@ -512,38 +555,6 @@ async def lifespan(app: FastAPI):
             main_logger.info("Risk manager scheduler shutdown")
     except Exception as e:
         main_logger.warning(f"Risk manager shutdown warning: {e}")
-
-# 重新创建带有lifespan的FastAPI应用
-app = FastAPI(title="IBKR Trading Bot", version="1.0.0", lifespan=lifespan)
-
-# Re-attach middleware, static, and docs routes to the new app instance
-app.middleware("http")(request_id_middleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
-app.add_api_route("/", index_page)
-app.add_api_route("/api-docs.json", get_api_docs_main, include_in_schema=False)
-app.add_api_route("/rapidoc", rapidoc_html_main, include_in_schema=False)
-# Re-apply custom OpenAPI generator
-app.openapi = custom_openapi
-
-# Register routers
-app.include_router(auth_router)
-app.include_router(connection_router)
-app.include_router(market_data_router)
-app.include_router(account_router)
-app.include_router(orders_router)
-app.include_router(risk_router)
-app.include_router(strategy_router)
-app.include_router(notifications_router)
-app.include_router(queue_router)
-app.include_router(logs_router)
-app.include_router(websocket_router)
 
 # 添加：定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
 async def _pnl_broadcast_loop():

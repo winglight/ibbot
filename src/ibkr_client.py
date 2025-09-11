@@ -555,7 +555,6 @@ class IBKRClient:
                     ib.cancelMktData(contract)
                 except Exception as e:
                     ibkr_logger.warning(f"Failed to cancel market data for {symbol}: {e}")
-                    ibkr_logger.warning(f"Failed to cancel market data for {symbol}: {e}")
             self.connection_manager.run_in_connection_thread(_cancel_mkt_data)
             
             if result_payload:

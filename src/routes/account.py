@@ -5,7 +5,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
-from core import ibkr_client, connection_manager
+import core
+from core import connection_manager
 from .auth import get_current_user
 
 router = APIRouter()
@@ -48,7 +49,7 @@ async def backfill_commissions(
 async def get_account_info(user: Optional[str] = Depends(get_current_user)):
     """Retrieve IBKR account information."""
     # 当未连接时，返回200并提供结构化状态，避免频繁400噪声
-    if not ibkr_client or not connection_manager or not connection_manager.is_connected():
+    if not connection_manager or not connection_manager.is_connected():
         last_err = None
         try:
             last_err = connection_manager.get_last_connect_error() if connection_manager else None
@@ -65,7 +66,7 @@ async def get_account_info(user: Optional[str] = Depends(get_current_user)):
     try:
         try:
             info = await asyncio.wait_for(
-                ibkr_client.get_account_info(), timeout=10.0
+                core.ibkr_client.get_account_info(), timeout=10.0
             )
         except asyncio.TimeoutError:
             logger.warning("Account info request timed out")
@@ -85,7 +86,7 @@ async def get_positions(
     """Retrieve current positions with optional caching."""
     global positions_cache, positions_cache_timestamp
 
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         logger.warning("Not connected to IBKR, returning empty positions list")
         return {
             "success": True,
@@ -108,7 +109,7 @@ async def get_positions(
 
         try:
             positions = await asyncio.wait_for(
-                ibkr_client.get_positions(fast=fast), timeout=5.0
+                core.ibkr_client.get_positions(fast=fast), timeout=5.0
             )
             positions_cache = positions
             positions_cache_timestamp = current_time

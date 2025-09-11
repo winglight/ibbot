@@ -188,72 +188,8 @@ class RiskManager:
                 )
                 self.risk_rules[rule.symbol] = rule
             
-            # 加载订单记录
-            db_orders = self.db_manager.load_auto_orders()
-            for order_db in db_orders:
-                # 从数据库的AutoOrder转换为RiskManager的AutoOrder
-                # 正确映射所有字段，处理缺失的status、executed_at等字段
-                executed_dt = None
-                try:
-                    executed_dt = datetime.fromisoformat(order_db.executed_at) if getattr(order_db, 'executed_at', None) else None
-                except Exception:
-                    executed_dt = None
-                order = AutoOrder(
-                    order_id=order_db.order_id,
-                    symbol=order_db.symbol,
-                    action=order_db.action,
-                    quantity=order_db.quantity,
-                    order_type=order_db.order_type,
-                    price=order_db.price,
-                    status=getattr(order_db, 'status', None) or "pending",
-                    created_at=datetime.fromisoformat(order_db.timestamp) if order_db.timestamp else datetime.now(),
-                    executed_at=executed_dt,  # 可能为None
-                    rule_id=getattr(order_db, 'rule_id', None),
-                    order_source=getattr(order_db, 'order_source', None) or "auto"
-                )
-                self.auto_orders[order.order_id] = order
-            
-            risk_logger.info(f"Loaded {len(self.risk_rules)} risk rules and {len(self.auto_orders)} orders from database")
         except Exception as e:
             risk_logger.error(f"Error loading data from database: {e}")
-            # 如果数据库加载失败，尝试从CSV文件迁移
-            self._load_from_files_and_migrate()
-    
-    def _load_from_files_and_migrate(self):
-        """从旧的CSV/JSON文件加载数据并迁移到数据库"""
-        try:
-            # 尝试从CSV文件加载并迁移到数据库
-            risk_logger.info("Attempting to migrate data from CSV files to database")
-            
-            # 迁移风险规则
-            risk_rules_file = os.path.join(self.data_dir, "risk_rules.csv")
-            if os.path.exists(risk_rules_file):
-                self.load_risk_rules_from_csv(risk_rules_file)
-                # 将加载的规则保存到数据库
-                for rule in self.risk_rules.values():
-                    db_rule = DatabaseRiskRule(
-                        symbol=rule.symbol,
-                        stop_loss_price=rule.stop_loss_price,
-                        take_profit_price=rule.take_profit_price,
-                        max_loss_percent=rule.max_loss_percent,
-                        enabled=rule.enabled,
-                        max_time_span=rule.max_time_span,
-                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
-                    )
-                    self.db_manager.save_risk_rule(db_rule)
-                risk_logger.info(f"Migrated {len(self.risk_rules)} risk rules to database")
-            
-            # 迁移订单记录
-            orders_file = os.path.join(self.data_dir, "orders.csv")
-            if os.path.exists(orders_file):
-                self.load_auto_orders_from_csv(orders_file)
-                # 将加载的订单保存到数据库
-                for order in self.auto_orders.values():
-                    self.save_auto_order_to_db(order)
-                risk_logger.info(f"Migrated {len(self.auto_orders)} orders to database")
-                
-        except Exception as e:
-            risk_logger.error(f"Error during CSV to database migration: {e}")
 
     # 新增：从数据库加载风控运行时配置
     def _load_risk_config_from_db(self) -> None:

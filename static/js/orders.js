@@ -58,9 +58,11 @@ class OrderManager {
             
             const cacheKey = 'orders_main';
             
-            // 始终拉取最新数据，禁用多级缓存确保pnl/commission及时更新
-            console.log('🌐 Fetching fresh orders data (no cache)');
-            const data = await this.app.apiCall('/orders?limit=300&use_cache=false', {
+            // 只获取当天订单，减少数据传输量
+            const today = new Date();
+            const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
+            console.log('🌐 Fetching today\'s orders data (no cache)');
+            const data = await this.app.apiCall(`/orders?limit=50&start_date=${startOfDay}&use_cache=false`, {
                 method: 'GET',
                 useCache: false,
                 cacheTime: 0

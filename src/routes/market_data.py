@@ -10,7 +10,7 @@ from loguru import logger
 from zoneinfo import ZoneInfo
 
 import core
-from core import ibkr_client, connection_manager, get_db_manager
+from core import connection_manager, get_db_manager
 from .auth import get_current_user
 from src.models import (
     HistoricalDataRequest,
@@ -111,7 +111,7 @@ async def get_historical_data(
     user: Optional[str] = Depends(get_current_user),
 ):
     """获取历史数据"""
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     try:
@@ -176,7 +176,7 @@ async def get_historical_data(
             df = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: ibkr_client.get_historical_data(
+                    lambda: core.ibkr_client.get_historical_data(
                         symbol=request.symbol,
                         duration=request.duration,
                         bar_size=request.bar_size,
@@ -243,7 +243,7 @@ async def get_chart_data(
     user: Optional[str] = Depends(get_current_user),
 ):
     """获取图表数据"""
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         reason = None
         try:
             reason = connection_manager.get_last_connect_error()
@@ -258,7 +258,7 @@ async def get_chart_data(
             df = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: ibkr_client.get_historical_data(
+                    lambda: core.ibkr_client.get_historical_data(
                         symbol=request.symbol,
                         duration=request.duration,
                         bar_size=request.bar_size,
@@ -425,7 +425,7 @@ async def get_realtime_data(
     user: Optional[str] = Depends(get_current_user),
 ):
     """获取实时数据"""
-    if not ibkr_client or not ibkr_client.connected:
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     try:
@@ -433,7 +433,7 @@ async def get_realtime_data(
         try:
             data = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: ibkr_client.get_real_time_data(symbol, exchange)
+                    None, lambda: core.ibkr_client.get_real_time_data(symbol, exchange)
                 ),
                 timeout=10.0,
             )
@@ -442,8 +442,8 @@ async def get_realtime_data(
                 f"Real-time data request for {symbol} timed out, checking cache"
             )
             cached_data = None
-            if hasattr(ibkr_client, "price_cache") and symbol in ibkr_client.price_cache:
-                cached_price = ibkr_client.price_cache.get(symbol)
+            if hasattr(core.ibkr_client, "price_cache") and symbol in core.ibkr_client.price_cache:
+                cached_price = core.ibkr_client.price_cache.get(symbol)
                 if cached_price:
                     cached_data = {
                         "symbol": symbol,
@@ -469,8 +469,8 @@ async def get_realtime_data(
         if data:
             return {"success": True, "data": data}
         else:
-            if hasattr(ibkr_client, "price_cache") and symbol in ibkr_client.price_cache:
-                cached_price = ibkr_client.price_cache.get(symbol)
+            if hasattr(core.ibkr_client, "price_cache") and symbol in core.ibkr_client.price_cache:
+                cached_price = core.ibkr_client.price_cache.get(symbol)
                 if cached_price:
                     cached_data = {
                         "symbol": symbol,
@@ -499,8 +499,8 @@ async def get_current_price(
 ):
     """获取当前价格 - 轻量级接口"""
     if CURRENT_PRICE_CACHE_ONLY:
-        if hasattr(ibkr_client, "price_cache") and request.symbol in ibkr_client.price_cache:
-            cached_price = ibkr_client.price_cache.get(request.symbol)
+        if hasattr(core.ibkr_client, "price_cache") and request.symbol in core.ibkr_client.price_cache:
+            cached_price = core.ibkr_client.price_cache.get(request.symbol)
             if cached_price is not None:
                 return {
                     "success": True,
@@ -517,12 +517,12 @@ async def get_current_price(
             "error": "Cache-only mode: no cached price",
         }
 
-    if not ibkr_client or not connection_manager.is_connected():
+    if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     try:
-        if hasattr(ibkr_client, "price_cache") and request.symbol in ibkr_client.price_cache:
-            cached_price = ibkr_client.price_cache.get(request.symbol)
+        if hasattr(core.ibkr_client, "price_cache") and request.symbol in core.ibkr_client.price_cache:
+            cached_price = core.ibkr_client.price_cache.get(request.symbol)
             if cached_price:
                 return {
                     "success": True,
@@ -537,7 +537,7 @@ async def get_current_price(
             data = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: ibkr_client.get_real_time_data(
+                    lambda: core.ibkr_client.get_real_time_data(
                         request.symbol, request.exchange
                     ),
                 ),
@@ -563,7 +563,7 @@ async def get_current_price(
             df = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: ibkr_client.get_historical_data(
+                    lambda: core.ibkr_client.get_historical_data(
                         symbol=request.symbol,
                         duration="1 D",
                         bar_size="1 min",
