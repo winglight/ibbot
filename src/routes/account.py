@@ -47,8 +47,20 @@ async def backfill_commissions(
 @router.get("/api/account_info")
 async def get_account_info(user: Optional[str] = Depends(get_current_user)):
     """Retrieve IBKR account information."""
-    if not ibkr_client or not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    # 当未连接时，返回200并提供结构化状态，避免频繁400噪声
+    if not ibkr_client or not connection_manager or not connection_manager.is_connected():
+        last_err = None
+        try:
+            last_err = connection_manager.get_last_connect_error() if connection_manager else None
+        except Exception:
+            last_err = None
+        logger.warning("Not connected to IBKR, returning connection status for account_info")
+        return {
+            "success": False,
+            "connected": False,
+            "error": "Not connected to IBKR",
+            "last_error": last_err,
+        }
 
     try:
         try:
@@ -57,8 +69,8 @@ async def get_account_info(user: Optional[str] = Depends(get_current_user)):
             )
         except asyncio.TimeoutError:
             logger.warning("Account info request timed out")
-            return {"success": False, "error": "Account info request timed out"}
-        return {"success": True, "account_info": info}
+            return {"success": False, "connected": True, "error": "Account info request timed out"}
+        return {"success": True, "connected": True, "account_info": info}
     except Exception as e:
         logger.error(f"Get account info error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

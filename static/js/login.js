@@ -92,8 +92,7 @@ class LoginManager {
      */
     onLoginSuccess() {
         // 检查连接状态
--        this.app.checkConnectionStatus();
-+        this.app.ibkrManager.checkConnectionStatus();
+        this.app.ibkrManager.checkConnectionStatus();
         
         // 加载基础数据
         this.app.strategiesManager.loadStrategies();
@@ -166,7 +165,7 @@ class LoginManager {
                 
                 // 连接成功后异步加载数据
                 setTimeout(() => {
-                    this.app.loadAccountInfo();
+                    // this.app.loadAccountInfo(); // 改为由 WebSocket account_update 推送
                     this.app.loadOrders();
                     this.app.loadPortfolio();
                     this.app.riskRulesManager.loadRiskRules();

@@ -175,6 +175,14 @@ class QueueManager:
                     task = self.tasks.get(task_id)
                     
                     if task and task.status == "pending":
+                        # 当任务需要IBKR连接但当前未连接时，延后处理，避免无意义的失败与重试
+                        if task.task_type in ("strategy_order",) and self.connection_manager and not self.connection_manager.is_connected():
+                            # 重新放回队列尾部，并短暂休眠以避免紧密轮询
+                            self.pending_queue.append(task_id)
+                            queue_logger.debug(f"Deferring task {task_id} due to IBKR not connected")
+                            await asyncio.sleep(0.5)
+                            continue
+                        
                         # 启动任务处理
                         processing_task = asyncio.create_task(
                             self._process_task(task)
@@ -196,7 +204,7 @@ class QueueManager:
             except Exception as e:
                 queue_logger.error(f"Worker loop error: {e}")
                 await asyncio.sleep(1)
-    
+
     async def _process_task(self, task: QueueTask):
         """处理单个任务"""
         task.status = "processing"
@@ -217,22 +225,32 @@ class QueueManager:
             queue_logger.info(f"Task {task.task_id} completed successfully")
             
         except Exception as e:
-            task.retry_count += 1
             error_msg = str(e)
             task.error_message = error_msg
-            
-            queue_logger.error(f"Task {task.task_id} failed: {error_msg}, retry {task.retry_count}/{task.max_retries}")
-            
-            if task.retry_count < task.max_retries:
-                # 重新加入队列
+
+            # 针对未连接IBKR的情况进行延后处理而非计为失败/重试
+            if ("Not connected to IBKR" in error_msg) or (self.connection_manager and not self.connection_manager.is_connected()):
                 task.status = "pending"
                 task.started_at = None
+                # 重新排队等待连接恢复
                 self.pending_queue.append(task.task_id)
-                queue_logger.info(f"Task {task.task_id} requeued for retry")
+                queue_logger.warning(f"Task {task.task_id} deferred: {error_msg}; will retry when connected")
+                # 小幅休眠避免紧密轮询
+                await asyncio.sleep(0.5)
             else:
-                task.status = "failed"
-                task.completed_at = datetime.now()
-                queue_logger.error(f"Task {task.task_id} failed permanently after {task.max_retries} retries")
+                task.retry_count += 1
+                queue_logger.error(f"Task {task.task_id} failed: {error_msg}, retry {task.retry_count}/{task.max_retries}")
+                
+                if task.retry_count < task.max_retries:
+                    # 重新加入队列
+                    task.status = "pending"
+                    task.started_at = None
+                    self.pending_queue.append(task.task_id)
+                    queue_logger.info(f"Task {task.task_id} requeued for retry")
+                else:
+                    task.status = "failed"
+                    task.completed_at = datetime.now()
+                    queue_logger.error(f"Task {task.task_id} failed permanently after {task.max_retries} retries")
         
         finally:
             self._save_tasks()

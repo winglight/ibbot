@@ -239,28 +239,38 @@ class ConnectionManager:
                         except Exception as e:
                             connection_logger.error(f"Error in order status handler: {e}")
                     
-                    # 添加成交事件监听器
-                    def fill_handler(trade, fill):
-                        """处理订单成交事件"""
+                    # 添加成交细节事件监听器（ib_insync: execDetailsEvent）
+                    def exec_details_handler(trade, fill):
+                        """处理订单成交明细事件（不含佣金报告）"""
                         try:
                             order_id = str(trade.order.orderId)
                             connection_logger.info(f"Order fill event: {order_id}, fill: {fill}")
-                            
-                            # 处理佣金报告
-                            if hasattr(fill, 'commissionReport') and fill.commissionReport:
-                                commission = fill.commissionReport.commission
-                                pnl = getattr(fill.commissionReport, 'realizedPNL', None)
-                                connection_logger.info(f"Commission report for order {order_id}: commission={commission}, pnl={pnl}")
-                                
-                                # 异步更新订单的佣金和PnL
-                                asyncio.create_task(self._update_order_commission_pnl(order_id, commission, pnl))
                         except Exception as e:
-                            connection_logger.error(f"Error in fill handler: {e}")
+                            connection_logger.error(f"Error in exec details handler: {e}")
                     
-                    # 绑定事件监听器
-                    self.ib.orderStatusEvent += order_status_handler
-                    self.ib.fillEvent += fill_handler
-                    connection_logger.debug("Added order status and fill event handlers")
+                    # 添加佣金报告事件监听器（ib_insync: commissionReportEvent）
+                    def commission_report_handler(trade, fill, report):
+                        """处理成交后的佣金与已实现盈亏报告"""
+                        try:
+                            order_id = str(trade.order.orderId)
+                            commission = getattr(report, 'commission', None)
+                            pnl = getattr(report, 'realizedPNL', None)
+                            connection_logger.info(
+                                f"Commission report for order {order_id}: commission={commission}, pnl={pnl}"
+                            )
+                            # 异步更新订单的佣金和PnL
+                            asyncio.create_task(self._update_order_commission_pnl(order_id, commission, pnl))
+                        except Exception as e:
+                            connection_logger.error(f"Error in commission report handler: {e}")
+                    
+                    # 绑定事件监听器（兼容性检测）
+                    if hasattr(self.ib, 'orderStatusEvent'):
+                        self.ib.orderStatusEvent += order_status_handler
+                    if hasattr(self.ib, 'execDetailsEvent'):
+                        self.ib.execDetailsEvent += exec_details_handler
+                    if hasattr(self.ib, 'commissionReportEvent'):
+                        self.ib.commissionReportEvent += commission_report_handler
+                    connection_logger.debug("Added order status, exec details and commission report event handlers")
                     
                 except Exception as e:
                     connection_logger.warning(f"Failed to setup event handlers: {e}")

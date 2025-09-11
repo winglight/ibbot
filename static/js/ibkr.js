@@ -149,7 +149,7 @@ class IBKRConnectionManager {
             if (acctVal) localStorage.setItem('conn_accountType', acctVal);
             
             // Load data after successful connection
-            this.app.dataManager.loadAccountInfo();
+            // this.app.dataManager.loadAccountInfo();
             this.app.loadOrders();
             this.app.loadPortfolio();
             this.app.riskRulesManager.loadRiskRules();
@@ -193,7 +193,7 @@ class IBKRConnectionManager {
             if (data.connected) {
                 // Load data asynchronously to avoid blocking
                 setTimeout(() => {
-                    this.app.dataManager.loadAccountInfo();
+                    // this.app.dataManager.loadAccountInfo();
                     this.app.loadOrders();
                     this.app.loadPortfolio();
                     this.app.riskRulesManager.loadRiskRules();
@@ -385,11 +385,18 @@ class IBKRConnectionManager {
     handleConnectionError(error) {
         // 特殊处理IBKR连接错误 - 直接打开设置窗口而不显示错误提示
         if (error.message === 'Not connected to IBKR') {
-            console.warn('IBKR not connected, opening settings modal');
+            console.warn('IBKR not connected, opening settings modal (debounced)');
             const connectionModalEl = document.getElementById('connectionModal');
             if (connectionModalEl) {
-                const settingsModal = new bootstrap.Modal(connectionModalEl);
-                settingsModal.show();
+                const alreadyOpen = connectionModalEl.classList.contains('show') || connectionModalEl.dataset.opening === 'true';
+                if (!alreadyOpen) {
+                    connectionModalEl.dataset.opening = 'true';
+                    const settingsModal = bootstrap.Modal.getOrCreateInstance(connectionModalEl);
+                    settingsModal.show();
+                    const clearFlag = () => { delete connectionModalEl.dataset.opening; };
+                    connectionModalEl.addEventListener('hidden.bs.modal', clearFlag, { once: true });
+                    setTimeout(clearFlag, 3000);
+                }
             }
             return true; // 表示已处理
         }

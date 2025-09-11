@@ -94,7 +94,7 @@ class TradingApp {
             void this.loginManager.tryAutoLogin({ timeout: 7000, maxRetries: 0, connectTimeout: 10000, connectRetries: 0 });
             await this.ibkrManager.checkConnectionStatus({ timeout: 4000, maxRetries: 0 });
             // 加载账户和投资组合数据
-            this.dataManager.loadAccountInfo();
+            // this.dataManager.loadAccountInfo(); // 改为由 WebSocket account_update 推送
             this.portfolioManager.loadPortfolio();
             this.strategiesManager.loadStrategies();
             this.loadLogModules();
@@ -795,13 +795,21 @@ class TradingApp {
                     continue;
                 }
                 
-                // 特殊处理IBKR连接错误 - 直接打开设置窗口而不显示错误提示
+                // 特殊处理IBKR连接错误 - 直接打开设置窗口而不显示错误提示（带防抖，避免重复弹窗）
                 if (error.message === 'Not connected to IBKR') {
-                    console.warn('IBKR not connected, opening settings modal');
+                    console.warn('IBKR not connected, opening settings modal (debounced)');
                     const connectionModalEl = document.getElementById('connectionModal');
                     if (connectionModalEl) {
-                        const settingsModal = new bootstrap.Modal(connectionModalEl);
-                        settingsModal.show();
+                        const alreadyOpen = connectionModalEl.classList.contains('show') || connectionModalEl.dataset.opening === 'true';
+                        if (!alreadyOpen) {
+                            connectionModalEl.dataset.opening = 'true';
+                            const settingsModal = bootstrap.Modal.getOrCreateInstance(connectionModalEl);
+                            settingsModal.show();
+                            const clearFlag = () => { delete connectionModalEl.dataset.opening; };
+                            connectionModalEl.addEventListener('hidden.bs.modal', clearFlag, { once: true });
+                            // 双保险：3秒后确保解除opening标记，避免异常状态导致的卡死
+                            setTimeout(clearFlag, 3000);
+                        }
                     }
                     throw error;
                 }
@@ -5541,6 +5549,15 @@ class TradingApp {
         document.getElementById('endTradingTime').value = tradingReminder.end_trading_time || '16:00';
         document.getElementById('browserNotificationEnabled').checked = tradingReminder.browser_notification_enabled !== false;
         document.getElementById('telegramReminderEnabled').checked = tradingReminder.telegram_reminder_enabled || false;
+
+        // 初始化禁用/启用状态，并绑定变化事件
+        if (typeof this.updateNotificationInputStates === 'function') {
+            this.updateNotificationInputStates();
+        }
+        ['telegramEnabled','emailEnabled','tradingReminderEnabled'].forEach(id=>{
+            const el=document.getElementById(id);
+            if(el){ el.onchange=()=>{ if (typeof this.updateNotificationInputStates === 'function') this.updateNotificationInputStates(); } }
+        });
     }
 
     async populateModuleSettings(settings) {
@@ -5575,7 +5592,7 @@ class TradingApp {
                 <td class="text-center">
                     <input type="checkbox" class="form-check-input" 
                            data-channel="telegram" data-module="${module}"
-                           ${(telegram.enabled && telegramEvents.includes(module)) ? 'checked' : ''}>
+                           ${(telegram.enabled && telegramEvents.includes(module)) ? 'checked' : ''} ${telegram.enabled ? '' : 'disabled'}>
                 </td>
                 <td class="text-center">
                     <input type="checkbox" class="form-check-input" 
@@ -5584,6 +5601,35 @@ class TradingApp {
             `;
             tableBody.appendChild(row);
         });
+
+        // 渲染后根据当前开关状态再次同步禁用/启用
+        if (typeof this.updateNotificationInputStates === 'function') {
+            this.updateNotificationInputStates();
+        }
+    }
+
+    // 统一更新通知设置输入组件的禁用/启用状态
+    updateNotificationInputStates(){
+        try{
+            const setDisabled=(id,dis)=>{ const el=document.getElementById(id); if(el){ el.disabled=!!dis; }};
+            const tgEnabled = !!document.getElementById('telegramEnabled')?.checked;
+            setDisabled('telegramBotToken', !tgEnabled);
+            setDisabled('telegramChatId', !tgEnabled);
+
+            const emailEnabled = !!document.getElementById('emailEnabled')?.checked;
+            setDisabled('emailAddress', !emailEnabled);
+
+            const trEnabled = !!document.getElementById('tradingReminderEnabled')?.checked;
+            setDisabled('startTradingTime', !trEnabled);
+            setDisabled('endTradingTime', !trEnabled);
+            setDisabled('browserNotificationEnabled', !trEnabled);
+            setDisabled('telegramReminderEnabled', !trEnabled);
+
+            // 模块设置表格中禁用/启用 Telegram 列
+            document.querySelectorAll('#moduleSettingsTableBody input[data-channel="telegram"]').forEach(el=>{
+                el.disabled = !tgEnabled;
+            });
+        }catch(err){ console.error('updateNotificationInputStates error:', err); }
     }
 
     async getAvailableModules() {

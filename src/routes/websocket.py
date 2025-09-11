@@ -35,6 +35,44 @@ async def _realtime_price_sender(ws: WebSocket, symbol: str, interval: float = 2
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket_manager.connect(websocket)
+
+    # 新连接建立后，立即向该客户端单播当前连接状态
+    try:
+        await websocket.send_text(json.dumps({
+            "type": "connection_status",
+            "connected": connection_manager.is_connected(),
+            "account_type": "Paper" if connection_manager.config.paper_trading else "Live",
+        }))
+    except Exception as e:
+        logger.debug(f"Failed to send initial connection status: {e}")
+
+    # 初次连接后，向该连接单播账户信息快照
+    try:
+        if connection_manager.is_connected() and 'ibkr_client' in globals() and ibkr_client:
+            try:
+                info = await asyncio.wait_for(ibkr_client.get_account_info(), timeout=8.0)
+                await websocket.send_text(json.dumps({
+                    "type": "account_update",
+                    "account_info": info
+                }))
+            except asyncio.TimeoutError:
+                logger.warning("Initial account_info snapshot timed out on websocket connect")
+            except Exception as e:
+                logger.warning(f"Failed to get/send initial account_info snapshot: {e}")
+        else:
+            # 未连接时也发送一个占位 account_update，便于前端立即渲染“未连接”状态
+            last_err = None
+            try:
+                last_err = connection_manager.get_last_connect_error()
+            except Exception:
+                last_err = None
+            await websocket.send_text(json.dumps({
+                "type": "account_update",
+                "account_info": {"connected": False, "last_error": last_err}
+            }))
+    except Exception as e:
+        logger.debug(f"Failed to send initial account_update: {e}")
+
     # 初次连接后，向该连接单播发送订单快照（最多300条）
     try:
         if 'order_manager' in globals() and order_manager:

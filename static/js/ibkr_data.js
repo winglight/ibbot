@@ -16,7 +16,12 @@ class IBKRDataManager {
     async loadAccountInfo() {
         try {
             const data = await this.app.apiCall('/account_info');
-            const info = data.account_info;
+            // 后端在未连接时返回 { success: false, connected: false, last_error }
+            if (data && data.connected === false) {
+                this.updateAccountInfoUI({ connected: false, last_error: data.last_error || null });
+                return;
+            }
+            const info = (data && data.account_info) ? data.account_info : null;
             this.updateAccountInfoUI(info);
         } catch (error) {
             console.error('Failed to load account info:', error);
@@ -30,22 +35,55 @@ class IBKRDataManager {
         try {
             const accountInfoDiv = document.getElementById('accountInfo');
             if (!accountInfoDiv) return;
-            
+
+            // 未连接或无信息时的占位展示
+            if (!info || (typeof info === 'object' && info.connected === false)) {
+                const lastErr = info && info.last_error ? String(info.last_error) : '';
+                accountInfoDiv.innerHTML = `
+                    <div class="alert alert-warning mb-2" role="alert">
+                        未连接到 IBKR${lastErr ? `：${lastErr}` : ''}
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p><strong>Account ID:</strong> N/A</p>
+                            <p><strong>Account Type:</strong> N/A</p>
+                            <p><strong>Net Liquidation:</strong> $0</p>
+                        </div>
+                        <div class="col-md-6">
+                            <p><strong>Available Funds:</strong> $0</p>
+                            <p><strong>Buying Power:</strong> $0</p>
+                            <p class="loss"><strong>Unrealized P&L:</strong> $0</p>
+                            <p class="loss"><strong>Realized P&L:</strong> $0</p>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            // 安全提取字段并提供默认值
+            const account_id = info.account_id || 'N/A';
+            const account_type = info.account_type || 'N/A';
+            const net_liquidation = Number(info.net_liquidation) || 0;
+            const available_funds = Number(info.available_funds) || 0;
+            const buying_power = Number(info.buying_power) || 0;
+            const unrealized_pnl = Number(info.unrealized_pnl) || 0;
+            const realized_pnl = Number(info.realized_pnl) || 0;
+
             accountInfoDiv.innerHTML = `
                 <div class="row">
                     <div class="col-md-6">
-                        <p><strong>Account ID:</strong> ${info.account_id || 'N/A'}</p>
-                        <p><strong>Account Type:</strong> ${info.account_type}</p>
-                        <p><strong>Net Liquidation:</strong> $${this.app.formatNumber(info.net_liquidation)}</p>
+                        <p><strong>Account ID:</strong> ${account_id}</p>
+                        <p><strong>Account Type:</strong> ${account_type}</p>
+                        <p><strong>Net Liquidation:</strong> $${this.app.formatNumber(net_liquidation)}</p>
                     </div>
                     <div class="col-md-6">
-                        <p><strong>Available Funds:</strong> $${this.app.formatNumber(info.available_funds)}</p>
-                        <p><strong>Buying Power:</strong> $${this.app.formatNumber(info.buying_power)}</p>
-                        <p class="${info.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
-                            <strong>Unrealized P&L:</strong> $${this.app.formatNumber(info.unrealized_pnl)}
+                        <p><strong>Available Funds:</strong> $${this.app.formatNumber(available_funds)}</p>
+                        <p><strong>Buying Power:</strong> $${this.app.formatNumber(buying_power)}</p>
+                        <p class="${unrealized_pnl >= 0 ? 'profit' : 'loss'}">
+                            <strong>Unrealized P&L:</strong> $${this.app.formatNumber(unrealized_pnl)}
                         </p>
-                        <p class="${info.realized_pnl >= 0 ? 'profit' : 'loss'}">
-                            <strong>Realized P&L:</strong> $${this.app.formatNumber(info.realized_pnl)}
+                        <p class="${realized_pnl >= 0 ? 'profit' : 'loss'}">
+                            <strong>Realized P&L:</strong> $${this.app.formatNumber(realized_pnl)}
                         </p>
                     </div>
                 </div>
