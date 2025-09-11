@@ -1362,6 +1362,40 @@ class IBKRClient:
             ibkr_logger.error(f"Failed to get account info: {e}")
             return {}
     
+    def get_account_summary(self) -> List[Dict]:
+        """兼容方法：返回与 ib.accountSummary() 类似的结构，用于资金充足性校验等逻辑。
+        返回格式：[{'tag': str, 'value': Any, 'currency': str|None, 'account': str|None}, ...]
+        """
+        try:
+            # 确保连接
+            if not self.is_connected():
+                if not self.connect():
+                    ibkr_logger.error("Cannot connect to IBKR for get_account_summary")
+                    return []
+
+            ib = self.ib
+            if not ib or not ib.isConnected():
+                ibkr_logger.error("IBKR connection lost for get_account_summary")
+                return []
+
+            summary_items = ib.accountSummary()
+            result: List[Dict] = []
+            for it in summary_items or []:
+                try:
+                    result.append({
+                        'tag': getattr(it, 'tag', None),
+                        'value': getattr(it, 'value', None),
+                        'currency': getattr(it, 'currency', None),
+                        'account': getattr(it, 'account', None),
+                    })
+                except Exception:
+                    # 忽略单条解析错误，继续收集
+                    continue
+            return result
+        except Exception as e:
+            ibkr_logger.error(f"Failed to get account summary: {e}")
+            return []
+
     async def get_positions(self, fast: bool = False) -> List[Dict]:
         """获取持仓列表
         fast=False 时会尝试获取实时价格，确保价格数据最新
