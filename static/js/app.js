@@ -105,8 +105,7 @@ class TradingApp {
             this.loadGSRulesStatus();
             // 加载风险规则
             this.riskRulesManager.loadRiskRules();
-            // 启动订单状态自动刷新
-            this.startOrdersAutoRefresh();
+            // 已改为WebSocket推送更新订单，取消轮询刷新
             await cfgPromise.catch(() => {});
         }, 50);
     }
@@ -5229,7 +5228,8 @@ class TradingApp {
             if (!tbody) return;
             
             tbody.innerHTML = history.map(item => {
-                const timestamp = new Date(item.timestamp).toLocaleString();
+                const timeValue = item.sent_at || item.created_at || item.timestamp;
+            const timestamp = timeValue ? new Date(timeValue).toLocaleString() : '-';
                 return `
                 <tr>
                     <td>${timestamp}</td>
@@ -5828,7 +5828,9 @@ class TradingApp {
         return history.map(item => {
             const statusBadge = this.getNotificationStatusBadge(item.status);
             const channelIcon = this.getChannelIcon(item.channel);
-            const timestamp = new Date(item.timestamp).toLocaleString();
+            // Prefer backend-provided timestamps: sent_at -> created_at -> timestamp (fallback)
+            const timeValue = item?.sent_at || item?.created_at || item?.timestamp;
+            const timestamp = timeValue ? new Date(timeValue).toLocaleString() : '-';
             
             return `
                 <tr>
@@ -6217,6 +6219,10 @@ class TradingApp {
 const app = new TradingApp();
 // expose for inline onclick handlers
 window.app = app;
+// Attach NotificationsManager shim if available
+if (window.__attachNotifications) {
+    window.__attachNotifications(app);
+}
 
 // 延迟3秒后自动执行Orders表格调试
 setTimeout(() => {

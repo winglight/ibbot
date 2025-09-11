@@ -1124,6 +1124,10 @@ class RiskManager:
                     
                     if trade:
                         current_status = trade.orderStatus.status
+                        # 将IBKR的Inactive状态映射为Rejected状态
+                        if current_status == "Inactive":
+                            current_status = "Rejected"
+                        
                         if current_status != order.status:
                             # 更新订单状态
                             fill_price = None
@@ -1294,6 +1298,21 @@ class RiskManager:
                         auto_order.status = "Filled"
                         auto_order.executed_at = executed_at
                         self.update_order_status(str(order_id), "Filled")
+
+                        # 触发一次佣金/PNL回填（使用executor避免阻塞事件循环）
+                        try:
+                            cm = getattr(self.ibkr_client, "connection_manager", None)
+                            if cm is not None:
+                                risk_logger.info("触发commission/PNL回填以避免市价单本地成交后缺失")
+                                updated = await loop.run_in_executor(
+                                    None,
+                                    lambda: cm.backfill_commissions()
+                                )
+                                risk_logger.info(f"commission/PNL回填完成，尝试更新次数: {updated}")
+                            else:
+                                risk_logger.warning("未找到connection_manager，跳过commission/PNL回填")
+                        except Exception as bf_err:
+                            risk_logger.warning(f"commission/PNL回填失败: {bf_err}")
                 else:
                     risk_logger.warning(f"订单管理器未初始化，无法同步订单: {order_id}")
                 
@@ -1304,7 +1323,7 @@ class RiskManager:
                         position=position['position'],
                         trigger_price=position['current_price'],
                         order_type="loss",
-                        order_id=order_id
+                        order_id=str(order_id)
                     )
                 elif order_request.order_type == OrderType.TAKE_PROFIT:
                     await self.notification_manager.send_stop_loss_notification(
@@ -1312,13 +1331,13 @@ class RiskManager:
                         position=position['position'],
                         trigger_price=position['current_price'],
                         order_type="profit",
-                        order_id=order_id
+                        order_id=str(order_id)
                     )
                 elif order_request.order_type == OrderType.RISK_CLOSE:
                     await self.notification_manager.send_auto_close_notification(
                         symbol=order_request.symbol,
                         position=position['position'],
-                        order_id=order_id
+                        order_id=str(order_id)
                     )
                 
                 risk_logger.info(f"Order executed: {order_request.order_type.value} for {order_request.symbol}, Order ID: {order_id}")

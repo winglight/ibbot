@@ -338,7 +338,8 @@ class OrderManager:
                 "PartiallyFilled": 3,
                 "Filled": 4,
                 "Cancelled": 4,
-                "Rejected": 4
+                "Rejected": 4,
+                "Inactive": 4  # IBKR的Inactive状态映射为相同优先级，让后续处理决定具体映射
             }
             
             # 检查是否为状态回退
@@ -492,7 +493,7 @@ class OrderManager:
                     # 如果没有传入ibkr_client，创建新实例（保持向后兼容）
                     from .ibkr_client import IBKRClient
                     temp_client = IBKRClient()
-                    positions = temp_client.get_positions()
+                    positions = await temp_client.get_positions()
                 
                 # 查找指定资产的持仓
                 position_qty = 0
@@ -836,3 +837,14 @@ class OrderManager:
         except Exception as e:
             order_logger.error(f"Error updating order {order.order_id} in database: {e}")
             raise
+
+# 全局 OrderManager 单例
+_order_manager = None
+
+
+def get_order_manager():
+    """获取 OrderManager 单例实例"""
+    global _order_manager
+    if _order_manager is None:
+        _order_manager = OrderManager()
+    return _order_manager

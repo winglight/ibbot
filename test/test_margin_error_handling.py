@@ -18,7 +18,7 @@ import uuid
 from unittest.mock import Mock, patch, MagicMock
 from src.ibkr_client import IBKRClient
 from src.connection_manager import ConnectionManager
-from src.order_manager import OrderManager, OrderStatus
+from src.order_manager import get_order_manager, OrderStatus
 from loguru import logger
 
 # 设置测试日志
@@ -37,7 +37,7 @@ class TestMarginErrorHandling:
         
         # 创建IBKR客户端实例
         self.ibkr_client = IBKRClient()
-        self.order_manager = OrderManager()
+        self.order_manager = get_order_manager()
         
         test_logger.info("Test environment setup complete")
     

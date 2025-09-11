@@ -34,6 +34,12 @@ class IBKRClient:
         self.price_cache_ttl_seconds = 5  # 减少到5秒，确保实时按钮能获取最新价格
         # 映射reqId到订单ID，用于错误处理
         self.req_id_to_order_id = {}
+        
+        # Positions cache to smooth transient portfolio emptiness (e.g., after reconnect)
+        # 防止IBKR偶发返回空portfolio快照导致前端仓位闪烁或误判
+        self.positions_cache = []
+        self.positions_cache_timestamp = None
+        self.positions_cache_ttl_seconds = 15
     
     def _sanitize_float(self, value):
         """清理无效的浮点数值，将NaN和Infinity转换为None"""
@@ -683,8 +689,15 @@ class IBKRClient:
             ibkr_logger.error(f"Order refresh failed: {e}")
             return False
 
-    def cancel_order(self, order_id: int) -> tuple[bool, str]:
+    def cancel_order(self, order_id: Any) -> tuple[bool, str]:
         """取消指定订单"""
+        # 规范化 order_id，内部与 IBKR 比较使用 int，外部广播/日志统一使用字符串
+        order_id_str = str(order_id)
+        try:
+            order_id_int = int(order_id_str)
+        except Exception:
+            ibkr_logger.error(f"Invalid order_id for cancellation: {order_id}")
+            return False, "Invalid order_id"
         try:
             # 确保连接
             if not self.is_connected():
@@ -1266,10 +1279,10 @@ class IBKRClient:
                             ibkr_logger.warning(f"Failed to create historical order {order_id_str} in OrderManager: {create_err}")
                 
                 # Add debug logging for order data
-                ibkr_logger.debug(f"Processing order {trade.order.orderId}: totalQuantity={trade.order.totalQuantity}, action={trade.order.action}, orderType={trade.order.orderType}, status={trade.orderStatus.status}")
+                ibkr_logger.debug(f"Processing order {order_id_str}: totalQuantity={trade.order.totalQuantity}, action={trade.order.action}, orderType={trade.order.orderType}, status={trade.orderStatus.status}")
                 
                 orders.append({
-                    'order_id': trade.order.orderId,
+                    'order_id': order_id_str,
                     'symbol': getattr(trade.contract, 'localSymbol', None) or trade.contract.symbol,
                     'action': trade.order.action,
                     'quantity': trade.order.totalQuantity,
@@ -1368,6 +1381,16 @@ class IBKRClient:
             
             # Use portfolio() to get current market data snapshot
             portfolio_items = ib.portfolio()
+
+            # 当发生短暂断线/同步延迟时，IB可能返回空的portfolio快照。
+            # 为避免前端仓位瞬时清空，这里使用短期缓存回退。
+            if not portfolio_items:
+                if getattr(self, 'positions_cache', None) and getattr(self, 'positions_cache_timestamp', None) and (datetime.now() - self.positions_cache_timestamp) < timedelta(seconds=self.positions_cache_ttl_seconds):
+                    ibkr_logger.warning("IB portfolio() returned empty; using recent positions cache to avoid flicker")
+                    return self.positions_cache.copy()
+                else:
+                    ibkr_logger.warning("IB portfolio() returned empty and no valid cache; returning empty list")
+                    return []
             position_list = []
             
             for item in portfolio_items:
@@ -1474,6 +1497,11 @@ class IBKRClient:
                 }
                 position_list.append(position_info)
             
+            # 成功获取非空持仓后，刷新短期缓存
+            if position_list:
+                self.positions_cache = position_list.copy()
+                self.positions_cache_timestamp = datetime.now()
+            
             return position_list
         except Exception as e:
             ibkr_logger.error(f"Failed to get positions: {e}")
@@ -1502,7 +1530,9 @@ if __name__ == "__main__":
             
             # 获取当前持仓
             print("\nGetting positions...")
-            positions = client.get_positions()
+            # 需要await异步方法
+            import asyncio
+            positions = asyncio.run(client.get_positions())
             if positions:
                 for pos in positions:
                     print(f"Position: {pos['symbol']} - {pos['position']} shares @ ${pos['avg_cost']:.2f}")

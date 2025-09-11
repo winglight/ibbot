@@ -32,7 +32,50 @@ class NotificationManager:
             self.websocket_manager = websocket_manager
         if db_manager:
             self.db_manager = db_manager
-    
+
+    def _load_settings(self) -> Dict[str, Any]:
+        """加载通知配置（若未配置则返回默认），默认值需与后端保持一致。"""
+        default_events = [
+            'Order Filled',
+            'Position Opened',
+            'Position Closed',
+            'Risk Rule Triggered',
+            'Strategy Started',
+            'Strategy Stopped'
+        ]
+        default_settings = {
+            "chrome": {
+                "enabled": True,
+                "config": {},
+                "events": default_events
+            },
+            "telegram": {
+                "enabled": False,
+                "config": {
+                    "bot_token": "",
+                    "chat_id": ""
+                },
+                "events": default_events
+            },
+            "trading_reminder": {
+                "enabled": False,
+                "start_trading_time": "09:30",
+                "end_trading_time": "16:00",
+                "browser_notification_enabled": True,
+                "telegram_reminder_enabled": False
+            },
+            "email_enabled": False,
+            "email_address": ""
+        }
+        try:
+            if self.db_manager:
+                loaded = self.db_manager.load_notification_config()
+                if isinstance(loaded, dict) and loaded:
+                    return loaded
+        except Exception as e:
+            notification_logger.error(f"Load notification settings failed: {e}")
+        return default_settings
+
     async def send_notification(self, message: str, event_type: str = "general", 
                                channels: List[str] = None, **kwargs) -> Dict[str, bool]:
         """发送通知到指定渠道
@@ -49,15 +92,27 @@ class NotificationManager:
         if channels is None:
             channels = ['telegram', 'websocket']
         
-        results = {}
+        # 根据设置过滤实际发送的渠道（仅在启用时才尝试发送）
+        settings = self._load_settings()
+        telegram_enabled = bool(settings.get('telegram', {}).get('enabled', False))
+        chrome_enabled = bool(settings.get('chrome', {}).get('enabled', True))
+
+        requested = set(channels)
+        allowed: List[str] = []
+        if 'telegram' in requested and self.telegram_notifier and telegram_enabled:
+            allowed.append('telegram')
+        if 'websocket' in requested and self.websocket_manager and chrome_enabled:
+            allowed.append('websocket')
         
-        # 发送Telegram通知
-        if 'telegram' in channels and self.telegram_notifier:
+        results: Dict[str, bool] = {}
+        
+        # 发送Telegram通知（仅在启用时）
+        if 'telegram' in allowed:
             try:
                 success = await self.telegram_notifier.send_message(message)
                 results['telegram'] = success
                 
-                # 保存到数据库
+                # 保存到数据库（仅记录尝试发送的渠道）
                 if self.db_manager:
                     status = 'sent' if success else 'failed'
                     error_msg = None if success else 'Failed to send Telegram notification'
@@ -68,7 +123,7 @@ class NotificationManager:
                         status=status,
                         error_message=error_msg
                     )
-                    
+                
                 notification_logger.info(f"Telegram notification {'sent' if success else 'failed'}: {event_type}")
             except Exception as e:
                 results['telegram'] = False
@@ -84,8 +139,8 @@ class NotificationManager:
                         error_message=str(e)
                     )
         
-        # 发送WebSocket通知
-        if 'websocket' in channels and self.websocket_manager:
+        # 发送WebSocket通知（仅在启用时）
+        if 'websocket' in allowed:
             try:
                 notification_data = {
                     "type": event_type,
@@ -104,7 +159,7 @@ class NotificationManager:
                         message=message,
                         status='sent'
                     )
-                    
+                
                 notification_logger.info(f"WebSocket notification sent: {event_type}")
             except Exception as e:
                 results['websocket'] = False
@@ -123,7 +178,7 @@ class NotificationManager:
         return results
     
     async def send_order_notification(self, order_type: str, symbol: str, quantity: int,
-                                    price: Optional[float], status: str, order_id: int):
+                                    price: Optional[float], status: str, order_id: str):
         """发送订单通知"""
         # 构建消息
         if status.lower() == "filled":
@@ -133,17 +188,19 @@ class NotificationManager:
         else:
             emoji = "📋"
         
+        order_id_str = str(order_id)
+        
         message = f"{emoji} 订单{status} {emoji}\n\n"
         message += f"类型: {order_type}\n"
         message += f"代码: {symbol}\n"
         message += f"数量: {quantity:,}\n"
         if price:
             message += f"价格: ${price:.2f}\n"
-        message += f"订单ID: {order_id}\n"
+        message += f"订单ID: {order_id_str}\n"
         
         # WebSocket额外数据
         websocket_data = {
-            "order_id": order_id,
+            "order_id": order_id_str,
             "symbol": symbol,
             "action": order_type,
             "quantity": quantity,
@@ -193,16 +250,18 @@ class NotificationManager:
         )
     
     async def send_stop_loss_notification(self, symbol: str, position: float, 
-                                        trigger_price: float, order_type: str, order_id: int):
+                                        trigger_price: float, order_type: str, order_id: str):
         """发送止损止盈通知"""
         action = "止盈" if order_type == "profit" else "止损"
         emoji = "💰" if order_type == "profit" else "🛑"
+        
+        order_id_str = str(order_id)
         
         message = f"{emoji} 自动{action}触发 {emoji}\n\n"
         message += f"代码: {symbol}\n"
         message += f"持仓: {position:,.0f} 股\n"
         message += f"触发价格: ${trigger_price:.2f}\n"
-        message += f"订单ID: {order_id}\n\n"
+        message += f"订单ID: {order_id_str}\n\n"
         message += f"📈 风险管理系统执行的自动{action}订单。"
         
         return await self.send_notification(
@@ -211,15 +270,16 @@ class NotificationManager:
             symbol=symbol,
             position=position,
             trigger_price=trigger_price,
-            order_id=order_id
+            order_id=order_id_str
         )
     
-    async def send_auto_close_notification(self, symbol: str, position: float, order_id: int):
+    async def send_auto_close_notification(self, symbol: str, position: float, order_id: str):
         """发送自动平仓通知"""
+        order_id_str = str(order_id)
         message = f"🔴 自动平仓执行 🔴\n\n"
         message += f"代码: {symbol}\n"
         message += f"平仓数量: {position:,.0f} 股\n"
-        message += f"订单ID: {order_id}\n\n"
+        message += f"订单ID: {order_id_str}\n\n"
         message += f"💼 由于亏损阈值触发的自动平仓。"
         
         return await self.send_notification(
@@ -227,7 +287,7 @@ class NotificationManager:
             event_type="auto_close",
             symbol=symbol,
             position=position,
-            order_id=order_id
+            order_id=order_id_str
         )
     
     async def send_daily_summary_notification(self, account_info: dict, positions: list):

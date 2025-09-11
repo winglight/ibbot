@@ -67,8 +67,18 @@ class OrderManager {
             });
             this.orders = data.orders || [];
             
+            // 仅显示当天订单（本地时区）
+            const now = new Date();
+            const startOfDayMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+            const endOfDayMs = startOfDayMs + 24 * 60 * 60 * 1000;
+            
             // 过滤和排序
-            const filteredOrders = this.orders.filter(order => order.order_id !== 0);
+            const filteredOrders = this.orders.filter(order => {
+                if (!order || order.order_id === 0) return false;
+                if (!order.submit_time) return false;
+                const ts = new Date(order.submit_time).getTime();
+                return ts >= startOfDayMs && ts < endOfDayMs;
+            });
             const sortedOrders = filteredOrders.sort((a, b) => {
                 const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
                 const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;

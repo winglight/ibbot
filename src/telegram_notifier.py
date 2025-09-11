@@ -71,27 +71,29 @@ class TelegramNotifier:
         
         await self.send_message(message)
     
-    async def send_auto_close_alert(self, symbol: str, position: float, order_id: int):
+    async def send_auto_close_alert(self, symbol: str, position: float, order_id: str):
         """发送自动平仓警报"""
+        order_id_str = str(order_id)
         message = f"🔴 <b>Auto Close Executed</b> 🔴\n\n"
         message += f"<b>Symbol:</b> {symbol}\n"
         message += f"<b>Position Closed:</b> {position:,.0f} shares\n"
-        message += f"<b>Order ID:</b> {order_id}\n\n"
+        message += f"<b>Order ID:</b> {order_id_str}\n\n"
         message += f"💼 Position automatically closed due to loss threshold."
         
         await self.send_message(message)
     
     async def send_stop_loss_alert(self, symbol: str, position: float, trigger_price: float, 
-                                 order_type: str, order_id: int):
+                                 order_type: str, order_id: str):
         """发送止盈止损警报"""
         action = "Take Profit" if order_type == "profit" else "Stop Loss"
         emoji = "💰" if order_type == "profit" else "🛑"
+        order_id_str = str(order_id)
         
         message = f"{emoji} <b>Auto {action} Triggered</b> {emoji}\n\n"
         message += f"<b>Symbol:</b> {symbol}\n"
         message += f"<b>Position:</b> {position:,.0f} shares\n"
         message += f"<b>Trigger Price:</b> ${trigger_price:.2f}\n"
-        message += f"<b>Order ID:</b> {order_id}\n\n"
+        message += f"<b>Order ID:</b> {order_id_str}\n\n"
         message += f"📈 Auto {action.lower()} order executed by risk management system."
         
         await self.send_message(message)
@@ -118,7 +120,7 @@ class TelegramNotifier:
         await self.send_message(message)
     
     async def send_order_alert(self, order_type: str, symbol: str, quantity: int, 
-                             price: Optional[float], status: str, order_id: int):
+                             price: Optional[float], status: str, order_id: str):
         """发送订单状态警报"""
         if status.lower() == "filled":
             emoji = "✅"
@@ -127,13 +129,14 @@ class TelegramNotifier:
         else:
             emoji = "📋"
         
+        order_id_str = str(order_id)
         message = f"{emoji} <b>Order {status}</b> {emoji}\n\n"
         message += f"<b>Type:</b> {order_type}\n"
         message += f"<b>Symbol:</b> {symbol}\n"
         message += f"<b>Quantity:</b> {quantity:,}\n"
         if price:
             message += f"<b>Price:</b> ${price:.2f}\n"
-        message += f"<b>Order ID:</b> {order_id}\n"
+        message += f"<b>Order ID:</b> {order_id_str}\n"
         
         await self.send_message(message)
     

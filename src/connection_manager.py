@@ -229,7 +229,7 @@ class ConnectionManager:
                     def order_status_handler(trade):
                         """处理订单状态变化事件"""
                         try:
-                            order_id = trade.order.orderId
+                            order_id = str(trade.order.orderId)
                             status = trade.orderStatus.status
                             connection_logger.info(f"Order status update: {order_id} -> {status}")
                             
@@ -243,7 +243,7 @@ class ConnectionManager:
                     def fill_handler(trade, fill):
                         """处理订单成交事件"""
                         try:
-                            order_id = trade.order.orderId
+                            order_id = str(trade.order.orderId)
                             connection_logger.info(f"Order fill event: {order_id}, fill: {fill}")
                             
                             # 处理佣金报告
@@ -491,7 +491,7 @@ class ConnectionManager:
     async def _handle_order_error(self, req_id, error_code, error_string):
         """处理订单错误，更新订单状态为失败"""
         try:
-            from .order_manager import OrderManager
+            from .order_manager import get_order_manager
             from .models import OrderStatus
             
             # 记录错误信息
@@ -504,7 +504,7 @@ class ConnectionManager:
                     order_id = ibkr_client.req_id_to_order_id.get(req_id)
                     if order_id:
                         # 更新订单状态为失败
-                        order_manager = OrderManager()
+                        order_manager = get_order_manager()
                         order_manager.update_order_status(
                             order_id=order_id,
                             status=OrderStatus.REJECTED.value,
@@ -525,7 +525,7 @@ class ConnectionManager:
     async def _handle_order_filled(self, trade):
         """处理订单成交事件"""
         try:
-            order_id = trade.order.orderId
+            order_id = str(trade.order.orderId)
             connection_logger.info(f"Handling filled order: {order_id}")
             
             # 获取佣金和PnL信息
@@ -552,13 +552,14 @@ class ConnectionManager:
             from .database import get_db_manager
             
             db = get_db_manager()
-            await db.update_order_commission_pnl(order_id, commission, pnl)
-            connection_logger.info(f"Updated order {order_id} commission={commission}, pnl={pnl} in database")
+            oid = str(order_id)
+            await db.update_order_commission_pnl(oid, commission, pnl)
+            connection_logger.info(f"Updated order {oid} commission={commission}, pnl={pnl} in database")
 
             # 同步内存中的订单（如果存在）
             try:
-                from .order_manager import OrderManager
-                om = OrderManager()
+                from .order_manager import get_order_manager
+                om = get_order_manager()
                 oid = str(order_id)
                 order = om.orders.get(oid)
                 if order:
@@ -580,7 +581,7 @@ class ConnectionManager:
                 from .websocket_manager import websocket_manager
                 message = {
                     "type": "order_update",
-                    "order_id": order_id,
+                    "order_id": oid,
                     "commission": commission,
                     "pnl": pnl,
                 }
@@ -595,9 +596,9 @@ class ConnectionManager:
                         "executed_at": order.executed_at.isoformat() if getattr(order, 'executed_at', None) else None,
                     })
                 await websocket_manager.broadcast(message)
-                connection_logger.info(f"Broadcasted order_update for order {order_id} (commission={commission}, pnl={pnl})")
+                connection_logger.info(f"Broadcasted order_update for order {oid} (commission={commission}, pnl={pnl})")
             except Exception as ws_err:
-                connection_logger.warning(f"Failed to broadcast order_update for order {order_id}: {ws_err}")
+                connection_logger.warning(f"Failed to broadcast order_update for order {oid}: {ws_err}")
             
         except Exception as e:
             connection_logger.error(f"Error updating order commission/pnl in database: {e}")
@@ -650,7 +651,7 @@ class ConnectionManager:
                             cr = getattr(fill, 'commissionReport', None)
                             exec_obj = getattr(fill, 'execution', None)
                             if cr and exec_obj and hasattr(exec_obj, 'orderId'):
-                                order_id = exec_obj.orderId
+                                order_id = str(exec_obj.orderId)
                                 commission = cr.commission
                                 pnl = getattr(cr, 'realizedPNL', None)
                                 connection_logger.debug(

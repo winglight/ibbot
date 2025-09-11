@@ -48,7 +48,7 @@ from src.connection_manager import connection_manager, ConnectionConfig
 from src.strategy_manager import StrategyManager
 from src.database import get_db_manager
 from src.queue_manager import queue_manager
-from src.order_manager import OrderManager
+from src.order_manager import get_order_manager
 from src.models import HistoricalDataRequest, ChartDataRequest, OrderRequest, ExternalStrategyOrderRequest, StrategySettingsRequest, StrategyRequest, RiskRuleRequest, RiskConfigUpdateRequest, PositionSizingRequest, CurrentPriceRequest
 from src.websocket_manager import websocket_manager  # 新增导入
 from src.notification_manager import NotificationManager
@@ -517,7 +517,12 @@ class TokenResponse(BaseModel):
 EXEMPT_PATHS = set([
     '/',
     '/static/style.css',
-    '/static/app.js',
+    '/static/js/app.js',
+    '/static/js/login.js',
+    '/static/js/ibkr.js',
+    '/static/js/ibkr_data.js',
+    '/static/js/pnlcalendar.js',
+    '/static/js/notifications.js',
     '/static',
     '/api/login',
     '/api/strategy',  # external strategies use body token
@@ -577,7 +582,7 @@ try:
 except Exception as _sm_dep_err:
     logger.warning(f"StrategyManager set_dependencies at startup failed: {_sm_dep_err}")
 websocket_connections = []
-order_manager = OrderManager()
+order_manager = get_order_manager()
 # 注入依赖到 OrderManager
 try:
     order_manager.set_dependencies(
@@ -2834,6 +2839,61 @@ async def update_config_rules(payload: Dict[str, Any], user: Optional[str] = Dep
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket_manager.connect(websocket)
+    # 初次连接后，向该连接单播发送订单快照（最多300条）
+    try:
+        if 'order_manager' in globals() and order_manager:
+            loop = asyncio.get_event_loop()
+            orders = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: order_manager.get_orders(limit=300)),
+                timeout=5.0
+            )
+            converted_orders = []
+            for o in orders:
+                raw_type = (o.order_type or '').upper()
+                if raw_type in ('MARKET', 'MKT'):
+                    order_type = 'MKT'
+                elif raw_type in ('LIMIT', 'LMT'):
+                    order_type = 'LMT'
+                else:
+                    order_type = raw_type or 'MKT'
+                price_val = 0.0
+                try:
+                    if o.price is not None:
+                        price_val = float(o.price)
+                except Exception:
+                    price_val = 0.0
+                trigger_type = None
+                try:
+                    if getattr(o, 'order_source', 'manual') == 'auto':
+                        rule_id = getattr(o, 'rule_id', None)
+                        symbol = getattr(o, 'symbol', None)
+                        if rule_id and rule_id != symbol:
+                            trigger_type = 'strategy'
+                        else:
+                            trigger_type = 'risk_rule'
+                except Exception:
+                    trigger_type = None
+                converted_order = {
+                    'order_id': o.order_id,
+                    'symbol': o.symbol,
+                    'action': o.action,
+                    'quantity': o.quantity,
+                    'order_type': order_type,
+                    'limit_price': price_val if order_type == 'LMT' and price_val > 0 else None,
+                    'avg_fill_price': (o.fill_price if o.fill_price is not None else (price_val if order_type == 'MKT' and price_val > 0 else 0)),
+                    'status': o.status,
+                    'filled': o.quantity if o.status == 'Filled' else 0,
+                    'remaining': 0 if o.status == 'Filled' else o.quantity,
+                    'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
+                    'order_source': getattr(o, 'order_source', 'manual'),
+                    'trigger_type': trigger_type,
+                    'commission': getattr(o, 'commission', None),
+                    'pnl': getattr(o, 'pnl', None)
+                }
+                converted_orders.append(converted_order)
+            await websocket.send_text(json.dumps({'type': 'orders_snapshot', 'orders': converted_orders}))
+    except Exception as e:
+        logger.warning(f"Failed to send initial orders snapshot: {e}")
     realtime_tasks: Dict[str, asyncio.Task] = {}
     try:
         while True:
@@ -3130,14 +3190,26 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
     try:
         db = get_db_manager()
         settings = db.load_notification_config()
+
+        # 前后端事件名映射：令牌<->标签
+        token_to_label = {
+            'order_filled': 'Order Filled',
+            'position_opened': 'Position Opened',
+            'position_closed': 'Position Closed',
+            'risk_triggered': 'Risk Rule Triggered',
+            'strategy_started': 'Strategy Started',
+            'strategy_stopped': 'Strategy Stopped',
+        }
+        label_to_token = {v: k for k, v in token_to_label.items()}
         
-        # 如果没有设置，返回默认配置
+        # 如果没有设置，返回默认配置（使用前端展示的事件标签）
         if not settings:
+            default_events_labels = list(token_to_label.values())
             settings = {
                 "chrome": {
                     "enabled": True,
                     "config": {},
-                    "events": ["market", "strategy", "order", "risk"]
+                    "events": default_events_labels
                 },
                 "telegram": {
                     "enabled": False,
@@ -3145,7 +3217,7 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
                         "bot_token": "",
                         "chat_id": ""
                     },
-                    "events": ["market", "strategy", "order", "risk"]
+                    "events": default_events_labels
                 },
                 "trading_reminder": {
                     "enabled": False,
@@ -3162,6 +3234,17 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
             # 兼容旧数据：补齐email字段
             settings.setdefault("email_enabled", False)
             settings.setdefault("email_address", "")
+            # 将存储的事件（可能为令牌）转换为前端标签
+            for ch in ("chrome", "telegram"):
+                ch_cfg = settings.get(ch)
+                if isinstance(ch_cfg, dict):
+                    evs = ch_cfg.get("events", [])
+                    if isinstance(evs, list) and evs:
+                        # 若已是标签则保持，否则映射
+                        if any(e in label_to_token for e in evs):
+                            ch_cfg["events"] = evs
+                        else:
+                            ch_cfg["events"] = [token_to_label.get(e, e) for e in evs]
         
         return {"success": True, "settings": settings}
     except Exception as e:
@@ -3172,6 +3255,29 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
 async def update_notification_settings(settings: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
     """更新通知设置"""
     try:
+        # 前后端事件名映射：令牌<->标签
+        token_to_label = {
+            'order_filled': 'Order Filled',
+            'position_opened': 'Position Opened',
+            'position_closed': 'Position Closed',
+            'risk_triggered': 'Risk Rule Triggered',
+            'strategy_started': 'Strategy Started',
+            'strategy_stopped': 'Strategy Stopped',
+        }
+        label_to_token = {v: k for k, v in token_to_label.items()}
+        
+        # 保存前，将事件标签转换为后端存储令牌
+        for ch in ("chrome", "telegram"):
+            ch_cfg = settings.get(ch)
+            if isinstance(ch_cfg, dict):
+                evs = ch_cfg.get("events", [])
+                if isinstance(evs, list) and evs:
+                    # 若已是令牌则保持，否则映射
+                    if all(e in token_to_label for e in evs):
+                        ch_cfg["events"] = evs
+                    else:
+                        ch_cfg["events"] = [label_to_token.get(e, e) for e in evs]
+        
         db = get_db_manager()
         db.save_notification_config(settings)
         

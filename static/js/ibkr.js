@@ -318,6 +318,36 @@ class IBKRConnectionManager {
                 }
                 this.app.loadOrders();
                 break;
+            case 'orders_snapshot':
+                // 首次连接后的订单快照，直接渲染避免额外请求
+                if (Array.isArray(data.orders) && this.app.orderManager && typeof this.app.orderManager.updateOrdersTableSmart === 'function') {
+                    try {
+                        const tbody = document.querySelector('#ordersTable tbody');
+                        // 仅显示当天订单（本地时区），并按 submit_time 与 order_id 排序（与 _loadOrders 一致）
+                        const now = new Date();
+                        const startOfDayMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+                        const endOfDayMs = startOfDayMs + 24 * 60 * 60 * 1000;
+                        const sorted = data.orders
+                            .filter(o => {
+                                if (!o || o.order_id === 0) return false;
+                                if (!o.submit_time) return false;
+                                const ts = new Date(o.submit_time).getTime();
+                                return ts >= startOfDayMs && ts < endOfDayMs;
+                            })
+                            .sort((a, b) => {
+                                const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
+                                const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;
+                                if (bt !== at) return bt - at;
+                                const aid = Number(a.order_id) || 0;
+                                const bid = Number(b.order_id) || 0;
+                                return bid - aid;
+                            });
+                        this.app.orderManager.updateOrdersTableSmart(sorted, tbody);
+                    } catch (e) {
+                        console.error('Failed to render orders_snapshot:', e);
+                    }
+                }
+                break;
             case 'position_update':
                 if (data.positions) {
                     this.app.dataManager.updatePositionsUI(data.positions);
