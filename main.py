@@ -68,17 +68,17 @@ from core import (
 )
 
 # Authentication and routers
-from routes.auth import get_current_user, router as auth_router
-from routes.connection import router as connection_router
-from routes.market_data import router as market_data_router
-from routes.account import router as account_router
-from routes.orders import router as orders_router
-from routes.risk import router as risk_router
-from routes.strategy import router as strategy_router
-from routes.notifications import router as notifications_router
-from routes.queue import router as queue_router
-from routes.logs import router as logs_router
-from routes.websocket import router as websocket_router
+from src.routes.auth import get_current_user, router as auth_router
+from src.routes.connection import router as connection_router
+from src.routes.market_data import router as market_data_router
+from src.routes.account import router as account_router
+from src.routes.orders import router as orders_router
+from src.routes.risk import router as risk_router
+from src.routes.strategy import router as strategy_router
+from src.routes.notifications import router as notifications_router
+from src.routes.queue import router as queue_router
+from src.routes.logs import router as logs_router
+from src.routes.websocket import router as websocket_router
 
 
 # Global variables
