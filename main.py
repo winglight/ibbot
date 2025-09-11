@@ -3201,7 +3201,7 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
             'strategy_stopped': 'Strategy Stopped',
         }
         label_to_token = {v: k for k, v in token_to_label.items()}
-        
+
         # 如果没有设置，返回默认配置（使用前端展示的事件标签）
         if not settings:
             default_events_labels = list(token_to_label.values())
@@ -3236,15 +3236,16 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
             settings.setdefault("email_address", "")
             # 将存储的事件（可能为令牌）转换为前端标签
             for ch in ("chrome", "telegram"):
-                ch_cfg = settings.get(ch)
-                if isinstance(ch_cfg, dict):
-                    evs = ch_cfg.get("events", [])
-                    if isinstance(evs, list) and evs:
-                        # 若已是标签则保持，否则映射
-                        if any(e in label_to_token for e in evs):
-                            ch_cfg["events"] = evs
-                        else:
-                            ch_cfg["events"] = [token_to_label.get(e, e) for e in evs]
+                ch_cfg = settings.get(ch) or {}
+                evs = ch_cfg.get("events")
+                # 如果缺失或为空则使用默认事件标签
+                if not isinstance(evs, list) or not evs:
+                    ch_cfg["events"] = list(token_to_label.values())
+                else:
+                    # 若存储的是令牌则转换为标签
+                    if all(e in token_to_label for e in evs):
+                        ch_cfg["events"] = [token_to_label.get(e, e) for e in evs]
+                settings[ch] = ch_cfg
         
         return {"success": True, "settings": settings}
     except Exception as e:
@@ -3265,18 +3266,19 @@ async def update_notification_settings(settings: Dict[str, Any], user: Optional[
             'strategy_stopped': 'Strategy Stopped',
         }
         label_to_token = {v: k for k, v in token_to_label.items()}
-        
+
         # 保存前，将事件标签转换为后端存储令牌
         for ch in ("chrome", "telegram"):
-            ch_cfg = settings.get(ch)
-            if isinstance(ch_cfg, dict):
-                evs = ch_cfg.get("events", [])
-                if isinstance(evs, list) and evs:
-                    # 若已是令牌则保持，否则映射
-                    if all(e in token_to_label for e in evs):
-                        ch_cfg["events"] = evs
-                    else:
-                        ch_cfg["events"] = [label_to_token.get(e, e) for e in evs]
+            ch_cfg = settings.get(ch) or {}
+            evs = ch_cfg.get("events")
+            if not isinstance(evs, list) or not evs:
+                # 如果没有提供事件列表，默认保存所有事件（使用令牌）
+                ch_cfg["events"] = list(token_to_label.keys())
+            else:
+                # 将事件标签转换为存储令牌
+                if not all(e in token_to_label for e in evs):
+                    ch_cfg["events"] = [label_to_token.get(e, e) for e in evs]
+            settings[ch] = ch_cfg
         
         db = get_db_manager()
         db.save_notification_config(settings)
