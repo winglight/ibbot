@@ -91,12 +91,27 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
             except Exception as rec_err:
                 logger.warning(f"Failed to record order in OrderManager: {rec_err}")
             
+            # 失效订单缓存，避免3秒缓存导致新订单不可见
+            try:
+                global orders_cache, orders_cache_timestamp
+                orders_cache = []
+                orders_cache_timestamp = None
+            except Exception:
+                pass
+
             await websocket_manager.broadcast({  # 替换 manager
                 "type": "order_placed",
                 "order_id": trade.order.orderId,
                 "symbol": order.symbol,
                 "action": order.action,
                 "quantity": order.quantity
+            })
+
+            # 触发前端订单列表的通用刷新逻辑
+            await websocket_manager.broadcast({
+                "type": "order_update",
+                "reason": "order_placed",
+                "symbol": order.symbol
             })
             
             return {
@@ -125,7 +140,7 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
                     None,
                     lambda: core.ibkr_client.cancel_order(order_id)
                 ),
-                timeout=20.0  # 20-second timeout for order cancellation
+                timeout=35.0  # 35-second timeout for order cancellation
             )
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
@@ -176,7 +191,7 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
                     None,
                     lambda: core.ibkr_client.cancel_order(int(order_id))
                 ),
-                timeout=20.0  # 20-second timeout for order cancellation
+                timeout=35.0  # 35-second timeout for order cancellation
             )
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
@@ -700,10 +715,11 @@ orders_cache_timestamp = None
 ORDERS_CACHE_TTL = 3  # 缓存有效期（秒）
 
 @router.get("/api/orders")
-async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int = 100, use_cache: bool = True):
+async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int = 100, use_cache: bool = True, start_date: Optional[str] = None):
     """获取订单列表（从数据库读取，包含历史订单）
     - limit: 限制返回的订单数量，默认100条，提高性能
     - use_cache: 是否使用API级别缓存（默认 True）。启用时，短时间内的重复请求将直接返回缓存结果，无需重新查询数据库。
+    - start_date: 起始时间（ISO字符串，可含Z时区后缀）。若提供，则仅返回created_at不早于该时间的订单。
     """
     global orders_cache, orders_cache_timestamp
     
@@ -711,9 +727,23 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
         
-        # 检查缓存是否有效
+        # 解析start_date（如果提供）。支持Z后缀，统一转换为本地时区的naive时间，便于与订单created_at比较
+        start_dt = None
+        if start_date:
+            try:
+                s = start_date.replace('Z', '+00:00')
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is not None:
+                    local_tz = datetime.now().astimezone().tzinfo
+                    dt = dt.astimezone(local_tz).replace(tzinfo=None)
+                start_dt = dt
+            except Exception as e:
+                logger.warning(f"Invalid start_date '{start_date}': {e}")
+                start_dt = None
+        
+        # 检查缓存是否有效（当且仅当未指定start_date时才使用缓存）
         current_time = datetime.now()
-        if use_cache and orders_cache and orders_cache_timestamp:
+        if use_cache and not start_dt and orders_cache and orders_cache_timestamp:
             cache_age = (current_time - orders_cache_timestamp).total_seconds()
             if cache_age < ORDERS_CACHE_TTL:
                 logger.debug(f"Using orders cache, age: {cache_age:.1f}s")
@@ -727,6 +757,10 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                 loop.run_in_executor(None, lambda: order_manager.get_orders(limit=limit)),
                 timeout=5.0  # 5秒超时
             )
+            
+            # 根据start_date进行服务端过滤，确保只返回当天（或指定起始时间之后）的订单
+            if start_dt:
+                orders = [o for o in orders if getattr(o, 'created_at', None) and o.created_at >= start_dt]
             
             # 转换字段名以匹配前端期望
             converted_orders = []
@@ -770,17 +804,29 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                     'status': o.status,
                     'filled': o.quantity if o.status == 'Filled' else 0,
                     'remaining': 0 if o.status == 'Filled' else o.quantity,
-                    'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
+                    # 标准化时间戳：始终包含时区偏移，避免前端解析成UTC导致跨日
+                    'submit_time': ( 
+                        (lambda dt: (
+                            dt.replace(tzinfo=(datetime.now().astimezone().tzinfo)) if dt and dt.tzinfo is None else dt
+                        ).isoformat() if dt else None)(getattr(o, 'created_at', None))
+                    ),
+                    # 兼容字段，等同于submit_time
+                    'created_at': ( 
+                        (lambda dt: (
+                            dt.replace(tzinfo=(datetime.now().astimezone().tzinfo)) if dt and dt.tzinfo is None else dt
+                        ).isoformat() if dt else None)(getattr(o, 'created_at', None))
+                    ),
                     'order_source': getattr(o, 'order_source', 'manual'),
                     'trigger_type': trigger_type,
-                    'commission': getattr(o, 'commission', None),  # 新增：佣金
-                    'pnl': getattr(o, 'pnl', None)  # 新增：盈亏
+                    'commission': getattr(o, 'commission', None),
+                    'pnl': getattr(o, 'pnl', None)
                 }
                 converted_orders.append(converted_order)
             
-            # 更新缓存
-            orders_cache = converted_orders
-            orders_cache_timestamp = current_time
+            # 更新缓存（当且仅当未指定start_date时）
+            if not start_dt:
+                orders_cache = converted_orders
+                orders_cache_timestamp = current_time
             
             return {"success": True, "orders": converted_orders, "from_cache": False}
             

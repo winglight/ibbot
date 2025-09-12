@@ -661,14 +661,14 @@ class IBKRClient:
                 try:
                     await ib.reqOpenOrdersAsync()
                     await ib.reqAllOpenOrdersAsync()
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.2)
                     ibkr_logger.debug("Requested order refresh from IBKR (async)")
                     return True
                 except Exception as e:
                     ibkr_logger.warning(f"Failed to refresh orders: {e}")
                     return False
 
-            result = self.connection_manager.run_async_in_connection_thread(_refresh())
+            result = self.connection_manager.run_async_in_connection_thread(_refresh(), timeout=1.5)
             if result is not None:
                 return bool(result)
             else:
@@ -678,7 +678,7 @@ class IBKRClient:
                     ib.reqOpenOrders()
                     ib.reqAllOpenOrders()
                     import time
-                    time.sleep(0.5)
+                    time.sleep(0.2)
                     ibkr_logger.debug("Requested order refresh from IBKR (sync fallback)")
                     return True
                 except Exception as e:
@@ -727,6 +727,20 @@ class IBKRClient:
                             break
 
                     if not target_trade:
+                        # 快速重查一次，避免因列表延迟导致误判
+                        try:
+                            ib_local.reqOpenOrders()
+                            ib_local.reqAllOpenOrders()
+                            await asyncio.sleep(0.2)
+                            trades = ib_local.trades()
+                            for trade in trades:
+                                if trade.order.orderId == order_id:
+                                    target_trade = trade
+                                    break
+                        except Exception as requery_err:
+                            ibkr_logger.debug(f"Quick requery before cancel failed: {requery_err}")
+
+                    if not target_trade:
                         ibkr_logger.warning(f"Order {order_id} not found in active trades")
                         return False, f"Order {order_id} not found or already completed"
 
@@ -738,8 +752,12 @@ class IBKRClient:
                         ibkr_logger.warning(f"Order {order_id} cannot be cancelled, status: {current_status}")
                         return False, f"Order cannot be cancelled, current status: {current_status}"
 
-                    # 如果已经是PendingCancel状态，直接等待确认；否则发送取消请求
-                    if current_status != 'PendingCancel':
+                    # 如果已经是PendingCancel状态，短暂确认后直接返回；否则发送取消请求
+                    if current_status == 'PendingCancel':
+                        await asyncio.sleep(0.5)
+                        ibkr_logger.info(f"Order {order_id} already in PendingCancel, acknowledging cancellation initiation")
+                        return True, "Order cancellation initiated (PendingCancel)"
+                    else:
                         ibkr_logger.info(f"Sending cancel request for order {order_id}")
                         try:
                             ib_local.cancelOrder(target_trade.order)
@@ -747,10 +765,11 @@ class IBKRClient:
                             ibkr_logger.error(f"Error sending cancel request for order {order_id}: {send_err}")
                             return False, f"Error sending cancel request: {send_err}"
 
-                    # 等待取消确认，使用异步睡眠避免阻塞事件循环
-                    max_wait_time = 15.0
-                    check_interval = 0.5
+                    # 等待取消确认，使用更短超时与轮询间隔，并对 PendingCancel 早返回
+                    max_wait_time = 10.0
+                    check_interval = 0.25
                     start_time = asyncio.get_event_loop().time()
+                    pending_first_seen_elapsed = None
 
                     while True:
                         elapsed = asyncio.get_event_loop().time() - start_time
@@ -768,7 +787,12 @@ class IBKRClient:
                                     ibkr_logger.info(f"Order {order_id} successfully cancelled, final status: {new_status}")
                                     return True, f"Order cancelled successfully, status: {new_status}"
                                 elif new_status == 'PendingCancel':
-                                    ibkr_logger.info(f"Order {order_id} still pending cancellation... (elapsed: {elapsed:.1f}s)")
+                                    if pending_first_seen_elapsed is None:
+                                        pending_first_seen_elapsed = elapsed
+                                        ibkr_logger.info(f"Order {order_id} pending cancellation...")
+                                    elif elapsed - pending_first_seen_elapsed >= 1.0:
+                                        ibkr_logger.info(f"Order {order_id} cancellation acknowledged (PendingCancel)")
+                                        return True, "Order cancellation initiated (PendingCancel)"
                                 else:
                                     if new_status != current_status:
                                         ibkr_logger.info(f"Order {order_id} status changed from {current_status} to {new_status}")
@@ -800,7 +824,7 @@ class IBKRClient:
                     ibkr_logger.error(f"Error during cancellation operation for order {order_id}: {inner_e}")
                     return False, f"Error during cancellation: {inner_e}"
 
-            result = self.connection_manager.run_async_in_connection_thread(_cancel_op(), timeout=20)
+            result = self.connection_manager.run_async_in_connection_thread(_cancel_op(), timeout=16)
             if result is not None:
                 return result
             else:

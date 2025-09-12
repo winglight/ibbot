@@ -592,6 +592,95 @@ class StrategyManager:
             strategy_logger.error(f"Failed to update strategy {name}: {e}")
             return False
 
+    def rename_strategy(self, old_name: str, new_name: str, rename_file: bool = False) -> bool:
+        """重命名策略，并迁移相关配置与历史记录
+        - old_name: 原策略名
+        - new_name: 新策略名（会进行slug化处理）
+        - rename_file: 对于内部策略，是否同时重命名策略文件
+        """
+        try:
+            if old_name not in self.strategies:
+                return False
+
+            # 规范化新名称
+            normalized_new = slugify_strategy_name(new_name).strip()
+            if not normalized_new:
+                return False
+            if normalized_new in self.strategies:
+                # 冲突
+                return False
+
+            strategy = self.strategies[old_name]
+
+            # 可选：重命名内部策略文件
+            if rename_file and strategy.strategy_type == "internal":
+                try:
+                    # 计算相对与strategy_dir的旧/新路径（保留原相对路径的父目录与后缀）
+                    rel_old = Path(strategy.file_path) if strategy.file_path else Path(f"{old_name}.py")
+                    suffix = rel_old.suffix or ".py"
+                    rel_new = rel_old.with_name(f"{normalized_new}{suffix}")
+                    old_abs = self.strategy_dir / rel_old
+                    new_abs = self.strategy_dir / rel_new
+                    if old_abs.exists():
+                        if new_abs.exists():
+                            strategy_logger.warning(f"Target file already exists, skip file rename: {new_abs}")
+                        else:
+                            new_abs.parent.mkdir(parents=True, exist_ok=True)
+                            old_abs.rename(new_abs)
+                            strategy_logger.info(f"Strategy file renamed: {old_abs} -> {new_abs}")
+                            strategy.file_path = rel_new.as_posix()
+                    else:
+                        strategy_logger.warning(f"Old strategy file not found, skip file rename: {old_abs}")
+                except Exception as fe:
+                    strategy_logger.warning(f"Rename file failed, continue without file rename: {fe}")
+
+            # 迁移策略配置键前缀（{name}_sl_*, {name}_tp_*, {name}_schedule）
+            try:
+                settings = self.db_manager.load_strategy_config() or {}
+            except Exception:
+                settings = getattr(self, 'settings', {}) or {}
+
+            updated_settings: Dict[str, Any] = dict(settings)
+            prefix_old = f"{old_name}_"
+            prefix_new = f"{normalized_new}_"
+            for key in list(settings.keys()):
+                if isinstance(key, str) and key.startswith(prefix_old):
+                    suffix = key[len(prefix_old):]
+                    value = settings[key]
+                    # 删除旧键，写入新键
+                    updated_settings.pop(key, None)
+                    updated_settings[f"{prefix_new}{suffix}"] = value
+
+            # 同步内存与持久化
+            self.settings = updated_settings
+            self.db_manager.save_strategy_config(updated_settings)
+
+            # 更新内存结构与数据库中的策略实体
+            del self.strategies[old_name]
+            strategy.name = normalized_new
+            self.strategies[normalized_new] = strategy
+
+            # 保存所有策略到数据库（会写入新名称）
+            self._save_strategies()
+            # 删除旧策略行（保险）
+            try:
+                self.db_manager.delete_strategy(old_name)
+            except Exception:
+                pass
+
+            # 迁移订单历史中的strategy_name
+            try:
+                self.db_manager.update_orders_strategy_name(old_name, normalized_new)
+            except Exception as oe:
+                strategy_logger.warning(f"Update orders.strategy_name failed: {oe}")
+
+            strategy_logger.info(f"Renamed strategy: {old_name} -> {normalized_new}")
+            self.restart_scheduler()
+            return True
+        except Exception as e:
+            strategy_logger.error(f"Failed to rename strategy {old_name} -> {new_name}: {e}")
+            return False
+
     def _create_strategy_template(self, strategy_name: str, file_path: Optional[str] = None):
         """Create a Python strategy template file"""
         template_content = f'''"""

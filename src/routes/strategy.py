@@ -12,6 +12,7 @@ from src.models import (
     StrategySettingsRequest,
     StrategyRequest,
     ExternalStrategyOrderRequest,
+    StrategyRenameRequest,
 )
 
 router = APIRouter()
@@ -93,6 +94,15 @@ async def update_strategy_api(name: str, updates: Dict[str, Any], user: Optional
     success = strategy_manager.update_strategy(name, updates)
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update strategy")
+    return {"success": True}
+
+@router.post("/api/strategies/{name}/rename")
+async def rename_strategy_api(name: str, payload: StrategyRenameRequest, user: Optional[str] = Depends(get_current_user)):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    ok = strategy_manager.rename_strategy(name, payload.new_name, rename_file=payload.rename_file or False)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Failed to rename strategy")
     return {"success": True}
 
 @router.delete("/api/strategies/{name}")

@@ -253,6 +253,81 @@ async def get_chart_data(
         raise HTTPException(status_code=400, detail=detail)
 
     try:
+        # 统一使用与历史接口一致的缓存策略，使用前缀避免冲突
+        _clean_expired_cache()
+        now = datetime.now()
+        use_cache = True if (getattr(request, "use_cache", True) is not False) else False
+        force_refresh = True if (getattr(request, "force_refresh", False) is True) else False
+
+        cache_key_base = f"{request.symbol}_{request.duration}_{request.bar_size}_{request.exchange}"
+        cache_key = f"chart::{cache_key_base}"
+
+        # 1) 内存缓存命中（仅当使用缓存且不强制刷新）
+        if use_cache and not force_refresh and cache_key in historical_data_cache:
+            cache_entry = historical_data_cache[cache_key]
+            if cache_entry.get("expires_at", now) > now:
+                logger.debug(f"Using chart memory cache for {request.symbol}")
+                cached_data = cache_entry.get("data", [])
+                return {
+                    "success": True,
+                    "data": cached_data,
+                    "symbol": request.symbol,
+                    "duration": request.duration,
+                    "bar_size": request.bar_size,
+                }
+
+        # 2) 数据库缓存（覆盖请求范围且不强制刷新时）
+        db_manager = get_db_manager()
+        interval = db_manager._normalize_interval(request.bar_size)
+        minutes = _parse_duration_to_minutes(request.duration)
+        start_dt = now - timedelta(minutes=minutes)
+
+        cache_df = db_manager.query_historical_cache(
+            request.symbol,
+            interval=interval,
+            start_dt=start_dt.isoformat(timespec="seconds"),
+            end_dt=now.isoformat(timespec="seconds"),
+        )
+
+        if use_cache and not force_refresh and not db_manager.detect_missing_ranges(
+            cache_df, start_dt.isoformat(), now.isoformat(), interval
+        ):
+            logger.debug(f"Using chart database cache for {request.symbol}")
+            chart_data = []
+            try:
+                records = cache_df.to_dict("records")
+                for row in records:
+                    raw_time = row.get("date") or row.get("time")
+                    t = to_local_time(raw_time)
+                    chart_data.append(
+                        {
+                            "time": t,
+                            "open": float(row.get("open", 0) or 0),
+                            "high": float(row.get("high", 0) or 0),
+                            "low": float(row.get("low", 0) or 0),
+                            "close": float(row.get("close", 0) or 0),
+                            "volume": int(row.get("volume", 0) or 0),
+                        }
+                    )
+            except Exception:
+                chart_data = []
+
+            if chart_data:
+                expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
+                historical_data_cache[cache_key] = {
+                    "data": chart_data,
+                    "timestamp": now,
+                    "expires_at": expires_at,
+                }
+                return {
+                    "success": True,
+                    "data": chart_data,
+                    "symbol": request.symbol,
+                    "duration": request.duration,
+                    "bar_size": request.bar_size,
+                }
+
+        # 3) 需要拉取新数据（强制刷新或缓存不足）
         loop = asyncio.get_event_loop()
         try:
             df = await asyncio.wait_for(
@@ -268,39 +343,25 @@ async def get_chart_data(
                 timeout=65.0,
             )
         except asyncio.TimeoutError:
-            is_connected = connection_manager.is_connected()
+            # 超时时，如果有数据库缓存则回退
             logger.error(
-                f"Chart data request timed out for {request.symbol}. IBKR connection status: {'Connected' if is_connected else 'Disconnected'}"
+                f"Chart data request timed out for {request.symbol}. IBKR connection status: "
+                f"{'Connected' if connection_manager.is_connected() else 'Disconnected'}"
             )
-            if not is_connected:
-                return JSONResponse(
-                    status_code=408,
-                    content={
-                        "detail": "IBKR connection lost. Please reconnect to IBKR Gateway/TWS and try again.",
-                        "error_type": "connection_lost",
-                    },
-                )
-            cache_df = None
-            try:
-                db_manager = get_db_manager()
-                cache_df = db_manager.load_historical_data(
-                    request.symbol, bar_size=request.bar_size
-                )
-            except Exception:
-                cache_df = None
             if cache_df is not None and not cache_df.empty:
                 chart_data = []
                 try:
-                    for ts, row in cache_df.iterrows():
-                        t = to_local_time(ts)
+                    for _, row in cache_df.iterrows():
+                        raw_time = row.get("date") if isinstance(row, dict) else row["date"] if "date" in cache_df.columns else _
+                        t = to_local_time(raw_time)
                         chart_data.append(
                             {
                                 "time": t,
-                                "open": float(row.get("open", 0) or 0),
-                                "high": float(row.get("high", 0) or 0),
-                                "low": float(row.get("low", 0) or 0),
-                                "close": float(row.get("close", 0) or 0),
-                                "volume": int(row.get("volume", 0) or 0),
+                                "open": float(row.get("open", 0) if isinstance(row, dict) else row.get("open", 0) if hasattr(row, "get") else row["open"] if "open" in cache_df.columns else 0),
+                                "high": float(row.get("high", 0) if isinstance(row, dict) else row.get("high", 0) if hasattr(row, "get") else row["high"] if "high" in cache_df.columns else 0),
+                                "low": float(row.get("low", 0) if isinstance(row, dict) else row.get("low", 0) if hasattr(row, "get") else row["low"] if "low" in cache_df.columns else 0),
+                                "close": float(row.get("close", 0) if isinstance(row, dict) else row.get("close", 0) if hasattr(row, "get") else row["close"] if "close" in cache_df.columns else 0),
+                                "volume": int(row.get("volume", 0) if isinstance(row, dict) else row.get("volume", 0) if hasattr(row, "get") else row["volume"] if "volume" in cache_df.columns else 0),
                             }
                         )
                 except Exception:
@@ -313,6 +374,8 @@ async def get_chart_data(
                         "duration": request.duration,
                         "bar_size": request.bar_size,
                     }
+
+            # 无缓存可用，返回超时错误
             reason = None
             try:
                 reason = connection_manager.get_last_connect_error()
@@ -323,8 +386,8 @@ async def get_chart_data(
             )
             raise HTTPException(status_code=408, detail=msg)
 
+        # 4) 成功获取数据
         if df is not None and not df.empty:
-            db_manager = get_db_manager()
             try:
                 db_manager.save_historical_data(
                     request.symbol, df, bar_size=request.bar_size
@@ -349,6 +412,13 @@ async def get_chart_data(
                     }
                 )
 
+            expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
+            historical_data_cache[cache_key] = {
+                "data": chart_data,
+                "timestamp": now,
+                "expires_at": expires_at,
+            }
+
             return {
                 "success": True,
                 "data": chart_data,
@@ -357,18 +427,18 @@ async def get_chart_data(
                 "bar_size": request.bar_size,
             }
 
-        cache_df = None
+        # 5) API返回空，回退数据库load_historical_data
+        fallback_df = None
         try:
-            db_manager = get_db_manager()
-            cache_df = db_manager.load_historical_data(
+            fallback_df = db_manager.load_historical_data(
                 request.symbol, bar_size=request.bar_size
             )
         except Exception:
-            cache_df = None
-        if cache_df is not None and not cache_df.empty:
+            fallback_df = None
+        if fallback_df is not None and not fallback_df.empty:
             chart_data = []
             try:
-                for ts, row in cache_df.iterrows():
+                for ts, row in fallback_df.iterrows():
                     t = to_local_time(ts)
                     chart_data.append(
                         {
@@ -390,6 +460,7 @@ async def get_chart_data(
                     "duration": request.duration,
                     "bar_size": request.bar_size,
                 }
+
         reason = None
         try:
             reason = connection_manager.get_last_connect_error()

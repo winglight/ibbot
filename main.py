@@ -169,9 +169,23 @@ async def lifespan(app: FastAPI):
     else:
         main_logger.info("Auto-connect disabled. You can connect later through the web interface.")
     
+    # START risk manager scheduler within the running event loop
+    try:
+        risk_manager.start()
+        main_logger.info("Risk manager started during application startup")
+    except Exception as e:
+        main_logger.warning(f"Risk manager startup warning: {e}")
+    
     yield
     # Shutdown
     main_logger.info("Application shutting down...")
+    # Gracefully shutdown risk manager scheduler
+    try:
+        if getattr(risk_manager, 'scheduler', None) and risk_manager.scheduler.running:
+            risk_manager.scheduler.shutdown()
+            main_logger.info("Risk manager scheduler shutdown")
+    except Exception as e:
+        main_logger.warning(f"Risk manager shutdown warning: {e}")
 
 # 重新创建带有lifespan的FastAPI应用
 app = FastAPI(title="IBKR Trading Bot", version="1.0.0", lifespan=lifespan)
@@ -361,8 +375,7 @@ app.add_middleware(
         "http://localhost:8000",
         "http://127.0.0.1:8000",
         "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "*"
+        "http://127.0.0.1:3000"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -505,14 +518,6 @@ def check_environment() -> bool:
         ok = False
 
     return ok
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # 添加：全局任务引用用于定期广播账户与持仓（实时PnL展示）
 pnl_broadcast_task = None

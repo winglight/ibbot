@@ -450,6 +450,21 @@ class DatabaseManager:
             cursor.execute("DELETE FROM strategies WHERE name = ?", (name,))
             conn.commit()
             database_logger.debug(f"Strategy deleted: {name}")
+
+    def update_orders_strategy_name(self, old_name: str, new_name: str) -> int:
+        """将orders表中所有旧策略名迁移为新策略名，返回受影响的行数"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE orders SET strategy_name = ? WHERE strategy_name = ?",
+                (new_name, old_name),
+            )
+            conn.commit()
+            affected = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+            database_logger.debug(
+                f"Orders strategy_name updated: {old_name} -> {new_name}, rows={affected}"
+            )
+            return affected
     
     # 策略执行表已移除；保留占位符以保持向后兼容接口
     def load_strategy_orders(self, strategy_name: str, order_source: str = 'strategy', limit: int = 100) -> List[Order]:

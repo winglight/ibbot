@@ -50,6 +50,12 @@ class TradingApp {
         this.portfolioManager = new PortfolioManager(this);
         this.riskRulesManager = new RiskRulesManager(this);
         this.strategiesManager = new StrategiesManager(this);
+        this.logsManager = new LogsManager(
+            this.apiCall.bind(this),
+            this.showAlert.bind(this),
+            this.formatNumber.bind(this)
+        );
+        this.notificationsManager = new NotificationsManager(this);
         
         this.init();
     }
@@ -97,10 +103,9 @@ class TradingApp {
             // this.dataManager.loadAccountInfo(); // 改为由 WebSocket account_update 推送
             // this.portfolioManager.loadPortfolio(); // 移到登录成功后调用
             this.strategiesManager.loadStrategies();
-            this.loadLogModules();
-            this.loadLogs();
-            // 初始化通知面板
-            this.updateNotificationPanel();
+            this.logsManager.init();
+            // 初始化通知管理器
+            this.notificationsManager.init();
             // 加载配置和状态
             this.loadGSRulesStatus();
             // 加载风险规则
@@ -474,13 +479,13 @@ class TradingApp {
         // 通知面板事件监听器
         const clearNotificationsBtn = document.getElementById('clearNotificationsBtn');
         if (clearNotificationsBtn) {
-            clearNotificationsBtn.addEventListener('click', () => this.clearNotifications());
+            clearNotificationsBtn.addEventListener('click', () => this.notificationsManager.clearNotifications());
         }
         
 
         
         // 加载通知历史记录到面板
-        this.loadNotificationHistory();
+        this.notificationsManager.loadNotificationHistory();
         
         console.log('All event listeners bound successfully');
     }
@@ -1373,6 +1378,8 @@ class TradingApp {
                                 this.ws?.send(JSON.stringify({ type: 'subscribe_realtime', symbol }));
                                 this.monitorRealtimeSymbol = symbol;
                                 setActive(true);
+                                // 开启实时后强制刷新图表，绕过缓存
+                                this.loadMonitorChart(symbol, { useCache: false, forceRefresh: true });
                             } catch (e) {
                                 console.error('subscribe realtime failed', e);
                             }
@@ -1904,8 +1911,9 @@ class TradingApp {
     // 添加图表数据缓存
     chartDataCache = {};
     
-    async loadMonitorChart(symbol) {
+    async loadMonitorChart(symbol, options = {}) {
         try {
+            const { useCache = true, forceRefresh = false } = options || {};
             const chartContainer = document.getElementById('monitorChartContainer');
             if (!chartContainer) return;
 
@@ -1931,7 +1939,7 @@ class TradingApp {
             const cachedData = this.chartDataCache[cacheKey];
             let response;
             
-            if (cachedData && (now - cachedData.timestamp) < 5 * 60 * 1000) {
+            if (useCache && !forceRefresh && cachedData && (now - cachedData.timestamp) < 5 * 60 * 1000) {
                 console.log(`Using cached chart data for ${cacheKey}`);
                 response = cachedData.data;
             } else {
@@ -1951,20 +1959,26 @@ class TradingApp {
                             symbol: symbol,
                             duration: duration,
                             bar_size: barSize,
-                            data_type: 'TRADES'
+                            data_type: 'TRADES',
+                            use_cache: useCache,
+                            force_refresh: forceRefresh
                         }),
-                        // 增加超时时间
-                        timeout: 30000
+                        // 增加超时时间，略高于后端65秒
+                        timeout: 70000
                     });
                     
-                    // 更新缓存
-                    this.chartDataCache[cacheKey] = {
-                        data: response,
-                        timestamp: now
-                    };
+                    // 更新缓存（仅当允许使用缓存且非强制刷新）
+                    if (useCache && !forceRefresh) {
+                        this.chartDataCache[cacheKey] = {
+                            data: response,
+                            timestamp: now
+                        };
+                    }
                 } catch (error) {
                     console.error('Failed to fetch chart data:', error);
-                    chartContainer.innerHTML = `<div class="alert alert-danger">获取图表数据失败: ${error.message || '请稍后再试'}</div>`;
+                    const msg = (error && error.message) ? error.message : '请稍后再试';
+                    const extra = (/timeout|timed out|请求超时/i.test(String(msg)) || /AbortError/i.test(String(error?.name))) ? ' 可能在其他地方登录 IB，请退出后再试' : '';
+                    chartContainer.innerHTML = `<div class=\"alert alert-danger\">获取图表数据失败: ${msg}${extra}</div>`;
                     return;
                 }
             }
@@ -4016,7 +4030,7 @@ class TradingApp {
         alertContainer.insertAdjacentHTML('beforeend', alertHtml);
         
         // 同时添加到通知面板
-        this.addNotification(type, message);
+        this.notificationsManager.addNotification(type, message);
         
         // Auto-dismiss after 5 seconds
         setTimeout(() => {
@@ -4223,61 +4237,64 @@ class TradingApp {
         if (!tbody) return;
         
         tbody.innerHTML = '';
+        const requests = [];
         strategies.forEach(strategy => {
             const row = document.createElement('tr');
             
+            // Name
             const nameCell = document.createElement('td');
             nameCell.textContent = strategy.name;
             
-            const typeCell = document.createElement('td');
-            typeCell.innerHTML = `<span class="badge ${strategy.strategy_type === 'external' ? 'bg-primary' : 'bg-success'}">${strategy.strategy_type}</span>`;
+            // Symbol（暂无字段，先占位）
+            const symbolCell = document.createElement('td');
+            symbolCell.textContent = '-';
             
-            const enabledCell = document.createElement('td');
+            // Status（开关）
+            const statusCell = document.createElement('td');
             const toggleSwitch = document.createElement('div');
             toggleSwitch.className = 'form-check form-switch';
             toggleSwitch.innerHTML = `
                 <input class="form-check-input" type="checkbox" ${strategy.enabled ? 'checked' : ''} 
                        onchange="app.strategiesManager.toggleStrategy('${strategy.name}', this.checked)">
             `;
-            enabledCell.appendChild(toggleSwitch);
+            statusCell.appendChild(toggleSwitch);
             
-            const triggerCountCell = document.createElement('td');
-            triggerCountCell.textContent = strategy.trigger_count || 0;
-            
-            const lastTriggeredCell = document.createElement('td');
-            if (strategy.last_triggered) {
-                const date = new Date(strategy.last_triggered);
-                lastTriggeredCell.textContent = date.toLocaleString();
-            } else {
-                lastTriggeredCell.textContent = '-';
-            }
-            
-            const descCell = document.createElement('td');
-            descCell.textContent = strategy.description || '-';
-            
-            const actionsCell = document.createElement('td');
-            actionsCell.innerHTML = `
-                <button class="btn btn-sm btn-outline-primary me-1" onclick="app.strategiesManager.editStrategy('${strategy.name}')" title="Edit">
-                    <i class="fas fa-edit"></i>
-                </button>
-                <button class="btn btn-sm btn-outline-info me-1" onclick="app.strategiesManager.openStrategyDetails('${strategy.name}')" title="Details">
-                    <i class="fas fa-list"></i>
-                </button>
-                <button class="btn btn-sm btn-outline-danger" onclick="app.strategiesManager.deleteStrategy('${strategy.name}')" title="Delete">
-                    <i class="fas fa-trash"></i>
-                </button>
-            `;
+            // P&L（最近1个月）与 Trades（executions/2 取整），先占位，后异步回填
+            const pnlCell = document.createElement('td');
+            pnlCell.textContent = '...';
+            const tradesCell = document.createElement('td');
+            tradesCell.textContent = '...';
             
             row.appendChild(nameCell);
-            row.appendChild(typeCell);
-            row.appendChild(enabledCell);
-            row.appendChild(triggerCountCell);
-            row.appendChild(lastTriggeredCell);
-            row.appendChild(descCell);
-            row.appendChild(actionsCell);
+            row.appendChild(symbolCell);
+            row.appendChild(statusCell);
+            row.appendChild(pnlCell);
+            row.appendChild(tradesCell);
             
             tbody.appendChild(row);
+            
+            // 异步获取 1m 性能数据
+            const req = this.apiCall(`/strategies/${encodeURIComponent(strategy.name)}/performance?range=1m`)
+                .then(res => {
+                    if (!res || !res.success) {
+                        pnlCell.textContent = '-';
+                        tradesCell.textContent = '-';
+                        return;
+                    }
+                    const m = res.metrics || {};
+                    const totalPnL = Number(m.total_pnl ?? 0);
+                    const totalExec = Number(m.total_executions ?? 0);
+                    pnlCell.textContent = `$${(isFinite(totalPnL) ? totalPnL : 0).toFixed(2)}`;
+                    tradesCell.textContent = `${Math.max(0, Math.floor((isFinite(totalExec) ? totalExec : 0) / 2))}`;
+                })
+                .catch(() => {
+                    pnlCell.textContent = '-';
+                    tradesCell.textContent = '-';
+                });
+            requests.push(req);
         });
+        
+        Promise.allSettled(requests).catch(() => {});
     }
 
     async toggleStrategy(name, enabled) {
@@ -4632,7 +4649,7 @@ class TradingApp {
               <td>${exe.action ?? '-'}</td>
               <td>${exe.quantity ?? '-'}</td>
               <td>${exe.price != null ? exe.price : '-'}</td>
-              <td><span class="badge ${exe.status === 'executed' ? 'bg-success' : 'bg-secondary'}">${exe.status}</span></td>
+              <td><span class="badge bg-${this.getStatusColor(exe.status || '')}">${exe.status}</span></td>
               <td>${exe.pnl != null ? Number(exe.pnl).toFixed(2) : '-'}</td>
             `;
             tbody.appendChild(tr);
@@ -4803,15 +4820,25 @@ class TradingApp {
     }
 
     getStatusColor(status) {
-        switch (status.toLowerCase()) {
+        switch ((status || '').toLowerCase()) {
+            // Order statuses
             case 'filled': return 'success';
-            case 'cancelled': case 'canceled': return 'danger';
-            case 'submitted': case 'presubmitted': return 'primary';
+            case 'cancelled':
+            case 'canceled': return 'danger';
+            case 'submitted':
+            case 'presubmitted': return 'primary';
             case 'pendingsubmit': return 'warning';
             case 'pendingcancel': return 'info';
             case 'inactive': return 'secondary';
-            case 'apiwaiting': return 'warning';
+            case 'apiwaiting':
             case 'apipending': return 'warning';
+            // Executions/general statuses
+            case 'executed':
+            case 'success': return 'success';
+            case 'failed':
+            case 'error':
+            case 'rejected': return 'danger';
+            case 'pending': return 'warning';
             default: return 'secondary';
         }
     }
@@ -5023,82 +5050,7 @@ class TradingApp {
 
     // cancelOrder方法已迁移到OrderManager
 
-    async loadLogModules() {
-        try {
-            const range = document.getElementById('logRange')?.value || 'today';
-            const res = await this.apiCall(`/logs/modules?range=${range}`);
-            const moduleSelect = document.getElementById('logModule');
-            if (moduleSelect && res?.modules) {
-                const currentValue = moduleSelect.value;
-                // Clear existing options except "All Modules"
-                moduleSelect.innerHTML = '<option value="all">All Modules</option>';
-                // Add dynamic modules from logs
-                res.modules.forEach(module => {
-                    const option = document.createElement('option');
-                    option.value = module;
-                    option.textContent = module;
-                    moduleSelect.appendChild(option);
-                });
-                // Restore previous selection if it still exists
-                if (currentValue && [...moduleSelect.options].some(opt => opt.value === currentValue)) {
-                    moduleSelect.value = currentValue;
-                }
-            }
-        } catch (e) {
-            console.error('Load log modules error:', e);
-            // Fallback to static options if API fails
-        }
-    }
-
-    async loadLogs() {
-        try {
-            const module = document.getElementById('logModule')?.value || 'all';
-            const range = document.getElementById('logRange')?.value || 'today';
-            const level = document.getElementById('logLevel')?.value || 'all';
-            const requestId = document.getElementById('logRequestId')?.value.trim();
-            let url = `/logs?lines=200&range=${range}`;
-            if (level !== 'all') url += `&level=${encodeURIComponent(level)}`;
-            if (module !== 'all') url += `&module=${module}`;
-            if (requestId) url += `&request_id=${encodeURIComponent(requestId)}`;
-            const res = await this.apiCall(url);
-            if (res?.logs) {
-                const content = document.getElementById('logsContent');
-                if (content) content.textContent = res.logs.join('');
-            }
-        } catch (e) {
-            console.error('Load logs error:', e);
-            this.showAlert('danger', '加载日志失败');
-        }
-    }
-
-    async showLogStats() {
-        try {
-            const module = document.getElementById('logModule')?.value || 'all';
-            const range = document.getElementById('logRange')?.value || 'today';
-            let url = `/logs/stats?range=${range}`;
-            if (module !== 'all') url += `&module=${module}`;
-            const res = await this.apiCall(url);
-            const tbody = document.querySelector('#logStatsTable tbody');
-            if (tbody) {
-                tbody.innerHTML = '';
-                for (const [mod, paths] of Object.entries(res.stats || {})) {
-                    for (const [path, s] of Object.entries(paths)) {
-                        const tr = document.createElement('tr');
-                        tr.innerHTML = `<td>${mod}</td><td>${path}</td><td>${s.count}</td><td>${s.avg_time}</td><td>${(s.success_rate*100).toFixed(1)}%</td>`;
-                        tbody.appendChild(tr);
-                    }
-                }
-            }
-            const modalEl = document.getElementById('logStatsModal');
-            if (modalEl) {
-                const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
-                modal.show();
-            }
-        } catch (e) {
-            console.error('Load log stats error:', e);
-            this.showAlert('danger', '加载日志统计失败');
-        }
-    }
+    // 日志管理方法已迁移到 logs.js
 
     async showRiskRuleOrders(symbol) {
         try {
@@ -5452,528 +5404,30 @@ class TradingApp {
     }
 
     // 通知管理方法
-    addNotification(type, message, timestamp = null) {
-        const notification = {
-            id: Date.now() + Math.random(),
-            type: type, // 'success', 'warning', 'danger', 'info'
-            message: message,
-            timestamp: timestamp || new Date().toLocaleString()
-        };
-        
-        this.notifications.unshift(notification);
-        
-        // 限制通知数量，最多保留50条
-        if (this.notifications.length > 50) {
-            this.notifications = this.notifications.slice(0, 50);
-        }
-        
-        this.updateNotificationPanel();
-    }
+    // addNotification 方法已迁移到 notifications.js
 
-    clearNotifications() {
-        this.notifications = [];
-        this.updateNotificationPanel();
-    }
-
-    updateNotificationPanel() {
-        const notificationList = document.getElementById('notificationsList');
-        if (!notificationList) return;
-        
-        notificationList.innerHTML = '';
-        
-        if (this.notifications.length === 0) {
-            notificationList.innerHTML = `
-                <div class="text-muted text-center py-3">
-                    <i class="fas fa-bell-slash"></i>
-                    <p class="mb-0">No notifications</p>
-                </div>
-                <div class="mt-3">
-                    <button class="btn btn-sm btn-outline-primary" onclick="app.showNotificationSettings()">
-                        <i class="fas fa-cog"></i> Settings
-                    </button>
-                    <button class="btn btn-sm btn-outline-secondary ms-2" onclick="app.showNotificationHistory()">
-                        <i class="fas fa-history"></i> History
-                    </button>
-                </div>
-            `;
-            return;
-        }
-        
-        // Add settings and history buttons at the top
-        const headerDiv = document.createElement('div');
-        headerDiv.className = 'mb-3 d-flex justify-content-between align-items-center';
-        headerDiv.innerHTML = `
-            <span class="text-muted small">${this.notifications.length} notification(s)</span>
-            <div>
-                <button class="btn btn-sm btn-outline-primary" onclick="app.showNotificationSettings()">
-                    <i class="fas fa-cog"></i>
-                </button>
-                <button class="btn btn-sm btn-outline-secondary ms-1" onclick="app.showNotificationHistory()">
-                    <i class="fas fa-history"></i>
-                </button>
-            </div>
-        `;
-        notificationList.appendChild(headerDiv);
-        
-        this.notifications.forEach(notification => {
-            const notificationElement = document.createElement('div');
-            notificationElement.className = `alert alert-${notification.type} alert-dismissible fade show mb-2`;
-            notificationElement.innerHTML = `
-                <div class="d-flex justify-content-between align-items-start">
-                    <div>
-                        <div>${notification.message}</div>
-                        <small class="text-muted">${notification.timestamp}</small>
-                    </div>
-                    <button type="button" class="btn-close" onclick="app.removeNotification('${notification.id}')"></button>
-                </div>
-            `;
-            notificationList.appendChild(notificationElement);
-        });
-    }
-
-    removeNotification(notificationId) {
-        this.notifications = this.notifications.filter(n => n.id != notificationId);
-        this.updateNotificationPanel();
-    }
+    // 通知相关方法已迁移到 notifications.js
+    // clearNotifications, updateNotificationPanel, removeNotification 方法已迁移
 
     // 通知设置功能
-    async showNotificationSettings() {
-        try {
-            const response = await this.apiCall('/notifications/settings');
-            const settings = response.settings || {};
-            
-            // 填充基础设置标签页
-            await this.populateBasicSettings(settings);
-            
-            // 填充模块设置标签页
-            await this.populateModuleSettings(settings);
+    // showNotificationSettings 和 populateBasicSettings 方法已迁移到 notifications.js
 
-            // 显示模态框
-            const modal = new bootstrap.Modal(document.getElementById('notificationSettingsModal'));
-            modal.show();
+    // populateModuleSettings 方法已迁移到 notifications.js
 
-        } catch (error) {
-            console.error('Failed to load notification settings:', error);
-            this.showAlert('danger', 'Failed to load notification settings');
-        }
-    }
+    // updateNotificationInputStates 方法已迁移到 notifications.js
 
-    async populateBasicSettings(settings) {
-        // Telegram 设置
-        const telegramConfig = settings.telegram || {};
-        document.getElementById('telegramEnabled').checked = telegramConfig.enabled || false;
-        document.getElementById('telegramBotToken').value = telegramConfig.config?.bot_token || '';
-        document.getElementById('telegramChatId').value = telegramConfig.config?.chat_id || '';
+    // getAvailableModules method has been migrated to notifications.js
 
-        // Email 设置 (兼容旧版)
-        document.getElementById('emailEnabled').checked = settings.email_enabled || false;
-        document.getElementById('emailAddress').value = settings.email_address || '';
+    // saveNotificationSettings method has been migrated to notifications.js
 
-        // Trading Reminder 设置
-        const tradingReminder = settings.trading_reminder || {};
-        document.getElementById('tradingReminderEnabled').checked = tradingReminder.enabled || false;
-        document.getElementById('startTradingTime').value = tradingReminder.start_trading_time || '09:30';
-        document.getElementById('endTradingTime').value = tradingReminder.end_trading_time || '16:00';
-        document.getElementById('browserNotificationEnabled').checked = tradingReminder.browser_notification_enabled !== false;
-        document.getElementById('telegramReminderEnabled').checked = tradingReminder.telegram_reminder_enabled || false;
+    // testTradingReminder method has been migrated to notifications.js
 
-        // 初始化禁用/启用状态，并绑定变化事件
-        if (typeof this.updateNotificationInputStates === 'function') {
-            this.updateNotificationInputStates();
-        }
-        ['telegramEnabled','emailEnabled','tradingReminderEnabled'].forEach(id=>{
-            const el=document.getElementById(id);
-            if(el){ el.onchange=()=>{ if (typeof this.updateNotificationInputStates === 'function') this.updateNotificationInputStates(); } }
-        });
-    }
+    // checkTradingReminderStatus method has been migrated to notifications.js
 
-    async populateModuleSettings(settings) {
-        const tableBody = document.getElementById('moduleSettingsTableBody');
-        if (!tableBody) return;
+    // testNotification method has been migrated to notifications.js
 
-        // 获取可用模块列表
-        const modules = await this.getAvailableModules();
-        
-        // 从设置中提取模块配置
-        const chrome = settings.chrome || {};
-        const telegram = settings.telegram || {};
-        const email = { events: [] }; // Email 暂时不支持事件级别配置
-
-        const chromeEvents = Array.isArray(chrome.events) ? chrome.events : [];
-        const telegramEvents = Array.isArray(telegram.events) ? telegram.events : [];
-        const hasChromeOverlap = chromeEvents.some(ev => modules.includes(ev));
-
-        // 清空表格
-        tableBody.innerHTML = '';
-
-        // 为每个模块创建行
-        modules.forEach(module => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td class="fw-bold">${module}</td>
-                <td class="text-center">
-                    <input type="checkbox" class="form-check-input" 
-                           data-channel="chrome" data-module="${module}"
-                           ${((chromeEvents.length === 0 || !hasChromeOverlap) ? true : chromeEvents.includes(module)) ? 'checked' : ''}>
-                </td>
-                <td class="text-center">
-                    <input type="checkbox" class="form-check-input" 
-                           data-channel="telegram" data-module="${module}"
-                           ${(telegram.enabled && telegramEvents.includes(module)) ? 'checked' : ''}>
-                </td>
-                <td class="text-center">
-                    <input type="checkbox" class="form-check-input" 
-                           data-channel="email" data-module="${module}">
-                </td>
-            `;
-            tableBody.appendChild(row);
-        });
-
-        // 渲染后根据当前开关状态再次同步禁用/启用
-        if (typeof this.updateNotificationInputStates === 'function') {
-            this.updateNotificationInputStates();
-        }
-    }
-
-    // 统一更新通知设置输入组件的禁用/启用状态
-    updateNotificationInputStates(){
-        try{
-            const setDisabled=(id,dis)=>{ const el=document.getElementById(id); if(el){ el.disabled=!!dis; }};
-            const tgEnabled = !!document.getElementById('telegramEnabled')?.checked;
-            setDisabled('telegramBotToken', !tgEnabled);
-            setDisabled('telegramChatId', !tgEnabled);
-
-            const emailEnabled = !!document.getElementById('emailEnabled')?.checked;
-            setDisabled('emailAddress', !emailEnabled);
-
-            const trEnabled = !!document.getElementById('tradingReminderEnabled')?.checked;
-            setDisabled('startTradingTime', !trEnabled);
-            setDisabled('endTradingTime', !trEnabled);
-            setDisabled('browserNotificationEnabled', !trEnabled);
-            setDisabled('telegramReminderEnabled', !trEnabled);
-
-            // 模块设置表格中禁用/启用 Telegram 列
-            document.querySelectorAll('#moduleSettingsTableBody input[data-channel="telegram"]').forEach(el=>{
-                el.disabled = !tgEnabled;
-            });
-            
-            // 模块设置表格中禁用/启用 Email 列
-            document.querySelectorAll('#moduleSettingsTableBody input[data-channel="email"]').forEach(el=>{
-                el.disabled = !emailEnabled;
-            });
-        }catch(err){ console.error('updateNotificationInputStates error:', err); }
-    }
-
-    async getAvailableModules() {
-        // 使用 Event Notifications 区域的事件作为模块设置的第一列
-        return [
-            'Order Filled',
-            'Position Opened',
-            'Position Closed',
-            'Risk Rule Triggered',
-            'Strategy Started',
-            'Strategy Stopped'
-        ];
-    }
-
-    async saveNotificationSettings() {
-        try {
-            // 收集基础设置
-            const telegram_enabled = document.getElementById('telegramEnabled').checked;
-            const telegram_bot_token = document.getElementById('telegramBotToken').value;
-            const telegram_chat_id = document.getElementById('telegramChatId').value;
-            const email_enabled = document.getElementById('emailEnabled').checked;
-            const email_address = document.getElementById('emailAddress').value;
-            const trading_reminder_enabled = document.getElementById('tradingReminderEnabled').checked;
-            const start_trading_time = document.getElementById('startTradingTime').value;
-            const end_trading_time = document.getElementById('endTradingTime').value;
-            const browser_notification_enabled = document.getElementById('browserNotificationEnabled').checked;
-            const telegram_reminder_enabled = document.getElementById('telegramReminderEnabled').checked;
-
-            // 收集模块设置
-            const chromeModules = [];
-            const telegramModules = [];
-            const rows = document.querySelectorAll('#moduleSettingsTableBody input[type="checkbox"]');
-            rows.forEach(input => {
-                const module = input.getAttribute('data-module');
-                const channel = input.getAttribute('data-channel');
-                if (input.checked) {
-                    if (channel === 'chrome') chromeModules.push(module);
-                    if (channel === 'telegram') telegramModules.push(module);
-                }
-            });
-
-            // 构造后端需要的结构
-            const settings = {
-                chrome: {
-                    enabled: true, // UI要求默认Chrome全部选中，允许用户全不选也行
-                    config: {},
-                    events: chromeModules.length ? chromeModules : await this.getAvailableModules() // 如果未选，则默认全选
-                },
-                telegram: {
-                    enabled: telegram_enabled,
-                    config: {
-                        bot_token: telegram_bot_token,
-                        chat_id: telegram_chat_id
-                    },
-                    events: telegramModules
-                },
-                trading_reminder: {
-                    enabled: trading_reminder_enabled,
-                    start_trading_time,
-                    end_trading_time,
-                    browser_notification_enabled,
-                    telegram_reminder_enabled
-                },
-                // 兼容旧版字段
-                email_enabled,
-                email_address
-            };
-
-            const response = await this.apiCall('/notifications/settings', {
-                method: 'PUT',
-                body: JSON.stringify(settings)
-            });
-
-            if (response.success) {
-                this.showAlert('success', 'Notification settings saved successfully');
-                
-                // Update trading reminder schedules if enabled
-                if (settings.trading_reminder && settings.trading_reminder.enabled) {
-                    this.scheduleTradingReminders();
-                }
-                
-                const modal = bootstrap.Modal.getInstance(document.getElementById('notificationSettingsModal'));
-                modal.hide();
-            } else {
-                this.showAlert('danger', 'Failed to save notification settings: ' + (response.error || 'Unknown error'));
-            }
-        } catch (error) {
-            console.error('Failed to save notification settings:', error);
-            this.showAlert('danger', 'Failed to save notification settings: ' + error.message);
-        }
-    }
-
-    async testTradingReminder() {
-        try {
-            // 测试浏览器通知
-            let browserSent = false;
-            if ('Notification' in window) {
-                if (Notification.permission === 'granted') {
-                    new Notification('Trading Reminder Test', {
-                        body: 'This is a test trading reminder notification',
-                        icon: '/static/favicon.ico'
-                    });
-                    browserSent = true;
-                } else if (Notification.permission !== 'denied') {
-                    const permission = await Notification.requestPermission();
-                    if (permission === 'granted') {
-                        new Notification('Trading Reminder Test', {
-                            body: 'This is a test trading reminder notification',
-                            icon: '/static/favicon.ico'
-                        });
-                        browserSent = true;
-                    }
-                }
-            }
-
-            // Telegram测试：不调用后端不存在的接口，仅给出提示
-            const telegramEnabled = document.getElementById('telegramEnabled')?.checked;
-            const botToken = document.getElementById('telegramBotToken')?.value.trim();
-            const chatId = document.getElementById('telegramChatId')?.value.trim();
-
-            if (telegramEnabled && botToken && chatId) {
-                this.showAlert('info', '浏览器通知测试已发送。Telegram将在发生实际事件时按模块设置发送通知（保存设置后生效）。');
-            } else if (browserSent) {
-                this.showAlert('success', '浏览器通知测试已发送。');
-            } else {
-                this.showAlert('warning', '无法发送浏览器通知（可能未授权）。请允许通知或在地址栏权限设置中启用。');
-            }
-        } catch (error) {
-            console.error('Test reminder failed:', error);
-            this.showAlert('danger', 'Test reminder failed: ' + error.message);
-        }
-    }
-
-    async checkTradingReminderStatus() {
-        try {
-            const statusElement = document.getElementById('tradingReminderStatus');
-            if (!statusElement) return;
-
-            const now = new Date();
-            const startTime = document.getElementById('startTradingTime').value;
-            const endTime = document.getElementById('endTradingTime').value;
-            
-            let status = [];
-            
-            // Check reminder times
-            if (startTime && endTime) {
-                status.push(`⏰ Start: ${startTime}, End: ${endTime}`);
-            } else {
-                status.push('⚠️ Trading times not set');
-            }
-            
-            // Check if today is working day
-            const isWorking = this.isWorkingDay(now);
-            status.push(isWorking ? '📅 Working day' : '🏖️ Holiday/Weekend');
-            
-            // Check browser notification permission
-            if ('Notification' in window) {
-                const permission = Notification.permission;
-                status.push(`🔔 Browser: ${permission}`);
-            } else {
-                status.push('🔔 Browser: Not supported');
-            }
-            
-            // Check if reminders are scheduled
-            const hasReminders = this.tradingReminderTimeouts && this.tradingReminderTimeouts.length > 0;
-            status.push(hasReminders ? '⏲️ Scheduled' : '⏸️ Not scheduled');
-            
-            statusElement.textContent = status.join(' | ');
-            statusElement.className = 'text-info';
-            
-        } catch (error) {
-            console.error('Check reminder status failed:', error);
-            const statusElement = document.getElementById('tradingReminderStatus');
-            if (statusElement) {
-                statusElement.textContent = 'Error checking status';
-                statusElement.className = 'text-danger';
-            }
-        }
-    }
-
-    async testNotification() {
-        try {
-            const response = await this.apiCall('/notifications/test', {
-                method: 'POST',
-                body: JSON.stringify({
-                    channel: 'chrome',
-                    message: 'This is a test notification from IBBot'
-                })
-            });
-
-            if (response.success) {
-                this.showAlert('success', 'Test notification sent successfully');
-            } else {
-                this.showAlert('warning', 'Test notification sent but may have failed: ' + (response.error || 'Check your settings'));
-            }
-        } catch (error) {
-            console.error('Failed to send test notification:', error);
-            this.showAlert('danger', 'Failed to send test notification: ' + error.message);
-        }
-    }
-
-    // 加载通知历史记录到面板
-    async loadNotificationHistory() {
-        try {
-            const response = await this.apiCall('/notifications/history?limit=50');
-            const history = response.history || [];
-
-            const tbody = document.getElementById('notificationHistoryBody');
-            if (history.length === 0) {
-                tbody.innerHTML = `
-                    <tr>
-                        <td colspan="6" class="text-center text-muted py-3">
-                            <i class="fas fa-bell-slash"></i>
-                            <p class="mb-0">No notification history found</p>
-                        </td>
-                    </tr>
-                `;
-            } else {
-                tbody.innerHTML = this.renderNotificationHistoryRows(history);
-            }
-
-        } catch (error) {
-            console.error('Failed to load notification history:', error);
-            const tbody = document.getElementById('notificationHistoryBody');
-            tbody.innerHTML = `
-                <tr>
-                    <td colspan="6" class="text-center text-danger py-3">
-                        <i class="fas fa-exclamation-triangle"></i>
-                        <p class="mb-0">Failed to load notification history</p>
-                    </td>
-                </tr>
-            `;
-        }
-    }
-
-
-    renderNotificationHistoryRows(history) {
-        if (!history || history.length === 0) {
-            return '';
-        }
-
-        return history.map(item => {
-            const statusBadge = this.getNotificationStatusBadge(item.status);
-            const channelIcon = this.getChannelIcon(item.channel);
-            // Prefer backend-provided timestamps: sent_at -> created_at -> timestamp (fallback)
-            const timeValue = item?.sent_at || item?.created_at || item?.timestamp;
-            const timestamp = timeValue ? new Date(timeValue).toLocaleString() : '-';
-            
-            return `
-                <tr>
-                    <td><small>${timestamp}</small></td>
-                    <td>${channelIcon} ${item.channel}</td>
-                    <td><span class="badge bg-secondary">${item.event_type}</span></td>
-                    <td><small>${item.message}</small></td>
-                    <td>${statusBadge}</td>
-                    <td><small class="text-danger">${item.error_message || ''}</small></td>
-                </tr>
-            `;
-        }).join('');
-    }
-
-    getNotificationStatusBadge(status) {
-        const badges = {
-            'sent': '<span class="badge bg-success">Sent</span>',
-            'failed': '<span class="badge bg-danger">Failed</span>',
-            'pending': '<span class="badge bg-warning">Pending</span>'
-        };
-        return badges[status] || '<span class="badge bg-secondary">Unknown</span>';
-    }
-
-    getChannelIcon(channel) {
-        const icons = {
-            'telegram': '<i class="fab fa-telegram"></i>',
-            'email': '<i class="fas fa-envelope"></i>',
-            'websocket': '<i class="fas fa-wifi"></i>'
-        };
-        return icons[channel] || '<i class="fas fa-bell"></i>';
-    }
-
-    async filterNotificationHistory() {
-        try {
-            const status = document.getElementById('historyStatusFilter').value;
-            const channel = document.getElementById('historyChannelFilter').value;
-            const since = document.getElementById('historySinceFilter').value;
-            
-            let url = '/notifications/history?limit=50';
-            if (status) url += `&status=${status}`;
-            if (channel) url += `&channel=${channel}`;
-            if (since) url += `&since=${since}`;
-
-            const response = await this.apiCall(url);
-            const history = response.history || [];
-
-            const tbody = document.getElementById('notificationHistoryBody');
-            if (history.length === 0) {
-                tbody.innerHTML = `
-                    <tr>
-                        <td colspan="6" class="text-center text-muted py-3">
-                            <i class="fas fa-bell-slash"></i>
-                            <p class="mb-0">No notification history found</p>
-                        </td>
-                    </tr>
-                `;
-            } else {
-                tbody.innerHTML = this.renderNotificationHistoryRows(history);
-            }
-
-        } catch (error) {
-            console.error('Failed to filter notification history:', error);
-            this.showAlert('danger', 'Failed to filter notification history');
-        }
-    }
+    // loadNotificationHistory, renderNotificationHistoryRows, getNotificationStatusBadge, 
+    // getChannelIcon, and filterNotificationHistory methods have been migrated to notifications.js
 
 
     async loadGSRulesStatus() {

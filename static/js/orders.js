@@ -482,9 +482,17 @@ class OrderManager {
         }
         
         try {
-            const response = await this.app.apiCall('/orders/cancel_all', {
-                method: 'POST'
-            });
+            let response;
+            try {
+                response = await this.app.apiCall('/cancel_all_orders', { method: 'DELETE' });
+            } catch (e) {
+                // Fallback: older endpoints
+                try {
+                    response = await this.app.apiCall('/cancel_all_orders', { method: 'POST' });
+                } catch (e2) {
+                    response = await this.app.apiCall('/orders/cancel_all', { method: 'POST' });
+                }
+            }
             
             if (response.success) {
                 this.app.showAlert('success', 'All orders cancelled successfully');
@@ -567,9 +575,18 @@ class OrderManager {
                 }, 3000);
             }
             
-            const response = await this.app.apiCall(`/orders/${orderId}`, {
-                method: 'DELETE'
-            });
+            let response;
+            try {
+                response = await this.app.apiCall(`/cancel_order/${orderId}`, {
+                    method: 'DELETE'
+                });
+            } catch (e) {
+                // fallback to POST endpoint
+                response = await this.app.apiCall(`/cancel_order`, {
+                    method: 'POST',
+                    body: JSON.stringify({ order_id: orderId })
+                });
+            }
             
             if (response.success) {
                 this.app.showAlert('success', 'Order cancelled successfully');

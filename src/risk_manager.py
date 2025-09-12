@@ -98,7 +98,7 @@ class RiskManager:
         self.order_queue = Queue()
         
         # 调度器
-        self.scheduler = AsyncIOScheduler()
+        self.scheduler: Optional[AsyncIOScheduler] = None
 
         # 组件依赖
         self.order_manager = None
@@ -350,31 +350,33 @@ class RiskManager:
     def start(self):
         """启动风险管理器"""
         try:
-            # 检查是否有运行的事件循环
+            # 必须在已有运行事件循环中启动
             try:
                 loop = asyncio.get_running_loop()
-                # 如果有运行的事件循环，直接启动调度器
-                self._start_scheduler()
             except RuntimeError:
-                # 没有运行的事件循环，创建一个新的事件循环来启动调度器
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    self._start_scheduler()
-                except Exception as e:
-                    risk_logger.warning(f"无法启动异步调度器: {e}，将使用简化模式")
-                    self.monitoring_active = True
-                    risk_logger.info("Risk manager started in simplified mode")
-                    return
-            
+                risk_logger.error("RiskManager.start() 需要在正在运行的事件循环中调用，未启动调度器")
+                return
+
+            # 确保调度器与当前事件循环绑定
+            if self.scheduler is None or not getattr(self.scheduler, 'running', False):
+                self.scheduler = AsyncIOScheduler(event_loop=loop)
+                risk_logger.debug(f"AsyncIOScheduler 绑定事件循环: {loop}")
+                self._start_scheduler()
+            else:
+                risk_logger.info("Risk manager scheduler 已经在运行")
+
             self.monitoring_active = True
             risk_logger.info("Risk monitoring started successfully")
-            
         except Exception as e:
             risk_logger.error(f"Error starting risk manager: {e}")
     
     def _start_scheduler(self):
         """启动调度器和添加任务"""
+        # 若尚未创建，则绑定到当前事件循环
+        if self.scheduler is None:
+            loop = asyncio.get_running_loop()
+            self.scheduler = AsyncIOScheduler(event_loop=loop)
+            risk_logger.debug(f"为_start_scheduler创建AsyncIOScheduler并绑定事件循环: {loop}")
         # 启动调度器
         if not self.scheduler.running:
             self.scheduler.start()
@@ -433,8 +435,13 @@ class RiskManager:
         """停止风险管理器"""
         try:
             self.monitoring_active = False
-            if self.scheduler.running:
-                self.scheduler.shutdown()
+            if self.scheduler:
+                try:
+                    if self.scheduler.running:
+                        self.scheduler.remove_all_jobs()
+                        self.scheduler.shutdown(wait=False)
+                finally:
+                    self.scheduler = None
             risk_logger.info("Risk manager stopped")
         except Exception as e:
             risk_logger.error(f"Error stopping risk manager: {e}")

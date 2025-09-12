@@ -4,7 +4,7 @@ Pydantic 请求模型定义
 基于 main.py 中的 API 端点分析，定义所有必需的请求模型
 """
 
-from pydantic import BaseModel, validator, root_validator
+from pydantic import BaseModel, validator, root_validator, Field
 from typing import Optional, Dict, Any
 
 class HistoricalDataRequest(BaseModel):
@@ -21,6 +21,11 @@ class ChartDataRequest(BaseModel):
     bar_size: str
     exchange: str = "SMART"
     data_type: str = "TRADES"  # 添加data_type支持
+    use_cache: Optional[bool] = Field(True, alias="useCache")
+    force_refresh: Optional[bool] = Field(False, alias="forceRefresh")
+
+    class Config:
+        allow_population_by_field_name = True
 
 class RiskRuleRequest(BaseModel):
     """风险规则请求模型"""
@@ -104,6 +109,10 @@ class StrategyRequest(BaseModel):
     tp_price: Optional[float] = None
     sl_type: str = "amount"  # "amount" or "percent"
     tp_type: str = "amount"  # "amount" or "percent"
+
+class StrategyRenameRequest(BaseModel):
+    new_name: str
+    rename_file: Optional[bool] = False
 
 class StrategySettingsRequest(BaseModel):
     """策略设置请求模型"""
