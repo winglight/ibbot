@@ -315,26 +315,31 @@ class IBKRConnectionManager {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws`;
         
+        console.log('[ws] preparing to connect', { wsUrl });
         this.ws = new WebSocket(wsUrl);
         
         this.ws.onopen = () => {
-            console.log('WebSocket connected');
+            console.log('[ws] connected');
         };
         
         this.ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            console.log('WebSocket message received:', data);
-            this.handleWebSocketMessage(data);
+            try {
+                const data = JSON.parse(event.data);
+                console.log('[ws] message received', data?.type || 'unknown', data);
+                this.handleWebSocketMessage(data);
+            } catch (e) {
+                console.error('[ws] message parse error', e, event?.data);
+            }
         };
         
-        this.ws.onclose = () => {
-            console.log('WebSocket disconnected');
+        this.ws.onclose = (ev) => {
+            console.log('[ws] disconnected', { code: ev?.code, reason: ev?.reason });
             // Reconnect after 5 seconds
             setTimeout(() => this.connectWebSocket(), 5000);
         };
         
         this.ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
+            console.error('[ws] error', error);
         };
     }
 

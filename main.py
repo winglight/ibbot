@@ -398,15 +398,6 @@ app.include_router(notifications_router)
 app.include_router(queue_router)
 app.include_router(logs_router)
 app.include_router(websocket_router)
-app.include_router(market_data_router)
-app.include_router(account_router)
-app.include_router(orders_router)
-app.include_router(risk_router)
-app.include_router(strategy_router)
-app.include_router(notifications_router)
-app.include_router(queue_router)
-app.include_router(logs_router)
-app.include_router(websocket_router)
 
 # Utility helpers
 

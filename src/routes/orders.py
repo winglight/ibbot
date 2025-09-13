@@ -939,7 +939,7 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
         await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                lambda: core.ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
+                lambda: core.ibkr_client.get_orders(risk_manager, getattr(core, 'strategy_manager', None), order_manager)
             ),
             timeout=10.0
         )
@@ -951,4 +951,40 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=408, detail="Order sync request timed out")
     except Exception as e:
         logger.error(f"Sync orders error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/api/orders/{order_id}/sync")
+async def sync_single_order(order_id: str, user: Optional[str] = Depends(get_current_user)):
+    """手动同步指定订单的状态，然后返回该订单的最新详情"""
+    if not connection_manager.is_connected():
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+
+    try:
+        if 'order_manager' not in globals() or not order_manager:
+            raise HTTPException(status_code=500, detail="Order manager not initialized")
+
+        # 检查订单是否存在
+        if not order_manager.get_order(str(order_id)):
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        # 同步订单（IB接口暂不支持单个订单刷新，这里触发整体刷新）
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: core.ibkr_client.get_orders(risk_manager, getattr(core, 'strategy_manager', None), order_manager)
+            ),
+            timeout=10.0
+        )
+
+        # 返回最新订单详情（复用现有的详情接口）
+        return await get_order_detail(order_id, user)
+
+    except asyncio.TimeoutError:
+        logger.warning("Order sync request timed out")
+        raise HTTPException(status_code=408, detail="Order sync request timed out")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Sync single order error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

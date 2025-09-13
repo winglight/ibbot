@@ -235,24 +235,55 @@ class OrderManager {
         
         if (cells1.length !== cells2.length) return false;
         
+        // 专用于提取货币文本中的数值。如 "$1,234.56" -> 1234.56
+        const parseCurrency = (el) => {
+            if (!el) return NaN;
+            const txt = (el.textContent || '').replace(/[$,\s]/g, '');
+            const n = Number(txt);
+            return isFinite(n) ? n : NaN;
+        };
+        
         for (let i = 0; i < cells1.length; i++) {
-            // 对于操作列（最后一列），比较按钮的存在性而不是具体内容
-            if (i === cells1.length - 1) {
+            const isActionsCol = (i === cells1.length - 1);
+            const isPnlCol = (i === 6);        // 列顺序：0-id,1-sym,2-act,3-qty,4-price,5-status,6-pnl,7-comm,8-source,9-ops
+            const isCommissionCol = (i === 7);
+
+            if (isActionsCol) {
+                // 操作列：比较按钮数量与类型（通过 title），忽略禁用状态、图标闪烁等差异
                 const buttons1 = cells1[i].querySelectorAll('button');
                 const buttons2 = cells2[i].querySelectorAll('button');
                 if (buttons1.length !== buttons2.length) return false;
-                
-                // 比较按钮的类型（通过title属性）
                 for (let j = 0; j < buttons1.length; j++) {
-                    if (buttons1[j].getAttribute('title') !== buttons2[j].getAttribute('title')) {
-                        return false;
-                    }
+                    const t1 = buttons1[j].getAttribute('title') || '';
+                    const t2 = buttons2[j].getAttribute('title') || '';
+                    if (t1 !== t2) return false;
                 }
-            } else {
-                // 对于其他列，比较innerHTML
-                if (cells1[i].innerHTML.trim() !== cells2[i].innerHTML.trim()) {
-                    return false;
-                }
+                continue;
+            }
+            
+            if (isPnlCol) {
+                // PnL 列：除内容外，还需要比较单元格 class（盈亏颜色），并尽量按数值比较
+                const n1 = parseCurrency(cells1[i]);
+                const n2 = parseCurrency(cells2[i]);
+                if (!(isNaN(n1) && isNaN(n2)) && n1 !== n2) return false;
+                if ((cells1[i].className || '').trim() !== (cells2[i].className || '').trim()) return false;
+                // 同时兜底比较 innerHTML，避免存在附加节点时漏检
+                if (cells1[i].innerHTML.trim() !== cells2[i].innerHTML.trim()) return false;
+                continue;
+            }
+
+            if (isCommissionCol) {
+                // 佣金列：按数值与文本双重比较
+                const n1 = parseCurrency(cells1[i]);
+                const n2 = parseCurrency(cells2[i]);
+                if (!(isNaN(n1) && isNaN(n2)) && n1 !== n2) return false;
+                if (cells1[i].innerHTML.trim() !== cells2[i].innerHTML.trim()) return false;
+                continue;
+            }
+
+            // 默认：比较 innerHTML（适用于状态列内的 <span class="badge ..."> 等场景）
+            if (cells1[i].innerHTML.trim() !== cells2[i].innerHTML.trim()) {
+                return false;
             }
         }
         

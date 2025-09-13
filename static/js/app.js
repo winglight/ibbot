@@ -1361,7 +1361,8 @@ class TradingApp {
                     // 如果之前订阅了其他合约，先取消订阅
                     if (this.monitorRealtimeSymbol && this.monitorRealtimeSymbol !== symbol) {
                         try {
-                            this.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
+                            console.log('[monitor] unsubscribe realtime', this.monitorRealtimeSymbol);
+            this.ibkrManager.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
                         } catch (e) {}
                         this.monitorRealtimeSymbol = null;
                         setActive(false);
@@ -1369,13 +1370,15 @@ class TradingApp {
                     realtimeBtn.onclick = () => {
                         if (this.monitorRealtimeSymbol) {
                             try {
-                                this.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
+                                console.log('[monitor] unsubscribe realtime', this.monitorRealtimeSymbol);
+            this.ibkrManager.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
                             } catch (e) {}
                             this.monitorRealtimeSymbol = null;
                             setActive(false);
                         } else {
                             try {
-                                this.ws?.send(JSON.stringify({ type: 'subscribe_realtime', symbol }));
+                                console.log('[monitor] subscribe realtime', { symbol });
+            this.ibkrManager.ws?.send(JSON.stringify({ type: 'subscribe_realtime', symbol }));
                                 this.monitorRealtimeSymbol = symbol;
                                 setActive(true);
                                 // 开启实时后强制刷新图表，绕过缓存
@@ -1539,7 +1542,8 @@ class TradingApp {
                 modalEl.addEventListener('hidden.bs.modal', () => {
                     if (this.monitorRealtimeSymbol) {
                         try {
-                            this.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
+                            console.log('[monitor] unsubscribe realtime', this.monitorRealtimeSymbol);
+            this.ibkrManager.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
                         } catch (e) {}
                         this.monitorRealtimeSymbol = null;
                     }
@@ -4244,6 +4248,12 @@ class TradingApp {
             // Name
             const nameCell = document.createElement('td');
             nameCell.textContent = strategy.name;
+            nameCell.style.cursor = 'pointer';
+            nameCell.style.color = '#0066cc';
+            nameCell.style.textDecoration = 'underline';
+            nameCell.addEventListener('click', () => {
+                this.openStrategyDetails(strategy.name);
+            });
             
             // Symbol（暂无字段，先占位）
             const symbolCell = document.createElement('td');
@@ -4299,7 +4309,7 @@ class TradingApp {
 
     async toggleStrategy(name, enabled) {
         try {
-            await this.apiCall(`/strategies/${name}/toggle?enabled=${enabled}`, { method: 'POST' });
+            await this.apiCall(`/strategies/${encodeURIComponent(name)}/toggle?enabled=${enabled}`, { method: 'POST' });
             this.showAlert('success', `Strategy ${name} ${enabled ? 'enabled' : 'disabled'}`);
         } catch (error) {
             console.error('Failed to toggle strategy:', error);
@@ -4311,7 +4321,7 @@ class TradingApp {
 
     async editStrategy(name) {
         try {
-            const res = await this.apiCall(`/strategies/${name}`);
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}`);
             if (!res.success) throw new Error('Failed to load strategy');
             const s = res.strategy;
             const nameEl = document.getElementById('editStrategyName');
@@ -4360,7 +4370,7 @@ class TradingApp {
                         updates.tp_type = document.getElementById('editTpTypeSelect')?.value || 'amount';
                     }
                     try {
-                        await this.apiCall(`/strategies/${name}`, { method: 'PUT', body: JSON.stringify(updates) });
+                        await this.apiCall(`/strategies/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(updates) });
                         this.showAlert('success', `Strategy ${name} updated`);
                         const modalEl = document.getElementById('editStrategyModal');
                         const inst = bootstrap.Modal.getInstance(modalEl);
@@ -4384,7 +4394,7 @@ class TradingApp {
             if (nameEl) nameEl.textContent = name;
             let s = null;
             try {
-                const res = await this.apiCall(`/strategies/${name}`);
+                const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}`);
                 if (res.success) s = res.strategy;
             } catch {}
             const typeEl = document.getElementById('detailsStrategyType');
@@ -4410,10 +4420,10 @@ class TradingApp {
                 summaryPane?.classList.remove('d-none');
                 ordersPane?.classList.remove('d-none');
                 if (chartsTabText) chartsTabText.textContent = 'Visual Metrics';
-                new bootstrap.Tab(document.getElementById('summary-tab')).show();
+                try { new bootstrap.Tab(document.getElementById('summary-tab')).show(); } catch (e) { console.warn('Tab show failed', e); }
 
                 try {
-                    const infoRes = await this.apiCall(`/strategies/${name}/internal-info`);
+                    const infoRes = await this.apiCall(`/strategies/${encodeURIComponent(name)}/internal-info`);
                     if (infoRes.success) {
                         const info = infoRes.strategy || {};
                         const descEl = document.getElementById('summaryDescription');
@@ -4453,7 +4463,7 @@ class TradingApp {
                 summaryPane?.classList.add('d-none');
                 ordersPane?.classList.add('d-none');
                 if (chartsTabText) chartsTabText.textContent = 'Charts';
-                new bootstrap.Tab(document.getElementById('charts-tab')).show();
+                try { new bootstrap.Tab(document.getElementById('charts-tab')).show(); } catch (e) { console.warn('Tab show failed', e); }
             }
 
             // API Examples
@@ -4473,8 +4483,63 @@ class TradingApp {
                 }
             }
 
-            const modal = new bootstrap.Modal(document.getElementById('strategyDetailsModal'));
-            modal.show();
+            const modalElForDetails = document.getElementById('strategyDetailsModal');
+            if (modalElForDetails) {
+                const modal = (bootstrap.Modal.getOrCreateInstance ? bootstrap.Modal.getOrCreateInstance(modalElForDetails) : new bootstrap.Modal(modalElForDetails));
+                try { modal.show(); } catch (e) { console.warn('Failed to show strategy details modal:', e); }
+            }
+
+            // 标题内联重命名：双击编辑，回车提交
+            const titleNameEl = document.getElementById('detailsStrategyName');
+            if (titleNameEl) {
+                // 解除旧事件（克隆替换避免重复绑定）
+                const newTitle = titleNameEl.cloneNode(true);
+                titleNameEl.parentNode.replaceChild(newTitle, titleNameEl);
+                newTitle.title = '双击可重命名';
+                newTitle.style.cursor = 'text';
+                newTitle.ondblclick = () => {
+                    const oldName = newTitle.textContent || name;
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'form-control form-control-sm d-inline-block';
+                    input.style.width = Math.max(120, oldName.length * 9) + 'px';
+                    input.value = oldName;
+                    newTitle.replaceWith(input);
+                    input.focus();
+                    const commit = async () => {
+                        const newName = input.value.trim();
+                        if (!newName || newName === oldName) {
+                            input.replaceWith(newTitle);
+                            newTitle.textContent = oldName;
+                            return;
+                        }
+                        try {
+                            await this.apiCall(`/strategies/${encodeURIComponent(oldName)}/rename`, {
+                                method: 'POST',
+                                body: JSON.stringify({ new_name: newName, rename_file: false })
+                            });
+                            this.showAlert('success', `策略已重命名为 ${newName}`);
+                            newTitle.textContent = newName;
+                            input.replaceWith(newTitle);
+                            // 刷新策略列表
+                            this.strategiesManager.loadStrategies();
+                        } catch (e) {
+                            console.error('Rename strategy error:', e);
+                            this.showAlert('danger', '重命名失败');
+                            input.replaceWith(newTitle);
+                            newTitle.textContent = oldName;
+                        }
+                    };
+                    input.addEventListener('keydown', (ev) => {
+                        if (ev.key === 'Enter') commit();
+                        if (ev.key === 'Escape') {
+                            input.replaceWith(newTitle);
+                            newTitle.textContent = oldName;
+                        }
+                    });
+                    input.addEventListener('blur', commit);
+                };
+            }
 
             const rangeSel = document.getElementById('performanceRange');
             const customSection = document.getElementById('customRangeSection');
@@ -4513,6 +4578,23 @@ class TradingApp {
             if (exportBtn) {
                 exportBtn.onclick = () => this.exportExecutionsCsv(name);
             }
+
+            // 删除策略按钮
+            const delBtn = document.getElementById('deleteStrategyFromDetails');
+            if (delBtn) {
+                // 解绑旧事件
+                const cloned = delBtn.cloneNode(true);
+                delBtn.parentNode.replaceChild(cloned, delBtn);
+                cloned.addEventListener('click', async () => {
+                    const curName = document.getElementById('detailsStrategyName')?.textContent || name;
+                    if (!curName) return;
+                    await this.deleteStrategy(curName);
+                    // 删除成功后关闭弹窗
+                    const modalEl = document.getElementById('strategyDetailsModal');
+                    const inst = bootstrap.Modal.getInstance(modalEl);
+                    inst && inst.hide();
+                });
+            }
             
             // WebSocket updates executions automatically
             const refreshBtn = document.getElementById('refreshExecutionsBtn');
@@ -4530,7 +4612,7 @@ class TradingApp {
                         if (!confirm(`确定要清空策略 "${strategy}" 的全部执行记录吗？此操作不可撤销！`)) {
                             return;
                         }
-                        await this.apiCall(`/strategies/${strategy}/executions`, { method: 'DELETE' });
+                        await this.apiCall(`/strategies/${encodeURIComponent(strategy)}/executions`, { method: 'DELETE' });
                         this.executionsPagination.allExecutions = [];
                         this.executionsPagination.totalItems = 0;
                         this.executionsPagination.currentPage = 1;
@@ -4561,7 +4643,7 @@ class TradingApp {
             if (range) params.set('range', range);
             if (start) params.set('start', start);
             if (end) params.set('end', end);
-            const res = await this.apiCall(`/strategies/${name}/performance?${params.toString()}`);
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/performance?${params.toString()}`);
             if (!res.success) return;
             const m = res.metrics || {};
             const el = (id) => document.getElementById(id);
@@ -4573,7 +4655,7 @@ class TradingApp {
             el('kpiAvgDur').textContent = `${m.avg_trade_duration ?? 0}`;
 
             // Charts from executions over selected range
-            const execRes = await this.apiCall(`/strategies/${name}/executions?limit=1000`);
+            const execRes = await this.apiCall(`/strategies/${encodeURIComponent(name)}/executions?limit=1000`);
             const executions = (execRes.success ? (execRes.executions || []) : []).slice().sort((a,b)=> new Date(a.execution_time) - new Date(b.execution_time));
             const labels = [];
             const cumData = [];
@@ -4607,7 +4689,7 @@ class TradingApp {
 
     async loadStrategyExecutions(name, limit = 100) {
         try {
-            const res = await this.apiCall(`/strategies/${name}/executions?limit=${limit}`);
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/executions?limit=${limit}`);
             if (!res.success) return;
             const all = res.executions || [];
             this.executionsPagination.allExecutions = all;
@@ -4622,7 +4704,7 @@ class TradingApp {
 
     async loadPnLCalendar(name, options = {}) {
         try {
-            const res = await this.apiCall(`/strategies/${name}/pnl/daily`);
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/pnl/daily`);
             if (!res.success) return;
             if (window.PnLCalendar) {
                 PnLCalendar.init('pnlCalendarContainer', res.pnl || [], options);
@@ -4781,7 +4863,7 @@ class TradingApp {
         }
         
         try {
-            await this.apiCall(`/strategies/${name}`, { method: 'DELETE' });
+            await this.apiCall(`/strategies/${encodeURIComponent(name)}`, { method: 'DELETE' });
             this.showAlert('success', `Strategy ${name} deleted`);
             this.strategiesManager.loadStrategies();
         } catch (error) {
