@@ -115,12 +115,6 @@ class TradingApp {
         }, 50);
     }
 
-    // 迁移localStorage中的交易时间数据到后端
-
-
-    // Show login modal
-
-
     setupEventListeners() {
         // Wait for DOM to be ready
         if (document.readyState === 'loading') {
@@ -4692,8 +4686,9 @@ class TradingApp {
             const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/executions?limit=${limit}`);
             if (!res.success) return;
             const all = res.executions || [];
-            this.executionsPagination.allExecutions = all;
-            this.executionsPagination.totalItems = all.length;
+            const filled = all.filter(ex => String(ex.status || '').toLowerCase() === 'filled');
+            this.executionsPagination.allExecutions = filled;
+            this.executionsPagination.totalItems = filled.length;
             this.executionsPagination.currentPage = 1;
             this.renderExecutionsTable();
             this.renderExecutionsPagination();
@@ -4717,6 +4712,21 @@ class TradingApp {
     renderExecutionsTable() {
         const tbody = document.querySelector('#executionsTable tbody');
         if (!tbody) return;
+        // 同步表头为 9 列
+        const theadRow = document.querySelector('#executionsTable thead tr');
+        if (theadRow) {
+            theadRow.innerHTML = `
+              <th>ID</th>
+              <th>Symbol</th>
+              <th>Created At</th>
+              <th>Action</th>
+              <th>Qty</th>
+              <th>Price</th>
+              <th>Status</th>
+              <th>PnL</th>
+              <th>Commission</th>
+            `;
+        }
         tbody.innerHTML = '';
         const { currentPage, pageSize, allExecutions } = this.executionsPagination;
         const start = (currentPage - 1) * pageSize;
@@ -4724,15 +4734,20 @@ class TradingApp {
         const pageItems = allExecutions.slice(start, end);
         pageItems.forEach(exe => {
             const tr = document.createElement('tr');
-            const t = exe.execution_time ? new Date(exe.execution_time).toLocaleString() : '-';
+            const created = exe.created_at ? new Date(exe.created_at).toLocaleString() : (exe.execution_time ? new Date(exe.execution_time).toLocaleString() : '-');
+            const commission = exe.commission != null ? Number(exe.commission).toFixed(2) : '-';
+            const pnl = exe.pnl != null ? Number(exe.pnl).toFixed(2) : '-';
+            const pnlClass = exe.pnl != null ? (Number(exe.pnl) > 0 ? 'text-success' : Number(exe.pnl) < 0 ? 'text-danger' : '') : '';
             tr.innerHTML = `
-              <td>${t}</td>
+              <td>${exe.id ?? exe.order_id ?? '-'}</td>
               <td>${exe.symbol ?? '-'}</td>
+              <td>${created}</td>
               <td>${exe.action ?? '-'}</td>
               <td>${exe.quantity ?? '-'}</td>
               <td>${exe.price != null ? exe.price : '-'}</td>
               <td><span class="badge bg-${this.getStatusColor(exe.status || '')}">${exe.status}</span></td>
-              <td>${exe.pnl != null ? Number(exe.pnl).toFixed(2) : '-'}</td>
+              <td class="${pnlClass}">${pnl}</td>
+              <td>${commission}</td>
             `;
             tbody.appendChild(tr);
         });
@@ -4776,18 +4791,20 @@ class TradingApp {
 
     exportExecutionsCsv(name) {
         const rows = [
-            ['Time','Symbol','Action','Qty','Price','Status','PnL']
+            ['ID','Symbol','Created At','Action','Qty','Price','Status','PnL','Commission']
         ];
         const all = this.executionsPagination.allExecutions || [];
         all.forEach(exe => {
             rows.push([
-                exe.execution_time ? new Date(exe.execution_time).toISOString() : '',
+                exe.id ?? '',
                 exe.symbol ?? '',
+                exe.created_at ? new Date(exe.created_at).toISOString() : (exe.execution_time ? new Date(exe.execution_time).toISOString() : ''),
                 exe.action ?? '',
                 exe.quantity ?? '',
                 exe.price ?? '',
                 exe.status ?? '',
-                exe.pnl ?? ''
+                exe.pnl ?? '',
+                exe.commission ?? ''
             ]);
         });
         const csv = rows.map(r => r.map(v => typeof v === 'string' && v.includes(',') ? `"${v.replace(/"/g,'""')}"` : v).join(',')).join('\n');
@@ -5136,48 +5153,39 @@ class TradingApp {
 
     async showRiskRuleOrders(symbol) {
         try {
-            // 获取今天的订单数据
+            // 获取全部订单数据
             const ordersData = await this.apiCall('/orders');
-            const today = new Date().toISOString().split('T')[0];
 
-            // 获取该symbol的持仓信息
-            const position = this.dataManager.getAllPositions().find(pos => pos.symbol === symbol);
-            const avgCost = position ? position.avg_cost : 0;
+            // 构建持仓映射，用于计算PnL
+            const positions = (this.dataManager.getAllPositions && this.dataManager.getAllPositions()) || [];
+            const posMap = {};
+            (positions || []).forEach(p => { if (p && p.symbol) posMap[String(p.symbol).toUpperCase()] = p; });
+
+            const target = String(symbol || '').toUpperCase();
             
-            // 过滤出今天的、由风险规则触发的、指定symbol的订单
-            // 风险规则触发的订单特征：order_source为'sl'或'tp'等风险规则类型 且 symbol匹配
-            const riskRuleOrders = ordersData.orders.filter(order => {
-                const orderDate = new Date(order.submit_time || order.created_at).toISOString().split('T')[0];
-                return orderDate === today && 
-                       order.symbol === symbol && 
-                       (order.order_source === 'sl' || order.order_source === 'tp' || order.trigger_type === 'risk_rule');
-            });
+            // 过滤：来源为风险规则（sl/tp 或 trigger_type=risk_rule），且 symbol 或 rule_id 与目标匹配；不再限制“仅今日”
+            const riskRuleOrders = (ordersData.orders || []).filter(order => {
+                const os = String(order.order_source || '').toLowerCase();
+                const isRisk = os === 'sl' || os === 'tp' || String(order.trigger_type || '').toLowerCase() === 'risk_rule';
+                const symU = String(order.symbol || '').toUpperCase();
+                const ridU = String(order.rule_id || '').toUpperCase();
+                const isFilled = String(order.status || '').toLowerCase() === 'filled';
+                return isRisk && (symU === target || ridU === target) && isFilled;
+            }).sort((a,b) => new Date(b.submit_time || b.created_at || 0) - new Date(a.submit_time || a.created_at || 0));
 
             // 计算统计数据
             let totalOrders = riskRuleOrders.length;
             let totalProfit = 0;
             let totalLoss = 0;
 
-            // 根据成交价和平均成本计算PnL
             riskRuleOrders.forEach(order => {
-                if (order.status === 'Filled' && order.avg_fill_price && avgCost > 0) {
-                    // 计算每股盈亏：(成交价 - 平均成本) * 数量
-                    // 对于卖出订单，盈亏 = (成交价 - 平均成本) * 数量
-                    // 对于买入订单，盈亏 = (平均成本 - 成交价) * 数量（通常风险规则不会有买入）
+                const pos = posMap[String(order.symbol || '').toUpperCase()];
+                const avgCost = pos ? pos.avg_cost : 0;
+                if (String(order.status || '').toLowerCase() === 'filled' && order.avg_fill_price && avgCost > 0) {
                     let pnlPerShare = 0;
-                    if (order.action === 'SELL') {
-                        pnlPerShare = order.avg_fill_price - avgCost;
-                    } else if (order.action === 'BUY') {
-                        pnlPerShare = avgCost - order.avg_fill_price;
-                    }
-                    
-                    const totalPnl = pnlPerShare * order.quantity;
-                    
-                    if (totalPnl > 0) {
-                        totalProfit += totalPnl;
-                    } else {
-                        totalLoss += Math.abs(totalPnl);
-                    }
+                    if (order.action === 'SELL') pnlPerShare = order.avg_fill_price - avgCost; else if (order.action === 'BUY') pnlPerShare = avgCost - order.avg_fill_price;
+                    const totalPnl = pnlPerShare * (order.quantity || 0);
+                    if (totalPnl > 0) totalProfit += totalPnl; else totalLoss += Math.abs(totalPnl);
                 }
             });
 
@@ -5191,62 +5199,37 @@ class TradingApp {
 
             // 渲染订单表格
             const tbody = document.querySelector('#riskRuleOrdersTable tbody');
-            tbody.innerHTML = riskRuleOrders.map(order => {
+            tbody.innerHTML = (riskRuleOrders || []).map(order => {
                 // 确定触发类型显示文本
                 let triggerTypeText = '风险规则';
                 let triggerTypeClass = 'bg-warning';
-                
-                // 根据订单来源确定显示文本
-                if (order.order_source === 'sl') {
-                    triggerTypeText = '止损';
-                    triggerTypeClass = 'bg-danger';
-                } else if (order.order_source === 'tp') {
-                    triggerTypeText = '止盈';
-                    triggerTypeClass = 'bg-success';
-                } else if (order.order_source === 'strategy') {
-                    triggerTypeText = '策略';
-                    triggerTypeClass = 'bg-info';
-                } else if (order.order_source === 'auto' || order.order_source === '机器人') {
-                    triggerTypeText = '自动';
-                    triggerTypeClass = 'bg-secondary';
-                } else if (order.trigger_type === 'risk_rule') {
-                    // 兼容旧的trigger_type字段
-                    triggerTypeText = '风险规则';
-                    triggerTypeClass = 'bg-warning';
-                } else {
-                    // 手动订单，显示order_source值或用户名
-                    triggerTypeText = order.order_source || '手动';
-                    triggerTypeClass = 'bg-info';
-                }
-                
-                // 价格显示逻辑
+                if (order.order_source === 'sl') { triggerTypeText = '止损'; triggerTypeClass = 'bg-danger'; }
+                else if (order.order_source === 'tp') { triggerTypeText = '止盈'; triggerTypeClass = 'bg-success'; }
+                else if (order.order_source === 'strategy') { triggerTypeText = '策略'; triggerTypeClass = 'bg-info'; }
+                else if (order.order_source === 'auto' || order.order_source === '机器人') { triggerTypeText = '自动'; triggerTypeClass = 'bg-secondary'; }
+                else if (String(order.trigger_type || '').toLowerCase() === 'risk_rule') { triggerTypeText = '风险规则'; triggerTypeClass = 'bg-warning'; }
+                else { triggerTypeText = order.order_source || '手动'; triggerTypeClass = 'bg-info'; }
+
+                // 价格显示
                 let priceDisplay = '';
-                if (order.order_type === 'MKT') {
-                    priceDisplay = order.avg_fill_price && order.avg_fill_price > 0 ? 
-                        this.formatNumber(order.avg_fill_price) : 'Market';
+                if (order.order_type === 'MKT' || order.order_type === 'MARKET') {
+                    priceDisplay = order.avg_fill_price && order.avg_fill_price > 0 ? this.formatNumber(order.avg_fill_price) : 'Market';
                 } else {
                     priceDisplay = order.limit_price ? this.formatNumber(order.limit_price) : 'N/A';
                 }
-                
-                // 成交价显示
-                const executionPrice = order.avg_fill_price || 0;
-                
-                // 计算该订单的PnL
+
+                const pos = posMap[String(order.symbol || '').toUpperCase()];
+                const avgCost = pos ? pos.avg_cost : 0;
                 let orderPnl = 0;
-                if (order.status === 'Filled' && order.avg_fill_price && avgCost > 0) {
+                if (String(order.status || '').toLowerCase() === 'filled' && order.avg_fill_price && avgCost > 0) {
                     let pnlPerShare = 0;
-                    if (order.action === 'SELL') {
-                        pnlPerShare = order.avg_fill_price - avgCost;
-                    } else if (order.action === 'BUY') {
-                        pnlPerShare = avgCost - order.avg_fill_price;
-                    }
-                    orderPnl = pnlPerShare * order.quantity;
+                    if (order.action === 'SELL') pnlPerShare = order.avg_fill_price - avgCost; else if (order.action === 'BUY') pnlPerShare = avgCost - order.avg_fill_price;
+                    orderPnl = pnlPerShare * (order.quantity || 0);
                 }
-                
-                // PnL显示样式
                 const pnlClass = orderPnl > 0 ? 'text-success' : orderPnl < 0 ? 'text-danger' : 'text-muted';
                 const pnlText = `$${this.formatNumber(orderPnl)}`;
-                
+                const executionPrice = order.avg_fill_price || 0;
+
                 return `
                 <tr>
                     <td>${order.order_id}</td>
@@ -5263,18 +5246,14 @@ class TradingApp {
                 `;
             }).join('');
 
-            // 如果没有找到订单，显示提示信息
-            if (riskRuleOrders.length === 0) {
+            if ((riskRuleOrders || []).length === 0) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="10" class="text-center text-muted">
-                            今日暂无该风险规则触发的订单
-                        </td>
+                        <td colspan="10" class="text-center text-muted">暂无该风险规则关联的订单</td>
                     </tr>
                 `;
             }
 
-            // 显示模态框
             const modalEl = document.getElementById('riskRuleOrdersModal');
             const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
             modal.show();
@@ -5852,6 +5831,3 @@ setTimeout(() => {
         }
     }
 }, 3000);
-
-// 也可以手动在控制台执行: app.orderManager.debugOrdersTable()
-console.log('💡 提示: 可以在控制台手动执行 app.orderManager.debugOrdersTable() 来调试Orders表格');

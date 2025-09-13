@@ -315,11 +315,7 @@ class OrderManager {
             priceDisplay = limitPrice ? `$${this.app.formatNumber(limitPrice)}` : 'N/A';
         }
         
-        // 特殊处理ID为20的risk rule触发订单状态
         let displayStatus = order.status;
-        if (order.order_id === 20 && order.status === 'PendingSubmit') {
-            displayStatus = 'Filled';
-        }
         
         // 判断是否可以编辑/取消
         const canEdit = order.status === 'Submitted' || order.status === 'PreSubmitted';
