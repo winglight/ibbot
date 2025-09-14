@@ -70,19 +70,26 @@ class DOMRingBuffer:
         bid_sum = int(self.book[i, 0, :n_bids, 1].sum())
         ask_sum = int(self.book[i, 1, :n_asks, 1].sum())
         total = bid_sum + ask_sum
-        return (bid_sum - ask_sum) / total if total else 0.0
+        return bid_sum / total if total else 0.0
 
     # ------------------------------------------------------------------
-    def calc_ofi(self, k: int = 1, idx: Optional[int] = None) -> float:
+    def calc_ofi(self, idx: Optional[int] = None) -> float:
         i = self._resolve_idx(idx)
         if self._filled < 2:
             return 0.0
         j = (i - 1) % self.window
-        n_bids = min(k, int(self.valid_levels[i, 0]), int(self.valid_levels[j, 0]))
-        n_asks = min(k, int(self.valid_levels[i, 1]), int(self.valid_levels[j, 1]))
-        bid_diff = self.book[i, 0, :n_bids, 1] - self.book[j, 0, :n_bids, 1]
-        ask_diff = self.book[i, 1, :n_asks, 1] - self.book[j, 1, :n_asks, 1]
-        return float(bid_diff.sum() - ask_diff.sum())
+        mid_i = int(self.mid_tick[i])
+        mid_j = int(self.mid_tick[j])
+        bid_i = int(self.book[i, 0, 0, 1])
+        bid_j = int(self.book[j, 0, 0, 1])
+        ask_i = int(self.book[i, 1, 0, 1])
+        ask_j = int(self.book[j, 1, 0, 1])
+        ofi = 0
+        if mid_i >= mid_j:
+            ofi += bid_i - bid_j
+        if mid_i <= mid_j:
+            ofi -= ask_i - ask_j
+        return float(ofi)
 
 
 class DOMProcessor:
@@ -91,26 +98,45 @@ class DOMProcessor:
     def __init__(self, window: int = 10000, max_levels: int = 30):
         self.buffer = DOMRingBuffer(window=window, max_levels=max_levels)
         self.last_metrics: Dict[str, float] = {}
+        self.last_signals: Dict[str, bool] = {"long": False, "short": False}
         self.last_events: List[str] = []
         self.features_history: List[Dict[str, float]] = []
         self._obi_history: List[float] = []
+        self._ofi_history: List[float] = []
         self.cvd: float = 0.0
 
     # ------------------------------------------------------------------
     def compute_features(self, snapshot_window: int = 20) -> Dict[str, float]:
         """Compute core features from the latest snapshot window."""
         obi = self.buffer.calc_obi(k=5)
-        ofi = self.buffer.calc_ofi(k=1)
+        ofi = self.buffer.calc_ofi()
         self.cvd += ofi
 
         self._obi_history.append(obi)
         if len(self._obi_history) > snapshot_window:
             self._obi_history.pop(0)
-        mean = float(np.mean(self._obi_history)) if self._obi_history else 0.0
-        std = float(np.std(self._obi_history)) if len(self._obi_history) > 1 else 0.0
-        zscore = (obi - mean) / std if std else 0.0
+        self._ofi_history.append(ofi)
+        if len(self._ofi_history) > snapshot_window:
+            self._ofi_history.pop(0)
 
-        return {"obi5": obi, "ofi": ofi, "cvd": self.cvd, "zscore_obi5": zscore}
+        mean_obi = float(np.mean(self._obi_history)) if self._obi_history else 0.0
+        std_obi = float(np.std(self._obi_history)) if len(self._obi_history) > 1 else 0.0
+        z_obi = (obi - mean_obi) / std_obi if std_obi else 0.0
+
+        mean_ofi = float(np.mean(self._ofi_history)) if self._ofi_history else 0.0
+        std_ofi = float(np.std(self._ofi_history)) if len(self._ofi_history) > 1 else 0.0
+        z_ofi = (ofi - mean_ofi) / std_ofi if std_ofi else 0.0
+
+        price_tick = int(self.buffer.mid_tick[(self.buffer._idx - 1) % self.buffer.window])
+        price = price_tick / 100.0
+        return {
+            "obi5": obi,
+            "ofi": ofi,
+            "cvd": self.cvd,
+            "zscore_obi5": z_obi,
+            "zscore_ofi": z_ofi,
+            "mid_price": price,
+        }
 
     # ------------------------------------------------------------------
     def detect_events(self, history: List[Dict[str, float]]) -> List[str]:
@@ -121,9 +147,9 @@ class DOMProcessor:
         prev = history[-2] if len(history) > 1 else {}
         events: List[str] = []
 
-        if cur.get("ofi", 0) > 0 and cur.get("obi5", 0) < 0:
+        if cur.get("ofi", 0) > 0 and cur.get("obi5", 0) < 0.4:
             events.append("buy_absorb")
-        if cur.get("ofi", 0) < 0 and cur.get("obi5", 0) > 0:
+        if cur.get("ofi", 0) < 0 and cur.get("obi5", 0) > 0.6:
             events.append("sell_absorb")
 
         prev_ofi = prev.get("ofi")
@@ -141,9 +167,9 @@ class DOMProcessor:
     ) -> Dict[str, bool]:
         """Return simple long/short trade signals."""
         signals = {"long": False, "short": False}
-        if features.get("obi5", 0) > 0.5 and features.get("ofi", 0) > 0:
+        if features.get("obi5", 0) > 0.6 and features.get("ofi", 0) > 0:
             signals["long"] = True
-        if features.get("obi5", 0) < -0.5 and features.get("ofi", 0) < 0:
+        if features.get("obi5", 0) < 0.4 and features.get("ofi", 0) < 0:
             signals["short"] = True
         return signals
 
@@ -165,6 +191,7 @@ class DOMProcessor:
         self.features_history.append(features)
         self.last_metrics = features
         self.last_events = self.detect_events(self.features_history)
+        self.last_signals = self.check_trade_signal(features)
 
 
 __all__ = ["DOMRingBuffer", "DOMProcessor"]

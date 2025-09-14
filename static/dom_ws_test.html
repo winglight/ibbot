@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DOM WebSocket Test</title>
+</head>
+<body>
+  <script>
+    const ws = new WebSocket(`ws://${location.host}/ws/dom/TEST`);
+    ws.onmessage = (ev) => {
+      console.log('DOM data', ev.data);
+    };
+    ws.onopen = () => console.log('ws open');
+    ws.onclose = () => console.log('ws closed');
+  </script>
+  <p>Open console to view incoming DOM data.</p>
+</body>
+</html>
