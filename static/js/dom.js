@@ -9,6 +9,18 @@ class DOMManager {
         this.signalTooltip = null;
         this.signalHistory = [];
         this.barWidth = 8;
+        this.metricsChart = null;
+        this.priceChart = null;
+        this.metricsChartEl = null;
+        this.priceChartEl = null;
+        this.timeLabels = [];
+        this.obiData = [];
+        this.ofiData = [];
+        this.zObiData = [];
+        this.zOfiData = [];
+        this.obiColors = [];
+        this.ofiColors = [];
+        this.priceBars = [];
         this.eventColors = {
             buy_absorb: 'rgba(0,200,0,0.8)',
             sell_absorb: 'rgba(200,0,0,0.8)',
@@ -47,6 +59,11 @@ class DOMManager {
             this.signalTooltip = document.getElementById('domSignalTooltip');
             this.signalCanvas.addEventListener('mousemove', (e) => this.onSignalHover(e));
             this.signalCanvas.addEventListener('mouseleave', () => this.hideTooltip());
+        }
+        this.metricsChartEl = document.getElementById('domMetricsChart');
+        this.priceChartEl = document.getElementById('domPriceChart');
+        if (this.metricsChartEl && this.priceChartEl) {
+            this.initCharts();
         }
         await this.loadConfig();
     }
@@ -94,6 +111,7 @@ class DOMManager {
             this.app.showAlert('warning', 'Please enter symbol in settings');
             return;
         }
+        this.resetCharts();
         try {
             await this.app.apiCall('/dom/start', {
                 method: 'POST',
@@ -133,10 +151,10 @@ class DOMManager {
             try {
                 const data = JSON.parse(evt.data);
                 if (data.metrics) {
-                    const m = data.metrics;
-                    document.getElementById('domObi').textContent = (m.obi ?? 0).toFixed(2);
-                    document.getElementById('domOfi').textContent = (m.ofi ?? 0).toFixed(2);
-                    document.getElementById('domCvd').textContent = (m.cvd ?? 0).toFixed(2);
+                    this.addMetricPoint(data.metrics);
+                }
+                if (Array.isArray(data.events)) {
+                    data.events.forEach((ev) => this.addEvent(ev));
                 }
                 if (Array.isArray(data.events)) {
                     data.events.forEach((ev) => this.addEvent(ev));
@@ -195,6 +213,105 @@ class DOMManager {
 
     hideTooltip() {
         if (this.signalTooltip) this.signalTooltip.style.display = 'none';
+    }
+
+    initCharts() {
+        const ctx = this.metricsChartEl.getContext('2d');
+        this.metricsChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    { label: 'OBI', data: [], borderColor: 'blue', pointBackgroundColor: [], fill: false },
+                    { label: 'OFI', data: [], borderColor: 'orange', pointBackgroundColor: [], fill: false },
+                    { label: 'Z-OBI', data: [], borderColor: 'green', borderDash: [5,5], pointRadius: 0, fill: false },
+                    { label: 'Z-OFI', data: [], borderColor: 'red', borderDash: [5,5], pointRadius: 0, fill: false }
+                ]
+            },
+            options: {
+                animation: false,
+                scales: {
+                    x: { type: 'time', time: { unit: 'second' } },
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+        const pctx = this.priceChartEl.getContext('2d');
+        this.priceChart = new Chart(pctx, {
+            data: {
+                datasets: [
+                    { type: 'candlestick', label: 'Price', data: [], yAxisID: 'y', upColor: '#4caf50', downColor: '#f44336', borderColor: '#888' },
+                    { type: 'bar', label: 'Volume', data: [], yAxisID: 'y1', backgroundColor: 'rgba(100,100,200,0.3)' }
+                ]
+            },
+            options: {
+                animation: false,
+                parsing: false,
+                scales: {
+                    x: { type: 'time', time: { unit: 'second' } },
+                    y: { position: 'left', title: { display: true, text: 'Price' } },
+                    y1: { position: 'right', grid: { display: false }, ticks: { display: false }, title: { display: true, text: 'Vol' } }
+                }
+            }
+        });
+    }
+
+    resetCharts() {
+        this.timeLabels = [];
+        this.obiData = [];
+        this.ofiData = [];
+        this.zObiData = [];
+        this.zOfiData = [];
+        this.obiColors = [];
+        this.ofiColors = [];
+        this.priceBars = [];
+        if (this.metricsChart) {
+            this.metricsChart.data.labels = [];
+            this.metricsChart.data.datasets.forEach(ds => { ds.data = []; ds.pointBackgroundColor = []; });
+            this.metricsChart.update();
+        }
+        if (this.priceChart) {
+            this.priceChart.data.datasets[0].data = [];
+            this.priceChart.data.datasets[1].data = [];
+            this.priceChart.update();
+        }
+    }
+
+    addMetricPoint(m) {
+        const now = Date.now();
+        this.timeLabels.push(now);
+        this.obiData.push(m.obi5 ?? 0);
+        this.ofiData.push(m.ofi ?? 0);
+        this.zObiData.push(m.zscore_obi5 ?? 0);
+        this.zOfiData.push(m.zscore_ofi ?? 0);
+        const color = m.long ? 'green' : m.short ? 'red' : 'white';
+        this.obiColors.push(color);
+        this.ofiColors.push(color);
+        if (this.metricsChart) {
+            this.metricsChart.data.labels = this.timeLabels;
+            this.metricsChart.data.datasets[0].data = this.obiData;
+            this.metricsChart.data.datasets[0].pointBackgroundColor = this.obiColors;
+            this.metricsChart.data.datasets[1].data = this.ofiData;
+            this.metricsChart.data.datasets[1].pointBackgroundColor = this.ofiColors;
+            this.metricsChart.data.datasets[2].data = this.zObiData;
+            this.metricsChart.data.datasets[3].data = this.zOfiData;
+            this.metricsChart.update('none');
+        }
+        const price = m.mid_price ?? 0;
+        const vol = Math.abs(m.ofi ?? 0);
+        let bar;
+        if (this.priceBars.length) {
+            const prev = this.priceBars[this.priceBars.length - 1];
+            bar = { x: now, o: prev.c, h: Math.max(prev.c, price), l: Math.min(prev.c, price), c: price, v: vol };
+        } else {
+            bar = { x: now, o: price, h: price, l: price, c: price, v: vol };
+        }
+        this.priceBars.push(bar);
+        if (this.priceChart) {
+            this.priceChart.data.datasets[0].data = this.priceBars;
+            this.priceChart.data.datasets[1].data = this.priceBars.map(b => ({ x: b.x, y: b.v }));
+            this.priceChart.update('none');
+        }
     }
 }
 

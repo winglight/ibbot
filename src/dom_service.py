@@ -1,4 +1,5 @@
 import time
+import asyncio
 from typing import Dict, List
 
 import core
@@ -12,12 +13,27 @@ class DOMService:
         self.processor: DOMProcessor = core.dom_processor
         self._alerts: List[Dict[str, any]] = []
         self._next_alert_id: int = 1
+        self._last_signal = {"long": False, "short": False}
 
     # --------------------------------------------------------------
     def _on_depth_update(self, data: Dict) -> None:
         """Internal callback from DepthSubscriber."""
         self.processor.on_depth_update(data)
         ts = time.time()
+        signals = self.processor.last_signals
+        if signals.get("long") and not self._last_signal.get("long"):
+            asyncio.create_task(
+                core.notification_manager.send_notification(
+                    "DOM signal: LONG", event_type="dom_long"
+                )
+            )
+        if signals.get("short") and not self._last_signal.get("short"):
+            asyncio.create_task(
+                core.notification_manager.send_notification(
+                    "DOM signal: SHORT", event_type="dom_short"
+                )
+            )
+        self._last_signal = signals
         for evt in self.processor.last_events:
             self._alerts.append({"id": self._next_alert_id, "event": evt, "timestamp": ts})
             self._next_alert_id += 1
@@ -34,7 +50,7 @@ class DOMService:
 
     # --------------------------------------------------------------
     def get_metrics(self) -> Dict[str, float]:
-        return self.processor.last_metrics
+        return {**self.processor.last_metrics, **self.processor.last_signals}
 
     # --------------------------------------------------------------
     def list_alerts(self) -> List[Dict[str, any]]:

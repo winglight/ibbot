@@ -98,6 +98,7 @@ class DOMProcessor:
     def __init__(self, window: int = 10000, max_levels: int = 30):
         self.buffer = DOMRingBuffer(window=window, max_levels=max_levels)
         self.last_metrics: Dict[str, float] = {}
+        self.last_signals: Dict[str, bool] = {"long": False, "short": False}
         self.last_events: List[str] = []
         self.features_history: List[Dict[str, float]] = []
         self._obi_history: List[float] = []
@@ -126,7 +127,16 @@ class DOMProcessor:
         std_ofi = float(np.std(self._ofi_history)) if len(self._ofi_history) > 1 else 0.0
         z_ofi = (ofi - mean_ofi) / std_ofi if std_ofi else 0.0
 
-        return {"obi5": obi, "ofi": ofi, "cvd": self.cvd, "zscore_obi5": z_obi, "zscore_ofi": z_ofi}
+        price_tick = int(self.buffer.mid_tick[(self.buffer._idx - 1) % self.buffer.window])
+        price = price_tick / 100.0
+        return {
+            "obi5": obi,
+            "ofi": ofi,
+            "cvd": self.cvd,
+            "zscore_obi5": z_obi,
+            "zscore_ofi": z_ofi,
+            "mid_price": price,
+        }
 
     # ------------------------------------------------------------------
     def detect_events(self, history: List[Dict[str, float]]) -> List[str]:
@@ -181,6 +191,7 @@ class DOMProcessor:
         self.features_history.append(features)
         self.last_metrics = features
         self.last_events = self.detect_events(self.features_history)
+        self.last_signals = self.check_trade_signal(features)
 
 
 __all__ = ["DOMRingBuffer", "DOMProcessor"]
