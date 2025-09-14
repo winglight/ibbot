@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import JSONResponse
 from loguru import logger
 
 import core
@@ -48,20 +49,27 @@ async def backfill_commissions(
 @router.get("/api/account_info")
 async def get_account_info(user: Optional[str] = Depends(get_current_user)):
     """Retrieve IBKR account information."""
-    # 当未连接时，返回200并提供结构化状态，避免频繁400噪声
+    # 未连接时返回 400，并附带结构化错误信息
     if not connection_manager or not connection_manager.is_connected():
         last_err = None
         try:
-            last_err = connection_manager.get_last_connect_error() if connection_manager else None
+            last_err = (
+                connection_manager.get_last_connect_error()
+                if connection_manager
+                else None
+            )
         except Exception:
             last_err = None
-        logger.warning("Not connected to IBKR, returning connection status for account_info")
-        return {
-            "success": False,
-            "connected": False,
-            "error": "Not connected to IBKR",
-            "last_error": last_err,
-        }
+        logger.warning("Not connected to IBKR, returning 400 for account_info")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "connected": False,
+                "error": "Not connected to IBKR",
+                "last_error": last_err,
+            },
+        )
 
     try:
         try:
