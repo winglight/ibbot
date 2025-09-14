@@ -102,8 +102,31 @@
 
         <!-- Trading Panel -->
         <div class="row mb-4">
-
-
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-arrows-alt"></i> DOM Monitor</h5>
+                        <div>
+                            <button class="btn btn-sm btn-secondary me-2" id="domSettingsBtn">
+                                <i class="fas fa-cog"></i>
+                            </button>
+                            <button class="btn btn-sm btn-success me-2" id="startDomBtn">
+                                <i class="fas fa-play"></i>
+                            </button>
+                            <button class="btn btn-sm btn-danger" id="stopDomBtn">
+                                <i class="fas fa-stop"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div id="domMetrics" class="mb-3">
+                            <span class="me-3">OBI: <span id="domObi">0.00</span></span>
+                            <span class="me-3">OFI: <span id="domOfi">0.00</span></span>
+                            <span class="me-3">CVD: <span id="domCvd">0.00</span></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Data Tables -->
@@ -569,6 +592,42 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- DOM Settings Modal -->
+    <div class="modal fade" id="domSettingsModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">DOM Settings</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="domSettingsForm">
+              <div class="mb-3">
+                <label class="form-label">Symbol</label>
+                <input type="text" class="form-control" id="domSymbol">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Window</label>
+                <input type="number" class="form-control" id="domWindow">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Max Levels</label>
+                <input type="number" class="form-control" id="domMaxLevels">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Depth Rows</label>
+                <input type="number" class="form-control" id="domNumRows" value="5">
+              </div>
+            </form>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            <button type="button" class="btn btn-primary" id="saveDomSettingsBtn">Save</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Strategy Settings Modal -->
@@ -2149,6 +2208,7 @@
 <script src="/static/js/pnlcalendar.js" defer></script>
 <script src="/static/js/notifications.js?v=2025-09-12-1" defer></script>
 <script src="/static/js/logs.js" defer></script>
+<script src="/static/js/dom.js" defer></script>
 <script src="/static/js/app.js?v=2025-09-12-1" defer></script>
 </body>
 </html>

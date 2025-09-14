@@ -56,7 +56,8 @@ class TradingApp {
             this.formatNumber.bind(this)
         );
         this.notificationsManager = new NotificationsManager(this);
-        
+        this.domManager = new DOMManager(this);
+
         this.init();
     }
 

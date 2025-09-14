@@ -27,13 +27,14 @@ async def get_connection_config():
 @router.post("/api/connect")
 async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(get_current_user)):
     try:
-        connection_manager.update_config(config)
         loop = asyncio.get_event_loop()
         try:
             await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: connection_manager.disconnect()),
                 timeout=15.0,
             )
+            # 更新连接配置在断开之后，确保新参数生效
+            connection_manager.update_config(config)
             success = await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: connection_manager.connect()),
                 timeout=30.0,
