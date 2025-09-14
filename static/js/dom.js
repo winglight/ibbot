@@ -29,7 +29,7 @@ class DOMManager {
 
     async loadConfig() {
         try {
-            const data = await this.app.apiCall('/api/config/dom');
+            const data = await this.app.apiCall('/config/dom');
             if (data) {
                 document.getElementById('domWindow').value = data.window;
                 document.getElementById('domMaxLevels').value = data.max_levels;
@@ -49,7 +49,7 @@ class DOMManager {
         const maxLevels = parseInt(maxLevelsEl.value, 10) || 0;
         this.numRows = parseInt(numRowsEl.value, 10) || 5;
         try {
-            await this.app.apiCall('/api/config/dom', {
+            await this.app.apiCall('/config/dom', {
                 method: 'PUT',
                 body: JSON.stringify({ window: window, max_levels: maxLevels })
             });
@@ -71,7 +71,7 @@ class DOMManager {
             return;
         }
         try {
-            await this.app.apiCall('/api/dom/start', {
+            await this.app.apiCall('/dom/start', {
                 method: 'POST',
                 body: JSON.stringify({ symbol: this.symbol, num_rows: this.numRows })
             });
@@ -90,7 +90,7 @@ class DOMManager {
         }
         if (!this.symbol) return;
         try {
-            await this.app.apiCall('/api/dom/stop', {
+            await this.app.apiCall('/dom/stop', {
                 method: 'POST',
                 body: JSON.stringify({ symbol: this.symbol })
             });
