@@ -106,6 +106,9 @@ class RiskManager:
         # 监控状态
         self.monitoring_active = False
         
+        # 记录已警告的订单状态倒退，避免重复警告
+        self.warned_order_downgrades = set()
+        
         # 数据目录
         self.data_dir = "data"
         os.makedirs(self.data_dir, exist_ok=True)
@@ -1033,6 +1036,11 @@ class RiskManager:
     def _auto_sync_market_orders(self):
         """自动同步所有活跃订单状态和成交价格（包括市价单和限价单）"""
         try:
+            # 定期清理警告记录，避免内存泄漏（每100次调用清理一次）
+            if len(self.warned_order_downgrades) > 100:
+                self.warned_order_downgrades.clear()
+                risk_logger.debug("已清理订单状态倒退警告记录")
+            
             if not self.ibkr_client or not self.ibkr_client.is_connected():
                 return
             
@@ -1071,20 +1079,46 @@ class RiskManager:
                         if current_status == "Inactive":
                             current_status = "Rejected"
                         
+                        # 检查状态是否需要更新，避免重复更新和状态倒退
                         if current_status != order.status:
-                            # 更新订单状态
-                            fill_price = None
-                            if current_status == "Filled" and trade.orderStatus.avgFillPrice:
-                                fill_price = float(trade.orderStatus.avgFillPrice)
+                            # 定义状态转换的优先级（数字越大优先级越高）
+                            status_priority = {
+                                "PendingSubmit": 1,
+                                "PreSubmitted": 2,
+                                "Submitted": 3,
+                                "Filled": 4,
+                                "Cancelled": 4,
+                                "Rejected": 4
+                            }
                             
-                            order_manager.update_order_status(
-                                order.order_id,
-                                current_status,
-                                fill_price=fill_price,
-                                executed_at=datetime.now() if current_status == "Filled" else None
-                            )
-                            synced_count += 1
-                            risk_logger.debug(f"Order {order.order_id} status updated: {order.status} -> {current_status}")
+                            current_priority = status_priority.get(current_status, 0)
+                            order_priority = status_priority.get(order.status, 0)
+                            
+                            # 只允许状态向前推进，不允许倒退
+                            if current_priority >= order_priority:
+                                # 更新订单状态
+                                fill_price = None
+                                if current_status == "Filled" and trade.orderStatus.avgFillPrice:
+                                    fill_price = float(trade.orderStatus.avgFillPrice)
+                                
+                                order_manager.update_order_status(
+                                    order.order_id,
+                                    current_status,
+                                    fill_price=fill_price,
+                                    executed_at=datetime.now() if current_status == "Filled" else None
+                                )
+                                synced_count += 1
+                                risk_logger.debug(f"Order {order.order_id} status updated: {order.status} -> {current_status}")
+                            else:
+                                # 避免重复警告同一个订单的状态倒退
+                                warning_key = f"{order.order_id}_{order.status}_{current_status}"
+                                if warning_key not in self.warned_order_downgrades:
+                                    self.warned_order_downgrades.add(warning_key)
+                                    risk_logger.warning(f"拒绝订单状态倒退: Order {order.order_id} 当前状态={order.status} (优先级{order_priority}), IBKR状态={current_status} (优先级{current_priority})")
+                                    
+                                    # 可选：直接从订单管理器中删除这个有问题的订单
+                                    # order_manager.remove_order(order.order_id)
+                                    # risk_logger.info(f"已删除状态异常的订单: {order.order_id}")
                 
                 if synced_count > 0:
                     risk_logger.debug(f"Auto-synced {synced_count} active orders")

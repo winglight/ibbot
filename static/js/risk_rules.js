@@ -5,21 +5,9 @@
 class RiskRulesManager {
     constructor(app) {
         this.app = app;
-        // 添加临时调试按钮
-        this.addDebugButton();
     }
     
-    addDebugButton() {
-        // 创建调试按钮
-        const debugBtn = document.createElement('button');
-        debugBtn.textContent = '调试订单372';
-        debugBtn.style.cssText = 'position:fixed;top:10px;right:10px;z-index:9999;background:red;color:white;padding:5px;';
-        debugBtn.onclick = () => {
-            console.log('开始调试订单372...');
-            this.app.showRiskRuleOrders('MNQ');
-        };
-        document.body.appendChild(debugBtn);
-    }
+
 
     async loadRiskRules() {
         try {

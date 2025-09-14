@@ -5816,18 +5816,3 @@ window.app = app;
 if (window.__attachNotifications) {
     window.__attachNotifications(app);
 }
-
-// 延迟3秒后自动执行Orders表格调试
-setTimeout(() => {
-    console.log('🔍 自动执行Orders表格调试...');
-    if (app && app.orderManager) {
-        if (typeof app.orderManager.attachOrdersTbodyGuard === 'function') {
-            app.orderManager.attachOrdersTbodyGuard();
-        }
-        if (typeof app.orderManager.debugOrdersTable === 'function') {
-            app.orderManager.debugOrdersTable();
-        } else {
-            console.error('debugOrdersTable方法不存在于 app.orderManager 上');
-        }
-    }
-}, 3000);
