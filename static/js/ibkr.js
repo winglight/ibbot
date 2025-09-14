@@ -437,6 +437,16 @@ class IBKRConnectionManager {
                     this.app.showAlert(level, data.message);
                 }
                 break;
+            case 'dom_long':
+                if (data.message) {
+                    this.app.showAlert('success', data.message);
+                }
+                break;
+            case 'dom_short':
+                if (data.message) {
+                    this.app.showAlert('danger', data.message);
+                }
+                break;
             case 'order_filled':
                 // 订单成交通知，刷新订单列表
                 console.log('Order filled notification received:', data);
