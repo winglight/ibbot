@@ -18,7 +18,6 @@ class DOMRingBuffer:
         self._idx = 0
         self._filled = 0
 
-    # ------------------------------------------------------------------
     def append_snapshot(
         self,
         bids: List[Tuple[int, int]],
