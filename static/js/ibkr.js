@@ -205,7 +205,8 @@ class IBKRConnectionManager {
                 }, 300);
             }
         } catch (error) {
-            console.error('Failed to check connection status:', error);
+            console.warn('Connection status check failed:', error?.message || error);
+            this.updateConnectionStatus(false);
         }
     }
 
