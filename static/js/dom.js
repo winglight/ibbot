@@ -241,7 +241,6 @@ class DOMManager {
                 ]
             },
             options: {
-                parsing: false,
                 animation: false,
                 scales: {
                     x: { type: 'time', time: { unit: 'second' } },
