@@ -8,6 +8,7 @@ from src.queue_manager import queue_manager
 from src.order_manager import get_order_manager
 from src.websocket_manager import websocket_manager
 from dataclasses import dataclass
+
 from src.depth_subscriber import DepthSubscriber
 from src.notification_manager import NotificationManager
 from src.dom_processor import DOMProcessor
