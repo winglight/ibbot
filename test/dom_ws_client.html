@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>DOM WebSocket Test</title>
+</head>
+<body>
+    <h1>DOM WebSocket Test</h1>
+    <pre id="log"></pre>
+    <script>
+        const logElem = document.getElementById('log');
+        function log(msg) {
+            logElem.textContent += msg + '\n';
+        }
+        const ws = new WebSocket('ws://localhost:8000/ws/dom/TEST');
+        ws.onopen = () => log('connected');
+        ws.onmessage = (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                log(JSON.stringify(data, null, 2));
+            } catch(err) {
+                log('non-json message: ' + e.data);
+            }
+        };
+        ws.onerror = (e) => log('error: ' + e.message);
+        ws.onclose = () => log('closed');
+    </script>
+</body>
+</html>
