@@ -7,6 +7,7 @@ class DOMManager {
         this.signalCanvas = null;
         this.signalCtx = null;
         this.signalTooltip = null;
+        this.signalContainer = null;
         this.signalHistory = [];
         this.barWidth = 8;
         this.metricsChart = null;
@@ -64,6 +65,10 @@ class DOMManager {
         if (stopBtn) stopBtn.addEventListener('click', () => this.stop());
         if (saveBtn) saveBtn.addEventListener('click', () => this.saveSettings());
         this.signalCanvas = document.getElementById('domSignalCanvas');
+        this.signalContainer = document.getElementById('domSignalBarContainer');
+        if (this.signalContainer) {
+            this.signalContainer.style.display = 'none';
+        }
         if (this.signalCanvas) {
             this.signalCtx = this.signalCanvas.getContext('2d');
             this.signalTooltip = document.getElementById('domSignalTooltip');
@@ -128,12 +133,14 @@ class DOMManager {
             return;
         }
         this.resetCharts();
+        this.resetSignals();
         try {
             await this.app.apiCall('/dom/start', {
                 method: 'POST',
                 body: JSON.stringify({ symbol: this.symbol, num_rows: this.numRows })
             });
             this.connectWS();
+            if (this.signalContainer) this.signalContainer.style.display = 'block';
             this.app.showAlert('success', 'DOM stream started');
         } catch (e) {
             console.error('Failed to start DOM', e);
@@ -146,6 +153,8 @@ class DOMManager {
             this.ws.close();
             this.ws = null;
         }
+        this.resetSignals();
+        this.hideTooltip();
         if (!this.symbol) return;
         try {
             await this.app.apiCall('/dom/stop', {
@@ -153,6 +162,7 @@ class DOMManager {
                 body: JSON.stringify({ symbol: this.symbol })
             });
             this.app.showAlert('info', 'DOM stream stopped');
+            if (this.signalContainer) this.signalContainer.style.display = 'none';
         } catch (e) {
             console.error('Failed to stop DOM', e);
             this.app.showAlert('danger', 'Failed to stop DOM');
@@ -226,6 +236,13 @@ class DOMManager {
 
     hideTooltip() {
         if (this.signalTooltip) this.signalTooltip.style.display = 'none';
+    }
+
+    resetSignals() {
+        this.signalHistory = [];
+        if (this.signalCtx && this.signalCanvas) {
+            this.signalCtx.clearRect(0, 0, this.signalCanvas.width, this.signalCanvas.height);
+        }
     }
 
     initCharts() {
