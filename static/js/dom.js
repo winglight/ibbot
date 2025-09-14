@@ -13,13 +13,6 @@ class DOMManager {
         this.priceChart = null;
         this.metricsChartEl = null;
         this.priceChartEl = null;
-        this.timeLabels = [];
-        this.obiData = [];
-        this.ofiData = [];
-        this.zObiData = [];
-        this.zOfiData = [];
-        this.obiColors = [];
-        this.ofiColors = [];
         this.priceBars = [];
         this.eventColors = {
             buy_absorb: 'rgba(0,200,0,0.8)',
@@ -34,6 +27,23 @@ class DOMManager {
             sweep_down: 'Sweep Down'
         };
         this.init();
+    }
+
+    getSavedSymbol() {
+        try {
+            return localStorage.getItem('domSymbol') || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    setSymbol(sym) {
+        this.symbol = sym;
+        try {
+            if (sym) localStorage.setItem('domSymbol', sym);
+        } catch (e) {
+            // ignore storage issues
+        }
     }
 
     async init() {
@@ -65,6 +75,12 @@ class DOMManager {
         if (this.metricsChartEl && this.priceChartEl) {
             this.initCharts();
         }
+        const saved = this.getSavedSymbol();
+        if (saved) {
+            this.symbol = saved;
+            const symbolEl = document.getElementById('domSymbol');
+            if (symbolEl) symbolEl.value = saved;
+        }
         await this.loadConfig();
     }
 
@@ -85,7 +101,7 @@ class DOMManager {
         const windowEl = document.getElementById('domWindow');
         const maxLevelsEl = document.getElementById('domMaxLevels');
         const numRowsEl = document.getElementById('domNumRows');
-        this.symbol = symbolEl.value.trim();
+        this.setSymbol(symbolEl.value.trim());
         const window = parseInt(windowEl.value, 10) || 0;
         const maxLevels = parseInt(maxLevelsEl.value, 10) || 0;
         this.numRows = parseInt(numRowsEl.value, 10) || 5;
@@ -105,7 +121,7 @@ class DOMManager {
 
     async start() {
         if (!this.symbol) {
-            this.symbol = document.getElementById('domSymbol').value.trim();
+            this.setSymbol(document.getElementById('domSymbol').value.trim());
         }
         if (!this.symbol) {
             this.app.showAlert('warning', 'Please enter symbol in settings');
@@ -152,9 +168,6 @@ class DOMManager {
                 const data = JSON.parse(evt.data);
                 if (data.metrics) {
                     this.addMetricPoint(data.metrics);
-                }
-                if (Array.isArray(data.events)) {
-                    data.events.forEach((ev) => this.addEvent(ev));
                 }
                 if (Array.isArray(data.events)) {
                     data.events.forEach((ev) => this.addEvent(ev));
@@ -220,7 +233,6 @@ class DOMManager {
         this.metricsChart = new Chart(ctx, {
             type: 'line',
             data: {
-                labels: [],
                 datasets: [
                     { label: 'OBI', data: [], borderColor: 'blue', pointBackgroundColor: [], fill: false },
                     { label: 'OFI', data: [], borderColor: 'orange', pointBackgroundColor: [], fill: false },
@@ -257,16 +269,8 @@ class DOMManager {
     }
 
     resetCharts() {
-        this.timeLabels = [];
-        this.obiData = [];
-        this.ofiData = [];
-        this.zObiData = [];
-        this.zOfiData = [];
-        this.obiColors = [];
-        this.ofiColors = [];
         this.priceBars = [];
         if (this.metricsChart) {
-            this.metricsChart.data.labels = [];
             this.metricsChart.data.datasets.forEach(ds => { ds.data = []; ds.pointBackgroundColor = []; });
             this.metricsChart.update();
         }
@@ -279,22 +283,15 @@ class DOMManager {
 
     addMetricPoint(m) {
         const now = Date.now();
-        this.timeLabels.push(now);
-        this.obiData.push(m.obi5 ?? 0);
-        this.ofiData.push(m.ofi ?? 0);
-        this.zObiData.push(m.zscore_obi5 ?? 0);
-        this.zOfiData.push(m.zscore_ofi ?? 0);
         const color = m.long ? 'green' : m.short ? 'red' : 'white';
-        this.obiColors.push(color);
-        this.ofiColors.push(color);
         if (this.metricsChart) {
-            this.metricsChart.data.labels = this.timeLabels;
-            this.metricsChart.data.datasets[0].data = this.obiData;
-            this.metricsChart.data.datasets[0].pointBackgroundColor = this.obiColors;
-            this.metricsChart.data.datasets[1].data = this.ofiData;
-            this.metricsChart.data.datasets[1].pointBackgroundColor = this.ofiColors;
-            this.metricsChart.data.datasets[2].data = this.zObiData;
-            this.metricsChart.data.datasets[3].data = this.zOfiData;
+            const ds = this.metricsChart.data.datasets;
+            ds[0].data.push({ x: now, y: m.obi5 ?? 0 });
+            ds[0].pointBackgroundColor.push(color);
+            ds[1].data.push({ x: now, y: m.ofi ?? 0 });
+            ds[1].pointBackgroundColor.push(color);
+            ds[2].data.push({ x: now, y: m.zscore_obi5 ?? 0 });
+            ds[3].data.push({ x: now, y: m.zscore_ofi ?? 0 });
             this.metricsChart.update('none');
         }
         const price = m.mid_price ?? 0;
