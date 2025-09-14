@@ -156,6 +156,9 @@ class DOMManager {
                 if (Array.isArray(data.events)) {
                     data.events.forEach((ev) => this.addEvent(ev));
                 }
+                if (Array.isArray(data.events)) {
+                    data.events.forEach((ev) => this.addEvent(ev));
+                }
             } catch (e) {
                 console.error('Invalid DOM WS message', e);
             }
