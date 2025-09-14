@@ -18,8 +18,7 @@ class DOMRingBuffer:
         self._idx = 0
         self._filled = 0
 
-    # ------------------------------------------------------------------
-    def append(
+    def append_snapshot(
         self,
         bids: List[Tuple[int, int]],
         asks: List[Tuple[int, int]],
@@ -49,6 +48,9 @@ class DOMRingBuffer:
 
         self._idx = (i + 1) % self.window
         self._filled = min(self._filled + 1, self.window)
+
+    # Backward compatible alias
+    append = append_snapshot
 
     # ------------------------------------------------------------------
     def _resolve_idx(self, idx: Optional[int]) -> int:
@@ -89,6 +91,61 @@ class DOMProcessor:
     def __init__(self, window: int = 10000, max_levels: int = 30):
         self.buffer = DOMRingBuffer(window=window, max_levels=max_levels)
         self.last_metrics: Dict[str, float] = {}
+        self.last_events: List[str] = []
+        self.features_history: List[Dict[str, float]] = []
+        self._obi_history: List[float] = []
+        self.cvd: float = 0.0
+
+    # ------------------------------------------------------------------
+    def compute_features(self, snapshot_window: int = 20) -> Dict[str, float]:
+        """Compute core features from the latest snapshot window."""
+        obi = self.buffer.calc_obi(k=5)
+        ofi = self.buffer.calc_ofi(k=1)
+        self.cvd += ofi
+
+        self._obi_history.append(obi)
+        if len(self._obi_history) > snapshot_window:
+            self._obi_history.pop(0)
+        mean = float(np.mean(self._obi_history)) if self._obi_history else 0.0
+        std = float(np.std(self._obi_history)) if len(self._obi_history) > 1 else 0.0
+        zscore = (obi - mean) / std if std else 0.0
+
+        return {"obi5": obi, "ofi": ofi, "cvd": self.cvd, "zscore_obi5": zscore}
+
+    # ------------------------------------------------------------------
+    def detect_events(self, history: List[Dict[str, float]]) -> List[str]:
+        """Detect absorb/sweep events from feature history."""
+        if not history:
+            return []
+        cur = history[-1]
+        prev = history[-2] if len(history) > 1 else {}
+        events: List[str] = []
+
+        if cur.get("ofi", 0) > 0 and cur.get("obi5", 0) < 0:
+            events.append("buy_absorb")
+        if cur.get("ofi", 0) < 0 and cur.get("obi5", 0) > 0:
+            events.append("sell_absorb")
+
+        prev_ofi = prev.get("ofi")
+        if prev_ofi is not None:
+            if cur.get("ofi", 0) > 0 and prev_ofi > 0 and cur["ofi"] > 2 * prev_ofi:
+                events.append("sweep_up")
+            if cur.get("ofi", 0) < 0 and prev_ofi < 0 and cur["ofi"] < 2 * prev_ofi:
+                events.append("sweep_down")
+        return events
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def check_trade_signal(
+        features: Dict[str, float], price_structures: Optional[Dict[str, float]] = None
+    ) -> Dict[str, bool]:
+        """Return simple long/short trade signals."""
+        signals = {"long": False, "short": False}
+        if features.get("obi5", 0) > 0.5 and features.get("ofi", 0) > 0:
+            signals["long"] = True
+        if features.get("obi5", 0) < -0.5 and features.get("ofi", 0) < 0:
+            signals["short"] = True
+        return signals
 
     # ------------------------------------------------------------------
     def on_depth_update(self, data: Dict) -> None:
@@ -103,11 +160,11 @@ class DOMProcessor:
         else:
             mid_tick = 0
         ts_ns = data.get("ts_ns", time.time_ns())
-        self.buffer.append(bids, asks, mid_tick, ts_ns)
-        self.last_metrics = {
-            "obi5": self.buffer.calc_obi(k=5),
-            "ofi": self.buffer.calc_ofi(k=1),
-        }
+        self.buffer.append_snapshot(bids, asks, mid_tick, ts_ns)
+        features = self.compute_features()
+        self.features_history.append(features)
+        self.last_metrics = features
+        self.last_events = self.detect_events(self.features_history)
 
 
 __all__ = ["DOMRingBuffer", "DOMProcessor"]

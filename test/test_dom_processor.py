@@ -9,7 +9,7 @@ def test_ring_buffer_wrap():
     for i in range(4):
         bids = [(100 - i, 10 + i)]
         asks = [(101 + i, 20 + i)]
-        buf.append(bids, asks, mid_tick=1000 + i, ts_ns=i)
+        buf.append_snapshot(bids, asks, mid_tick=1000 + i, ts_ns=i)
     assert buf._filled == 3
     # latest snapshot corresponds to i=3
     idx = (buf._idx - 1) % buf.window
@@ -40,3 +40,23 @@ def test_calc_obi_and_ofi():
     # OFI uses top level size diffs
     expected_ofi = (12 - 10) - (6 - 7)
     assert p.last_metrics["ofi"] == expected_ofi
+
+
+def test_compute_features_and_cvd():
+    p = DOMProcessor(window=5, max_levels=1)
+    p.on_depth_update({"bids": [(100, 10)], "asks": [(101, 20)]})
+    # first snapshot -> cvd=0
+    assert p.last_metrics["cvd"] == 0.0
+
+    p.on_depth_update({"bids": [(100, 11)], "asks": [(101, 15)]})
+    m = p.last_metrics
+    assert m["cvd"] == 6.0
+    assert pytest.approx(m["zscore_obi5"], rel=1e-5) == 1.0
+
+
+def test_detect_events_absorb():
+    p = DOMProcessor(window=5, max_levels=1)
+    p.on_depth_update({"bids": [(100, 10)], "asks": [(101, 20)]})
+    p.on_depth_update({"bids": [(100, 11)], "asks": [(101, 15)]})
+    events = p.detect_events(p.features_history)
+    assert "buy_absorb" in events
