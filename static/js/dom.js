@@ -21,11 +21,12 @@ class DOMManager {
             sweep_up: 'rgba(0,150,0,0.8)',
             sweep_down: 'rgba(150,0,0,0.8)'
         };
+        // Mapping for human-readable descriptions in tooltip
         this.eventLabels = {
-            buy_absorb: 'Buy Absorb',
-            sell_absorb: 'Sell Absorb',
-            sweep_up: 'Sweep Up',
-            sweep_down: 'Sweep Down'
+            buy_absorb: '买方吸收',
+            sell_absorb: '卖方吸收',
+            sweep_up: '向上扫单',
+            sweep_down: '向下扫单'
         };
         this.init();
     }
