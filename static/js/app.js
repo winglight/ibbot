@@ -2490,7 +2490,6 @@ class TradingApp {
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
-                        ...(chartType === 'candlestick' ? { parsing: false } : {}),
                         interaction: {
                             intersect: chartType === 'candlestick' ? true : false,
                             mode: chartType === 'candlestick' ? 'nearest' : 'index'
@@ -2885,7 +2884,6 @@ class TradingApp {
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
-                        ...(chartType === 'candlestick' ? { parsing: false } : {}),
                         interaction: {
                             intersect: false,
                             mode: 'index'
