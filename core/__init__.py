@@ -9,6 +9,7 @@ from src.order_manager import get_order_manager
 from src.websocket_manager import websocket_manager
 from src.depth_subscriber import DepthSubscriber
 from src.notification_manager import NotificationManager
+from src.dom_processor import DOMProcessor
 
 # Initialize shared instances
 telegram_notifier = TelegramNotifier()
@@ -17,6 +18,8 @@ notification_manager = NotificationManager(
     websocket_manager=websocket_manager,
     db_manager=get_db_manager(),
 )
+
+dom_processor = DOMProcessor()
 
 depth_subscriber = DepthSubscriber(connection_manager)
 try:
