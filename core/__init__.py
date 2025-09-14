@@ -7,6 +7,7 @@ from src.database import get_db_manager
 from src.queue_manager import queue_manager
 from src.order_manager import get_order_manager
 from src.websocket_manager import websocket_manager
+from src.depth_subscriber import DepthSubscriber
 from src.notification_manager import NotificationManager
 
 # Initialize shared instances
@@ -16,6 +17,12 @@ notification_manager = NotificationManager(
     websocket_manager=websocket_manager,
     db_manager=get_db_manager(),
 )
+
+depth_subscriber = DepthSubscriber(connection_manager)
+try:
+    depth_subscriber.set_ibkr_client(None)
+except Exception:
+    pass
 
 risk_manager = RiskManager(ibkr_client=None, notification_manager=notification_manager)
 strategy_manager = StrategyManager()
