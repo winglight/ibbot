@@ -86,31 +86,51 @@
     </nav>
 
     <div class="container-fluid mt-4">
-        <ul class="nav nav-tabs mb-3" id="mainTabs" role="tablist">
-            <li class="nav-item" role="presentation">
-                <button class="nav-link active" id="dashboard-tab" data-bs-toggle="tab" data-bs-target="#dashboardTab" type="button" role="tab">Dashboard</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="dom-tab" data-bs-toggle="tab" data-bs-target="#domTab" type="button" role="tab">DOM</button>
-            </li>
-        </ul>
-        <div class="tab-content" id="mainTabsContent">
-            <div class="tab-pane fade show active" id="dashboardTab" role="tabpanel" aria-labelledby="dashboard-tab">
-                <!-- Account Information Panel -->
-                <div class="row mb-4">
-                    <div class="col-md-12">
-                        <div class="card">
-                            <div class="card-header">
-                                <h5><i class="fas fa-user"></i> Account Information</h5>
-                            </div>
-                            <div class="card-body" id="accountInfo">
-                                <p class="text-muted">Connect to view account information</p>
-                            </div>
+        <!-- Account Information Panel -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-user"></i> Account Information</h5>
+                    </div>
+                    <div class="card-body" id="accountInfo">
+                        <p class="text-muted">Connect to view account information</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Trading Panel -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-arrows-alt"></i> DOM Monitor</h5>
+                        <div>
+                            <button class="btn btn-sm btn-secondary me-2" id="domSettingsBtn">
+                                <i class="fas fa-cog"></i>
+                            </button>
+                            <button class="btn btn-sm btn-success me-2" id="startDomBtn">
+                                <i class="fas fa-play"></i>
+                            </button>
+                            <button class="btn btn-sm btn-danger" id="stopDomBtn">
+                                <i class="fas fa-stop"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <canvas id="domMetricsChart" height="150"></canvas>
+                        </div>
+                        <div>
+                            <canvas id="domPriceChart" height="150"></canvas>
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
 
-                <!-- Data Tables -->
+        <!-- Data Tables -->
         <div class="row">
             <div class="col-md-6">
                 <div class="card">
@@ -498,38 +518,9 @@
                     </div>
                 </div>
             </div>
-            </div> <!-- end of dashboardTab -->
-            <div class="tab-pane fade" id="domTab" role="tabpanel" aria-labelledby="dom-tab">
-                <div class="row mb-4">
-                    <div class="col-md-12">
-                        <div class="card">
-                            <div class="card-header d-flex justify-content-between align-items-center">
-                                <h5><i class="fas fa-arrows-alt"></i> DOM Monitor</h5>
-                                <div>
-                                    <button class="btn btn-sm btn-secondary me-2" id="domSettingsBtn">
-                                        <i class="fas fa-cog"></i>
-                                    </button>
-                                    <button class="btn btn-sm btn-success me-2" id="startDomBtn">
-                                        <i class="fas fa-play"></i>
-                                    </button>
-                                    <button class="btn btn-sm btn-danger" id="stopDomBtn">
-                                        <i class="fas fa-stop"></i>
-                                    </button>
-                                </div>
-                            </div>
-                            <div class="card-body">
-                                <div class="mb-3">
-                                    <canvas id="domMetricsChart" height="150"></canvas>
-                                </div>
-                                <div>
-                                    <canvas id="domPriceChart" height="150"></canvas>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
         </div>
+
+
     </div>
 
     <!-- Alert Container -->
