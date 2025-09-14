@@ -27,7 +27,7 @@ def test_calc_obi_and_ofi():
     })
     # OFI should be zero for first snapshot
     assert p.last_metrics["ofi"] == 0.0
-    obi_expected = (18 - 13) / 31
+    obi_expected = 18 / (18 + 13)
     assert pytest.approx(p.last_metrics["obi5"], rel=1e-5) == obi_expected
 
     # second snapshot with changed sizes
@@ -35,10 +35,18 @@ def test_calc_obi_and_ofi():
         "bids": [(100, 12), (99, 8)],
         "asks": [(101, 6), (102, 6)],
     })
-    obi_expected = (20 - 12) / 32
+    obi_expected = 20 / (20 + 12)
     assert pytest.approx(p.last_metrics["obi5"], rel=1e-5) == obi_expected
-    # OFI uses top level size diffs
+    # OFI uses top level size diffs with mid unchanged
     expected_ofi = (12 - 10) - (6 - 7)
+    assert p.last_metrics["ofi"] == expected_ofi
+
+    # third snapshot where mid price increases -> only bid diff counts
+    p.on_depth_update({
+        "bids": [(101, 13), (100, 8)],
+        "asks": [(102, 4), (103, 6)],
+    })
+    expected_ofi = 13 - 12  # ask diff ignored as mid moved up
     assert p.last_metrics["ofi"] == expected_ofi
 
 
@@ -57,6 +65,6 @@ def test_compute_features_and_cvd():
 def test_detect_events_absorb():
     p = DOMProcessor(window=5, max_levels=1)
     p.on_depth_update({"bids": [(100, 10)], "asks": [(101, 20)]})
-    p.on_depth_update({"bids": [(100, 11)], "asks": [(101, 15)]})
+    p.on_depth_update({"bids": [(100, 11)], "asks": [(101, 18)]})
     events = p.detect_events(p.features_history)
     assert "buy_absorb" in events

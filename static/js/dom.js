@@ -4,6 +4,23 @@ class DOMManager {
         this.ws = null;
         this.symbol = '';
         this.numRows = 5;
+        this.signalCanvas = null;
+        this.signalCtx = null;
+        this.signalTooltip = null;
+        this.signalHistory = [];
+        this.barWidth = 8;
+        this.eventColors = {
+            buy_absorb: 'rgba(0,200,0,0.8)',
+            sell_absorb: 'rgba(200,0,0,0.8)',
+            sweep_up: 'rgba(0,150,0,0.8)',
+            sweep_down: 'rgba(150,0,0,0.8)'
+        };
+        this.eventLabels = {
+            buy_absorb: 'Buy Absorb',
+            sell_absorb: 'Sell Absorb',
+            sweep_up: 'Sweep Up',
+            sweep_down: 'Sweep Down'
+        };
         this.init();
     }
 
@@ -24,6 +41,13 @@ class DOMManager {
         if (startBtn) startBtn.addEventListener('click', () => this.start());
         if (stopBtn) stopBtn.addEventListener('click', () => this.stop());
         if (saveBtn) saveBtn.addEventListener('click', () => this.saveSettings());
+        this.signalCanvas = document.getElementById('domSignalCanvas');
+        if (this.signalCanvas) {
+            this.signalCtx = this.signalCanvas.getContext('2d');
+            this.signalTooltip = document.getElementById('domSignalTooltip');
+            this.signalCanvas.addEventListener('mousemove', (e) => this.onSignalHover(e));
+            this.signalCanvas.addEventListener('mouseleave', () => this.hideTooltip());
+        }
         await this.loadConfig();
     }
 
@@ -114,10 +138,63 @@ class DOMManager {
                     document.getElementById('domOfi').textContent = (m.ofi ?? 0).toFixed(2);
                     document.getElementById('domCvd').textContent = (m.cvd ?? 0).toFixed(2);
                 }
+                if (Array.isArray(data.events)) {
+                    data.events.forEach((ev) => this.addEvent(ev));
+                }
             } catch (e) {
                 console.error('Invalid DOM WS message', e);
             }
         };
+    }
+
+    addEvent(ev) {
+        if (!this.signalCtx) return;
+        const label = this.eventLabels[ev] || ev;
+        const color = this.eventColors[ev] || 'gray';
+        this.signalHistory.push({ event: ev, label, color });
+        const maxBars = Math.floor(this.signalCanvas.offsetWidth / this.barWidth);
+        if (this.signalHistory.length > maxBars) {
+            this.signalHistory.shift();
+        }
+        this.renderSignals();
+    }
+
+    renderSignals() {
+        if (!this.signalCtx) return;
+        const canvas = this.signalCanvas;
+        canvas.width = canvas.offsetWidth;
+        const ctx = this.signalCtx;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const mid = canvas.height / 2;
+        this.signalHistory.forEach((item, idx) => {
+            const x = idx * this.barWidth;
+            ctx.fillStyle = item.color;
+            if (item.event === 'buy_absorb' || item.event === 'sweep_up') {
+                ctx.fillRect(x, 0, this.barWidth - 1, mid);
+            } else {
+                ctx.fillRect(x, mid, this.barWidth - 1, mid);
+            }
+        });
+    }
+
+    onSignalHover(e) {
+        if (!this.signalCanvas || !this.signalTooltip) return;
+        const rect = this.signalCanvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const idx = Math.floor(x / this.barWidth);
+        const item = this.signalHistory[idx];
+        if (!item) {
+            this.hideTooltip();
+            return;
+        }
+        this.signalTooltip.textContent = item.label;
+        this.signalTooltip.style.left = `${idx * this.barWidth}px`;
+        this.signalTooltip.style.top = item.event === 'buy_absorb' || item.event === 'sweep_up' ? '0px' : `${this.signalCanvas.height / 2}px`;
+        this.signalTooltip.style.display = 'block';
+    }
+
+    hideTooltip() {
+        if (this.signalTooltip) this.signalTooltip.style.display = 'none';
     }
 }
 

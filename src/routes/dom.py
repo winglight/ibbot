@@ -1,14 +1,16 @@
 from typing import Optional
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 import core
 from .auth import get_current_user
-from core import connection_manager, dom_processor, depth_subscriber, dom_config
+from src.dom_service import get_dom_service
+from core import dom_config
 
 router = APIRouter()
+dom_service = get_dom_service()
 
 
 class StartRequest(BaseModel):
@@ -18,11 +20,7 @@ class StartRequest(BaseModel):
 
 @router.post("/api/dom/start")
 async def dom_start(req: StartRequest, user: Optional[str] = Depends(get_current_user)):
-    if not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    ok = depth_subscriber.start_depth_stream(
-        req.symbol, dom_processor.on_depth_update, num_rows=req.num_rows
-    )
+    ok = dom_service.start(req.symbol, num_rows=req.num_rows)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to start depth stream")
     return {"success": True}
@@ -34,7 +32,7 @@ class StopRequest(BaseModel):
 
 @router.post("/api/dom/stop")
 async def dom_stop(req: StopRequest, user: Optional[str] = Depends(get_current_user)):
-    ok = depth_subscriber.stop_depth_stream(req.symbol)
+    ok = dom_service.stop(req.symbol)
     if not ok:
         raise HTTPException(status_code=400, detail="No active depth stream for symbol")
     return {"success": True}
@@ -52,11 +50,7 @@ async def get_dom_config(user: Optional[str] = Depends(get_current_user)):
 
 @router.put("/api/config/dom")
 async def update_dom_config(cfg: DOMConfigModel, user: Optional[str] = Depends(get_current_user)):
-    dom_config.window = cfg.window
-    dom_config.max_levels = cfg.max_levels
-    core.dom_processor = core.DOMProcessor(
-        window=dom_config.window, max_levels=dom_config.max_levels
-    )
+    dom_service.update_config(cfg.window, cfg.max_levels)
     return {
         "success": True,
         "config": {"window": dom_config.window, "max_levels": dom_config.max_levels},
@@ -65,7 +59,20 @@ async def update_dom_config(cfg: DOMConfigModel, user: Optional[str] = Depends(g
 
 @router.get("/api/dom/data")
 async def get_dom_data(user: Optional[str] = Depends(get_current_user)):
-    return {"success": True, "metrics": dom_processor.last_metrics}
+    return {"success": True, "metrics": dom_service.get_metrics()}
+
+
+@router.get("/api/alerts")
+async def get_alerts(user: Optional[str] = Depends(get_current_user)):
+    return {"success": True, "alerts": dom_service.list_alerts()}
+
+
+@router.post("/api/alerts/{alert_id}/ack")
+async def ack_alert(alert_id: int, user: Optional[str] = Depends(get_current_user)):
+    ok = dom_service.ack_alert(alert_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return {"success": True}
 
 
 @router.websocket("/ws/dom/{symbol}")
@@ -74,7 +81,11 @@ async def dom_ws(websocket: WebSocket, symbol: str):
     try:
         while True:
             await websocket.send_json(
-                {"symbol": symbol, "metrics": dom_processor.last_metrics}
+                {
+                    "symbol": symbol,
+                    "metrics": dom_service.get_metrics(),
+                    "events": dom_service.get_events(),
+                }
             )
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:
