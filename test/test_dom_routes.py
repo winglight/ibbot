@@ -1,92 +1,84 @@
-#!/usr/bin/env python3
-"""DOM API route tests.
-
-This suite checks that DOM-related backend routes behave
-according to design. It relies on a running instance of
-our FastAPI application on http://localhost:8000.
-"""
-
-import os
-from typing import Optional
+import asyncio
 
 import pytest
-import requests
-from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-load_dotenv()
-
-BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change_me")
-
-
-def login(username: str, password: str) -> Optional[str]:
-    try:
-        resp = requests.post(
-            f"{BASE_URL}/api/login",
-            json={"username": username, "password": password},
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            return None
-        return resp.json().get("access_token")
-    except Exception:
-        return None
-
-
-def api_get(path: str, token: Optional[str]):
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return requests.get(f"{BASE_URL}{path}", headers=headers, timeout=10)
-
-
-def api_post(path: str, token: Optional[str], json: dict):
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return requests.post(f"{BASE_URL}{path}", headers=headers, json=json, timeout=15)
-
-
-def api_put(path: str, token: Optional[str], json: dict):
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return requests.put(f"{BASE_URL}{path}", headers=headers, json=json, timeout=15)
+from src.routes.dom import router as dom_router
+from src.routes.auth import create_access_token
+import core
+from src.dom_service import get_dom_service
 
 
 @pytest.fixture
-def token():
-    t = login(ADMIN_USERNAME, ADMIN_PASSWORD)
-    assert t is not None, "unable to obtain token"
-    return t
+def client(monkeypatch):
+    app = FastAPI()
+    app.include_router(dom_router)
+    token, _ = create_access_token({"sub": "tester"})
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Patch connection and depth subscriber
+    monkeypatch.setattr(core.connection_manager, "is_connected", lambda: True)
+    callbacks = {}
+
+    def fake_start(symbol, cb, num_rows=5):
+        callbacks[symbol] = cb
+        return True
+
+    def fake_stop(symbol):
+        callbacks.pop(symbol, None)
+        return True
+
+    monkeypatch.setattr(core.depth_subscriber, "start_depth_stream", fake_start)
+    monkeypatch.setattr(core.depth_subscriber, "stop_depth_stream", fake_stop)
+
+    dom_service = get_dom_service()
+    dom_service.update_config(50, 10)
+    dom_service._alerts.clear()
+
+    return TestClient(app), headers, callbacks, dom_service
 
 
-def test_start_requires_connection(token):
-    resp = api_post("/api/dom/start", token, {"symbol": "AAPL"})
-    assert resp.status_code == 400
-    assert "Not connected" in resp.text
+def _feed(callback):
+    callback({"bids": [(100, 10)], "asks": [(101, 100)], "ts_ns": 1})
+    callback({"bids": [(101, 20)], "asks": [(102, 100)], "ts_ns": 2})
 
 
-def test_config_get_put(token):
-    resp = api_get("/api/config/dom", token)
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "window" in data and "max_levels" in data
+def test_dom_api_flow(client, monkeypatch):
+    test_client, headers, callbacks, dom_service = client
 
-    new_cfg = {"window": data["window"] + 1, "max_levels": data["max_levels"]}
-    resp2 = api_put("/api/config/dom", token, new_cfg)
-    assert resp2.status_code == 200
+    # start stream
+    r = test_client.post("/api/dom/start", json={"symbol": "TEST"}, headers=headers)
+    assert r.status_code == 200 and r.json()["success"]
+    cb = callbacks["TEST"]
 
-    resp3 = api_get("/api/config/dom", token)
-    assert resp3.status_code == 200
-    data3 = resp3.json()
-    assert data3["window"] == new_cfg["window"]
+    # feed two snapshots to trigger metrics and alert
+    _feed(cb)
 
+    # metrics endpoint
+    r = test_client.get("/api/dom/data", headers=headers)
+    metrics = r.json()["metrics"]
+    assert metrics["obi5"] == pytest.approx(20 / 120)
 
-def test_dom_data_endpoint(token):
-    resp = api_get("/api/dom/data", token)
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data.get("success") is True
-    assert "metrics" in data
+    # alerts list and ack
+    r = test_client.get("/api/alerts", headers=headers)
+    alerts = r.json()["alerts"]
+    assert len(alerts) == 1
+    alert_id = alerts[0]["id"]
+    r = test_client.post(f"/api/alerts/{alert_id}/ack", headers=headers)
+    assert r.json()["success"]
+    r = test_client.get("/api/alerts", headers=headers)
+    assert r.json()["alerts"] == []
+
+    # websocket
+    async def instant_sleep(_):
+        pass
+
+    monkeypatch.setattr("src.routes.dom.asyncio.sleep", instant_sleep)
+    with test_client.websocket_connect("/ws/dom/TEST") as ws:
+        data = ws.receive_json()
+        assert "metrics" in data and "events" in data
+
+    # stop stream
+    r = test_client.post("/api/dom/stop", json={"symbol": "TEST"}, headers=headers)
+    assert r.status_code == 200 and r.json()["success"]
