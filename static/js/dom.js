@@ -21,11 +21,12 @@ class DOMManager {
             sweep_up: 'rgba(0,150,0,0.8)',
             sweep_down: 'rgba(150,0,0,0.8)'
         };
+        // Mapping for human-readable descriptions in tooltip
         this.eventLabels = {
-            buy_absorb: 'Buy Absorb',
-            sell_absorb: 'Sell Absorb',
-            sweep_up: 'Sweep Up',
-            sweep_down: 'Sweep Down'
+            buy_absorb: '买方吸收',
+            sell_absorb: '卖方吸收',
+            sweep_up: '向上扫单',
+            sweep_down: '向下扫单'
         };
         this.init();
     }
@@ -308,6 +309,7 @@ class DOMManager {
 
     addMetricPoint(m) {
         const now = Date.now();
+        const windowMs = 60 * 1000; // keep 1 minute of data to avoid huge time ranges
         const color = m.long ? 'green' : m.short ? 'red' : 'white';
         if (this.metricsChart) {
             const ds = this.metricsChart.data.datasets;
@@ -317,6 +319,15 @@ class DOMManager {
             ds[1].pointBackgroundColor.push(color);
             ds[2].data.push({ x: now, y: m.zscore_obi5 ?? 0 });
             ds[3].data.push({ x: now, y: m.zscore_ofi ?? 0 });
+            // prune old points and colors
+            ds.forEach((dataset) => {
+                dataset.data = dataset.data.filter(p => p.x >= now - windowMs);
+                if (dataset.pointBackgroundColor) {
+                    dataset.pointBackgroundColor = dataset.pointBackgroundColor.slice(-dataset.data.length);
+                }
+            });
+            this.metricsChart.options.scales.x.min = now - windowMs;
+            this.metricsChart.options.scales.x.max = now;
             this.metricsChart.update('none');
         }
         const price = m.mid_price ?? 0;
@@ -329,9 +340,13 @@ class DOMManager {
             bar = { x: now, o: price, h: price, l: price, c: price, v: vol };
         }
         this.priceBars.push(bar);
+        // keep only recent bars
+        this.priceBars = this.priceBars.filter(b => b.x >= now - windowMs);
         if (this.priceChart) {
             this.priceChart.data.datasets[0].data = this.priceBars;
             this.priceChart.data.datasets[1].data = this.priceBars.map(b => ({ x: b.x, y: b.v }));
+            this.priceChart.options.scales.x.min = now - windowMs;
+            this.priceChart.options.scales.x.max = now;
             this.priceChart.update('none');
         }
     }
