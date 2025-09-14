@@ -258,7 +258,15 @@ class DOMManager {
             },
             options: {
                 animation: false,
-                parsing: false,
+                // Allow Chart.js to parse candlestick and volume data so the time
+                // scale receives the correct millisecond values. Disabling parsing
+                // caused the x-axis to default to index-based values (starting at 0),
+                // which made Chart.js attempt to generate a massive number of ticks
+                // between 0 and the current timestamp. This resulted in errors like
+                // "0 and {timestamp} are too far apart with stepSize of 1 second" and
+                // subsequent failures in the candlestick controller. By removing the
+                // `parsing: false` option we ensure that the dataset's `x`, `o`, `h`,
+                // `l`, `c` and `y` properties are parsed correctly.
                 scales: {
                     x: { type: 'time', time: { unit: 'second' } },
                     y: { position: 'left', title: { display: true, text: 'Price' } },
