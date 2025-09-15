@@ -127,6 +127,18 @@ class DOMProcessor:
         std_ofi = float(np.std(self._ofi_history)) if len(self._ofi_history) > 1 else 0.0
         z_ofi = (ofi - mean_ofi) / std_ofi if std_ofi else 0.0
 
+        # Compute a heuristic trend score in [-1, 1]
+        avg_norm_obi = (
+            float(np.mean([(v - 0.5) * 2 for v in self._obi_history]))
+            if self._obi_history
+            else 0.0
+        )
+        cum_ofi = float(np.sum(self._ofi_history))
+        ofi_scale = (std_ofi * len(self._ofi_history)) or 1.0
+        norm_ofi = float(np.tanh(cum_ofi / ofi_scale))
+        trend_score = 0.6 * avg_norm_obi + 0.4 * norm_ofi
+        trend_score = max(min(trend_score, 1.0), -1.0)
+
         price_tick = int(self.buffer.mid_tick[(self.buffer._idx - 1) % self.buffer.window])
         price = price_tick / 100.0
         return {
@@ -136,6 +148,7 @@ class DOMProcessor:
             "zscore_obi5": z_obi,
             "zscore_ofi": z_ofi,
             "mid_price": price,
+            "trend_score": trend_score,
         }
 
     # ------------------------------------------------------------------
