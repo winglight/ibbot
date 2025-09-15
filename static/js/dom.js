@@ -14,7 +14,8 @@ class DOMManager {
         this.priceChart = null;
         this.metricsChartEl = null;
         this.priceChartEl = null;
-        this.priceBars = [];
+        this.priceData = [];
+        this.volumeData = [];
         this.eventColors = {
             buy_absorb: 'rgba(0,200,0,0.8)',
             sell_absorb: 'rgba(200,0,0,0.8)',
@@ -267,17 +268,18 @@ class DOMManager {
             type: 'line',
             data: {
                 datasets: [
-                    { label: 'OBI', data: [], borderColor: 'blue', pointBackgroundColor: [], fill: false },
-                    { label: 'OFI', data: [], borderColor: 'orange', pointBackgroundColor: [], fill: false },
-                    { label: 'Z-OBI', data: [], borderColor: 'green', borderDash: [5,5], pointRadius: 0, fill: false },
-                    { label: 'Z-OFI', data: [], borderColor: 'red', borderDash: [5,5], pointRadius: 0, fill: false }
+                    { label: 'OBI', data: [], borderColor: 'blue', pointBackgroundColor: [], fill: false, yAxisID: 'y' },
+                    { type: 'bar', label: 'OFI', data: [], backgroundColor: [], yAxisID: 'y1' },
+                    { label: 'Z-OBI', data: [], borderColor: 'green', borderDash: [5,5], pointRadius: 0, fill: false, yAxisID: 'y' },
+                    { label: 'Z-OFI', data: [], borderColor: 'red', borderDash: [5,5], pointRadius: 0, fill: false, yAxisID: 'y1' }
                 ]
             },
             options: {
                 animation: false,
                 scales: {
                     x: { type: 'time', time: { unit: 'second' } },
-                    y: { beginAtZero: true }
+                    y: { position: 'left', beginAtZero: true, title: { display: true, text: 'OBI/Z-OBI' } },
+                    y1: { position: 'right', beginAtZero: true, grid: { display: false }, title: { display: true, text: 'OFI/Z-OFI' } }
                 }
             }
         });
@@ -285,34 +287,30 @@ class DOMManager {
         this.priceChart = new Chart(pctx, {
             data: {
                 datasets: [
-                    { type: 'candlestick', label: 'Price', data: [], yAxisID: 'y', upColor: '#4caf50', downColor: '#f44336', borderColor: '#888' },
+                    { type: 'line', label: 'Price', data: [], yAxisID: 'y', borderColor: '#4caf50', pointRadius: 0, fill: false },
                     { type: 'bar', label: 'Volume', data: [], yAxisID: 'y1', backgroundColor: 'rgba(100,100,200,0.3)' }
                 ]
             },
             options: {
                 animation: false,
-                // Allow Chart.js to parse candlestick and volume data so the time
-                // scale receives the correct millisecond values. Disabling parsing
-                // caused the x-axis to default to index-based values (starting at 0),
-                // which made Chart.js attempt to generate a massive number of ticks
-                // between 0 and the current timestamp. This resulted in errors like
-                // "0 and {timestamp} are too far apart with stepSize of 1 second" and
-                // subsequent failures in the candlestick controller. By removing the
-                // `parsing: false` option we ensure that the dataset's `x`, `o`, `h`,
-                // `l`, `c` and `y` properties are parsed correctly.
                 scales: {
                     x: { type: 'time', time: { unit: 'second' } },
                     y: { position: 'left', title: { display: true, text: 'Price' } },
-                    y1: { position: 'right', grid: { display: false }, ticks: { display: false }, title: { display: true, text: 'Vol' } }
+                    y1: { position: 'right', grid: { display: false }, ticks: { display: false }, title: { display: true, text: 'Vol' }, beginAtZero: true }
                 }
             }
         });
     }
 
     resetCharts() {
-        this.priceBars = [];
+        this.priceData = [];
+        this.volumeData = [];
         if (this.metricsChart) {
-            this.metricsChart.data.datasets.forEach(ds => { ds.data = []; ds.pointBackgroundColor = []; });
+            this.metricsChart.data.datasets.forEach(ds => {
+                ds.data = [];
+                if (ds.pointBackgroundColor) ds.pointBackgroundColor = [];
+                if (Array.isArray(ds.backgroundColor)) ds.backgroundColor = [];
+            });
             this.metricsChart.update();
         }
         if (this.priceChart) {
@@ -331,7 +329,7 @@ class DOMManager {
             ds[0].data.push({ x: now, y: m.obi5 ?? 0 });
             ds[0].pointBackgroundColor.push(color);
             ds[1].data.push({ x: now, y: m.ofi ?? 0 });
-            ds[1].pointBackgroundColor.push(color);
+            ds[1].backgroundColor.push(color);
             ds[2].data.push({ x: now, y: m.zscore_obi5 ?? 0 });
             ds[3].data.push({ x: now, y: m.zscore_ofi ?? 0 });
             // prune old points and colors
@@ -340,6 +338,9 @@ class DOMManager {
                 if (dataset.pointBackgroundColor) {
                     dataset.pointBackgroundColor = dataset.pointBackgroundColor.slice(-dataset.data.length);
                 }
+                if (Array.isArray(dataset.backgroundColor)) {
+                    dataset.backgroundColor = dataset.backgroundColor.slice(-dataset.data.length);
+                }
             });
             this.metricsChart.options.scales.x.min = now - windowMs;
             this.metricsChart.options.scales.x.max = now;
@@ -347,19 +348,15 @@ class DOMManager {
         }
         const price = m.mid_price ?? 0;
         const vol = Math.abs(m.ofi ?? 0);
-        let bar;
-        if (this.priceBars.length) {
-            const prev = this.priceBars[this.priceBars.length - 1];
-            bar = { x: now, o: prev.c, h: Math.max(prev.c, price), l: Math.min(prev.c, price), c: price, v: vol };
-        } else {
-            bar = { x: now, o: price, h: price, l: price, c: price, v: vol };
-        }
-        this.priceBars.push(bar);
-        // keep only recent bars
-        this.priceBars = this.priceBars.filter(b => b.x >= now - windowMs);
+        this.priceData.push({ x: now, y: price });
+        this.volumeData.push({ x: now, y: vol });
+        this.priceData = this.priceData.filter(p => p.x >= now - windowMs);
+        this.volumeData = this.volumeData.filter(p => p.x >= now - windowMs);
         if (this.priceChart) {
-            this.priceChart.data.datasets[0].data = this.priceBars;
-            this.priceChart.data.datasets[1].data = this.priceBars.map(b => ({ x: b.x, y: b.v }));
+            this.priceChart.data.datasets[0].data = this.priceData;
+            this.priceChart.data.datasets[1].data = this.volumeData;
+            const maxVol = this.volumeData.reduce((mx, p) => Math.max(mx, p.y), 0);
+            this.priceChart.options.scales.y1.max = (maxVol || 1) * 3;
             this.priceChart.options.scales.x.min = now - windowMs;
             this.priceChart.options.scales.x.max = now;
             this.priceChart.update('none');
