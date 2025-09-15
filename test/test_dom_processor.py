@@ -68,3 +68,13 @@ def test_detect_events_absorb():
     p.on_depth_update({"bids": [(100, 11)], "asks": [(101, 18)]})
     events = p.detect_events(p.features_history)
     assert "buy_absorb" in events
+
+
+def test_trend_score_range():
+    p = DOMProcessor(window=5, max_levels=1)
+    p.on_depth_update({"bids": [(100, 10)], "asks": [(101, 20)]})
+    p.on_depth_update({"bids": [(100, 15)], "asks": [(101, 10)]})
+    score = p.last_metrics.get("trend_score")
+    assert score is not None
+    assert -1.0 <= score <= 1.0
+    assert score > 0

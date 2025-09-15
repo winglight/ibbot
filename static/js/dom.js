@@ -29,6 +29,8 @@ class DOMManager {
             sweep_up: '向上扫单',
             sweep_down: '向下扫单'
         };
+        this.lastTrendLevel = 0;
+        this.lastTrendDir = 0;
         this.init();
     }
 
@@ -348,6 +350,17 @@ class DOMManager {
         }
         const price = m.mid_price ?? 0;
         const vol = Math.abs(m.ofi ?? 0);
+
+        if (typeof m.trend_score === 'number') {
+            const absScore = Math.abs(m.trend_score);
+            const level = absScore >= 0.95 ? 4 : absScore >= 0.85 ? 3 : absScore >= 0.7 ? 2 : absScore >= 0.5 ? 1 : 0;
+            const dir = m.trend_score > 0 ? 1 : m.trend_score < 0 ? -1 : 0;
+            if (level > 0 && (level !== this.lastTrendLevel || dir !== this.lastTrendDir)) {
+                this.app.addDomSignal({ time: now, price, score: m.trend_score, level });
+            }
+            this.lastTrendLevel = level;
+            this.lastTrendDir = dir;
+        }
         this.priceData.push({ x: now, y: price });
         this.volumeData.push({ x: now, y: vol });
         this.priceData = this.priceData.filter(p => p.x >= now - windowMs);
