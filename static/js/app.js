@@ -1930,10 +1930,6 @@ class TradingApp {
             // 显示加载状态
             chartContainer.innerHTML = `<div class="text-center py-3"><div class="spinner-border text-primary" role="status"></div><p class="mt-2">加载图表数据中...</p></div>`;
             
-            const volumeContainer = document.getElementById('monitorVolumeContainer');
-            if (volumeContainer) {
-                volumeContainer.innerHTML = '';
-            }
 
             // 获取图表参数
             const intervalSelect = document.getElementById('monitorInterval');
@@ -1955,11 +1951,7 @@ class TradingApp {
             } else {
                 console.log(`Fetching fresh chart data for ${cacheKey}`);
                 // 准备图表容器
-                chartContainer.innerHTML = `<canvas id="monitorChart" width="900" height="450"></canvas>`;
-                
-                if (volumeContainer) {
-                    volumeContainer.innerHTML = `<canvas id="monitorVolumeChart" width="900" height="270"></canvas>`;
-                }
+                chartContainer.innerHTML = `<canvas id="monitorChart" width="900" height="600"></canvas>`;
                 
                 // 请求新数据
                 try {
@@ -1994,11 +1986,7 @@ class TradingApp {
             }
             
             // 准备图表容器
-            chartContainer.innerHTML = `<canvas id="monitorChart" width="900" height="450"></canvas>`;
-            
-            if (volumeContainer) {
-                volumeContainer.innerHTML = `<canvas id="monitorVolumeChart" width="900" height="270"></canvas>`;
-            }
+            chartContainer.innerHTML = `<canvas id="monitorChart" width="900" height="600"></canvas>`;
 
             if (!response.data || response.data.length === 0) {
                 chartContainer.innerHTML = '<div class="alert alert-warning">暂无图表数据</div>';
@@ -2383,9 +2371,6 @@ class TradingApp {
                     }
                     this.monitorChart.destroy();
                 }
-                if (this.monitorVolumeChart) {
-                    this.monitorVolumeChart.destroy();
-                }
 
                 // 根据图表宽度和数据量智能设置初始显示范围
                 const getOptimalDisplayRange = (dataLength, chartType) => {
@@ -2457,40 +2442,66 @@ class TradingApp {
                     console.log('OHLC data sample:', ohlcData.slice(0, 3));
                     console.log('Total OHLC points:', ohlcData.length);
                     
+                    const volumeData = ohlcData.map(item => ({ x: item.x, y: item.volume }));
                     chartConfig = {
                         type: 'candlestick',
                         data: {
-                            datasets: [{
-                                label: `${symbol} OHLC`,
-                                data: ohlcData,
-                                // 添加hover配置以确保事件能正确触发
-                                hoverBackgroundColor: 'rgba(255, 99, 132, 0.8)',
-                                hoverBorderColor: 'rgba(255, 99, 132, 1)',
-                                hoverBorderWidth: 2
-                            }]
+                            datasets: [
+                                {
+                                    type: 'candlestick',
+                                    label: `${symbol} OHLC`,
+                                    data: ohlcData,
+                                    yAxisID: 'y',
+                                    // 添加hover配置以确保事件能正确触发
+                                    hoverBackgroundColor: 'rgba(255, 99, 132, 0.8)',
+                                    hoverBorderColor: 'rgba(255, 99, 132, 1)',
+                                    hoverBorderWidth: 2
+                                },
+                                {
+                                    type: 'bar',
+                                    label: 'Volume',
+                                    data: volumeData,
+                                    yAxisID: 'y1',
+                                    backgroundColor: 'rgba(75, 192, 192, 0.6)'
+                                }
+                            ]
                         }
                     };
                 } else {
                     // 折线图配置
+                    const volumeData = validData.map(item => parseFloat(item.volume || 0));
+                    for (let i = 0; i < padBars; i++) {
+                        volumeData.push(null);
+                    }
                     chartConfig = {
                         type: 'line',
                         data: {
                             labels: chartType === 'line' ? validLabels : labels,
-                            datasets: [{
-                                label: `${symbol} Price`,
-                                data: chartType === 'line' ? prices : prices,
-                                borderColor: 'rgb(54, 162, 235)',
-                                backgroundColor: 'rgba(54, 162, 235, 0.1)',
-                                tension: 0.1,
-                                pointRadius: 3,
-                                pointHoverRadius: 5,
-                                pointBackgroundColor: 'white',
-                                pointBorderColor: 'rgb(54, 162, 235)',
-                                pointBorderWidth: 2,
-                                pointHoverBackgroundColor: 'white',
-                                pointHoverBorderColor: 'rgb(54, 162, 235)',
-                                pointHoverBorderWidth: 3
-                            }]
+                            datasets: [
+                                {
+                                    label: `${symbol} Price`,
+                                    data: chartType === 'line' ? prices : prices,
+                                    borderColor: 'rgb(54, 162, 235)',
+                                    backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                                    tension: 0.1,
+                                    pointRadius: 3,
+                                    pointHoverRadius: 5,
+                                    pointBackgroundColor: 'white',
+                                    pointBorderColor: 'rgb(54, 162, 235)',
+                                    pointBorderWidth: 2,
+                                    pointHoverBackgroundColor: 'white',
+                                    pointHoverBorderColor: 'rgb(54, 162, 235)',
+                                    pointHoverBorderWidth: 3,
+                                    yAxisID: 'y'
+                                },
+                                {
+                                    type: 'bar',
+                                    label: 'Volume',
+                                    data: volumeData,
+                                    yAxisID: 'y1',
+                                    backgroundColor: 'rgba(75, 192, 192, 0.6)'
+                                }
+                            ]
                         }
                     };
                 }
@@ -2617,6 +2628,12 @@ class TradingApp {
                                     min: Math.min(...response.data.map(item => parseFloat(item.low)).filter(p => p > 0)) * 0.998,
                                     max: Math.max(...response.data.map(item => parseFloat(item.high)).filter(p => p > 0)) * 1.002
                                 } : {})
+                            },
+                            y1: {
+                                position: 'right',
+                                grid: { display: false },
+                                ticks: { display: false },
+                                title: { display: true, text: 'Vol' }
                             }
                         },
                         // 移除padding以解决数据点显示不完整问题
@@ -2628,43 +2645,8 @@ class TradingApp {
                         //         bottom: 15
                         //     }
                         // },
-                        // 添加拖动事件监听器和Volume图表联动高亮
+                        // 添加拖动事件监听器
                         onHover: (event, activeElements, chart) => {
-                            // Volume图表联动高亮
-                            if (this.monitorVolumeChart && activeElements.length > 0) {
-                                const activeIndex = activeElements[0].index;
-                                
-                                // 高亮Volume图表对应的柱子
-                                const volumeDataset = this.monitorVolumeChart.data.datasets[0];
-                                
-                                // 保存原始颜色（如果还没保存）
-                                if (!volumeDataset._originalColors) {
-                                    const originalBg = volumeDataset.backgroundColor;
-                                    if (Array.isArray(originalBg)) {
-                                        volumeDataset._originalColors = [...originalBg];
-                                    } else {
-                                        volumeDataset._originalColors = new Array(volumeDataset.data.length).fill(originalBg);
-                                    }
-                                }
-                                
-                                // 重置所有颜色
-                                volumeDataset.backgroundColor = [...volumeDataset._originalColors];
-                                
-                                // 高亮当前索引的柱子
-                                if (activeIndex < volumeDataset.backgroundColor.length) {
-                                    volumeDataset.backgroundColor[activeIndex] = 'rgba(255, 99, 132, 0.8)';
-                                }
-                                
-                                this.monitorVolumeChart.update('none');
-                            } else if (this.monitorVolumeChart && activeElements.length === 0) {
-                                // 恢复Volume图表原始颜色
-                                const volumeDataset = this.monitorVolumeChart.data.datasets[0];
-                                if (volumeDataset._originalColors) {
-                                    volumeDataset.backgroundColor = [...volumeDataset._originalColors];
-                                    this.monitorVolumeChart.update('none');
-                                }
-                            }
-                            
                             // 检查是否悬停在可拖动的annotation线上（只有SL/TP线可拖动）
                             const annotations = chart.options.plugins.annotation.annotations;
                             if (annotations) {
@@ -2859,252 +2841,6 @@ class TradingApp {
                     }
                 });
                 
-                // Create Volume Chart
-                const volumeCtx = document.getElementById('monitorVolumeChart').getContext('2d');
-                
-                // 为蜡烛图和折线图准备不同的Volume数据格式
-                let volumeChartData, volumeLabels;
-                if (chartType === 'candlestick') {
-                    // 蜡烛图：使用与主图表相同的ohlcData和时间格式
-                    volumeChartData = ohlcData.map((item) => ({
-                        x: item.x, // 使用相同的时间戳
-                        y: parseFloat(item.volume || 0)
-                    }));
-                    volumeLabels = undefined; // 时间轴图表不需要labels
-                  } else {
-                      // 折线图：使用传统的labels和data数组
-                      volumeChartData = validData.map((item) => parseFloat(item.volume || 0));
-                      volumeLabels = validLabels;
-                      for (let i = 0; i < padBars; i++) {
-                          volumeChartData.push(null);
-                      }
-                  }
-                
-                this.monitorVolumeChart = new Chart(volumeCtx, {
-                    type: 'bar',
-                    data: {
-                        labels: volumeLabels,
-                        datasets: [{
-                            label: 'Volume',
-                            data: volumeChartData,
-                            backgroundColor: 'rgba(75, 192, 192, 0.6)',
-                            borderColor: 'rgba(75, 192, 192, 1)',
-                            borderWidth: 1
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        interaction: {
-                            intersect: false,
-                            mode: 'index'
-                        },
-                        scales: {
-                            x: {
-                                display: true,
-                                title: {
-                                    display: true,
-                                    text: 'Time'
-                                },
-                                // 蜡烛图使用时间轴，折线图使用索引
-                                ...(chartType === 'candlestick' ? {
-                                    type: 'time',
-                                    adapters: {
-                                        date: {
-                                            locale: 'en-US'
-                                        }
-                                    },
-                                    time: {
-                                        unit: 'minute',
-                                        displayFormats: {
-                                            minute: 'HH:mm',
-                                            hour: 'HH:mm',
-                                            day: 'MMM dd'
-                                        }
-                                    },
-                                    ticks: {
-                                        maxTicksLimit: 20,
-                                        autoSkip: true,
-                                        maxRotation: 45
-                                    },
-                                    // 蜡烛图的显示范围控制
-                                    min: validData[displayRange.minIndex]?.x,
-                                    max: validData[displayRange.maxIndex]?.x
-                                } : {
-                                    // 折线图使用智能计算的显示范围
-                                    min: displayRange.min,
-                                    max: displayRange.max,
-                                    ticks: {
-                                        maxTicksLimit: labels.length > 50 ? 10 : Math.min(labels.length, 20),
-                                        autoSkip: true,
-                                        maxRotation: 45,
-                                        minRotation: 0
-                                    }
-                                })
-                            },
-                            y: {
-                                display: true,
-                                title: {
-                                    display: true,
-                                    text: 'Volume'
-                                },
-                                beginAtZero: true
-                            }
-                        },
-                        // 移除padding以解决数据点显示不完整问题
-                        // layout: {
-                        //     padding: {
-                        //         left: 15,
-                        //         right: 15,
-                        //         top: 15,
-                        //         bottom: 15
-                        //     }
-                        // },
-                        plugins: {
-                            title: {
-                                display: true,
-                                text: `${symbol} - Volume`
-                            },
-                            legend: {
-                                display: false
-                            },
-                            zoom: {
-                                limits: {
-                                    x: chartType === 'candlestick' ? 
-                                        {min: validData[0]?.x, max: validData[validData.length - 1]?.x} :
-                                        {min: 0, max: Math.max(10, labels.length - 1)},
-                                    y: {min: 'original', max: 'original'}
-                                },
-                                pan: {
-                                    enabled: true,
-                                    mode: 'x',
-                                    modifierKey: null,
-                                    threshold: 5,
-                                    rangeMin: chartType === 'candlestick' ? 
-                                        {x: validData[0]?.x} : {x: 0},
-                                    rangeMax: chartType === 'candlestick' ? 
-                                        {x: validData[validData.length - 1]?.x} : {x: Math.max(10, labels.length - 1)}
-                                },
-                                zoom: {
-                                    wheel: {
-                                        enabled: true,
-                                        modifierKey: null,
-                                        speed: chartType === 'candlestick' ? 0.05 : 0.1
-                                    },
-                                    pinch: {
-                                        enabled: true
-                                    },
-                                    mode: 'x',
-                                    // 根据图表类型设置不同的缩放限制
-                                    limits: chartType === 'candlestick' ? {
-                                        x: {
-                                            // 蜡烛图使用计算的最佳显示数据量作为最小值
-                                            min: Math.max(10, displayRange.maxIndex - displayRange.minIndex + 1) * (validData[1]?.x - validData[0]?.x || 60000),
-                                            max: validData[validData.length - 1]?.x - validData[0]?.x // 全部数据的时间跨度
-                                        }
-                                    } : {
-                                        x: {
-                                            min: Math.max(10, Math.floor(labels.length * 0.1)),
-                                            max: labels.length
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        onHover: (event, elements) => {
-                            // Volume图表的鼠标悬停联动
-                            if (this.monitorChart && this.monitorChart.data && this.monitorChart.data.datasets) {
-                                const mainDataset = this.monitorChart.data.datasets[0];
-                                if (mainDataset && mainDataset.backgroundColor) {
-                                    // 重置主图表所有点的颜色
-                                    if (chartType === 'line') {
-                                        // 折线图重置点的颜色
-                                        if (Array.isArray(mainDataset.pointBackgroundColor)) {
-                                            mainDataset.pointBackgroundColor = mainDataset.pointBackgroundColor.map(() => 'white');
-                                        }
-                                        if (Array.isArray(mainDataset.pointBorderColor)) {
-                                            mainDataset.pointBorderColor = mainDataset.pointBorderColor.map(() => '#007bff');
-                                        }
-                                    } else {
-                                        // 蜡烛图重置颜色
-                                        if (Array.isArray(mainDataset.backgroundColor)) {
-                                            mainDataset.backgroundColor = mainDataset.backgroundColor.map((color, index) => {
-                                                const data = validData[index];
-                                                return data && data.c >= data.o ? '#00ff00' : '#ff0000';
-                                            });
-                                        }
-                                        if (Array.isArray(mainDataset.borderColor)) {
-                                            mainDataset.borderColor = mainDataset.borderColor.map((color, index) => {
-                                                const data = validData[index];
-                                                return data && data.c >= data.o ? '#00aa00' : '#aa0000';
-                                            });
-                                        }
-                                    }
-                                    
-                                    // 如果有悬停的元素，高亮对应的主图表点
-                                    if (elements.length > 0) {
-                                        const elementIndex = elements[0].index;
-                                        if (chartType === 'line') {
-                                            // 折线图高亮点
-                                            if (Array.isArray(mainDataset.pointBackgroundColor) && elementIndex < mainDataset.pointBackgroundColor.length) {
-                                                mainDataset.pointBackgroundColor[elementIndex] = '#ff6b6b';
-                                            }
-                                            if (Array.isArray(mainDataset.pointBorderColor) && elementIndex < mainDataset.pointBorderColor.length) {
-                                                mainDataset.pointBorderColor[elementIndex] = '#ff4757';
-                                            }
-                                        } else {
-                                            // 蜡烛图高亮
-                                            if (Array.isArray(mainDataset.backgroundColor) && elementIndex < mainDataset.backgroundColor.length) {
-                                                mainDataset.backgroundColor[elementIndex] = '#ffff00';
-                                            }
-                                            if (Array.isArray(mainDataset.borderColor) && elementIndex < mainDataset.borderColor.length) {
-                                                mainDataset.borderColor[elementIndex] = '#ffaa00';
-                                            }
-                                        }
-                                    }
-                                    
-                                    this.monitorChart.update('none');
-                                }
-                            }
-                        }
-                    }
-                });
-                
-                // 同步主图表和Volume图表的缩放和平移
-                let isUpdatingZoom = false;
-                
-                this.monitorChart.options.plugins.zoom.pan.onPan = ({chart}) => {
-                    if (this.monitorVolumeChart && !isUpdatingZoom) {
-                        isUpdatingZoom = true;
-                        this.monitorVolumeChart.zoomScale('x', {min: chart.scales.x.min, max: chart.scales.x.max}, 'none');
-                        isUpdatingZoom = false;
-                    }
-                };
-                
-                this.monitorChart.options.plugins.zoom.zoom.onZoom = ({chart}) => {
-                    if (this.monitorVolumeChart && !isUpdatingZoom) {
-                        isUpdatingZoom = true;
-                        this.monitorVolumeChart.zoomScale('x', {min: chart.scales.x.min, max: chart.scales.x.max}, 'none');
-                        isUpdatingZoom = false;
-                    }
-                };
-                
-                this.monitorVolumeChart.options.plugins.zoom.pan.onPan = ({chart}) => {
-                    if (this.monitorChart && !isUpdatingZoom) {
-                        isUpdatingZoom = true;
-                        this.monitorChart.zoomScale('x', {min: chart.scales.x.min, max: chart.scales.x.max}, 'none');
-                        isUpdatingZoom = false;
-                    }
-                };
-                
-                this.monitorVolumeChart.options.plugins.zoom.zoom.onZoom = ({chart}) => {
-                    if (this.monitorChart && !isUpdatingZoom) {
-                        isUpdatingZoom = true;
-                        this.monitorChart.zoomScale('x', {min: chart.scales.x.min, max: chart.scales.x.max}, 'none');
-                        isUpdatingZoom = false;
-                    }
-                };
-                
                      }, 100);
 
             // 渲染OHLC价格分布
@@ -3116,10 +2852,6 @@ class TradingApp {
             const chartContainer = document.getElementById('monitorChartContainer');
             if (chartContainer) {
                 chartContainer.innerHTML = `<div class="alert alert-danger">Failed to load chart: ${error.message}</div>`;
-            }
-            const volumeContainer = document.getElementById('monitorVolumeContainer');
-            if (volumeContainer) {
-                volumeContainer.innerHTML = `<div class="alert alert-danger">Failed to load volume chart: ${error.message}</div>`;
             }
         }
     }
@@ -3462,6 +3194,8 @@ class TradingApp {
 
                 if (chartType === 'candlestick') {
                     const ohlcData = dataset.data;
+                    const volumeDataset = this.monitorChart.data.datasets[1];
+                    const vData = volumeDataset.data;
                     if (ohlcData.length > 0) {
                         const lastBar = ohlcData[ohlcData.length - 1];
                         if (lastBar.x === timeValue) {
@@ -3469,37 +3203,28 @@ class TradingApp {
                             lastBar.h = Math.max(lastBar.h || price, price);
                             lastBar.l = Math.min(lastBar.l || price, price);
                             lastBar.volume = volume;
-                        } else {
-                            ohlcData.push({ x: timeValue, o: price, h: price, l: price, c: price, volume });
-                        }
-                    } else {
-                        ohlcData.push({ x: timeValue, o: price, h: price, l: price, c: price, volume });
-                    }
-
-                    if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.datasets && this.monitorVolumeChart.data.datasets.length > 0) {
-                        const volumeDataset = this.monitorVolumeChart.data.datasets[0];
-                        const vData = volumeDataset.data;
-                        if (vData.length > 0) {
-                            const lastVol = vData[vData.length - 1];
-                            if (lastVol.x === timeValue) {
-                                lastVol.y = volume;
+                            if (vData.length > 0 && vData[vData.length - 1].x === timeValue) {
+                                vData[vData.length - 1].y = volume;
                             } else {
                                 vData.push({ x: timeValue, y: volume });
                             }
                         } else {
+                            ohlcData.push({ x: timeValue, o: price, h: price, l: price, c: price, volume });
                             vData.push({ x: timeValue, y: volume });
                         }
+                    } else {
+                        ohlcData.push({ x: timeValue, o: price, h: price, l: price, c: price, volume });
+                        vData.push({ x: timeValue, y: volume });
                     }
 
                     const MAX_POINTS = 300;
                     if (ohlcData.length > MAX_POINTS) {
                         ohlcData.shift();
-                        if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.datasets && this.monitorVolumeChart.data.datasets.length > 0) {
-                            this.monitorVolumeChart.data.datasets[0].data.shift();
-                        }
+                        vData.shift();
                     }
                 } else {
                     const labels = this.monitorChart.data.labels || [];
+                    const volumeDataset = this.monitorChart.data.datasets[1];
                     let shouldUpdateLast = false;
 
                     if (labels.length > 0) {
@@ -3509,50 +3234,34 @@ class TradingApp {
 
                         if (lastLabel === timeLabel) {
                             dataset.data[dataset.data.length - 1] = price;
+                            volumeDataset.data[volumeDataset.data.length - 1] = volume;
                             shouldUpdateLast = true;
                             console.log(`[实时更新] 更新最后一个数据点: ${timeLabel}, 价格: ${price}`);
                         } else {
                             labels.push(timeLabel);
                             dataset.data.push(price);
+                            volumeDataset.data.push(volume);
                             shouldUpdateLast = false;
                             console.log(`[实时更新] 添加新数据点: ${timeLabel}, 价格: ${price}`);
                         }
                     } else {
                         labels.push(timeLabel);
                         dataset.data.push(price);
+                        volumeDataset.data.push(volume);
                         shouldUpdateLast = false;
                         console.log(`[实时更新] 添加首个数据点: ${timeLabel}, 价格: ${price}`);
                         console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
-                    }
-
-                    if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.datasets && this.monitorVolumeChart.data.datasets.length > 0) {
-                        const volumeLabels = this.monitorVolumeChart.data.labels || [];
-                        const volumeDataset = this.monitorVolumeChart.data.datasets[0];
-                        if (shouldUpdateLast && volumeLabels.length > 0) {
-                            volumeDataset.data[volumeDataset.data.length - 1] = volume;
-                        } else {
-                            volumeLabels.push(timeLabel);
-                            volumeDataset.data.push(volume);
-                        }
                     }
 
                     const MAX_POINTS = 300;
                     if (labels.length > MAX_POINTS) {
                         labels.shift();
                         dataset.data.shift();
-                        if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.labels) {
-                            this.monitorVolumeChart.data.labels.shift();
-                            if (this.monitorVolumeChart.data.datasets[0]) {
-                                this.monitorVolumeChart.data.datasets[0].data.shift();
-                            }
-                        }
+                        volumeDataset.data.shift();
                     }
                 }
 
                 this.monitorChart.update('none');
-                if (this.monitorVolumeChart) {
-                    this.monitorVolumeChart.update('none');
-                }
             }
             
             // 更新预期PnL显示
