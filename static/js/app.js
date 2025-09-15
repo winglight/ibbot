@@ -41,6 +41,7 @@ class TradingApp {
         // 价格缓存机制
         this.priceCache = new Map();
         this.priceCacheTimeout = 30000; // 30秒缓存
+        this.domSignals = [];
         
         // 初始化登录管理器
         this.loginManager = new LoginManager(this);
@@ -59,6 +60,34 @@ class TradingApp {
         this.domManager = new DOMManager(this);
 
         this.init();
+    }
+
+    addDomSignal(signal) {
+        this.domSignals.push(signal);
+        if (this.domSignals.length > 1000) this.domSignals.shift();
+        this.updateDomSignalAnnotations();
+    }
+
+    updateDomSignalAnnotations() {
+        if (!this.monitorChart || this.monitorChart.config.type !== 'candlestick') return;
+        const annotations = this.monitorChart.options.plugins.annotation.annotations || {};
+        Object.keys(annotations).filter(k => k.startsWith('domSignal')).forEach(k => delete annotations[k]);
+        const sizeMap = {1: 12, 2: 16, 3: 20, 4: 24};
+        this.domSignals.forEach((sig, idx) => {
+            const content = sig.score > 0 ? '↑' : '↓';
+            const color = sig.score > 0 ? 'green' : 'red';
+            annotations[`domSignal${idx}`] = {
+                type: 'label',
+                xValue: sig.time,
+                yValue: sig.price,
+                backgroundColor: 'rgba(0,0,0,0)',
+                color,
+                font: {size: sizeMap[sig.level] || 12, weight: 'bold'},
+                content,
+                yAdjust: sig.score > 0 ? 10 : -10
+            };
+        });
+        this.monitorChart.update('none');
     }
 
     // Detect security type based on symbol (simple heuristic for common cases)
@@ -2688,6 +2717,8 @@ class TradingApp {
                         // 图表大小改变时的处理
                     }
                 });
+
+                this.updateDomSignalAnnotations();
 
                 // 添加键盘事件监听器支持左右箭头键平移
                 const addKeyboardNavigation = () => {

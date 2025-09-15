@@ -437,16 +437,6 @@ class IBKRConnectionManager {
                     this.app.showAlert(level, data.message);
                 }
                 break;
-            case 'dom_long':
-                if (data.message) {
-                    this.app.showAlert('success', data.message);
-                }
-                break;
-            case 'dom_short':
-                if (data.message) {
-                    this.app.showAlert('danger', data.message);
-                }
-                break;
             case 'realtime_data':
                 // Forward realtime price updates to the monitor modal
                 if (this.app && typeof this.app.updateMonitorRealtime === 'function') {
