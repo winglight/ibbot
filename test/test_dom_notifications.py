@@ -1,7 +1,6 @@
 import asyncio
 import threading
 import time
-
 import pytest
 
 from src.dom_service import get_dom_service
@@ -34,7 +33,6 @@ def test_dom_notifier_and_alerts():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     dom_service._loop = loop
-
     async def run_update():
         dom_service._on_depth_update({})
         await asyncio.sleep(0)
