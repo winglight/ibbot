@@ -33,26 +33,16 @@ CACHE_DURATION_MINUTES = 1  # 缓存1分钟
 def to_local_time(value: Any) -> str:
     """Convert IBKR timestamps (US/Eastern) to local timezone ISO strings."""
     try:
+        # Use pandas to handle daylight saving time correctly
         if hasattr(value, "to_pydatetime"):
             value = value.to_pydatetime()
         if isinstance(value, datetime):
-            dt = value
-        elif isinstance(value, str):
-            raw = value.strip()
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d %H:%M:%S", "%Y-%m-%d"):
-                try:
-                    dt = datetime.strptime(raw, fmt)
-                    break
-                except ValueError:
-                    dt = None
-            if dt is None:
-                dt = datetime.fromisoformat(raw)
+            if value.tzinfo is None:
+                dt = pd.Timestamp(value, tz=NY_TZ).to_pydatetime()
+            else:
+                dt = value.astimezone(NY_TZ)
         else:
-            return str(value)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=NY_TZ)
-        else:
-            dt = dt.astimezone(NY_TZ)
+            dt = pd.Timestamp(value, tz=NY_TZ).to_pydatetime()
         return dt.astimezone(LOCAL_TZ).isoformat()
     except Exception:
         return str(value)
