@@ -20,10 +20,14 @@ class DOMService:
         self._retention_sec = 300
         self._cleanup_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Store last raw depth update for monitoring
+        self._last_depth: Dict[str, Any] = {}
 
     # --------------------------------------------------------------
     def _on_depth_update(self, data: Dict) -> None:
         """Internal callback from DepthSubscriber."""
+        # Keep raw depth snapshot for external monitoring
+        self._last_depth = data
         self.processor.on_depth_update(data)
         ts = time.time()
         signals = self.processor.last_signals
@@ -82,6 +86,11 @@ class DOMService:
     # --------------------------------------------------------------
     def get_metrics(self) -> Dict[str, float]:
         return {**self.processor.last_metrics, **self.processor.last_signals}
+
+    # --------------------------------------------------------------
+    def get_last_depth(self) -> Dict[str, Any]:
+        """Return last raw depth data received from IB."""
+        return dict(self._last_depth)
 
     # --------------------------------------------------------------
     def list_alerts(self) -> List[Dict[str, Any]]:

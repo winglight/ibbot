@@ -59,7 +59,11 @@ async def update_dom_config(cfg: DOMConfigModel, user: Optional[str] = Depends(g
 
 @router.get("/api/dom/data")
 async def get_dom_data(user: Optional[str] = Depends(get_current_user)):
-    return {"success": True, "metrics": dom_service.get_metrics()}
+    return {
+        "success": True,
+        "metrics": dom_service.get_metrics(),
+        "depth": dom_service.get_last_depth(),
+    }
 
 
 @router.get("/api/alerts")
