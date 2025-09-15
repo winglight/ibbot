@@ -3316,14 +3316,19 @@ class TradingApp {
         try {
             if (!this.currentMonitor || !this.currentMonitor.symbol) return;
             const symbol = this.currentMonitor.symbol;
-            if (!data || (data.symbol && data.symbol !== symbol)) return;
-            // 兼容服务器返回结构
-            data = data.data || data;
+
+            // 兼容服务器返回结构，确保处理数组形式的数据
+            let payload = (data && data.data) ? data.data : data;
+            if (Array.isArray(payload)) payload = payload[0] || {};
+            if (!payload || (payload.symbol && payload.symbol !== symbol)) return;
+
             let price = null;
-            if (typeof data.last === 'number') price = data.last;
-            else if (typeof data.price === 'number') price = data.price;
-            else if (typeof data.close === 'number') price = data.close;
+            if (typeof payload.last === 'number') price = payload.last;
+            else if (typeof payload.price === 'number') price = payload.price;
+            else if (typeof payload.close === 'number') price = payload.close;
             if (price == null) return;
+
+            const volume = payload.volume || payload.vol || 0;
 
             const qty = Number(this.currentMonitor.positionQty || 0);
             const avgCost = Number(this.currentMonitor.avgCost || 0);
@@ -3443,7 +3448,6 @@ class TradingApp {
                 }
 
                 const timeValue = intervalTime.getTime();
-                const volume = data.volume || data.vol || Math.floor(Math.random() * 1000000);
 
                 if (chartType === 'candlestick') {
                     const ohlcData = dataset.data;
