@@ -145,7 +145,7 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
             return {"success": False, "error": "Order cancellation timed out"}
-        
+
         if success:
             # 更新 OrderManager 本地状态
             try:
@@ -157,17 +157,19 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
                     logger.warning("OrderManager is not initialized; local order state not updated")
             except Exception as rec_err:
                 logger.warning(f"Failed to update OrderManager on cancel: {rec_err}")
-            
+
             await websocket_manager.broadcast({  # 替换 manager
                 "type": "order_cancelled",
                 "order_id": order_id
             })
-            
+
             return {"success": True, "message": message}
         else:
             # 订单未找到或状态不可取消
             raise HTTPException(status_code=404, detail=message)
-            
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Order cancellation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
