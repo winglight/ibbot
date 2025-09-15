@@ -236,10 +236,17 @@ class QueueManager:
                 queue_logger.warning(f"Task {task.task_id} deferred: {error_msg}; will retry when connected")
                 # 小幅休眠避免紧密轮询
                 await asyncio.sleep(0.5)
+            elif "Strategy disabled" in error_msg or "Strategy not found" in error_msg:
+                # 对于禁用或不存在的策略，不进行重试，直接标记为失败
+                task.status = "failed"
+                task.completed_at = datetime.now()
+                queue_logger.error(f"Task {task.task_id} failed permanently: {error_msg}")
             else:
                 task.retry_count += 1
-                queue_logger.error(f"Task {task.task_id} failed: {error_msg}, retry {task.retry_count}/{task.max_retries}")
-                
+                queue_logger.error(
+                    f"Task {task.task_id} failed: {error_msg}, retry {task.retry_count}/{task.max_retries}"
+                )
+
                 if task.retry_count < task.max_retries:
                     # 重新加入队列
                     task.status = "pending"
@@ -249,7 +256,9 @@ class QueueManager:
                 else:
                     task.status = "failed"
                     task.completed_at = datetime.now()
-                    queue_logger.error(f"Task {task.task_id} failed permanently after {task.max_retries} retries")
+                    queue_logger.error(
+                        f"Task {task.task_id} failed permanently after {task.max_retries} retries"
+                    )
         
         finally:
             self._save_tasks()
@@ -271,8 +280,10 @@ class QueueManager:
         
         # 验证策略
         strategy = self.strategy_manager.get_strategy(payload['strategy'])
-        if not strategy or not strategy.get('enabled', False):
-            raise Exception("Strategy disabled or not found")
+        if not strategy:
+            raise Exception("Strategy not found")
+        if not strategy.get('enabled', False):
+            raise Exception("Strategy disabled")
         
         # 处理订单参数
         order_type = payload['type'].upper()
@@ -456,3 +467,4 @@ class QueueManager:
 
 # 全局队列管理器实例
 queue_manager = QueueManager()
+
