@@ -447,6 +447,12 @@ class IBKRConnectionManager {
                     this.app.showAlert('danger', data.message);
                 }
                 break;
+            case 'realtime_data':
+                // Forward realtime price updates to the monitor modal
+                if (this.app && typeof this.app.updateMonitorRealtime === 'function') {
+                    this.app.updateMonitorRealtime(data);
+                }
+                break;
             case 'order_filled':
                 // 订单成交通知，刷新订单列表
                 console.log('Order filled notification received:', data);
