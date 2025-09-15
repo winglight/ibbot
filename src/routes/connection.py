@@ -59,7 +59,6 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
                 logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
             try:
                 queue_manager.set_dependencies(
-                    ibkr_client=ibkr_client_local,
                     risk_manager=risk_manager,
                     strategy_manager=strategy_manager,
                     connection_manager=connection_manager,

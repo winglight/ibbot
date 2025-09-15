@@ -20,6 +20,7 @@ from .notification_manager import NotificationManager
 from .database import DatabaseManager, get_db_manager
 from .database import AutoOrder as DatabaseAutoOrder
 from .database import RiskRule as DatabaseRiskRule
+import core
 
 load_dotenv()
 
@@ -565,7 +566,7 @@ class RiskManager:
             # get_account_info 是同步阻塞方法，使用 asyncio.to_thread 在后台线程执行
             positions = await core.ibkr_client.get_positions(fast=False)
             try:
-                account_info = await asyncio.to_thread(core.ibkr_client.get_account_info)
+                account_info = await core.ibkr_client.get_account_info()
             except Exception as e:
                 risk_logger.warning(f"Failed to get account info: {e}")
                 account_info = {}

@@ -151,7 +151,6 @@ async def lifespan(app: FastAPI):
                     # Update queue_manager dependencies
                     try:
                         queue_manager.set_dependencies(
-                            ibkr_client=ibkr_client_local,
                             risk_manager=risk_manager,
                             strategy_manager=strategy_manager,
                             connection_manager=connection_manager,
