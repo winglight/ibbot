@@ -66,8 +66,7 @@ class DOMManager {
         try {
             const wasActive = localStorage.getItem('domActive') === '1';
             if (wasActive && this.symbol) {
-                this.resetCharts();
-                this.connectWS();
+                await this.start();
             }
         } catch (e) {
             // ignore storage issues
@@ -166,7 +165,7 @@ class DOMManager {
         this.ws.onmessage = (evt) => {
             try {
                 const data = JSON.parse(evt.data);
-                if (data.metrics) {
+                if (data.metrics && Object.keys(data.metrics).length > 0) {
                     this.addMetricPoint(data.metrics);
                 }
             } catch (e) {
