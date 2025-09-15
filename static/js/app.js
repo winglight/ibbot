@@ -2402,6 +2402,7 @@ class TradingApp {
                 // 准备图表数据
                 let chartConfig;
                 let ohlcData; // 声明在外层作用域
+                let maxVolume = 0; // 记录最大成交量以限制柱状图高度
                 
                 if (chartType === 'candlestick') {
                     // 使用标准的Chart.js金融图表插件，参考折线图的数据处理方式
@@ -2443,6 +2444,7 @@ class TradingApp {
                     console.log('Total OHLC points:', ohlcData.length);
                     
                     const volumeData = ohlcData.map(item => ({ x: item.x, y: item.volume }));
+                    maxVolume = Math.max(...volumeData.map(v => v.y), 0);
                     chartConfig = {
                         type: 'candlestick',
                         data: {
@@ -2473,6 +2475,7 @@ class TradingApp {
                     for (let i = 0; i < padBars; i++) {
                         volumeData.push(null);
                     }
+                    maxVolume = Math.max(...volumeData.filter(v => v != null), 0);
                     chartConfig = {
                         type: 'line',
                         data: {
@@ -2633,7 +2636,9 @@ class TradingApp {
                                 position: 'right',
                                 grid: { display: false },
                                 ticks: { display: false },
-                                title: { display: true, text: 'Vol' }
+                                title: { display: true, text: 'Vol' },
+                                beginAtZero: true,
+                                max: (maxVolume * 3) || 1
                             }
                         },
                         // 移除padding以解决数据点显示不完整问题
@@ -3260,6 +3265,13 @@ class TradingApp {
                         volumeDataset.data.shift();
                     }
                 }
+                // 调整成交量轴的最大值，使柱状图高度不超过整体三分之一
+                const volDataset = this.monitorChart.data.datasets[1];
+                const volumes = volDataset.data
+                    .map(v => (typeof v === 'object' && v !== null) ? v.y : v)
+                    .filter(v => typeof v === 'number' && !isNaN(v));
+                const maxVol = volumes.length ? Math.max(...volumes) : 0;
+                this.monitorChart.options.scales.y1.max = (maxVol * 3) || 1;
 
                 this.monitorChart.update('none');
             }
