@@ -270,6 +270,20 @@ class DOMManager {
             }
             this.lastTrendLevel = level;
             this.lastTrendDir = dir;
+
+            // update monitor trend chart dataset
+            this.app.monitorTrendData.push({ x: now, y: m.trend_score });
+            // keep data within same window as metrics
+            this.app.monitorTrendData = this.app.monitorTrendData.filter(p => p.x >= now - windowMs);
+            if (this.app.monitorTrendChart) {
+                this.app.monitorTrendChart.data.datasets[0].data = this.app.monitorTrendData;
+                if (this.app.monitorChart) {
+                    const xScale = this.app.monitorChart.scales.x;
+                    this.app.monitorTrendChart.options.scales.x.min = xScale.min;
+                    this.app.monitorTrendChart.options.scales.x.max = xScale.max;
+                }
+                this.app.monitorTrendChart.update('none');
+            }
         }
         this.priceData.push({ x: now, y: price });
         this.volumeData.push({ x: now, y: vol });

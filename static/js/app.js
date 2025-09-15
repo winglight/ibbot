@@ -42,7 +42,9 @@ class TradingApp {
         this.priceCache = new Map();
         this.priceCacheTimeout = 30000; // 30秒缓存
         this.domSignals = [];
-        
+        this.monitorTrendChart = null;
+        this.monitorTrendData = [];
+
         // 初始化登录管理器
         this.loginManager = new LoginManager(this);
         this.ibkrManager = new IBKRConnectionManager(this);
@@ -88,6 +90,17 @@ class TradingApp {
             };
         });
         this.monitorChart.update('none');
+    }
+
+    syncCharts(source, target) {
+        if (!source || !target) return;
+        const srcScale = source.scales.x;
+        target.options.scales.x.min = srcScale.min;
+        target.options.scales.x.max = srcScale.max;
+        target.update('none');
+        if (source === this.monitorChart || target === this.monitorChart) {
+            this.updateDomSignalAnnotations();
+        }
     }
 
     // Detect security type based on symbol (simple heuristic for common cases)
@@ -1370,6 +1383,9 @@ class TradingApp {
                         if (this.monitorChart) {
                             this.monitorChart.resetZoom();
                         }
+                        if (this.monitorTrendChart) {
+                            this.monitorTrendChart.resetZoom();
+                        }
                     };
                 }
                 
@@ -2598,6 +2614,9 @@ class TradingApp {
                                         }
                                     }
                                 }
+                                ,
+                                onZoom: ({chart}) => this.syncCharts(chart, this.monitorTrendChart),
+                                onPan: ({chart}) => this.syncCharts(chart, this.monitorTrendChart)
                             }
                         },
                         scales: {
@@ -2716,9 +2735,64 @@ class TradingApp {
                     onResize: function(chart, size) {
                         // 图表大小改变时的处理
                     }
-                });
+                    });
 
-                this.updateDomSignalAnnotations();
+                    // Initialize or update trend chart with synchronized time range
+                    const trendCtx = document.getElementById('monitorTrendChart')?.getContext('2d');
+                    if (trendCtx) {
+                        if (!this.monitorTrendChart) {
+                            this.monitorTrendChart = new Chart(trendCtx, {
+                                type: 'line',
+                                data: {
+                                    datasets: [{
+                                        label: 'Trend Score',
+                                        data: this.monitorTrendData,
+                                        borderColor: 'orange',
+                                        backgroundColor: 'rgba(255,165,0,0.1)',
+                                        pointRadius: 0,
+                                        yAxisID: 'y'
+                                    }]
+                                },
+                                options: {
+                                    responsive: true,
+                                    maintainAspectRatio: false,
+                                    interaction: { intersect: false, mode: 'index' },
+                                    plugins: {
+                                        legend: { display: false },
+                                        zoom: {
+                                            pan: { enabled: true, mode: 'x' },
+                                            zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+                                            onZoom: ({chart}) => this.syncCharts(chart, this.monitorChart),
+                                            onPan: ({chart}) => this.syncCharts(chart, this.monitorChart)
+                                        }
+                                    },
+                                    scales: {
+                                        x: {
+                                            type: 'time',
+                                            time: { unit: 'minute', displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'MMM dd' } },
+                                            min: this.monitorChart.scales.x.min,
+                                            max: this.monitorChart.scales.x.max
+                                        },
+                                        y: {
+                                            position: 'left',
+                                            beginAtZero: true,
+                                            suggestedMin: -1,
+                                            suggestedMax: 1,
+                                            title: { display: true, text: 'Trend Score' }
+                                        }
+                                    }
+                                }
+                            });
+                        } else {
+                            const trendScale = this.monitorTrendChart.options.scales.x;
+                            const priceScale = this.monitorChart.scales.x;
+                            trendScale.min = priceScale.min;
+                            trendScale.max = priceScale.max;
+                            this.monitorTrendChart.update('none');
+                        }
+                    }
+
+                    this.updateDomSignalAnnotations();
 
                 // 添加键盘事件监听器支持左右箭头键平移
                 const addKeyboardNavigation = () => {
