@@ -4,7 +4,6 @@ from typing import Dict, List, Optional, Any
 
 import core
 from core import connection_manager, depth_subscriber, dom_config, DOMProcessor
-from .notifier import Notifier
 
 
 class DOMService:
@@ -12,14 +11,11 @@ class DOMService:
 
     def __init__(self) -> None:
         self.processor: DOMProcessor = core.dom_processor
-        self.notifier = Notifier(core.notification_manager)
         self._alerts: List[Dict[str, Any]] = []
         self._next_alert_id: int = 1
-        self._last_signal = {"long": False, "short": False}
         self._max_alerts = 100
         self._retention_sec = 300
         self._cleanup_task: Optional[asyncio.Task] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
         # Store last raw depth update for monitoring
         self._last_depth: Dict[str, Any] = {}
 
@@ -30,20 +26,6 @@ class DOMService:
         self._last_depth = data
         self.processor.on_depth_update(data)
         ts = time.time()
-        signals = self.processor.last_signals
-        if signals.get("long") and not self._last_signal.get("long"):
-            if self._loop:
-                asyncio.run_coroutine_threadsafe(
-                    self.notifier.send("DOM signal: LONG", event_type="dom_long"),
-                    self._loop,
-                )
-        if signals.get("short") and not self._last_signal.get("short"):
-            if self._loop:
-                asyncio.run_coroutine_threadsafe(
-                    self.notifier.send("DOM signal: SHORT", event_type="dom_short"),
-                    self._loop,
-                )
-        self._last_signal = signals
         for evt in self.processor.last_events:
             self._alerts.append({"id": self._next_alert_id, "event": evt, "timestamp": ts})
             self._next_alert_id += 1
@@ -65,11 +47,6 @@ class DOMService:
     def start(self, symbol: str, num_rows: int = 5) -> bool:
         if not connection_manager.is_connected():
             return False
-        if self._loop is None:
-            try:
-                self._loop = asyncio.get_running_loop()
-            except RuntimeError:
-                self._loop = asyncio.new_event_loop()
         if self._cleanup_task is None or self._cleanup_task.done():
             try:
                 self._cleanup_task = asyncio.create_task(self._cleanup_loop())
@@ -85,7 +62,7 @@ class DOMService:
 
     # --------------------------------------------------------------
     def get_metrics(self) -> Dict[str, float]:
-        return {**self.processor.last_metrics, **self.processor.last_signals}
+        return dict(self.processor.last_metrics)
 
     # --------------------------------------------------------------
     def get_last_depth(self) -> Dict[str, Any]:

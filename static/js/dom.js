@@ -4,31 +4,14 @@ class DOMManager {
         this.ws = null;
         this.symbol = '';
         this.numRows = 5;
-        this.signalCanvas = null;
-        this.signalCtx = null;
-        this.signalTooltip = null;
-        this.signalContainer = null;
-        this.signalHistory = [];
-        this.barWidth = 8;
         this.metricsChart = null;
         this.priceChart = null;
         this.metricsChartEl = null;
         this.priceChartEl = null;
         this.priceData = [];
         this.volumeData = [];
-        this.eventColors = {
-            buy_absorb: 'rgba(0,200,0,0.8)',
-            sell_absorb: 'rgba(200,0,0,0.8)',
-            sweep_up: 'rgba(0,150,0,0.8)',
-            sweep_down: 'rgba(150,0,0,0.8)'
-        };
-        // Mapping for human-readable descriptions in tooltip
-        this.eventLabels = {
-            buy_absorb: '买方吸收',
-            sell_absorb: '卖方吸收',
-            sweep_up: '向上扫单',
-            sweep_down: '向下扫单'
-        };
+        this.lastTrendLevel = 0;
+        this.lastTrendDir = 0;
         this.init();
     }
 
@@ -66,17 +49,6 @@ class DOMManager {
         if (startBtn) startBtn.addEventListener('click', () => this.start());
         if (stopBtn) stopBtn.addEventListener('click', () => this.stop());
         if (saveBtn) saveBtn.addEventListener('click', () => this.saveSettings());
-        this.signalCanvas = document.getElementById('domSignalCanvas');
-        this.signalContainer = document.getElementById('domSignalBarContainer');
-        if (this.signalContainer) {
-            this.signalContainer.style.display = 'none';
-        }
-        if (this.signalCanvas) {
-            this.signalCtx = this.signalCanvas.getContext('2d');
-            this.signalTooltip = document.getElementById('domSignalTooltip');
-            this.signalCanvas.addEventListener('mousemove', (e) => this.onSignalHover(e));
-            this.signalCanvas.addEventListener('mouseleave', () => this.hideTooltip());
-        }
         this.metricsChartEl = document.getElementById('domMetricsChart');
         this.priceChartEl = document.getElementById('domPriceChart');
         if (this.metricsChartEl && this.priceChartEl) {
@@ -95,9 +67,7 @@ class DOMManager {
             const wasActive = localStorage.getItem('domActive') === '1';
             if (wasActive && this.symbol) {
                 this.resetCharts();
-                this.resetSignals();
                 this.connectWS();
-                if (this.signalContainer) this.signalContainer.style.display = 'block';
             }
         } catch (e) {
             // ignore storage issues
@@ -148,14 +118,16 @@ class DOMManager {
             return;
         }
         this.resetCharts();
-        this.resetSignals();
+        this.app.domSignals = [];
+        if (typeof this.app.updateDomSignalAnnotations === 'function') {
+            this.app.updateDomSignalAnnotations();
+        }
         try {
             await this.app.apiCall('/dom/start', {
                 method: 'POST',
                 body: JSON.stringify({ symbol: this.symbol, num_rows: this.numRows })
             });
             this.connectWS();
-            if (this.signalContainer) this.signalContainer.style.display = 'block';
             this.app.showAlert('success', 'DOM stream started');
             try { localStorage.setItem('domActive', '1'); } catch (e) {}
         } catch (e) {
@@ -169,8 +141,10 @@ class DOMManager {
             this.ws.close();
             this.ws = null;
         }
-        this.resetSignals();
-        this.hideTooltip();
+        this.app.domSignals = [];
+        if (typeof this.app.updateDomSignalAnnotations === 'function') {
+            this.app.updateDomSignalAnnotations();
+        }
         if (!this.symbol) return;
         try {
             await this.app.apiCall('/dom/stop', {
@@ -178,7 +152,6 @@ class DOMManager {
                 body: JSON.stringify({ symbol: this.symbol })
             });
             this.app.showAlert('info', 'DOM stream stopped');
-            if (this.signalContainer) this.signalContainer.style.display = 'none';
             try { localStorage.setItem('domActive', '0'); } catch (e) {}
         } catch (e) {
             console.error('Failed to stop DOM', e);
@@ -196,70 +169,10 @@ class DOMManager {
                 if (data.metrics) {
                     this.addMetricPoint(data.metrics);
                 }
-                if (Array.isArray(data.events)) {
-                    data.events.forEach((ev) => this.addEvent(ev));
-                }
             } catch (e) {
                 console.error('Invalid DOM WS message', e);
             }
         };
-    }
-
-    addEvent(ev) {
-        if (!this.signalCtx) return;
-        const label = this.eventLabels[ev] || ev;
-        const color = this.eventColors[ev] || 'gray';
-        this.signalHistory.push({ event: ev, label, color });
-        const maxBars = Math.floor(this.signalCanvas.offsetWidth / this.barWidth);
-        if (this.signalHistory.length > maxBars) {
-            this.signalHistory.shift();
-        }
-        this.renderSignals();
-    }
-
-    renderSignals() {
-        if (!this.signalCtx) return;
-        const canvas = this.signalCanvas;
-        canvas.width = canvas.offsetWidth;
-        const ctx = this.signalCtx;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        const mid = canvas.height / 2;
-        this.signalHistory.forEach((item, idx) => {
-            const x = idx * this.barWidth;
-            ctx.fillStyle = item.color;
-            if (item.event === 'buy_absorb' || item.event === 'sweep_up') {
-                ctx.fillRect(x, 0, this.barWidth - 1, mid);
-            } else {
-                ctx.fillRect(x, mid, this.barWidth - 1, mid);
-            }
-        });
-    }
-
-    onSignalHover(e) {
-        if (!this.signalCanvas || !this.signalTooltip) return;
-        const rect = this.signalCanvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const idx = Math.floor(x / this.barWidth);
-        const item = this.signalHistory[idx];
-        if (!item) {
-            this.hideTooltip();
-            return;
-        }
-        this.signalTooltip.textContent = item.label;
-        this.signalTooltip.style.left = `${idx * this.barWidth}px`;
-        this.signalTooltip.style.top = item.event === 'buy_absorb' || item.event === 'sweep_up' ? '0px' : `${this.signalCanvas.height / 2}px`;
-        this.signalTooltip.style.display = 'block';
-    }
-
-    hideTooltip() {
-        if (this.signalTooltip) this.signalTooltip.style.display = 'none';
-    }
-
-    resetSignals() {
-        this.signalHistory = [];
-        if (this.signalCtx && this.signalCanvas) {
-            this.signalCtx.clearRect(0, 0, this.signalCanvas.width, this.signalCanvas.height);
-        }
     }
 
     initCharts() {
@@ -348,6 +261,17 @@ class DOMManager {
         }
         const price = m.mid_price ?? 0;
         const vol = Math.abs(m.ofi ?? 0);
+
+        if (typeof m.trend_score === 'number') {
+            const absScore = Math.abs(m.trend_score);
+            const level = absScore >= 0.95 ? 4 : absScore >= 0.85 ? 3 : absScore >= 0.7 ? 2 : absScore >= 0.5 ? 1 : 0;
+            const dir = m.trend_score > 0 ? 1 : m.trend_score < 0 ? -1 : 0;
+            if (level > 0 && (level !== this.lastTrendLevel || dir !== this.lastTrendDir)) {
+                this.app.addDomSignal({ time: now, price, score: m.trend_score, level });
+            }
+            this.lastTrendLevel = level;
+            this.lastTrendDir = dir;
+        }
         this.priceData.push({ x: now, y: price });
         this.volumeData.push({ x: now, y: vol });
         this.priceData = this.priceData.filter(p => p.x >= now - windowMs);
