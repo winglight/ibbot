@@ -3316,14 +3316,19 @@ class TradingApp {
         try {
             if (!this.currentMonitor || !this.currentMonitor.symbol) return;
             const symbol = this.currentMonitor.symbol;
-            if (!data || (data.symbol && data.symbol !== symbol)) return;
-            // 兼容服务器返回结构
-            data = data.data || data;
+
+            // 兼容服务器返回结构，确保处理数组形式的数据
+            let payload = (data && data.data) ? data.data : data;
+            if (Array.isArray(payload)) payload = payload[0] || {};
+            if (!payload || (payload.symbol && payload.symbol !== symbol)) return;
+
             let price = null;
-            if (typeof data.last === 'number') price = data.last;
-            else if (typeof data.price === 'number') price = data.price;
-            else if (typeof data.close === 'number') price = data.close;
+            if (typeof payload.last === 'number') price = payload.last;
+            else if (typeof payload.price === 'number') price = payload.price;
+            else if (typeof payload.close === 'number') price = payload.close;
             if (price == null) return;
+
+            const volume = payload.volume || payload.vol || 0;
 
             const qty = Number(this.currentMonitor.positionQty || 0);
             const avgCost = Number(this.currentMonitor.avgCost || 0);
@@ -3385,54 +3390,43 @@ class TradingApp {
             }
 
             if (this.monitorChart && this.monitorChart.data && this.monitorChart.data.datasets && this.monitorChart.data.datasets.length > 0) {
-                const labels = this.monitorChart.data.labels || [];
                 const dataset = this.monitorChart.data.datasets[0];
-                
+                const chartType = this.monitorChart.config.type || '';
+
                 // 获取当前图表的interval设置
                 const intervalSelect = document.getElementById('monitorInterval');
                 const intervalRaw = intervalSelect ? intervalSelect.value : '1 min';
-                
+
                 // 标准化interval格式，移除空格，与loadMonitorChart方法保持一致
                 const interval = intervalRaw.replace(/\s+/g, '');
-                
+
                 // 根据interval计算正确的时间点
                 const now = new Date();
-                let timeLabel;
-                let shouldUpdateLast = false;
-                
-                // 创建一个新的Date对象用于时间计算，避免修改原始now对象
-                // 使用const确保intervalTime不会被意外修改
                 const intervalTime = new Date(now);
-                
-                // 根据不同的时间间隔调整时间
+
                 switch(interval) {
                     case '1min':
-                        // 对于1分钟间隔，向下取整到分钟
                         intervalTime.setSeconds(0, 0);
                         break;
                     case '5min':
-                        // 对于5分钟间隔，向下取整到5分钟边界
                         const minutes5 = Math.floor(intervalTime.getMinutes() / 5) * 5;
                         intervalTime.setMinutes(minutes5, 0, 0);
                         break;
                     case '15min':
-                        // 对于15分钟间隔，向下取整到15分钟边界
                         const minutes15 = Math.floor(intervalTime.getMinutes() / 15) * 15;
                         intervalTime.setMinutes(minutes15, 0, 0);
                         break;
                     case '1hour':
-                        // 对于1小时间隔，向下取整到小时
                         intervalTime.setMinutes(0, 0, 0);
                         break;
                     default:
-                        // 默认不做特殊处理
                         break;
                 }
-                
-                // 根据interval和duration格式化时间标签，确保与loadMonitorChart方法中的格式完全一致
+
                 const durationSelect = document.getElementById('monitorDuration');
                 const duration = durationSelect?.value || '1 D';
-                
+
+                let timeLabel;
                 if (intervalRaw.includes('day') || duration.includes('M') || duration.includes('Y')) {
                     timeLabel = intervalTime.toLocaleDateString('en-US', {
                         month: 'short',
@@ -3452,66 +3446,98 @@ class TradingApp {
                         hour12: false
                     });
                 }
-                
-                // 检查最后一个数据点是否是同一时间点
-                if (labels.length > 0) {
-                    const lastLabel = labels[labels.length - 1];
-                    // 增强调试输出，帮助诊断问题
-                    console.log(`[实时更新] 比较: 最后标签="${lastLabel}", 当前标签="${timeLabel}"`);
-                    console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
-                    
-                    // 严格比较时间标签字符串 - 确保字符串格式完全一致
-                    if (lastLabel === timeLabel) {
-                        // 更新最后一个数据点的价格
-                        dataset.data[dataset.data.length - 1] = price;
-                        shouldUpdateLast = true;
-                        console.log(`[实时更新] 更新最后一个数据点: ${timeLabel}, 价格: ${price}`);
+
+                const timeValue = intervalTime.getTime();
+
+                if (chartType === 'candlestick') {
+                    const ohlcData = dataset.data;
+                    if (ohlcData.length > 0) {
+                        const lastBar = ohlcData[ohlcData.length - 1];
+                        if (lastBar.x === timeValue) {
+                            lastBar.c = price;
+                            lastBar.h = Math.max(lastBar.h || price, price);
+                            lastBar.l = Math.min(lastBar.l || price, price);
+                            lastBar.volume = volume;
+                        } else {
+                            ohlcData.push({ x: timeValue, o: price, h: price, l: price, c: price, volume });
+                        }
                     } else {
-                        // 添加新的数据点
-                        labels.push(timeLabel);
-                        dataset.data.push(price);
-                        shouldUpdateLast = false;
-                        console.log(`[实时更新] 添加新数据点: ${timeLabel}, 价格: ${price}`);
+                        ohlcData.push({ x: timeValue, o: price, h: price, l: price, c: price, volume });
                     }
-                } else {
-                    // 图表为空，添加第一个数据点
-                    labels.push(timeLabel);
-                    dataset.data.push(price);
-                    shouldUpdateLast = false;
-                    console.log(`[实时更新] 添加首个数据点: ${timeLabel}, 价格: ${price}`);
-                    console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
-                }
-                
-                // 同时更新Volume图表
-                if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.datasets && this.monitorVolumeChart.data.datasets.length > 0) {
-                    const volumeLabels = this.monitorVolumeChart.data.labels || [];
-                    const volumeDataset = this.monitorVolumeChart.data.datasets[0];
-                    // 使用实时数据中的volume，如果没有则使用默认值
-                    const volume = data.volume || data.vol || Math.floor(Math.random() * 1000000); // 临时使用随机值作为示例
-                    
-                    if (shouldUpdateLast && volumeLabels.length > 0) {
-                        // 更新最后一个数据点的成交量
-                        volumeDataset.data[volumeDataset.data.length - 1] = volume;
-                    } else {
-                        // 添加新的数据点
-                        volumeLabels.push(timeLabel);
-                        volumeDataset.data.push(volume);
+
+                    if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.datasets && this.monitorVolumeChart.data.datasets.length > 0) {
+                        const volumeDataset = this.monitorVolumeChart.data.datasets[0];
+                        const vData = volumeDataset.data;
+                        if (vData.length > 0) {
+                            const lastVol = vData[vData.length - 1];
+                            if (lastVol.x === timeValue) {
+                                lastVol.y = volume;
+                            } else {
+                                vData.push({ x: timeValue, y: volume });
+                            }
+                        } else {
+                            vData.push({ x: timeValue, y: volume });
+                        }
                     }
-                }
-                
-                const MAX_POINTS = 300;
-                if (labels.length > MAX_POINTS) {
-                    labels.shift();
-                    dataset.data.shift();
-                    // 同步删除Volume图表的旧数据
-                    if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.labels) {
-                        this.monitorVolumeChart.data.labels.shift();
-                        if (this.monitorVolumeChart.data.datasets[0]) {
+
+                    const MAX_POINTS = 300;
+                    if (ohlcData.length > MAX_POINTS) {
+                        ohlcData.shift();
+                        if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.datasets && this.monitorVolumeChart.data.datasets.length > 0) {
                             this.monitorVolumeChart.data.datasets[0].data.shift();
                         }
                     }
+                } else {
+                    const labels = this.monitorChart.data.labels || [];
+                    let shouldUpdateLast = false;
+
+                    if (labels.length > 0) {
+                        const lastLabel = labels[labels.length - 1];
+                        console.log(`[实时更新] 比较: 最后标签="${lastLabel}", 当前标签="${timeLabel}"`);
+                        console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
+
+                        if (lastLabel === timeLabel) {
+                            dataset.data[dataset.data.length - 1] = price;
+                            shouldUpdateLast = true;
+                            console.log(`[实时更新] 更新最后一个数据点: ${timeLabel}, 价格: ${price}`);
+                        } else {
+                            labels.push(timeLabel);
+                            dataset.data.push(price);
+                            shouldUpdateLast = false;
+                            console.log(`[实时更新] 添加新数据点: ${timeLabel}, 价格: ${price}`);
+                        }
+                    } else {
+                        labels.push(timeLabel);
+                        dataset.data.push(price);
+                        shouldUpdateLast = false;
+                        console.log(`[实时更新] 添加首个数据点: ${timeLabel}, 价格: ${price}`);
+                        console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
+                    }
+
+                    if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.datasets && this.monitorVolumeChart.data.datasets.length > 0) {
+                        const volumeLabels = this.monitorVolumeChart.data.labels || [];
+                        const volumeDataset = this.monitorVolumeChart.data.datasets[0];
+                        if (shouldUpdateLast && volumeLabels.length > 0) {
+                            volumeDataset.data[volumeDataset.data.length - 1] = volume;
+                        } else {
+                            volumeLabels.push(timeLabel);
+                            volumeDataset.data.push(volume);
+                        }
+                    }
+
+                    const MAX_POINTS = 300;
+                    if (labels.length > MAX_POINTS) {
+                        labels.shift();
+                        dataset.data.shift();
+                        if (this.monitorVolumeChart && this.monitorVolumeChart.data && this.monitorVolumeChart.data.labels) {
+                            this.monitorVolumeChart.data.labels.shift();
+                            if (this.monitorVolumeChart.data.datasets[0]) {
+                                this.monitorVolumeChart.data.datasets[0].data.shift();
+                            }
+                        }
+                    }
                 }
-                
+
                 this.monitorChart.update('none');
                 if (this.monitorVolumeChart) {
                     this.monitorVolumeChart.update('none');

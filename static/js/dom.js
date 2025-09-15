@@ -88,6 +88,19 @@ class DOMManager {
             if (symbolEl) symbolEl.value = saved;
         }
         await this.loadConfig();
+
+        // 如果之前已启动DOM流，刷新后自动重连
+        try {
+            const wasActive = localStorage.getItem('domActive') === '1';
+            if (wasActive && this.symbol) {
+                this.resetCharts();
+                this.resetSignals();
+                this.connectWS();
+                if (this.signalContainer) this.signalContainer.style.display = 'block';
+            }
+        } catch (e) {
+            // ignore storage issues
+        }
     }
 
     async loadConfig() {
@@ -143,6 +156,7 @@ class DOMManager {
             this.connectWS();
             if (this.signalContainer) this.signalContainer.style.display = 'block';
             this.app.showAlert('success', 'DOM stream started');
+            try { localStorage.setItem('domActive', '1'); } catch (e) {}
         } catch (e) {
             console.error('Failed to start DOM', e);
             this.app.showAlert('danger', 'Failed to start DOM');
@@ -164,6 +178,7 @@ class DOMManager {
             });
             this.app.showAlert('info', 'DOM stream stopped');
             if (this.signalContainer) this.signalContainer.style.display = 'none';
+            try { localStorage.setItem('domActive', '0'); } catch (e) {}
         } catch (e) {
             console.error('Failed to stop DOM', e);
             this.app.showAlert('danger', 'Failed to stop DOM');
