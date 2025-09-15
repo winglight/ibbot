@@ -172,7 +172,7 @@ async def _test_comprehensive_stop_loss():
         mock_telegram = MockTelegramNotifier()
         
         # 创建风险管理器
-        risk_manager = RiskManager(mock_ibkr, mock_telegram)
+        risk_manager = RiskManager(mock_telegram)
         
         # 步骤2: 创建并激活风险规则
         logger.info("步骤2: 创建并激活风险规则")
@@ -288,7 +288,7 @@ async def _test_event_loop_conflict():
         mock_ibkr.place_market_order = problematic_place_order
         
         # 创建风险管理器
-        risk_manager = RiskManager(mock_ibkr, mock_telegram)
+        risk_manager = RiskManager(mock_telegram)
         
         # 创建订单请求
         order_request = OrderRequest(

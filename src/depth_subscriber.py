@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
-from typing import Callable, Dict, List
+from typing import Any, Callable, Dict, List
 
 from ib_insync import Stock
 from loguru import logger
@@ -18,8 +18,8 @@ _depth_logger = logger.bind(module="depth_subscriber", request_id="-")
 
 @dataclass
 class _DepthStream:
-    ticker: any
-    contract: any
+    ticker: Any
+    contract: Any
     callbacks: List[Callable]
 
 
@@ -28,19 +28,14 @@ class DepthSubscriber:
 
     def __init__(self, connection_manager: ConnectionManager):
         self.connection_manager = connection_manager
-        self.ibkr_client = None  # set later to access contract helpers
         self._streams: Dict[str, _DepthStream] = {}
         self._lock = Lock()
-
-    def set_ibkr_client(self, ibkr_client) -> None:
-        """Set IBKR client for contract creation."""
-        self.ibkr_client = ibkr_client
 
     # ------------------------------------------------------------------
     def start_depth_stream(
         self,
         symbol: str,
-        callback: Callable[[Dict[str, any]], None],
+        callback: Callable[[Dict[str, Any]], None],
         num_rows: int = 5,
     ) -> bool:
         """Start market depth streaming for a symbol.
@@ -68,19 +63,18 @@ class DepthSubscriber:
                 return None
             # Choose contract helper from IBKR client when available
             contract = None
-            if self.ibkr_client:
-                try:
-                    if symbol in ["MNQ", "NQ", "ES", "MES"]:
-                        contract = self.ibkr_client.get_future_contract(symbol)
-                    else:
-                        contract = self.ibkr_client.get_stock_contract(symbol)
-                except Exception as e:
-                    _depth_logger.error(f"Contract build failed for {symbol}: {e}")
-                    return None
-            else:
-                # fallback simple stock contract
-                contract = Stock(symbol, "SMART", "USD")
+            try:
+                import core  # 延迟导入避免循环导入
+                if symbol in ["MNQ", "NQ", "ES", "MES"]:
+                    contract = core.ibkr_client.get_future_contract(symbol, exchange="CME")
+                else:
+                    contract = core.ibkr_client.get_stock_contract(symbol)
+            except Exception as e:
+                _depth_logger.error(f"Contract build failed for {symbol}: {e}")
+                return None
             ticker = ib.reqMktDepth(contract, numRows=num_rows, isSmartDepth=False)
+            _depth_logger.warning(f"Created ticker for {symbol}: {ticker}, contract: {contract}")
+            _depth_logger.warning(f"Ticker initial state - domBids: {getattr(ticker, 'domBids', 'None')}, domAsks: {getattr(ticker, 'domAsks', 'None')}")
             return ticker, contract
 
         result = self.connection_manager.run_in_connection_thread(_subscribe)
@@ -90,6 +84,9 @@ class DepthSubscriber:
         ticker, contract = result
 
         def _on_update(*_):
+            # _depth_logger.warning(f"*** _on_update CALLED for {symbol} ***")
+            # _depth_logger.warning(f"Ticker domBids: {getattr(ticker, 'domBids', 'None')}")
+            # _depth_logger.warning(f"Ticker domAsks: {getattr(ticker, 'domAsks', 'None')}")
             data = {
                 "bids": [(d.price, d.size) for d in getattr(ticker, "domBids", [])],
                 "asks": [(d.price, d.size) for d in getattr(ticker, "domAsks", [])],
@@ -104,7 +101,10 @@ class DepthSubscriber:
                 except Exception as e:
                     _depth_logger.warning(f"Callback error for {symbol}: {e}")
 
+        # _depth_logger.warning(f"Before binding updateEvent for {symbol}, ticker: {ticker}")
+        # _depth_logger.warning(f"Ticker updateEvent before binding: {ticker.updateEvent}")
         ticker.updateEvent += _on_update
+        # _depth_logger.warning(f"After binding updateEvent for {symbol}, event handlers: {len(ticker.updateEvent)}")
         with self._lock:
             self._streams[symbol] = _DepthStream(ticker=ticker, contract=contract, callbacks=[callback])
         _depth_logger.info(f"Started depth stream for {symbol}")

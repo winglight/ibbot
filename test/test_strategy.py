@@ -30,7 +30,7 @@ load_dotenv()
 BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000')
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change_me')
-TEST_STRATEGY_NAME = os.getenv('TEST_STRATEGY_NAME', 'strategy_internal_smoke')
+TEST_STRATEGY_NAME = os.getenv('TEST_STRATEGY_NAME', 'Buy the Dip Strategy')
 
 
 def login(username: str, password: str) -> Optional[str]:

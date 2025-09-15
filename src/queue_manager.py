@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 from loguru import logger
 import json
+import core
 
 # 为队列管理器绑定模块日志记录器
 queue_logger = logger.bind(module="queue_manager", request_id="-")
@@ -36,7 +37,6 @@ class QueueManager:
         self._worker_task: Optional[asyncio.Task] = None
         
         # 依赖注入的对象
-        self.ibkr_client = None
         self.risk_manager = None
         self.strategy_manager = None
         self.connection_manager = None
@@ -51,9 +51,8 @@ class QueueManager:
         # 启动时加载持久化的任务
         self._load_tasks()
     
-    def set_dependencies(self, ibkr_client, risk_manager, strategy_manager, connection_manager, websocket_manager, order_manager=None):
+    def set_dependencies(self, risk_manager, strategy_manager, connection_manager, websocket_manager, order_manager=None):
         """设置依赖对象"""
-        self.ibkr_client = ibkr_client
         self.risk_manager = risk_manager
         self.strategy_manager = strategy_manager
         self.connection_manager = connection_manager
@@ -298,10 +297,8 @@ class QueueManager:
         order_type_for_record = "MKT" if order_type == "MARKET" else "LMT"
         
         # 真实IBKR路径：使用 ibkr_client
-        if not self.ibkr_client:
-            raise Exception("IBKR client not initialized")
         if order_type == "MARKET":
-            trade = self.ibkr_client.place_market_order(
+            trade = core.ibkr_client.place_market_order(
                 symbol=payload['symbol'],
                 quantity=payload['qty'],
                 action=action,
@@ -311,7 +308,7 @@ class QueueManager:
         elif order_type == "LIMIT":
             if not payload.get('price'):
                 raise Exception("Price required for limit order")
-            trade = self.ibkr_client.place_limit_order(
+            trade = core.ibkr_client.place_limit_order(
                 symbol=payload['symbol'],
                 quantity=payload['qty'],
                 price=payload['price'],

@@ -21,7 +21,7 @@ TEST_ADMIN_USER = os.getenv("ADMIN_USERNAME", "admin")
 TEST_ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change_me")
 
 # 测试常量
-TEST_STRATEGY_NAME = "test_external_strategy"
+TEST_STRATEGY_NAME = "Buy the Dip Strategy"
 TEST_SYMBOL = "AAPL"
 TEST_QUANTITY = 100
 

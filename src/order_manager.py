@@ -13,7 +13,8 @@ import re
 order_logger = logger.bind(module="order_manager", request_id="-")
 
 from .database import get_db_manager
-
+import asyncio
+import core
 
 class OrderStatus(Enum):
     """订单状态枚举"""
@@ -412,9 +413,6 @@ class OrderManager:
             # 发送浏览器通知
             if hasattr(self, 'websocket_manager') and self.websocket_manager:
                 try:
-                    import asyncio
-                    import core
-
                     async def _broadcast():
                         await self.websocket_manager.broadcast(message)
                         try:

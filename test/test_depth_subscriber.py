@@ -51,7 +51,16 @@ def test_start_and_stop_stream():
     cm = DummyConnectionManager()
     client = DummyIBKRClient()
     sub = DepthSubscriber(cm)
-    sub.set_ibkr_client(client)
+    # 直接设置ibkr_client到core模块中，避免循环导入
+    import sys
+    if 'core' not in sys.modules:
+        # 创建一个模拟的core模块
+        core_module = types.ModuleType('core')
+        core_module.ibkr_client = client
+        sys.modules['core'] = core_module
+    else:
+        import core
+        core.ibkr_client = client
 
     received = []
     assert sub.start_depth_stream("AAPL", lambda data: received.append(data))

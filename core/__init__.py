@@ -31,12 +31,8 @@ dom_config = DOMConfig()
 dom_processor = DOMProcessor(window=dom_config.window, max_levels=dom_config.max_levels)
 
 depth_subscriber = DepthSubscriber(connection_manager)
-try:
-    depth_subscriber.set_ibkr_client(None)
-except Exception:
-    pass
 
-risk_manager = RiskManager(ibkr_client=None, notification_manager=notification_manager)
+risk_manager = RiskManager(notification_manager=notification_manager)
 strategy_manager = StrategyManager()
 
 try:
@@ -61,7 +57,6 @@ except Exception:
 
 try:
     queue_manager.set_dependencies(
-        ibkr_client=None,
         risk_manager=risk_manager,
         strategy_manager=strategy_manager,
         connection_manager=connection_manager,
