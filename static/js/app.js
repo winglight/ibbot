@@ -80,12 +80,23 @@ class TradingApp {
     }
 
     async init() {
-        try { 
-            if (window.Chart && window.ChartAnnotation && window.Chart.register) { 
-                window.Chart.register(window.ChartAnnotation); 
+        try {
+            if (window.Chart && window.ChartAnnotation && window.Chart.register) {
+                window.Chart.register(window.ChartAnnotation);
             }
             if (window.Chart && window.zoomPlugin && window.Chart.register) {
                 window.Chart.register(window.zoomPlugin);
+            }
+            if (window.Chart && window.Chart.register) {
+                const fin = window.ChartFinancial || window["chartjs-chart-financial"]; 
+                if (fin && fin.CandlestickController && fin.OhlcElement) {
+                    window.Chart.register(
+                        fin.CandlestickController,
+                        fin.OhlcController,
+                        fin.CandlestickElement,
+                        fin.OhlcElement
+                    );
+                }
             }
         } catch (e) {}
         this.setupEventListeners();
