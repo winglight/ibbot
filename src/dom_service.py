@@ -19,6 +19,7 @@ class DOMService:
         self._max_alerts = 100
         self._retention_sec = 300
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # --------------------------------------------------------------
     def _on_depth_update(self, data: Dict) -> None:
@@ -27,13 +28,17 @@ class DOMService:
         ts = time.time()
         signals = self.processor.last_signals
         if signals.get("long") and not self._last_signal.get("long"):
-            asyncio.create_task(
-                self.notifier.send("DOM signal: LONG", event_type="dom_long")
-            )
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.notifier.send("DOM signal: LONG", event_type="dom_long"),
+                    self._loop,
+                )
         if signals.get("short") and not self._last_signal.get("short"):
-            asyncio.create_task(
-                self.notifier.send("DOM signal: SHORT", event_type="dom_short")
-            )
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.notifier.send("DOM signal: SHORT", event_type="dom_short"),
+                    self._loop,
+                )
         self._last_signal = signals
         for evt in self.processor.last_events:
             self._alerts.append({"id": self._next_alert_id, "event": evt, "timestamp": ts})
@@ -56,6 +61,11 @@ class DOMService:
     def start(self, symbol: str, num_rows: int = 5) -> bool:
         if not connection_manager.is_connected():
             return False
+        if self._loop is None:
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._loop = asyncio.new_event_loop()
         if self._cleanup_task is None or self._cleanup_task.done():
             try:
                 self._cleanup_task = asyncio.create_task(self._cleanup_loop())

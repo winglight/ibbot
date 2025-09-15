@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 import pytest
 
@@ -31,7 +32,7 @@ def test_dom_notifier_and_alerts():
     dom_service._last_signal = {"long": False, "short": False}
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
+    dom_service._loop = loop
     async def run_update():
         dom_service._on_depth_update({})
         await asyncio.sleep(0)
@@ -52,3 +53,24 @@ def test_dom_notifier_and_alerts():
     dom_service._alerts.append({"id": 99, "event": "x", "timestamp": time.time() - 400})
     dom_service._perform_cleanup()
     assert not dom_service._alerts
+
+
+def test_dom_notifier_threadsafe():
+    dom_service = get_dom_service()
+    dom_service.processor = FakeProcessor()
+    dom_service.notifier = DummyNotifier()
+    dom_service._alerts.clear()
+    dom_service._last_signal = {"long": False, "short": False}
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    dom_service._loop = loop
+
+    def call_update():
+        dom_service._on_depth_update({})
+
+    t = threading.Thread(target=call_update)
+    t.start()
+    t.join()
+    loop.run_until_complete(asyncio.sleep(0))
+
+    assert dom_service.notifier.calls
