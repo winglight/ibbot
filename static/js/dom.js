@@ -12,6 +12,7 @@ class DOMManager {
         this.volumeData = [];
         this.lastTrendLevel = 0;
         this.lastTrendDir = 0;
+        this.startPromise = null;
         this.init();
     }
 
@@ -109,29 +110,37 @@ class DOMManager {
     }
 
     async start() {
-        if (!this.symbol) {
-            this.setSymbol(document.getElementById('domSymbol').value.trim());
-        }
-        if (!this.symbol) {
-            this.app.showAlert('warning', 'Please enter symbol in settings');
-            return;
-        }
-        this.resetCharts();
-        this.app.domSignals = [];
-        if (typeof this.app.updateDomSignalAnnotations === 'function') {
-            this.app.updateDomSignalAnnotations();
-        }
+        if (this.startPromise) return this.startPromise;
+        this.startPromise = (async () => {
+            if (!this.symbol) {
+                this.setSymbol(document.getElementById('domSymbol').value.trim());
+            }
+            if (!this.symbol) {
+                this.app.showAlert('warning', 'Please enter symbol in settings');
+                return;
+            }
+            this.resetCharts();
+            this.app.domSignals = [];
+            if (typeof this.app.updateDomSignalAnnotations === 'function') {
+                this.app.updateDomSignalAnnotations();
+            }
+            try {
+                await this.app.apiCall('/dom/start', {
+                    method: 'POST',
+                    body: JSON.stringify({ symbol: this.symbol, num_rows: this.numRows })
+                });
+                this.connectWS();
+                this.app.showAlert('success', 'DOM stream started');
+                try { localStorage.setItem('domActive', '1'); } catch (e) {}
+            } catch (e) {
+                console.error('Failed to start DOM', e);
+                this.app.showAlert('danger', 'Failed to start DOM');
+            }
+        })();
         try {
-            await this.app.apiCall('/dom/start', {
-                method: 'POST',
-                body: JSON.stringify({ symbol: this.symbol, num_rows: this.numRows })
-            });
-            this.connectWS();
-            this.app.showAlert('success', 'DOM stream started');
-            try { localStorage.setItem('domActive', '1'); } catch (e) {}
-        } catch (e) {
-            console.error('Failed to start DOM', e);
-            this.app.showAlert('danger', 'Failed to start DOM');
+            await this.startPromise;
+        } finally {
+            this.startPromise = null;
         }
     }
 
@@ -159,7 +168,14 @@ class DOMManager {
     }
 
     connectWS() {
-        if (this.ws) this.ws.close();
+        if (this.ws) {
+            if (this.ws.readyState === WebSocket.CONNECTING) return;
+            if (this.ws.readyState !== WebSocket.CLOSED) {
+                this.ws.addEventListener('close', () => this.connectWS(), { once: true });
+                this.ws.close();
+                return;
+            }
+        }
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';
         this.ws = new WebSocket(`${proto}://${location.host}/ws/dom/${this.symbol}`);
         this.ws.onmessage = (evt) => {
