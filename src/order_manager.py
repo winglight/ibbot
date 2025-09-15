@@ -413,13 +413,23 @@ class OrderManager:
             if hasattr(self, 'websocket_manager') and self.websocket_manager:
                 try:
                     import asyncio
-                    # 在事件循环中发送WebSocket消息
+                    import core
+
+                    async def _broadcast():
+                        await self.websocket_manager.broadcast(message)
+                        try:
+                            positions = await core.ibkr_client.get_positions()
+                        except Exception:
+                            positions = []
+                        await self.websocket_manager.broadcast(
+                            {"type": "portfolio_update", "portfolio": positions}
+                        )
+
                     try:
                         loop = asyncio.get_running_loop()
-                        asyncio.create_task(self.websocket_manager.broadcast(message))
+                        asyncio.create_task(_broadcast())
                     except RuntimeError:
-                        # 没有运行中的事件循环，创建新的
-                        asyncio.run(self.websocket_manager.broadcast(message))
+                        asyncio.run(_broadcast())
                     order_logger.info(f"🌐 已发送浏览器通知: 订单 {order.order_id} 成交")
                 except Exception as e:
                     order_logger.error(f"发送浏览器通知失败: {e}")

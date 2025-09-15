@@ -236,7 +236,22 @@ class ConnectionManager:
                             order_id = str(trade.order.orderId)
                             status = trade.orderStatus.status
                             connection_logger.info(f"Order status update: {order_id} -> {status}")
-                            
+
+                            # 更新本地订单状态，确保手动市价单等及时同步
+                            try:
+                                from .order_manager import get_order_manager
+                                om = get_order_manager()
+                                fill_price = getattr(trade.orderStatus, 'avgFillPrice', None)
+                                executed_at = datetime.now() if status in ('Filled', 'PartiallyFilled') else None
+                                om.update_order_status(
+                                    order_id=order_id,
+                                    status=status,
+                                    fill_price=fill_price,
+                                    executed_at=executed_at,
+                                )
+                            except Exception as e:
+                                connection_logger.warning(f"OrderManager status update failed for {order_id}: {e}")
+
                             # 如果订单已成交，处理佣金和PnL
                             if status == 'Filled':
                                 asyncio.create_task(self._handle_order_filled(trade))

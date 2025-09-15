@@ -729,8 +729,8 @@ class IBKRClient:
                     if not target_trade:
                         # 快速重查一次，避免因列表延迟导致误判
                         try:
-                            ib_local.reqOpenOrders()
-                            ib_local.reqAllOpenOrders()
+                            await ib_local.reqOpenOrdersAsync()
+                            await ib_local.reqAllOpenOrdersAsync()
                             await asyncio.sleep(0.2)
                             trades = ib_local.trades()
                             for trade in trades:
@@ -741,7 +741,7 @@ class IBKRClient:
                             ibkr_logger.debug(f"Quick requery before cancel failed: {requery_err}")
 
                     if not target_trade:
-                        ibkr_logger.warning(f"Order {order_id} not found in active trades")
+                        ibkr_logger.info(f"Order {order_id} not found in active trades")
                         return False, f"Order {order_id} not found or already completed"
 
                     current_status = target_trade.orderStatus.status
