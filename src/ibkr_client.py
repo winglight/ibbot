@@ -4,11 +4,14 @@ from datetime import datetime, timedelta
 import pandas as pd
 from ib_insync import IB, Stock, Future, Order, MarketOrder, LimitOrder, Contract
 from loguru import logger
+from zoneinfo import ZoneInfo
+
+from src.utils import to_local_time
+
 # Module-specific logger for ibkr_client
 ibkr_logger = logger.bind(module="ibkr_client", request_id="-")
 import time
 import threading
-import asyncio
 import os
 import csv
 import concurrent.futures
@@ -16,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 import math
 from .connection_manager import connection_manager, ConnectionConfig
 from .database import get_db_manager
+
+NY_TZ = ZoneInfo("America/New_York")
 
 class IBKRClient:
     def __init__(self):
@@ -432,7 +437,7 @@ class IBKRClient:
                         'bid': 0,
                         'ask': 0,
                         'volume': 0,
-                        'timestamp': datetime.now().isoformat(),
+                        'timestamp': to_local_time(datetime.now(NY_TZ)),
                         'is_cached': True
                     }
             
@@ -484,31 +489,33 @@ class IBKRClient:
             bid = getattr(ticker, 'bid', 0) or 0
             ask = getattr(ticker, 'ask', 0) or 0
             volume = getattr(ticker, 'volume', 0) or 0
-            
+
             if last and last > 0:
                 ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (immediate)")
                 self.price_cache[symbol] = last
                 self.price_cache_timestamp[symbol] = datetime.now()
+                ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                 result_payload = {
                     'symbol': symbol,
                     'last': self._sanitize_float(last),
                     'bid': self._sanitize_float(bid),
                     'ask': self._sanitize_float(ask),
                     'volume': self._sanitize_float(volume),
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': to_local_time(ts)
                 }
             elif bid and ask and bid > 0 and ask > 0:
                 mid = (bid + ask) / 2
                 ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (immediate)")
                 self.price_cache[symbol] = mid
                 self.price_cache_timestamp[symbol] = datetime.now()
+                ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                 result_payload = {
                     'symbol': symbol,
                     'last': self._sanitize_float(mid),
                     'bid': self._sanitize_float(bid),
                     'ask': self._sanitize_float(ask),
                     'volume': self._sanitize_float(volume),
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': to_local_time(ts)
                 }
             else:
                 # 如果立即没有数据，进行短暂的非阻塞等待
@@ -524,28 +531,30 @@ class IBKRClient:
                         ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (waited {waited:.1f}s)")
                         self.price_cache[symbol] = last
                         self.price_cache_timestamp[symbol] = datetime.now()
+                        ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                         result_payload = {
                             'symbol': symbol,
                             'last': self._sanitize_float(last),
                             'bid': self._sanitize_float(bid),
                             'ask': self._sanitize_float(ask),
                             'volume': self._sanitize_float(volume),
-                            'timestamp': datetime.now().isoformat()
+                            'timestamp': to_local_time(ts)
                         }
                         break
-                    
+
                     if bid and ask and bid > 0 and ask > 0:
                         mid = (bid + ask) / 2
                         ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (waited {waited:.1f}s)")
                         self.price_cache[symbol] = mid
                         self.price_cache_timestamp[symbol] = datetime.now()
+                        ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                         result_payload = {
                             'symbol': symbol,
                             'last': self._sanitize_float(mid),
                             'bid': self._sanitize_float(bid),
                             'ask': self._sanitize_float(ask),
                             'volume': self._sanitize_float(volume),
-                            'timestamp': datetime.now().isoformat()
+                            'timestamp': to_local_time(ts)
                         }
                         break
             
@@ -571,7 +580,7 @@ class IBKRClient:
                     'bid': 0,
                     'ask': 0,
                     'volume': 0,
-                    'timestamp': datetime.now().isoformat(),
+                    'timestamp': to_local_time(datetime.now(NY_TZ)),
                     'is_cached': True
                 }
             
@@ -589,7 +598,7 @@ class IBKRClient:
                     'bid': 0,
                     'ask': 0,
                     'volume': 0,
-                    'timestamp': datetime.now().isoformat(),
+                    'timestamp': to_local_time(datetime.now(NY_TZ)),
                     'is_cached': True,
                     'error': str(e)
                 }

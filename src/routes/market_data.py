@@ -7,7 +7,6 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from loguru import logger
-from zoneinfo import ZoneInfo
 
 import core
 from core import connection_manager, get_db_manager
@@ -17,35 +16,14 @@ from src.models import (
     ChartDataRequest,
     CurrentPriceRequest,
 )
+from src.utils import to_local_time
 
 router = APIRouter()
-
-# Timezone helpers
-LOCAL_TZ = datetime.now().astimezone().tzinfo
-NY_TZ = ZoneInfo("America/New_York")
 
 # Cache controls
 CURRENT_PRICE_CACHE_ONLY = os.getenv("CURRENT_PRICE_CACHE_ONLY", "False").lower() == "true"
 historical_data_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_DURATION_MINUTES = 1  # 缓存1分钟
-
-
-def to_local_time(value: Any) -> str:
-    """Convert IBKR timestamps (US/Eastern) to local timezone ISO strings."""
-    try:
-        # Use pandas to handle daylight saving time correctly
-        if hasattr(value, "to_pydatetime"):
-            value = value.to_pydatetime()
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                dt = pd.Timestamp(value, tz=NY_TZ).to_pydatetime()
-            else:
-                dt = value.astimezone(NY_TZ)
-        else:
-            dt = pd.Timestamp(value, tz=NY_TZ).to_pydatetime()
-        return dt.astimezone(LOCAL_TZ).isoformat()
-    except Exception:
-        return str(value)
 
 
 def _parse_duration_to_minutes(duration: str) -> int:
@@ -512,7 +490,7 @@ async def get_realtime_data(
                         "bid": 0,
                         "ask": 0,
                         "volume": 0,
-                        "timestamp": datetime.now().isoformat(),
+                        "timestamp": datetime.now().astimezone().isoformat(),
                         "is_cached": True,
                     }
             if cached_data:
@@ -539,7 +517,7 @@ async def get_realtime_data(
                         "bid": 0,
                         "ask": 0,
                         "volume": 0,
-                        "timestamp": datetime.now().isoformat(),
+                        "timestamp": datetime.now().astimezone().isoformat(),
                         "is_cached": True,
                     }
                     logger.info(
@@ -567,14 +545,14 @@ async def get_current_price(
                     "success": True,
                     "symbol": request.symbol,
                     "price": cached_price,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now().astimezone().isoformat(),
                     "source": "cache_only",
                 }
         return {
             "success": False,
             "symbol": request.symbol,
             "price": None,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now().astimezone().isoformat(),
             "error": "Cache-only mode: no cached price",
         }
 
@@ -589,7 +567,7 @@ async def get_current_price(
                     "success": True,
                     "symbol": request.symbol,
                     "price": cached_price,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now().astimezone().isoformat(),
                     "source": "cache",
                 }
 
@@ -611,7 +589,7 @@ async def get_current_price(
                     "success": True,
                     "symbol": request.symbol,
                     "price": price,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now().astimezone().isoformat(),
                     "source": "realtime",
                 }
         except asyncio.TimeoutError:
@@ -640,7 +618,7 @@ async def get_current_price(
                     "success": True,
                     "symbol": request.symbol,
                     "price": latest_price,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now().astimezone().isoformat(),
                     "source": "historical",
                 }
         except asyncio.TimeoutError:
@@ -652,7 +630,7 @@ async def get_current_price(
             "success": False,
             "symbol": request.symbol,
             "price": None,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now().astimezone().isoformat(),
             "error": "Unable to get current price",
         }
 
