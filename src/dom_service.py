@@ -1,6 +1,6 @@
 import time
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import core
 from core import connection_manager, depth_subscriber, dom_config, DOMProcessor
@@ -13,7 +13,7 @@ class DOMService:
     def __init__(self) -> None:
         self.processor: DOMProcessor = core.dom_processor
         self.notifier = Notifier(core.notification_manager)
-        self._alerts: List[Dict[str, any]] = []
+        self._alerts: List[Dict[str, Any]] = []
         self._next_alert_id: int = 1
         self._last_signal = {"long": False, "short": False}
         self._max_alerts = 100
@@ -74,7 +74,7 @@ class DOMService:
         return {**self.processor.last_metrics, **self.processor.last_signals}
 
     # --------------------------------------------------------------
-    def list_alerts(self) -> List[Dict[str, any]]:
+    def list_alerts(self) -> List[Dict[str, Any]]:
         return list(self._alerts)
 
     # --------------------------------------------------------------
