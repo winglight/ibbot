@@ -12,6 +12,36 @@ const INTERVAL_MINUTES_MAP = {
 const MONITOR_SOURCE_TZ = 'America/New_York';
 const MONITOR_FALLBACK_TZ = 'Asia/Shanghai';
 
+const TrendSignalLabelPlugin = {
+    id: 'trendSignalLabel',
+    afterDatasetsDraw(chart, args, opts) {
+        const dataset = chart.data?.datasets?.[0];
+        if (!dataset) return;
+        const meta = chart.getDatasetMeta(0);
+        if (!meta || !meta.data) return;
+        const ctx = chart.ctx;
+        const offset = typeof opts?.offset === 'number' ? opts.offset : 16;
+        const font = opts?.font || 'bold 12px sans-serif';
+        const buyColor = opts?.buyColor || '#16a34a';
+        const sellColor = opts?.sellColor || '#dc2626';
+        meta.data.forEach((element, index) => {
+            if (!element) return;
+            const raw = dataset.data?.[index];
+            if (!raw || !raw.suggestion) return;
+            const { x, y } = element.tooltipPosition();
+            const text = raw.suggestion === 'buy' ? 'Buy' : 'Sell';
+            const yOffset = raw.suggestion === 'buy' ? -offset : offset;
+            ctx.save();
+            ctx.font = font;
+            ctx.fillStyle = raw.suggestion === 'buy' ? buyColor : sellColor;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, x, y + yOffset);
+            ctx.restore();
+        });
+    }
+};
+
 function slugifyStrategyName(name) {
     return (name || '')
         .toLowerCase()
@@ -98,6 +128,153 @@ class TradingApp {
             };
         });
         this.monitorChart.update('none');
+    }
+
+    resetMonitorTrendData() {
+        this.monitorTrendData = [];
+        if (this.monitorTrendChart?.data?.datasets?.[0]) {
+            this.monitorTrendChart.data.datasets[0].data = this.monitorTrendData;
+            this.monitorTrendChart.update('none');
+        }
+    }
+
+    deriveTrendLevel(score) {
+        const value = Math.abs(Number(score));
+        if (!Number.isFinite(value)) return 0;
+        if (value >= 0.95) return 4;
+        if (value >= 0.85) return 3;
+        if (value >= 0.7) return 2;
+        if (value >= 0.5) return 1;
+        return 0;
+    }
+
+    addMonitorTrendPoint(time, score, options = {}) {
+        if (typeof score !== 'number' || Number.isNaN(score)) return;
+
+        let x = this.normalizeMonitorTime(time ?? Date.now());
+        if (x == null) {
+            x = Date.now();
+        }
+
+        const providedReason = typeof options.reason === 'string' ? options.reason : '';
+        const reasonLines = [];
+        const trendLine = `Trend Score ${score.toFixed(2)}`;
+
+        const providedLineSet = new Set();
+        if (providedReason) {
+            providedReason.split('\n').forEach((line) => {
+                const trimmed = line.trim();
+                if (trimmed) {
+                    const lower = trimmed.toLowerCase();
+                    providedLineSet.add(lower);
+                    reasonLines.push(trimmed);
+                }
+            });
+        }
+
+        if (!providedLineSet.has(trendLine.toLowerCase())) {
+            reasonLines.unshift(trendLine);
+        }
+
+        if (reasonLines.length === 0) {
+            reasonLines.push(trendLine);
+            reasonLines.push('指标变化有限，保持观察');
+        }
+
+        const normalizeSuggestion = (value) => {
+            if (typeof value === 'string') {
+                const lower = value.trim().toLowerCase();
+                if (lower === 'buy' || lower === 'sell') return lower;
+            }
+            return null;
+        };
+
+        let suggestion = normalizeSuggestion(options.suggestion);
+        if (!suggestion) {
+            if (options.longBias === true && options.shortBias !== true) {
+                suggestion = 'buy';
+            } else if (options.shortBias === true && options.longBias !== true) {
+                suggestion = 'sell';
+            }
+        }
+        if (!suggestion) {
+            const threshold = typeof options.threshold === 'number' && options.threshold > 0
+                ? options.threshold
+                : 0.5;
+            if (score >= threshold) suggestion = 'buy';
+            else if (score <= -threshold) suggestion = 'sell';
+        }
+
+        const level = typeof options.level === 'number'
+            ? options.level
+            : this.deriveTrendLevel(score);
+        const price = typeof options.price === 'number' && Number.isFinite(options.price)
+            ? options.price
+            : undefined;
+
+        if (!Array.isArray(this.monitorTrendData)) {
+            this.monitorTrendData = [];
+        }
+
+        const newPoint = {
+            x,
+            y: score,
+            reason: reasonLines.join('\n'),
+            suggestion,
+            level,
+            price
+        };
+
+        let inserted = false;
+        for (let i = 0; i < this.monitorTrendData.length; i++) {
+            const existing = this.monitorTrendData[i];
+            if (!existing) continue;
+            if (existing.x === x) {
+                this.monitorTrendData[i] = { ...existing, ...newPoint };
+                inserted = true;
+                break;
+            }
+            if (existing.x > x) {
+                this.monitorTrendData.splice(i, 0, newPoint);
+                inserted = true;
+                break;
+            }
+        }
+        if (!inserted) {
+            this.monitorTrendData.push(newPoint);
+        }
+
+        const windowMs = typeof options.windowMs === 'number' && options.windowMs > 0
+            ? options.windowMs
+            : null;
+        const maxPoints = typeof options.maxPoints === 'number' && options.maxPoints > 0
+            ? Math.floor(options.maxPoints)
+            : 1200;
+
+        if (windowMs) {
+            const cutoff = x - windowMs;
+            while (this.monitorTrendData.length && this.monitorTrendData[0].x < cutoff) {
+                this.monitorTrendData.shift();
+            }
+        }
+
+        while (this.monitorTrendData.length > maxPoints) {
+            this.monitorTrendData.shift();
+        }
+
+        if (this.monitorTrendChart?.data?.datasets?.[0]) {
+            this.monitorTrendChart.data.datasets[0].data = this.monitorTrendData;
+            if (this.monitorChart?.scales?.x) {
+                const scale = this.monitorChart.scales.x;
+                const min = this.normalizeMonitorTime(scale.min);
+                const max = this.normalizeMonitorTime(scale.max);
+                if (min != null) this.monitorTrendChart.options.scales.x.min = min;
+                if (max != null) this.monitorTrendChart.options.scales.x.max = max;
+            } else if (this.currentMonitor?.chartTimeRange) {
+                this.applyRangeToTrendChart(this.currentMonitor.chartTimeRange);
+            }
+            this.monitorTrendChart.update('none');
+        }
     }
 
     syncCharts(source, target) {
@@ -1384,6 +1561,8 @@ class TradingApp {
                 }
             }
 
+            const previousSymbol = this.currentMonitor?.symbol;
+
             // 保存当前监控上下文
             this.currentMonitor = {
                 symbol,
@@ -1397,6 +1576,14 @@ class TradingApp {
                 lastOrderTime, // 添加最近订单时间
                 timeAlertSent: false,
             };
+
+            if (!previousSymbol || previousSymbol !== symbol) {
+                this.resetMonitorTrendData();
+            }
+
+            if (this.domManager && typeof this.domManager.handleMonitorSymbolChange === 'function') {
+                await this.domManager.handleMonitorSymbolChange(symbol);
+            }
 
             // 清理输入框
             const slInput = document.getElementById('monitorStopLoss');
@@ -1507,11 +1694,8 @@ class TradingApp {
                 const modal = new bootstrap.Modal(modalEl);
                 modal.show();
 
-                // WebSocket自动更新监控图表，刷新按钮已禁用
-                const refreshBtn = document.getElementById('refreshMonitorChartBtn');
-                if (refreshBtn) {
-                    refreshBtn.disabled = true;
-                    refreshBtn.title = 'WebSocket自动更新，无需手动刷新';
+                if (this.domManager && typeof this.domManager.updateToggleButton === 'function') {
+                    this.domManager.updateToggleButton();
                 }
                 
                 // 重置缩放按钮事件
@@ -3040,9 +3224,25 @@ class TradingApp {
                                     datasets: [{
                                         label: 'Trend Score',
                                         data: this.monitorTrendData,
-                                        borderColor: 'orange',
+                                        borderColor: 'rgba(255,165,0,0.9)',
                                         backgroundColor: 'rgba(255,165,0,0.1)',
-                                        pointRadius: 0,
+                                        pointRadius: 3,
+                                        pointHoverRadius: 5,
+                                        pointHitRadius: 12,
+                                        pointBackgroundColor: (ctx) => {
+                                            const suggestion = ctx.raw?.suggestion;
+                                            if (suggestion === 'buy') return '#16a34a';
+                                            if (suggestion === 'sell') return '#dc2626';
+                                            const value = ctx.parsed?.y;
+                                            if (typeof value === 'number') {
+                                                return value >= 0 ? '#60a5fa' : '#f87171';
+                                            }
+                                            return '#94a3b8';
+                                        },
+                                        pointBorderColor: '#ffffff',
+                                        pointBorderWidth: 1,
+                                        tension: 0.2,
+                                        spanGaps: true,
                                         yAxisID: 'y'
                                     }]
                                 },
@@ -3057,7 +3257,29 @@ class TradingApp {
                                             zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
                                             onZoom: ({chart}) => this.syncCharts(chart, this.monitorChart),
                                             onPan: ({chart}) => this.syncCharts(chart, this.monitorChart)
-                                        }
+                                        },
+                                        tooltip: {
+                                            callbacks: {
+                                                label: (context) => {
+                                                    const lines = [];
+                                                    const value = context.parsed?.y;
+                                                    if (typeof value === 'number') {
+                                                        lines.push(`Trend Score: ${value.toFixed(2)}`);
+                                                    }
+                                                    const rawReason = context.raw?.reason;
+                                                    if (rawReason) {
+                                                        String(rawReason).split('\n').forEach((line) => {
+                                                            if (line) lines.push(line);
+                                                        });
+                                                    }
+                                                    if (context.raw?.suggestion) {
+                                                        lines.push(context.raw.suggestion === 'buy' ? '建议：Buy' : '建议：Sell');
+                                                    }
+                                                    return lines;
+                                                }
+                                            }
+                                        },
+                                        trendSignalLabel: { offset: 18 }
                                     },
                                     scales: {
                                         x: {
@@ -3071,10 +3293,12 @@ class TradingApp {
                                             beginAtZero: true,
                                             suggestedMin: -1,
                                             suggestedMax: 1,
+                                            grace: '20%',
                                             title: { display: true, text: 'Trend Score' }
                                         }
                                     }
-                                }
+                                },
+                                plugins: [TrendSignalLabelPlugin]
                             });
                         } else {
                             const range = this.extractRangeFromMonitorChart();
@@ -3483,6 +3707,43 @@ class TradingApp {
             if (Array.isArray(payload)) payload = payload[0] || {};
             if (!payload || (payload.symbol && payload.symbol !== symbol)) return;
 
+            const trendScore = typeof payload.trend_score === 'number' ? payload.trend_score : null;
+            let trendReason = '';
+            let trendSuggestion = null;
+            let trendLevel = typeof payload.trend_level === 'number' ? payload.trend_level : null;
+            const trendLongBias = payload.long === true || payload.trend_long === true;
+            const trendShortBias = payload.short === true || payload.trend_short === true;
+            let trendPointTime = null;
+
+            if (trendScore !== null) {
+                const reasonPieces = [];
+                const pushReason = (value) => {
+                    if (value == null) return;
+                    if (Array.isArray(value)) {
+                        value.forEach(pushReason);
+                        return;
+                    }
+                    const str = String(value).trim();
+                    if (str) reasonPieces.push(str);
+                };
+                pushReason(payload.trend_reason);
+                pushReason(payload.trend_reasoning);
+                pushReason(payload.trend_reason_lines);
+                pushReason(payload.trend_reasons);
+                pushReason(payload.trend_comment);
+                pushReason(payload.reason);
+                if (reasonPieces.length) {
+                    trendReason = reasonPieces.join('\n');
+                }
+                const suggestionField = payload.trend_suggestion ?? payload.trend_signal ?? payload.trendSignal ?? payload.suggestion;
+                if (typeof suggestionField === 'string') {
+                    const lower = suggestionField.trim().toLowerCase();
+                    if (lower === 'buy' || lower === 'sell') {
+                        trendSuggestion = lower;
+                    }
+                }
+            }
+
             let price = null;
             if (typeof payload.last === 'number') price = payload.last;
             else if (typeof payload.price === 'number') price = payload.price;
@@ -3609,6 +3870,9 @@ class TradingApp {
                 }
 
                 const timeValue = intervalTime.getTime();
+                if (trendScore !== null) {
+                    trendPointTime = timeValue;
+                }
 
                 if (chartType === 'candlestick') {
                     const ohlcData = dataset.data;
@@ -3734,6 +3998,38 @@ class TradingApp {
                         this.monitorTrendChart.update('none');
                     }
                 }
+            }
+
+            if (trendScore !== null) {
+                if (trendPointTime == null) {
+                    const rawTime = payload.timestamp ?? payload.time ?? payload.last_time ?? payload.lastTimestamp ?? payload.ts;
+                    const normalized = this.normalizeMonitorTime(rawTime);
+                    if (normalized != null) {
+                        trendPointTime = normalized;
+                    } else {
+                        trendPointTime = Date.now();
+                    }
+                }
+
+                let maxPoints;
+                const primaryDataset = this.monitorChart?.data?.datasets?.[0];
+                if (primaryDataset && Array.isArray(primaryDataset.data)) {
+                    const length = primaryDataset.data.length || 0;
+                    maxPoints = Math.max(300, length + 60);
+                } else if (Array.isArray(this.currentMonitor?.displayTimes)) {
+                    maxPoints = Math.max(300, this.currentMonitor.displayTimes.length + 60);
+                }
+
+                this.addMonitorTrendPoint(trendPointTime, trendScore, {
+                    reason: trendReason,
+                    suggestion: trendSuggestion,
+                    level: trendLevel,
+                    price,
+                    maxPoints,
+                    longBias: trendLongBias,
+                    shortBias: trendShortBias,
+                    threshold: 0.5
+                });
             }
 
             // 更新预期PnL显示
