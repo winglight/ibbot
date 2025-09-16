@@ -188,8 +188,24 @@ class DOMProcessor:
 
     # ------------------------------------------------------------------
     def on_depth_update(self, data: Dict) -> None:
-        bids = [(int(p), int(s)) for p, s in data.get("bids", [])]
-        asks = [(int(p), int(s)) for p, s in data.get("asks", [])]
+        def _to_levels(levels: List[Tuple[float, float]]) -> List[Tuple[int, int]]:
+            normalized: List[Tuple[int, int]] = []
+            for price, size in levels:
+                if price is None:
+                    continue
+                try:
+                    price_tick = int(round(float(price) * 100))
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    size_int = int(size)
+                except (TypeError, ValueError):
+                    continue
+                normalized.append((price_tick, size_int))
+            return normalized
+
+        bids = _to_levels(data.get("bids", []))
+        asks = _to_levels(data.get("asks", []))
         if bids and asks:
             mid_tick = int(round((bids[0][0] + asks[0][0]) / 2))
         elif bids:

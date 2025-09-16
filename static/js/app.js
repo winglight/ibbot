@@ -133,9 +133,35 @@ class TradingApp {
     resetMonitorTrendData() {
         this.monitorTrendData = [];
         if (this.monitorTrendChart?.data?.datasets?.[0]) {
-            this.monitorTrendChart.data.datasets[0].data = this.monitorTrendData;
+            this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
             this.monitorTrendChart.update('none');
         }
+    }
+
+    formatTrendPointForChart(point) {
+        if (!point || typeof point !== 'object') return null;
+        const rawTime = point.timestamp ?? point.x ?? point.time ?? point.date;
+        const normalized = this.normalizeMonitorTime(rawTime);
+        if (normalized == null) return null;
+        return {
+            ...point,
+            timestamp: normalized,
+            x: new Date(normalized)
+        };
+    }
+
+    getFormattedTrendChartData() {
+        if (!Array.isArray(this.monitorTrendData)) return [];
+        return this.monitorTrendData
+            .map(point => this.formatTrendPointForChart(point))
+            .filter(point => point !== null);
+    }
+
+    getTrendChartScaleValue(value) {
+        const normalized = this.normalizeMonitorTime(value);
+        if (normalized == null) return undefined;
+        const date = new Date(normalized);
+        return Number.isNaN(date.getTime()) ? undefined : date;
     }
 
     deriveTrendLevel(score) {
@@ -226,6 +252,7 @@ class TradingApp {
 
         const newPoint = {
             x,
+            timestamp: x,
             y: score,
             reason: reasonLines.join('\n'),
             suggestion,
@@ -278,7 +305,7 @@ class TradingApp {
 
         if (this.monitorTrendChart?.data?.datasets?.[0]) {
             console.log('[App] addMonitorTrendPoint - 更新monitorTrendChart，数据点数量:', this.monitorTrendData.length);
-            this.monitorTrendChart.data.datasets[0].data = this.monitorTrendData;
+            this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
 
             const range = this.extractRangeFromMonitorChart();
             if (range) {
@@ -441,8 +468,10 @@ class TradingApp {
         if (!this.monitorTrendChart || !range) return;
         const scale = this.monitorTrendChart.options?.scales?.x;
         if (!scale) return;
-        scale.min = range.min;
-        scale.max = range.max;
+        const min = this.getTrendChartScaleValue(range.min);
+        const max = this.getTrendChartScaleValue(range.max);
+        if (min !== undefined) scale.min = min; else delete scale.min;
+        if (max !== undefined) scale.max = max; else delete scale.max;
     }
 
     // Detect security type based on symbol (simple heuristic for common cases)
@@ -3264,7 +3293,7 @@ class TradingApp {
                                 data: {
                                     datasets: [{
                                         label: 'Trend Score',
-                                        data: this.monitorTrendData,
+                                        data: this.getFormattedTrendChartData(),
                                         borderColor: 'rgba(255,165,0,0.9)',
                                         backgroundColor: 'rgba(255,165,0,0.1)',
                                         pointRadius: 3,
@@ -3326,8 +3355,8 @@ class TradingApp {
                                         x: {
                                             type: 'time',
                                             time: { unit: 'minute', displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'MMM dd' } },
-                                            min: timeRange?.min ?? this.monitorTrendData[0]?.x ?? null,
-                                            max: timeRange?.max ?? this.monitorTrendData[this.monitorTrendData.length - 1]?.x ?? null
+                                            min: this.getTrendChartScaleValue(timeRange?.min ?? this.monitorTrendData[0]?.x) ?? null,
+                                            max: this.getTrendChartScaleValue(timeRange?.max ?? this.monitorTrendData[this.monitorTrendData.length - 1]?.x) ?? null
                                         },
                                         y: {
                                             position: 'left',
@@ -3346,6 +3375,7 @@ class TradingApp {
                         } else {
                             console.log('[loadMonitorChart] Updating existing monitorTrendChart');
                             console.log('[loadMonitorChart] Current chart data length:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
+                            this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
                             const range = this.extractRangeFromMonitorChart();
                             if (range) {
                                 console.log('[loadMonitorChart] Applying range to trend chart:', range);

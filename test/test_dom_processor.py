@@ -62,6 +62,18 @@ def test_compute_features_and_cvd():
     assert pytest.approx(m["zscore_obi5"], rel=1e-5) == 1.0
 
 
+def test_mid_price_preserves_scale():
+    p = DOMProcessor(window=5, max_levels=1)
+    p.on_depth_update({"bids": [(4321.25, 5)], "asks": [(4321.75, 7)]})
+    m = p.last_metrics
+    assert pytest.approx(m["mid_price"], rel=1e-6) == 4321.5
+    idx = (p.buffer._idx - 1) % p.buffer.window
+    stored_bid = int(p.buffer.book[idx, 0, 0, 0])
+    stored_ask = int(p.buffer.book[idx, 1, 0, 0])
+    assert stored_bid == int(round(4321.25 * 100))
+    assert stored_ask == int(round(4321.75 * 100))
+
+
 def test_detect_events_absorb():
     p = DOMProcessor(window=5, max_levels=1)
     p.on_depth_update({"bids": [(100, 10)], "asks": [(101, 20)]})
