@@ -1619,6 +1619,66 @@ class TradingApp {
                 await this.loadOrders();
             } catch (e) {}
 
+            const args = Array.from(arguments);
+            const positionArgProvided = args.length >= 2;
+            const priceArgProvided = args.length >= 3;
+            const avgArgProvided = args.length >= 4;
+            const pnlArgProvided = args.length >= 5;
+            const pnlPctArgProvided = args.length >= 6;
+
+            let resolvedPositionQty = positionArgProvided ? Number(positionQty) || 0 : null;
+            let resolvedCurrentPrice = priceArgProvided ? Number(currentPrice) || 0 : null;
+            let resolvedAvgCost = avgArgProvided ? Number(avgCost) || 0 : null;
+            let resolvedPnl = pnlArgProvided ? Number(pnl) || 0 : null;
+            let resolvedPnlPercent = pnlPctArgProvided ? Number(pnlPercent) || 0 : null;
+
+            const normalizedSymbol = typeof symbol === 'string' ? symbol.trim() : '';
+            const lookupSymbol = normalizedSymbol ? normalizedSymbol.toUpperCase() : '';
+            if (lookupSymbol) {
+                let positionInfo = this.dataManager?.getPosition?.(lookupSymbol);
+                if (!positionInfo && this.dataManager?.loadPortfolio) {
+                    try {
+                        await this.dataManager.loadPortfolio();
+                        positionInfo = this.dataManager.getPosition?.(lookupSymbol);
+                    } catch (portfolioErr) {
+                        console.warn('Failed to refresh portfolio for monitor modal:', portfolioErr);
+                    }
+                }
+                if (positionInfo) {
+                    if (!positionArgProvided && resolvedPositionQty === null) {
+                        resolvedPositionQty = Number(positionInfo.position) || 0;
+                    }
+                    if (!avgArgProvided && resolvedAvgCost === null) {
+                        resolvedAvgCost = Number(positionInfo.avg_cost) || 0;
+                    }
+                    if (!priceArgProvided && resolvedCurrentPrice === null) {
+                        resolvedCurrentPrice = Number(positionInfo.current_price) || 0;
+                    }
+                    if (!pnlArgProvided && resolvedPnl === null && positionInfo.unrealized_pnl !== undefined) {
+                        resolvedPnl = Number(positionInfo.unrealized_pnl) || 0;
+                    }
+                    if (!pnlPctArgProvided && resolvedPnlPercent === null && positionInfo.unrealized_pnl_percent !== undefined) {
+                        resolvedPnlPercent = Number(positionInfo.unrealized_pnl_percent) || 0;
+                    }
+                }
+            }
+
+            resolvedPositionQty = resolvedPositionQty ?? 0;
+            resolvedCurrentPrice = resolvedCurrentPrice ?? 0;
+            resolvedAvgCost = resolvedAvgCost ?? 0;
+            resolvedPnl = resolvedPnl ?? 0;
+            resolvedPnlPercent = resolvedPnlPercent ?? 0;
+
+            if (normalizedSymbol) {
+                symbol = normalizedSymbol;
+            }
+
+            positionQty = resolvedPositionQty;
+            currentPrice = resolvedCurrentPrice;
+            avgCost = resolvedAvgCost;
+            pnl = resolvedPnl;
+            pnlPercent = resolvedPnlPercent;
+
             // 填充基础字段
             const symEl = document.getElementById('monitorSymbol');
             if (!symEl) return;
@@ -2750,6 +2810,7 @@ class TradingApp {
                 // 检查当前选择的图表类型
                 const chartTypeRadio = document.querySelector('input[name="chartType"]:checked');
                 const chartType = chartTypeRadio ? chartTypeRadio.value : 'line';
+                const isCandlestick = chartType === 'candlestick';
 
                 // 计算时间跨度相关参数
                 const intervalValue = intervalSelect ? intervalSelect.value : '1min';
@@ -2758,8 +2819,8 @@ class TradingApp {
                 const spanBars = Math.max(1, Math.round(chartSpanMinutes / chartIntervalMinutes));
 
                 // 根据图表类型选择对应的标签和时间数组
-                const displayLabels = chartType === 'line' ? validLabels : labels;
-                const displayTimes = chartType === 'line' ? validTimes : timeValues;
+                const displayLabels = isCandlestick ? labels : validLabels;
+                const displayTimes = isCandlestick ? timeValues : validTimes;
 
                 const normalizedTimes = displayTimes.map(value => {
                     if (value instanceof Date) {
@@ -2826,7 +2887,7 @@ class TradingApp {
 
                     let minIdx;
                     let maxIdx;
-                    if (chartType === 'candlestick' && displayRange && typeof displayRange.minIndex === 'number' && typeof displayRange.maxIndex === 'number') {
+                    if (isCandlestick && displayRange && typeof displayRange.minIndex === 'number' && typeof displayRange.maxIndex === 'number') {
                         minIdx = clampIndex(displayRange.minIndex);
                         maxIdx = clampIndex(displayRange.maxIndex);
                     } else {
@@ -2846,6 +2907,40 @@ class TradingApp {
                     }
                     chartTimeRange = this.currentMonitor.chartTimeRange;
                 }
+
+                const clampLabelIndex = (idx) => {
+                    if (!Number.isFinite(idx)) return 0;
+                    if (!displayLabels.length) return 0;
+                    return Math.max(0, Math.min(displayLabels.length - 1, Math.round(idx)));
+                };
+
+                const clampTimeIndex = (idx) => {
+                    if (!Number.isFinite(idx)) return 0;
+                    if (!normalizedTimes.length) return 0;
+                    return Math.max(0, Math.min(normalizedTimes.length - 1, Math.round(idx)));
+                };
+
+                const getTimeValueForIndex = (idx) => {
+                    if (!normalizedTimes.length) return null;
+                    const clamped = clampTimeIndex(idx);
+                    const value = normalizedTimes[clamped];
+                    if (value instanceof Date) return new Date(value.getTime());
+                    if (typeof value === 'number' && Number.isFinite(value)) return new Date(value);
+                    return null;
+                };
+
+                const getAxisValueForIndex = (idx) => {
+                    if (isCandlestick) {
+                        return getTimeValueForIndex(idx);
+                    }
+                    if (!displayLabels.length) return null;
+                    return displayLabels[clampLabelIndex(idx)];
+                };
+
+                const rangeStartAxisValue = getAxisValueForIndex(startIndex);
+                const rangeEndAxisValue = getAxisValueForIndex(endIndex);
+                const rangeStartTimeMs = isCandlestick ? this.normalizeMonitorTime(rangeStartAxisValue) : null;
+                const rangeEndTimeMs = isCandlestick ? this.normalizeMonitorTime(rangeEndAxisValue) : null;
 
                 // Prepare annotations
                 const annotations = {};
@@ -2950,13 +3045,13 @@ class TradingApp {
                     };
                 }
 
-                if (stopLossPrice && takeProfitPrice) {
+                if (stopLossPrice && takeProfitPrice && rangeStartAxisValue != null && rangeEndAxisValue != null) {
                     const isLong = (this.currentMonitor?.positionQty || 0) > 0;
-                    const xMin = displayLabels[startIndex];
-                    const xMax = displayLabels[endIndex];
+                    const xMin = rangeStartAxisValue;
+                    const xMax = rangeEndAxisValue;
                     const profitColor = isLong ? 'rgba(144,238,144,0.3)' : 'rgba(255,182,193,0.3)';
                     const lossColor = isLong ? 'rgba(255,182,193,0.3)' : 'rgba(144,238,144,0.3)';
-                    
+
                     // 确保无论是多头还是空头，都能正确绘制盈亏方框
                     if (isLong) {
                         annotations.profitBox = { type: 'box', xMin, xMax, yMin: avgCost, yMax: takeProfitPrice, backgroundColor: profitColor, borderWidth: 0 };
@@ -2966,12 +3061,14 @@ class TradingApp {
                         annotations.profitBox = { type: 'box', xMin, xMax, yMin: takeProfitPrice, yMax: avgCost, backgroundColor: profitColor, borderWidth: 0 };
                         annotations.lossBox = { type: 'box', xMin, xMax, yMin: avgCost, yMax: stopLossPrice, backgroundColor: lossColor, borderWidth: 0 };
                     }
-                    
+
                     // 添加时间限制线
                     annotations.timeLimit = {
                         type: 'line',
                         xMin: xMax,
                         xMax: xMax,
+                        value: xMax,
+                        endValue: xMax,
                         borderColor: 'rgba(128,128,128,0.8)',
                         borderWidth: 2,
                         enter: (ctx) => { ctx.chart.canvas.style.cursor = 'ew-resize'; },
@@ -3031,7 +3128,7 @@ class TradingApp {
                 let candlestickFirst = null;
                 let candlestickLast = null;
 
-                if (chartType === 'candlestick') {
+                if (isCandlestick) {
                     const toTimestamp = (raw) => {
                         const parsed = this.parseMonitorChartTime(raw);
                         if (parsed && !Number.isNaN(parsed.getTime())) {
@@ -3053,16 +3150,22 @@ class TradingApp {
                         };
                     }).filter(item => Number.isFinite(item.x) && item.c > 0);
 
-                    futureTimes.forEach(ft => {
-                        ohlcData.push({ x: ft.getTime(), o: NaN, h: NaN, l: NaN, c: NaN, volume: 0 });
-                    });
-
                     candlestickMinIdx = Math.max(0, Math.min(ohlcData.length - 1, (displayRange && typeof displayRange.minIndex === 'number') ? displayRange.minIndex : 0));
                     candlestickMaxIdx = Math.max(0, Math.min(ohlcData.length - 1, (displayRange && typeof displayRange.maxIndex === 'number') ? displayRange.maxIndex : (ohlcData.length - 1)));
                     candlestickStep = ohlcData.length > 1 ? Math.max(1, Math.abs(ohlcData[1].x - ohlcData[0].x)) : 60000;
                     candlestickVisibleCount = Math.max(1, candlestickMaxIdx - candlestickMinIdx + 1);
-                    candlestickFirst = ohlcData[0]?.x ?? null;
-                    candlestickLast = ohlcData[ohlcData.length - 1]?.x ?? null;
+                    const firstDataTime = ohlcData[0]?.x ?? null;
+                    const lastDataTime = ohlcData[ohlcData.length - 1]?.x ?? null;
+                    const paddedStartTime = Number.isFinite(rangeStartTimeMs) ? rangeStartTimeMs : this.normalizeMonitorTime(getTimeValueForIndex(startIndex));
+                    const paddedEndTime = Number.isFinite(rangeEndTimeMs) ? rangeEndTimeMs : this.normalizeMonitorTime(getTimeValueForIndex(endIndex));
+                    candlestickFirst = Number.isFinite(paddedStartTime) ? paddedStartTime : firstDataTime;
+                    candlestickLast = Number.isFinite(paddedEndTime) ? paddedEndTime : lastDataTime;
+                    if (!Number.isFinite(candlestickFirst) && Number.isFinite(firstDataTime)) {
+                        candlestickFirst = firstDataTime;
+                    }
+                    if (!Number.isFinite(candlestickLast) && Number.isFinite(lastDataTime)) {
+                        candlestickLast = lastDataTime;
+                    }
 
                     console.log('OHLC data sample:', ohlcData.slice(0, 3));
                     console.log('Total OHLC points:', ohlcData.length);
@@ -3072,6 +3175,7 @@ class TradingApp {
                     chartConfig = {
                         type: 'candlestick',
                         data: {
+                            labels: labels,
                             datasets: [
                                 {
                                     type: 'candlestick',
@@ -3133,6 +3237,19 @@ class TradingApp {
                     };
                 }
 
+                const resolvedCandlestickMin = isCandlestick
+                    ? (Number.isFinite(chartTimeRange?.min) ? chartTimeRange.min : candlestickFirst)
+                    : null;
+                const resolvedCandlestickMax = isCandlestick
+                    ? (Number.isFinite(chartTimeRange?.max) ? chartTimeRange.max : candlestickLast)
+                    : null;
+                const fallbackCandlestickMin = isCandlestick
+                    ? (resolvedCandlestickMin ?? this.normalizeMonitorTime(getTimeValueForIndex(startIndex)) ?? (ohlcData[candlestickMinIdx]?.x ?? candlestickFirst ?? null))
+                    : null;
+                const fallbackCandlestickMax = isCandlestick
+                    ? (resolvedCandlestickMax ?? this.normalizeMonitorTime(getTimeValueForIndex(endIndex)) ?? (ohlcData[candlestickMaxIdx]?.x ?? candlestickLast ?? null))
+                    : null;
+
                 // Create new chart
                 this.monitorChart = new Chart(ctx, {
                     ...chartConfig,
@@ -3140,8 +3257,8 @@ class TradingApp {
                         responsive: true,
                         maintainAspectRatio: false,
                         interaction: {
-                            intersect: chartType === 'candlestick' ? true : false,
-                            mode: chartType === 'candlestick' ? 'nearest' : 'index'
+                            intersect: isCandlestick ? true : false,
+                            mode: isCandlestick ? 'nearest' : 'index'
                         },
                         plugins: {
                             title: {
@@ -3149,16 +3266,16 @@ class TradingApp {
                                 text: `${symbol} - Real-time Price Chart`
                             },
                             legend: {
-                                display: chartType === 'candlestick'
+                                display: isCandlestick
                             },
                             annotation: {
                                 annotations: annotations
                             },
                             zoom: {
                                 limits: {
-                                    x: chartType === 'candlestick' ?
-                                        {min: chartTimeRange?.min ?? candlestickFirst, max: chartTimeRange?.max ?? candlestickLast} :
-                                        {min: 0, max: Math.max(10, labels.length - 1)},
+                                    x: isCandlestick ?
+                                        { min: resolvedCandlestickMin ?? fallbackCandlestickMin, max: resolvedCandlestickMax ?? fallbackCandlestickMax } :
+                                        { min: 0, max: Math.max(10, labels.length - 1) },
                                     y: {min: 'original', max: 'original'}
                                 },
                                 pan: {
@@ -3166,26 +3283,28 @@ class TradingApp {
                                     mode: 'x',
                                     modifierKey: null,
                                     threshold: 5,
-                                    rangeMin: chartType === 'candlestick' ?
-                                        {x: chartTimeRange?.min ?? candlestickFirst} : {x: 0},
-                                    rangeMax: chartType === 'candlestick' ?
-                                        {x: chartTimeRange?.max ?? candlestickLast} : {x: Math.max(10, labels.length - 1)}
+                                    rangeMin: isCandlestick ?
+                                        { x: resolvedCandlestickMin ?? fallbackCandlestickMin } : { x: 0 },
+                                    rangeMax: isCandlestick ?
+                                        { x: resolvedCandlestickMax ?? fallbackCandlestickMax } : { x: Math.max(10, labels.length - 1) }
                                 },
                                 zoom: {
                                     wheel: {
                                         enabled: true,
                                         modifierKey: null,
-                                        speed: chartType === 'candlestick' ? 0.05 : 0.1
+                                        speed: isCandlestick ? 0.05 : 0.1
                                     },
                                     pinch: {
                                         enabled: true
                                     },
                                     mode: 'x',
-                                    limits: chartType === 'candlestick' ? {
+                                    limits: isCandlestick ? {
                                         x: {
                                             min: candlestickVisibleCount * candlestickStep,
                                             max: (() => {
-                                                const span = (chartTimeRange?.max ?? candlestickLast ?? 0) - (chartTimeRange?.min ?? candlestickFirst ?? 0);
+                                                const minBound = resolvedCandlestickMin ?? fallbackCandlestickMin ?? candlestickFirst ?? 0;
+                                                const maxBound = resolvedCandlestickMax ?? fallbackCandlestickMax ?? candlestickLast ?? 0;
+                                                const span = maxBound - minBound;
                                                 return span > 0 ? span : candlestickVisibleCount * candlestickStep;
                                             })()
                                         }
@@ -3209,7 +3328,7 @@ class TradingApp {
                                     text: 'Time'
                                 },
                                 // 蜡烛图使用时间轴
-                                ...(chartType === 'candlestick' ? {
+                                ...(isCandlestick ? {
                                     type: 'time',
                                     adapters: {
                                         date: {
@@ -3230,8 +3349,8 @@ class TradingApp {
                                         maxRotation: 45
                                     },
                                     // 蜡烛图的显示范围控制
-                                    min: chartTimeRange?.min ?? ohlcData[candlestickMinIdx]?.x,
-                                    max: chartTimeRange?.max ?? ohlcData[candlestickMaxIdx]?.x,
+                                    min: resolvedCandlestickMin ?? fallbackCandlestickMin,
+                                    max: resolvedCandlestickMax ?? fallbackCandlestickMax,
                                     // 为右边数据点添加空间
                                     grace: '10%'
                                 } : {
@@ -3257,7 +3376,7 @@ class TradingApp {
                                 },
                                 beginAtZero: false,
                                 // 为蜡烛图设置合适的价格范围
-                                ...(chartType === 'candlestick' && response.data && response.data.length > 0 ? {
+                                ...(isCandlestick && response.data && response.data.length > 0 ? {
                                     min: Math.min(...response.data.map(item => parseFloat(item.low)).filter(p => p > 0)) * 0.998,
                                     max: Math.max(...response.data.map(item => parseFloat(item.high)).filter(p => p > 0)) * 1.002
                                 } : {})
@@ -3299,10 +3418,19 @@ class TradingApp {
                                         }
                                     } else if (key === 'timeLimit' && annotations[key].type === 'line') {
                                         const annotation = annotations[key];
-                                        const labels = chart.data.labels || [];
-                                        const lineIndex = labels.indexOf(annotation.xMin || annotation.value);
-                                        if (Math.abs(dataX - lineIndex) < 0.5) {
-                                            overVLine = true;
+                                        if (isCandlestick) {
+                                            const annotationValue = annotation.xMin ?? annotation.value ?? annotation.xMax;
+                                            const annotationTime = this.normalizeMonitorTime(annotationValue);
+                                            const tolerance = Math.max(candlestickStep || 60000, 1) * 0.5;
+                                            if (annotationTime != null && Math.abs(dataX - annotationTime) <= tolerance) {
+                                                overVLine = true;
+                                            }
+                                        } else {
+                                            const labels = chart.data.labels || [];
+                                            const lineIndex = labels.indexOf(annotation.xMin || annotation.value);
+                                            if (lineIndex !== -1 && Math.abs(dataX - lineIndex) < 0.5) {
+                                                overVLine = true;
+                                            }
                                         }
                                     }
                                 });
@@ -3441,7 +3569,7 @@ class TradingApp {
                     const handleKeyDown = (event) => {
                         if (!this.monitorChart) return;
                         
-                        const panAmount = chartType === 'candlestick' ?
+                        const panAmount = isCandlestick ?
                             candlestickStep * 5 : // 5个数据点的时间跨度
                             5; // 折线图移动5个索引
                         
@@ -3493,12 +3621,23 @@ class TradingApp {
                             }
                         } else if (key === 'timeLimit' && annotations[key].type === 'line') {
                             const annotation = annotations[key];
-                            const labels = this.monitorChart.data.labels || [];
-                            const lineIndex = labels.indexOf(annotation.xMin || annotation.value);
-                            if (Math.abs(dataX - lineIndex) < 0.5) {
-                                this.monitorChart._draggedAnnotation = key;
-                                this.monitorChart._isDragging = true;
-                                event.preventDefault();
+                            if (isCandlestick) {
+                                const annotationValue = annotation.xMin ?? annotation.value ?? annotation.xMax;
+                                const annotationTime = this.normalizeMonitorTime(annotationValue);
+                                const tolerance = Math.max(candlestickStep || 60000, 1) * 0.5;
+                                if (annotationTime != null && Math.abs(dataX - annotationTime) <= tolerance) {
+                                    this.monitorChart._draggedAnnotation = key;
+                                    this.monitorChart._isDragging = true;
+                                    event.preventDefault();
+                                }
+                            } else {
+                                const labels = this.monitorChart.data.labels || [];
+                                const lineIndex = labels.indexOf(annotation.xMin || annotation.value);
+                                if (lineIndex !== -1 && Math.abs(dataX - lineIndex) < 0.5) {
+                                    this.monitorChart._draggedAnnotation = key;
+                                    this.monitorChart._isDragging = true;
+                                    event.preventDefault();
+                                }
                             }
                         }
                     });
@@ -3519,19 +3658,54 @@ class TradingApp {
 
                     if (annotationKey === 'timeLimit') {
                         const dataX = this.monitorChart.scales.x.getValueForPixel(canvasPosition.x);
-                        const labels = this.monitorChart.data.labels || [];
-                        let index = Math.round(dataX);
-                        if (index <= this.currentMonitor.riskStartIndex) index = this.currentMonitor.riskStartIndex + 1;
-                        if (index >= labels.length) index = labels.length - 1;
-                        const label = labels[index];
-                        annotation.xMin = label;
-                        annotation.xMax = label;
-                        if (annotations.profitBox) annotations.profitBox.xMax = label;
-                        if (annotations.lossBox) annotations.lossBox.xMax = label;
-                        const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
-                        const intervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
-                        const newSpan = (index - this.currentMonitor.riskStartIndex) * intervalMinutes;
-                        this.currentMonitor.maxTimeSpan = newSpan;
+                        if (isCandlestick) {
+                            const times = Array.isArray(this.currentMonitor?.displayTimes) ? this.currentMonitor.displayTimes : [];
+                            let nearestIndex = Math.max((this.currentMonitor?.riskStartIndex ?? 0) + 1, 0);
+                            if (times.length) {
+                                let smallestDiff = Number.POSITIVE_INFINITY;
+                                for (let i = nearestIndex; i < times.length; i++) {
+                                    const ts = this.normalizeMonitorTime(times[i]);
+                                    if (ts == null) continue;
+                                    const diff = Math.abs(ts - dataX);
+                                    if (diff < smallestDiff) {
+                                        smallestDiff = diff;
+                                        nearestIndex = i;
+                                    }
+                                }
+                                if (nearestIndex >= times.length) nearestIndex = times.length - 1;
+                            }
+                            if (nearestIndex <= (this.currentMonitor?.riskStartIndex ?? 0)) {
+                                nearestIndex = Math.min((this.currentMonitor?.riskStartIndex ?? 0) + 1, Math.max(times.length - 1, 0));
+                            }
+                            const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
+                            const intervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
+                            const timeValue = times[nearestIndex];
+                            const axisDate = timeValue instanceof Date ? new Date(timeValue.getTime())
+                                : (typeof timeValue === 'number' && Number.isFinite(timeValue) ? new Date(timeValue) : null);
+                            if (axisDate) {
+                                annotation.xMin = axisDate;
+                                annotation.xMax = axisDate;
+                                annotation.value = axisDate;
+                                annotation.endValue = axisDate;
+                                if (annotations.profitBox) annotations.profitBox.xMax = axisDate;
+                                if (annotations.lossBox) annotations.lossBox.xMax = axisDate;
+                            }
+                            this.currentMonitor.maxTimeSpan = (nearestIndex - (this.currentMonitor?.riskStartIndex ?? 0)) * intervalMinutes;
+                        } else {
+                            const labels = this.monitorChart.data.labels || [];
+                            let index = Math.round(dataX);
+                            if (index <= this.currentMonitor.riskStartIndex) index = this.currentMonitor.riskStartIndex + 1;
+                            if (index >= labels.length) index = labels.length - 1;
+                            const label = labels[index];
+                            annotation.xMin = label;
+                            annotation.xMax = label;
+                            if (annotations.profitBox) annotations.profitBox.xMax = label;
+                            if (annotations.lossBox) annotations.lossBox.xMax = label;
+                            const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
+                            const intervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
+                            const newSpan = (index - this.currentMonitor.riskStartIndex) * intervalMinutes;
+                            this.currentMonitor.maxTimeSpan = newSpan;
+                        }
                     } else {
                         const dataY = this.monitorChart.scales.y.getValueForPixel(canvasPosition.y);
                         const adjustedPrice = Math.round(dataY / minStep) * minStep;
