@@ -168,7 +168,10 @@ class DOMManager {
             } else if (Array.isArray(this.app.monitorTrendData)) {
                 this.app.monitorTrendData = [];
                 if (this.app.monitorTrendChart?.data?.datasets?.[0]) {
-                    this.app.monitorTrendChart.data.datasets[0].data = this.app.monitorTrendData;
+                    const formatted = typeof this.app.getFormattedTrendChartData === 'function'
+                        ? this.app.getFormattedTrendChartData()
+                        : [];
+                    this.app.monitorTrendChart.data.datasets[0].data = formatted;
                     this.app.monitorTrendChart.update('none');
                 }
             }
