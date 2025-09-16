@@ -53,6 +53,8 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
             'risk_triggered': 'Risk Rule Triggered',
             'strategy_started': 'Strategy Started',
             'strategy_stopped': 'Strategy Stopped',
+            'dom_level_3': 'DOM Level 3',
+            'dom_level_4': 'DOM Level 4',
         }
         label_to_token = {v: k for k, v in token_to_label.items()}
 
@@ -118,6 +120,8 @@ async def update_notification_settings(settings: Dict[str, Any], user: Optional[
             'risk_triggered': 'Risk Rule Triggered',
             'strategy_started': 'Strategy Started',
             'strategy_stopped': 'Strategy Stopped',
+            'dom_level_3': 'DOM Level 3',
+            'dom_level_4': 'DOM Level 4',
         }
         label_to_token = {v: k for k, v in token_to_label.items()}
 

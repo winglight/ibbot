@@ -58,11 +58,14 @@ async def update_dom_config(cfg: DOMConfigModel, user: Optional[str] = Depends(g
 
 
 @router.get("/api/dom/data")
-async def get_dom_data(user: Optional[str] = Depends(get_current_user)):
+async def get_dom_data(
+    symbol: Optional[str] = None,
+    user: Optional[str] = Depends(get_current_user),
+):
     return {
         "success": True,
-        "metrics": dom_service.get_metrics(),
-        "depth": dom_service.get_last_depth(),
+        "metrics": dom_service.get_metrics(symbol),
+        "depth": dom_service.get_last_depth(symbol),
     }
 
 
@@ -87,11 +90,17 @@ async def dom_ws(websocket: WebSocket, symbol: str):
             await websocket.send_json(
                 {
                     "symbol": symbol,
-                    "metrics": dom_service.get_metrics(),
+                    "metrics": dom_service.get_metrics(symbol),
                     "events": dom_service.get_events(),
                 }
             )
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:
         return
+
+
+@router.get("/api/dom/history/{symbol}")
+async def get_dom_history(symbol: str, user: Optional[str] = Depends(get_current_user)):
+    history = dom_service.get_history(symbol)
+    return {"success": True, "symbol": symbol, **history}
 

@@ -4,14 +4,15 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.routes.dom import router as dom_router
-from src.routes.auth import create_access_token
 import core
+from src.dom_cache import DomCacheManager
 from src.dom_service import get_dom_service
+from src.routes.auth import create_access_token
+from src.routes.dom import router as dom_router
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
     app = FastAPI()
     app.include_router(dom_router)
     token, _ = create_access_token({"sub": "tester"})
@@ -35,6 +36,9 @@ def client(monkeypatch):
     dom_service = get_dom_service()
     dom_service.update_config(50, 10)
     dom_service._alerts.clear()
+    dom_service._last_depth_by_symbol.clear()
+    dom_service._last_metrics_by_symbol.clear()
+    dom_service._cache = DomCacheManager(base_dir=str(tmp_path))
 
     return TestClient(app), headers, callbacks, dom_service
 
@@ -56,9 +60,16 @@ def test_dom_api_flow(client, monkeypatch):
     _feed(cb)
 
     # metrics endpoint
-    r = test_client.get("/api/dom/data", headers=headers)
+    r = test_client.get("/api/dom/data", params={"symbol": "TEST"}, headers=headers)
     metrics = r.json()["metrics"]
     assert metrics["obi5"] == pytest.approx(20 / 120)
+    assert "timestamp" in metrics
+
+    history_resp = test_client.get("/api/dom/history/TEST", headers=headers)
+    assert history_resp.status_code == 200
+    history = history_resp.json()
+    assert history["success"] is True
+    assert len(history.get("metrics", [])) >= 1
 
     # alerts list and ack
     r = test_client.get("/api/alerts", headers=headers)
