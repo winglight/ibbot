@@ -436,12 +436,27 @@ class DOMManager {
                 this.metricsChart.update('none');
             }
 
-            if (trendPoints.length) {
+            const trendWindowMs = 60 * 1000;
+            const trendMaxPoints = 240;
+            const trimmedTrendPoints = (() => {
+                if (!trendPoints.length) return [];
+                const lastTs = trendPoints[trendPoints.length - 1].timestamp;
+                if (Number.isFinite(lastTs)) {
+                    const cutoff = lastTs - trendWindowMs;
+                    const sliced = trendPoints.filter(point => point.timestamp >= cutoff);
+                    if (sliced.length) {
+                        return sliced.slice(-trendMaxPoints);
+                    }
+                }
+                return trendPoints.slice(-trendMaxPoints);
+            })();
+
+            if (trimmedTrendPoints.length) {
                 if (replaceExisting && typeof this.app.setMonitorTrendHistory === 'function') {
-                    this.app.setMonitorTrendHistory(trendPoints);
+                    this.app.setMonitorTrendHistory(trimmedTrendPoints);
                 } else if (Array.isArray(this.app.monitorTrendData)) {
                     const merged = [...this.app.monitorTrendData];
-                    trendPoints.forEach(point => {
+                    trimmedTrendPoints.forEach(point => {
                         const idx = merged.findIndex(item => item && item.timestamp === point.timestamp);
                         if (idx >= 0) {
                             merged[idx] = { ...merged[idx], ...point };
@@ -450,14 +465,22 @@ class DOMManager {
                         }
                     });
                     merged.sort((a, b) => a.timestamp - b.timestamp);
-                    if (typeof this.app.setMonitorTrendHistory === 'function') {
-                        this.app.setMonitorTrendHistory(merged);
+                    let constrained = merged;
+                    const mergedLastTs = merged.length ? merged[merged.length - 1].timestamp : null;
+                    if (Number.isFinite(mergedLastTs)) {
+                        const cutoff = mergedLastTs - trendWindowMs;
+                        constrained = merged.filter(item => item.timestamp >= cutoff).slice(-trendMaxPoints);
                     } else {
-                        this.app.monitorTrendData = merged;
+                        constrained = merged.slice(-trendMaxPoints);
+                    }
+                    if (typeof this.app.setMonitorTrendHistory === 'function') {
+                        this.app.setMonitorTrendHistory(constrained);
+                    } else {
+                        this.app.monitorTrendData = constrained;
                     }
                 }
 
-                const lastPoint = trendPoints[trendPoints.length - 1];
+                const lastPoint = trimmedTrendPoints[trimmedTrendPoints.length - 1];
                 const dir = lastPoint.y > 0 ? 1 : lastPoint.y < 0 ? -1 : 0;
                 this.lastTrendLevel = lastPoint.level || 0;
                 this.lastTrendDir = dir;
