@@ -2737,6 +2737,7 @@ class TradingApp {
                 let candlestickVisibleCount = 1;
                 let candlestickFirst = null;
                 let candlestickLast = null;
+
                 if (chartType === 'candlestick') {
                     const toTimestamp = (raw) => {
                         const parsed = this.parseMonitorChartTime(raw);
