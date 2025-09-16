@@ -5,7 +5,7 @@
 import sqlite3
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from enum import Enum
 from loguru import logger
 import re
@@ -238,7 +238,7 @@ class OrderManager:
         except Exception as e:
             order_logger.error(f"Error loading orders from database: {e}")
 
-    def create_order(self, 
+    def create_order(self,
                     order_id: str,
                     symbol: str,
                     action: str,
@@ -313,8 +313,85 @@ class OrderManager:
             order_logger.error(f"Error creating order {order_id}: {e}")
             raise
 
-    def update_order_status(self, 
-                          order_id: str, 
+    def add_order(self, order: "Order" | Dict[str, Any]) -> "Order":
+        """将外部生成的订单同步到订单管理器
+
+        该方法会在订单已存在时更新基础信息；如果是新订单，则写入内存与数据库。
+        """
+        try:
+            if not isinstance(order, Order):
+                if isinstance(order, dict):
+                    order = Order(**order)
+                else:
+                    raise TypeError("order must be an Order instance or dict")
+
+            # 统一字符串格式的订单ID
+            order_id = str(order.order_id)
+            order.order_id = order_id
+
+            # 确保关键字段有默认值
+            if not order.status:
+                order.status = OrderStatus.SUBMITTED.value
+            if not order.order_source:
+                order.order_source = OrderSource.MANUAL.value
+            if order.created_at is None:
+                order.created_at = datetime.now()
+            order.updated_at = datetime.now()
+            order.is_deleted = 0
+
+            # 如果之前被软删除，重新激活
+            if order_id in self.deleted_order_ids:
+                self.deleted_order_ids.discard(order_id)
+
+            existing_order = self.orders.get(order_id)
+            if existing_order:
+                status_priority = {
+                    "PendingSubmit": 1,
+                    "Submitted": 2,
+                    "PartiallyFilled": 3,
+                    "Filled": 4,
+                    "Cancelled": 4,
+                    "Rejected": 4,
+                }
+
+                new_status = order.status or existing_order.status
+                if new_status:
+                    old_priority = status_priority.get(existing_order.status, 0)
+                    new_priority = status_priority.get(new_status, 0)
+                    if new_priority >= old_priority:
+                        existing_order.status = new_status
+
+                for field in fields(Order):
+                    name = field.name
+                    if name in {"order_id", "status"}:
+                        continue
+                    value = getattr(order, name)
+                    if value is None:
+                        continue
+                    if name == "created_at" and existing_order.created_at is not None:
+                        continue
+                    if name == "updated_at":
+                        continue
+                    setattr(existing_order, name, value)
+
+                existing_order.updated_at = datetime.now()
+                existing_order.is_deleted = 0
+                self._update_order_in_database(existing_order)
+                order_logger.info(f"🔄 更新已有订单信息: {order_id}")
+                return existing_order
+
+            # 新订单写入内存与数据库
+            self.orders[order_id] = order
+            self._save_order_to_database(order)
+            order_logger.info(f"📥 新订单已添加到管理器: {order_id}")
+            return order
+
+        except Exception as e:
+            order_logger.error(f"Error adding order {getattr(order, 'order_id', 'unknown')}: {e}")
+            raise
+
+    def update_order_status(self,
+                          order_id: str,
                           status: str,
                           fill_price: Optional[float] = None,
                           executed_at: Optional[datetime] = None,
