@@ -193,6 +193,8 @@ class TradingApp {
         this.monitorChartRenderTimeout = null;
         // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制
         this.pendingMonitorChartRender = null;
+        // 图表联动时的递归保护开关
+        this._syncingCharts = false;
 
         // 初始化登录管理器
         this.loginManager = new LoginManager(this);
@@ -546,22 +548,29 @@ class TradingApp {
 
     syncCharts(source, target) {
         if (!source || !target) return;
+        if (this._syncingCharts) return;
 
-        const isMonitorTrendPair =
-            (source === this.monitorChart && target === this.monitorTrendChart) ||
-            (source === this.monitorTrendChart && target === this.monitorChart);
+        this._syncingCharts = true;
 
-        if (!isMonitorTrendPair) {
-            const srcScale = source.scales?.x;
-            const targetScale = target.options?.scales?.x;
-            if (srcScale && targetScale) {
-                targetScale.min = srcScale.min;
-                targetScale.max = srcScale.max;
+        try {
+            const isMonitorTrendPair =
+                (source === this.monitorChart && target === this.monitorTrendChart) ||
+                (source === this.monitorTrendChart && target === this.monitorChart);
+
+            if (!isMonitorTrendPair) {
+                const srcScale = source.scales?.x;
+                const targetScale = target.options?.scales?.x;
+                if (srcScale && targetScale) {
+                    targetScale.min = srcScale.min;
+                    targetScale.max = srcScale.max;
+                }
+                target.update('none');
             }
-            target.update('none');
-        }
-        if (source === this.monitorChart || target === this.monitorChart) {
-            this.updateDomSignalAnnotations();
+            if (source === this.monitorChart || target === this.monitorChart) {
+                this.updateDomSignalAnnotations();
+            }
+        } finally {
+            this._syncingCharts = false;
         }
     }
 

@@ -935,9 +935,46 @@ class RiskManager:
                         )
                         self.auto_orders[str(trade.order.orderId)] = auto_order
                         self.save_auto_order_to_db(auto_order)
-                        
+
+                        # 同步到订单管理器，保持前端订单列表与数据库一致
+                        if self.order_manager:
+                            try:
+                                from .order_manager import Order, OrderStatus
+
+                                order_obj = Order(
+                                    order_id=str(trade.order.orderId),
+                                    symbol=symbol,
+                                    action=action,
+                                    quantity=abs(position_qty),
+                                    order_type="MARKET",
+                                    price=current_price,
+                                    status=OrderStatus.SUBMITTED.value,
+                                    order_source="sl",
+                                    notes=f"Stop loss triggered at ${current_price:.2f}"
+                                )
+
+                                synced_order = self.order_manager.add_order(order_obj)
+                                executed_at = datetime.now()
+                                self.order_manager.update_order_status(
+                                    order_id=str(trade.order.orderId),
+                                    status=OrderStatus.FILLED.value,
+                                    fill_price=current_price,
+                                    executed_at=executed_at
+                                )
+
+                                auto_order.status = "Filled"
+                                auto_order.executed_at = executed_at
+                                self.update_order_status(str(trade.order.orderId), "Filled")
+                                risk_logger.info(f"Stop loss order synced to OrderManager: {synced_order.order_id}")
+                            except Exception as om_err:
+                                risk_logger.warning(
+                                    f"Failed to sync stop-loss order {trade.order.orderId} to OrderManager: {om_err}"
+                                )
+                        else:
+                            risk_logger.warning("OrderManager not available, skip syncing stop-loss order")
+
                         risk_logger.info(f"✅ Market order placed for stop loss: {symbol} at market price ${current_price:.2f}")
-                        
+
                         # 禁用规则并更新数据库
                         rule.enabled = False
                         db_rule = DatabaseRiskRule(
