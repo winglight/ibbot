@@ -5,11 +5,7 @@ class DOMManager {
         this.symbol = '';
         this.numRows = 5;
         this.metricsChart = null;
-        this.priceChart = null;
         this.metricsChartEl = null;
-        this.priceChartEl = null;
-        this.priceData = [];
-        this.volumeData = [];
         this.lastTrendLevel = 0;
         this.lastTrendDir = 0;
         this.startPromise = null;
@@ -38,8 +34,7 @@ class DOMManager {
         }
         if (saveBtn) saveBtn.addEventListener('click', () => this.saveSettings());
         this.metricsChartEl = document.getElementById('domMetricsChart');
-        this.priceChartEl = document.getElementById('domPriceChart');
-        if (this.metricsChartEl && this.priceChartEl) {
+        if (this.metricsChartEl) {
             this.initCharts();
         }
         await this.loadConfig();
@@ -279,6 +274,7 @@ class DOMManager {
     }
 
     initCharts() {
+        if (!this.metricsChartEl) return;
         const ctx = this.metricsChartEl.getContext('2d');
         this.metricsChart = new Chart(ctx, {
             type: 'line',
@@ -299,28 +295,9 @@ class DOMManager {
                 }
             }
         });
-        const pctx = this.priceChartEl.getContext('2d');
-        this.priceChart = new Chart(pctx, {
-            data: {
-                datasets: [
-                    { type: 'line', label: 'Price', data: [], yAxisID: 'y', borderColor: '#4caf50', pointRadius: 0, fill: false },
-                    { type: 'bar', label: 'Volume', data: [], yAxisID: 'y1', backgroundColor: 'rgba(100,100,200,0.3)' }
-                ]
-            },
-            options: {
-                animation: false,
-                scales: {
-                    x: { type: 'time', time: { unit: 'second' } },
-                    y: { position: 'left', title: { display: true, text: 'Price' } },
-                    y1: { position: 'right', grid: { display: false }, ticks: { display: false }, title: { display: true, text: 'Vol' }, beginAtZero: true }
-                }
-            }
-        });
     }
 
     resetCharts() {
-        this.priceData = [];
-        this.volumeData = [];
         if (this.metricsChart) {
             this.metricsChart.data.datasets.forEach(ds => {
                 ds.data = [];
@@ -328,11 +305,6 @@ class DOMManager {
                 if (Array.isArray(ds.backgroundColor)) ds.backgroundColor = [];
             });
             this.metricsChart.update();
-        }
-        if (this.priceChart) {
-            this.priceChart.data.datasets[0].data = [];
-            this.priceChart.data.datasets[1].data = [];
-            this.priceChart.update();
         }
     }
 
@@ -413,7 +385,6 @@ class DOMManager {
             this.metricsChart.update('none');
         }
         const price = m.mid_price ?? 0;
-        const vol = Math.abs(m.ofi ?? 0);
 
         if (trendScore !== null) {
             const absScore = Math.abs(trendScore);
@@ -441,19 +412,6 @@ class DOMManager {
             } else {
                 console.warn('[DOM Manager] addMonitorTrendPoint方法不存在');
             }
-        }
-        this.priceData.push({ x: now, y: price });
-        this.volumeData.push({ x: now, y: vol });
-        this.priceData = this.priceData.filter(p => p.x >= now - windowMs);
-        this.volumeData = this.volumeData.filter(p => p.x >= now - windowMs);
-        if (this.priceChart) {
-            this.priceChart.data.datasets[0].data = this.priceData;
-            this.priceChart.data.datasets[1].data = this.volumeData;
-            const maxVol = this.volumeData.reduce((mx, p) => Math.max(mx, p.y), 0);
-            this.priceChart.options.scales.y1.max = (maxVol || 1) * 3;
-            this.priceChart.options.scales.x.min = now - windowMs;
-            this.priceChart.options.scales.x.max = now;
-            this.priceChart.update('none');
         }
     }
 }

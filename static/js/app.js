@@ -3698,43 +3698,6 @@ class TradingApp {
             if (Array.isArray(payload)) payload = payload[0] || {};
             if (!payload || (payload.symbol && payload.symbol !== symbol)) return;
 
-            const trendScore = typeof payload.trend_score === 'number' ? payload.trend_score : null;
-            let trendReason = '';
-            let trendSuggestion = null;
-            let trendLevel = typeof payload.trend_level === 'number' ? payload.trend_level : null;
-            const trendLongBias = payload.long === true || payload.trend_long === true;
-            const trendShortBias = payload.short === true || payload.trend_short === true;
-            let trendPointTime = null;
-
-            if (trendScore !== null) {
-                const reasonPieces = [];
-                const pushReason = (value) => {
-                    if (value == null) return;
-                    if (Array.isArray(value)) {
-                        value.forEach(pushReason);
-                        return;
-                    }
-                    const str = String(value).trim();
-                    if (str) reasonPieces.push(str);
-                };
-                pushReason(payload.trend_reason);
-                pushReason(payload.trend_reasoning);
-                pushReason(payload.trend_reason_lines);
-                pushReason(payload.trend_reasons);
-                pushReason(payload.trend_comment);
-                pushReason(payload.reason);
-                if (reasonPieces.length) {
-                    trendReason = reasonPieces.join('\n');
-                }
-                const suggestionField = payload.trend_suggestion ?? payload.trend_signal ?? payload.trendSignal ?? payload.suggestion;
-                if (typeof suggestionField === 'string') {
-                    const lower = suggestionField.trim().toLowerCase();
-                    if (lower === 'buy' || lower === 'sell') {
-                        trendSuggestion = lower;
-                    }
-                }
-            }
-
             let price = null;
             if (typeof payload.last === 'number') price = payload.last;
             else if (typeof payload.price === 'number') price = payload.price;
@@ -3861,9 +3824,6 @@ class TradingApp {
                 }
 
                 const timeValue = intervalTime.getTime();
-                if (trendScore !== null) {
-                    trendPointTime = timeValue;
-                }
 
                 if (chartType === 'candlestick') {
                     const ohlcData = dataset.data;
@@ -3985,38 +3945,6 @@ class TradingApp {
                     if (!this.currentMonitor) this.currentMonitor = {};
                     this.currentMonitor.chartTimeRange = updatedRange;
                 }
-            }
-
-            if (trendScore !== null) {
-                if (trendPointTime == null) {
-                    const rawTime = payload.timestamp ?? payload.time ?? payload.last_time ?? payload.lastTimestamp ?? payload.ts;
-                    const normalized = this.normalizeMonitorTime(rawTime);
-                    if (normalized != null) {
-                        trendPointTime = normalized;
-                    } else {
-                        trendPointTime = Date.now();
-                    }
-                }
-
-                let maxPoints;
-                const primaryDataset = this.monitorChart?.data?.datasets?.[0];
-                if (primaryDataset && Array.isArray(primaryDataset.data)) {
-                    const length = primaryDataset.data.length || 0;
-                    maxPoints = Math.max(300, length + 60);
-                } else if (Array.isArray(this.currentMonitor?.displayTimes)) {
-                    maxPoints = Math.max(300, this.currentMonitor.displayTimes.length + 60);
-                }
-
-                this.addMonitorTrendPoint(trendPointTime, trendScore, {
-                    reason: trendReason,
-                    suggestion: trendSuggestion,
-                    level: trendLevel,
-                    price,
-                    maxPoints,
-                    longBias: trendLongBias,
-                    shortBias: trendShortBias,
-                    threshold: 0.5
-                });
             }
 
             // 更新预期PnL显示
