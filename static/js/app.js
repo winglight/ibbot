@@ -219,9 +219,33 @@ class TradingApp {
         this.updateDomSignalAnnotations();
     }
 
+    ensureMonitorAnnotations() {
+        if (!this.monitorChart || !this.monitorChart.options) return null;
+
+        const options = this.monitorChart.options;
+        let plugins = options.plugins;
+        if (!plugins) {
+            options.plugins = {};
+            plugins = options.plugins;
+        }
+
+        let annotationConfig = plugins.annotation;
+        if (!annotationConfig) {
+            plugins.annotation = { annotations: {} };
+            annotationConfig = plugins.annotation;
+        }
+
+        if (!annotationConfig.annotations) {
+            annotationConfig.annotations = {};
+        }
+
+        return annotationConfig.annotations;
+    }
+
     updateDomSignalAnnotations() {
         if (!this.monitorChart || this.monitorChart.config.type !== 'candlestick') return;
-        const annotations = this.monitorChart.options.plugins.annotation.annotations || {};
+        const annotations = this.ensureMonitorAnnotations();
+        if (!annotations) return;
         Object.keys(annotations).filter(k => k.startsWith('domSignal')).forEach(k => delete annotations[k]);
         const sizeMap = {1: 12, 2: 16, 3: 20, 4: 24};
         this.domSignals.forEach((sig, idx) => {
@@ -3710,7 +3734,7 @@ class TradingApp {
                 const dataY = this.monitorChart.scales.y.getValueForPixel(canvasPosition.y);
                 const dataX = this.monitorChart.scales.x.getValueForPixel(canvasPosition.x);
 
-                const annotations = this.monitorChart.options.plugins.annotation.annotations;
+                const annotations = this.ensureMonitorAnnotations();
                 if (annotations) {
                     Object.keys(annotations).forEach(key => {
                         if ((key === 'stopLoss' || key === 'takeProfit') && annotations[key].type === 'line') {
@@ -3754,8 +3778,8 @@ class TradingApp {
                         y: event.clientY - rect.top
                     };
                     const annotationKey = this.monitorChart._draggedAnnotation;
-                    const annotations = this.monitorChart.options.plugins.annotation.annotations;
-                    const annotation = annotations[annotationKey];
+                    const annotations = this.ensureMonitorAnnotations();
+                    const annotation = annotations ? annotations[annotationKey] : null;
                     if (!annotation) return;
 
                     if (annotationKey === 'timeLimit') {
@@ -4027,13 +4051,16 @@ class TradingApp {
 
     updateMonitorStopLossLine() {
         if (!this.monitorChart) return;
-        
+
         const stopLossInput = document.getElementById('monitorStopLoss');
         const stopLossPrice = stopLossInput?.value ? parseFloat(stopLossInput.value) : null;
 
         // Update or remove stop loss annotation
+        const annotations = this.ensureMonitorAnnotations();
+        if (!annotations) return;
+
         if (stopLossPrice && !isNaN(stopLossPrice)) {
-            this.monitorChart.options.plugins.annotation.annotations.stopLoss = {
+            annotations.stopLoss = {
                 type: 'line',
                 yMin: stopLossPrice,
                 yMax: stopLossPrice,
@@ -4046,16 +4073,15 @@ class TradingApp {
                     position: 'start'
                 }
             };
-            const ann = this.monitorChart.options.plugins.annotation.annotations;
-            if (ann.lossBox) {
+            if (annotations.lossBox) {
                 if ((this.currentMonitor?.positionQty || 0) > 0) {
-                    ann.lossBox.yMin = stopLossPrice;
+                    annotations.lossBox.yMin = stopLossPrice;
                 } else {
-                    ann.lossBox.yMax = stopLossPrice;
+                    annotations.lossBox.yMax = stopLossPrice;
                 }
             }
         } else {
-            delete this.monitorChart.options.plugins.annotation.annotations.stopLoss;
+            delete annotations.stopLoss;
         }
 
         this.monitorChart.update('none');
@@ -4063,13 +4089,16 @@ class TradingApp {
 
     updateMonitorTakeProfitLine() {
         if (!this.monitorChart) return;
-        
+
         const takeProfitInput = document.getElementById('monitorTakeProfit');
         const takeProfitPrice = takeProfitInput?.value ? parseFloat(takeProfitInput.value) : null;
 
         // Update or remove take profit annotation
+        const annotations = this.ensureMonitorAnnotations();
+        if (!annotations) return;
+
         if (takeProfitPrice && !isNaN(takeProfitPrice)) {
-            this.monitorChart.options.plugins.annotation.annotations.takeProfit = {
+            annotations.takeProfit = {
                 type: 'line',
                 yMin: takeProfitPrice,
                 yMax: takeProfitPrice,
@@ -4082,16 +4111,15 @@ class TradingApp {
                     position: 'start'
                 }
             };
-            const ann = this.monitorChart.options.plugins.annotation.annotations;
-            if (ann.profitBox) {
+            if (annotations.profitBox) {
                 if ((this.currentMonitor?.positionQty || 0) > 0) {
-                    ann.profitBox.yMax = takeProfitPrice;
+                    annotations.profitBox.yMax = takeProfitPrice;
                 } else {
-                    ann.profitBox.yMin = takeProfitPrice;
+                    annotations.profitBox.yMin = takeProfitPrice;
                 }
             }
         } else {
-            delete this.monitorChart.options.plugins.annotation.annotations.takeProfit;
+            delete annotations.takeProfit;
         }
 
         this.monitorChart.update('none');
@@ -4355,48 +4383,48 @@ class TradingApp {
                     }
                 }
 
-                const pluginConfig = this.monitorChart.options.plugins = this.monitorChart.options.plugins || {};
-                const annotationConfig = pluginConfig.annotation = pluginConfig.annotation || { annotations: {} };
-                const annotations = annotationConfig.annotations = annotationConfig.annotations || {};
-                const currentPriceLabel = `$${this.formatNumber(price)}`;
-                if (annotations.currentPrice) {
-                    annotations.currentPrice.yMin = price;
-                    annotations.currentPrice.yMax = price;
-                    annotations.currentPrice.borderColor = annotations.currentPrice.borderColor || 'rgb(255, 206, 84)';
-                    annotations.currentPrice.borderWidth = annotations.currentPrice.borderWidth || 2;
-                    if (annotations.currentPrice.label) {
-                        annotations.currentPrice.label.content = currentPriceLabel;
-                        annotations.currentPrice.label.backgroundColor = 'rgba(255, 206, 84, 0.8)';
-                        annotations.currentPrice.label.color = 'black';
-                        annotations.currentPrice.label.position = 'end';
-                        annotations.currentPrice.label.enabled = true;
-                        annotations.currentPrice.label.padding = 4;
+                const annotations = this.ensureMonitorAnnotations();
+                if (annotations) {
+                    const currentPriceLabel = `$${this.formatNumber(price)}`;
+                    if (annotations.currentPrice) {
+                        annotations.currentPrice.yMin = price;
+                        annotations.currentPrice.yMax = price;
+                        annotations.currentPrice.borderColor = annotations.currentPrice.borderColor || 'rgb(255, 206, 84)';
+                        annotations.currentPrice.borderWidth = annotations.currentPrice.borderWidth || 2;
+                        if (annotations.currentPrice.label) {
+                            annotations.currentPrice.label.content = currentPriceLabel;
+                            annotations.currentPrice.label.backgroundColor = 'rgba(255, 206, 84, 0.8)';
+                            annotations.currentPrice.label.color = 'black';
+                            annotations.currentPrice.label.position = 'end';
+                            annotations.currentPrice.label.enabled = true;
+                            annotations.currentPrice.label.padding = 4;
+                        } else {
+                            annotations.currentPrice.label = {
+                                content: currentPriceLabel,
+                                enabled: true,
+                                position: 'end',
+                                backgroundColor: 'rgba(255, 206, 84, 0.8)',
+                                color: 'black',
+                                padding: 4
+                            };
+                        }
                     } else {
-                        annotations.currentPrice.label = {
-                            content: currentPriceLabel,
-                            enabled: true,
-                            position: 'end',
-                            backgroundColor: 'rgba(255, 206, 84, 0.8)',
-                            color: 'black',
-                            padding: 4
+                        annotations.currentPrice = {
+                            type: 'line',
+                            yMin: price,
+                            yMax: price,
+                            borderColor: 'rgb(255, 206, 84)',
+                            borderWidth: 2,
+                            label: {
+                                content: currentPriceLabel,
+                                enabled: true,
+                                position: 'end',
+                                backgroundColor: 'rgba(255, 206, 84, 0.8)',
+                                color: 'black',
+                                padding: 4
+                            }
                         };
                     }
-                } else {
-                    annotations.currentPrice = {
-                        type: 'line',
-                        yMin: price,
-                        yMax: price,
-                        borderColor: 'rgb(255, 206, 84)',
-                        borderWidth: 2,
-                        label: {
-                            content: currentPriceLabel,
-                            enabled: true,
-                            position: 'end',
-                            backgroundColor: 'rgba(255, 206, 84, 0.8)',
-                            color: 'black',
-                            padding: 4
-                        }
-                    };
                 }
                 // 调整成交量轴的最大值，使柱状图高度不超过整体三分之一
                 const volDataset = this.monitorChart.data.datasets[1];
