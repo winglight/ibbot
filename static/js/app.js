@@ -1580,7 +1580,6 @@ class TradingApp {
             if (!previousSymbol || previousSymbol !== symbol) {
                 this.resetMonitorTrendData();
             }
-
             if (this.domManager && typeof this.domManager.handleMonitorSymbolChange === 'function') {
                 await this.domManager.handleMonitorSymbolChange(symbol);
             }
