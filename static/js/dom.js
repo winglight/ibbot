@@ -163,15 +163,14 @@ class DOMManager {
             if (typeof this.app.updateDomSignalAnnotations === 'function') {
                 this.app.updateDomSignalAnnotations();
             }
-            if (Array.isArray(this.app.monitorTrendData)) {
+            if (typeof this.app.resetMonitorTrendData === 'function') {
+                this.app.resetMonitorTrendData();
+            } else if (Array.isArray(this.app.monitorTrendData)) {
                 this.app.monitorTrendData = [];
-            }
-            if (this.app.monitorTrendChart) {
-                const trendDataset = this.app.monitorTrendChart.data?.datasets?.[0];
-                if (trendDataset) {
-                    trendDataset.data = [];
+                if (this.app.monitorTrendChart?.data?.datasets?.[0]) {
+                    this.app.monitorTrendChart.data.datasets[0].data = this.app.monitorTrendData;
+                    this.app.monitorTrendChart.update('none');
                 }
-                this.app.monitorTrendChart.update('none');
             }
             this.setToggleBusy(true);
             try {
@@ -216,6 +215,9 @@ class DOMManager {
         this.app.domSignals = [];
         if (typeof this.app.updateDomSignalAnnotations === 'function') {
             this.app.updateDomSignalAnnotations();
+        }
+        if (typeof this.app.resetMonitorTrendData === 'function') {
+            this.app.resetMonitorTrendData();
         }
         if (!targetSymbol) {
             this.active = false;
@@ -417,26 +419,18 @@ class DOMManager {
             this.lastTrendLevel = level;
             this.lastTrendDir = dir;
 
-            // update monitor trend chart dataset
-            const trendPoint = {
-                x: now,
-                y: trendScore,
-                reason,
-                suggestion,
-                level,
-                price
-            };
-            this.app.monitorTrendData.push(trendPoint);
-            // keep data within same window as metrics
-            this.app.monitorTrendData = this.app.monitorTrendData.filter(p => p.x >= now - windowMs);
-            if (this.app.monitorTrendChart) {
-                this.app.monitorTrendChart.data.datasets[0].data = this.app.monitorTrendData;
-                if (this.app.monitorChart) {
-                    const xScale = this.app.monitorChart.scales.x;
-                    this.app.monitorTrendChart.options.scales.x.min = xScale.min;
-                    this.app.monitorTrendChart.options.scales.x.max = xScale.max;
-                }
-                this.app.monitorTrendChart.update('none');
+            if (typeof this.app.addMonitorTrendPoint === 'function') {
+                this.app.addMonitorTrendPoint(now, trendScore, {
+                    reason,
+                    suggestion,
+                    level,
+                    price,
+                    windowMs,
+                    longBias: suggestion === 'buy',
+                    shortBias: suggestion === 'sell',
+                    maxPoints: 240,
+                    threshold: 0.5
+                });
             }
         }
         this.priceData.push({ x: now, y: price });
