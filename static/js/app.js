@@ -2212,7 +2212,10 @@ class TradingApp {
                 }
 
                 if (dt && dt.isValid) {
-                    return dt.setZone(targetZone).toJSDate();
+                    // 转换到本地时区而不是targetZone，确保显示本地时间
+                    const localTime = dt.setZone('local');
+                    console.log(`[时间转换] 原始: ${raw} -> 本地时间: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')}`);
+                    return localTime.toJSDate();
                 }
             }
         } catch (error) {
@@ -3586,19 +3589,19 @@ class TradingApp {
 
                 let timeLabel;
                 if (intervalRaw.includes('day') || duration.includes('M') || duration.includes('Y')) {
-                    timeLabel = intervalTime.toLocaleDateString('en-US', {
+                    timeLabel = intervalTime.toLocaleDateString('zh-CN', {
                         month: 'short',
                         day: 'numeric'
                     });
                 } else if (intervalRaw.includes('hour') || duration === '1 W') {
-                    timeLabel = intervalTime.toLocaleString('en-US', {
+                    timeLabel = intervalTime.toLocaleString('zh-CN', {
                         month: 'short',
                         day: 'numeric',
                         hour: '2-digit',
                         hour12: false
                     });
                 } else {
-                    timeLabel = intervalTime.toLocaleTimeString('en-US', {
+                    timeLabel = intervalTime.toLocaleTimeString('zh-CN', {
                         hour: '2-digit',
                         minute: '2-digit',
                         hour12: false
@@ -3653,6 +3656,8 @@ class TradingApp {
                         const lastLabel = labels[labels.length - 1];
                         console.log(`[实时更新] 比较: 最后标签="${lastLabel}", 当前标签="${timeLabel}"`);
                         console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
+                        console.log(`[实时更新] 时间值: ${intervalTime.toISOString()}, 本地时间: ${new Date().toISOString()}`);
+                        console.log(`[实时更新] 接收到的数据 - 价格: ${price}, 成交量: ${volume}`);
 
                         if (lastLabel === timeLabel) {
                             dataset.data[dataset.data.length - 1] = price;
@@ -3673,6 +3678,7 @@ class TradingApp {
                         shouldUpdateLast = false;
                         console.log(`[实时更新] 添加首个数据点: ${timeLabel}, 价格: ${price}`);
                         console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
+                        console.log(`[实时更新] 时间值: ${intervalTime.toISOString()}, 本地时间: ${new Date().toISOString()}`);
                     }
 
                     const MAX_POINTS = 300;
@@ -3711,7 +3717,13 @@ class TradingApp {
                 const maxVol = volumes.length ? Math.max(...volumes) : 0;
                 this.monitorChart.options.scales.y1.max = (maxVol * 3) || 1;
 
+                console.log(`[图表更新] 准备更新图表，数据点数量: ${dataset.data.length}, 成交量数据点: ${volDataset.data.length}`);
+                console.log(`[图表更新] 价格数据: ${JSON.stringify(dataset.data.slice(-3))}`);
+                console.log(`[图表更新] 成交量数据: ${JSON.stringify(volDataset.data.slice(-3))}`);
+                console.log(`[图表更新] 标签数据: ${JSON.stringify(this.monitorChart.data.labels.slice(-3))}`);
+                
                 this.monitorChart.update('none');
+                console.log(`[图表更新] 图表更新完成`);
 
                 const updatedRange = this.extractRangeFromMonitorChart();
                 if (updatedRange) {
