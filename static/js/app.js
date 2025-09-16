@@ -279,19 +279,18 @@ class TradingApp {
         if (this.monitorTrendChart?.data?.datasets?.[0]) {
             console.log('[App] addMonitorTrendPoint - 更新monitorTrendChart，数据点数量:', this.monitorTrendData.length);
             this.monitorTrendChart.data.datasets[0].data = this.monitorTrendData;
-            
-            if (this.monitorChart?.scales?.x) {
-                const scale = this.monitorChart.scales.x;
-                const min = this.normalizeMonitorTime(scale.min);
-                const max = this.normalizeMonitorTime(scale.max);
-                console.log('[App] addMonitorTrendPoint - 同步x轴时间范围 min:', min, 'max:', max);
-                if (min != null) this.monitorTrendChart.options.scales.x.min = min;
-                if (max != null) this.monitorTrendChart.options.scales.x.max = max;
+
+            const range = this.extractRangeFromMonitorChart();
+            if (range) {
+                console.log('[App] addMonitorTrendPoint - 同步x轴时间范围:', range);
+                if (!this.currentMonitor) this.currentMonitor = {};
+                this.currentMonitor.chartTimeRange = range;
+                this.applyRangeToTrendChart(range);
             } else if (this.currentMonitor?.chartTimeRange) {
                 console.log('[App] addMonitorTrendPoint - 应用当前监控时间范围:', this.currentMonitor.chartTimeRange);
                 this.applyRangeToTrendChart(this.currentMonitor.chartTimeRange);
             }
-            
+
             this.monitorTrendChart.update('none');
             console.log('[App] addMonitorTrendPoint - 图表更新完成');
         } else {
