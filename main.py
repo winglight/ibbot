@@ -57,7 +57,6 @@ from src.models import (
 
 # Shared application services
 from core import (
-    ibkr_client,
     telegram_notifier,
     notification_manager,
     risk_manager,
@@ -115,7 +114,6 @@ def resolve_module(path: str) -> str:
         return "connection"
     return "general"
 
-# 临时创建FastAPI应用实例（稍后会用lifespan重新创建）
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -139,27 +137,6 @@ async def lifespan(app: FastAPI):
                         core.ibkr_client = core.IBKRClient()
                         main_logger.info("IBKRClient initialized after auto-connect")
 
-                    ibkr_client_local = core.ibkr_client
-
-                    # Update risk_manager with ibkr_client
-                    try:
-                        risk_manager.ibkr_client = ibkr_client_local
-                        main_logger.info("Risk manager ibkr_client updated with auto-connected client")
-                    except Exception as re_err:
-                        main_logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
-
-                    # Update queue_manager dependencies
-                    try:
-                        queue_manager.set_dependencies(
-                            risk_manager=risk_manager,
-                            strategy_manager=strategy_manager,
-                            connection_manager=connection_manager,
-                            websocket_manager=websocket_manager,
-                            order_manager=order_manager,
-                        )
-                        main_logger.info("Queue manager dependencies updated after auto-connect")
-                    except Exception as dep_err:
-                        main_logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
             except Exception as e:
                 main_logger.warning(f"Auto-connection failed: {e}")
                 main_logger.info("You can connect later through the web interface.")
@@ -302,8 +279,6 @@ async def rapidoc_html_main():
         status_code=200,
     )
 
-# 自定义 OpenAPI：仅保留主服务分组
-
 def _ensure_tag(tags_list, name: str, description: str):
     if not any(t.get("name") == name for t in tags_list):
         tags_list.append({"name": name, "description": description})
@@ -373,9 +348,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000"
+        "http://127.0.0.1:8000"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -514,44 +487,6 @@ def check_environment() -> bool:
 # 添加：全局任务引用用于定期广播账户与持仓（实时PnL展示）
 pnl_broadcast_task = None
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
-    main_logger = get_module_logger("main")
-    
-    # 启动时的初始化
-    try:
-        # 在事件循环中启动 risk_manager
-        risk_manager.start()
-        main_logger.info("Risk manager started during application startup")
-    except Exception as e:
-        main_logger.warning(f"Risk manager startup warning: {e}")
-
-    try:
-        strategy_manager.start()
-        main_logger.info("Strategy manager started during application startup")
-    except Exception as e:
-        main_logger.warning(f"Strategy manager startup warning: {e}")
-
-    # 启动定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
-    # 现在使用异步调用，不会阻塞主线程
-    try:
-        global pnl_broadcast_task
-        if pnl_broadcast_task is None:
-            pnl_broadcast_task = asyncio.create_task(_pnl_broadcast_loop())
-            main_logger.info("Started PnL broadcast loop task with async calls")
-    except Exception as e:
-        main_logger.warning(f"Failed to start PnL broadcast loop: {e}")
-    
-    yield
-    
-    # 关闭时的清理
-    try:
-        if hasattr(risk_manager, 'scheduler') and risk_manager.scheduler.running:
-            risk_manager.scheduler.shutdown()
-            main_logger.info("Risk manager scheduler shutdown")
-    except Exception as e:
-        main_logger.warning(f"Risk manager shutdown warning: {e}")
 
 # 添加：定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
 async def _pnl_broadcast_loop():
@@ -598,16 +533,6 @@ async def _pnl_broadcast_loop():
         pass
     except Exception as e:
         logger.warning(f"PnL broadcast loop error: {e}")
-
-# 实时行情推送任务
-# Strategy APIs
-
-# Queue Management APIs
-
-# Strategy Executions API
-# Notifications API
-# System Logs API (kept for general debugging)
-
 
 def main():
     """Main application entry point"""

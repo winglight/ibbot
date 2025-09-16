@@ -472,7 +472,7 @@ class OrderManager:
         except Exception as e:
             order_logger.error(f"发送订单成交通知失败: {e}")
     
-    async def _check_and_deactivate_risk_rules(self, symbol: str, order_source: str = None, ibkr_client=None):
+    async def _check_and_deactivate_risk_rules(self, symbol: str, order_source: str = None):
         """检查指定资产的持仓状态和订单来源，决定是否停用相关的风险规则"""
         try:
             if not hasattr(self, 'risk_manager') or not self.risk_manager:
@@ -495,13 +495,8 @@ class OrderManager:
                 deactivate_reason = "手动下单"
             else:
                 # 获取当前持仓信息
-                if ibkr_client:
-                    positions = await ibkr_client.get_positions()
-                else:
-                    # 如果没有传入ibkr_client，创建新实例（保持向后兼容）
-                    from .ibkr_client import IBKRClient
-                    temp_client = IBKRClient()
-                    positions = await temp_client.get_positions()
+                import core  # 延迟导入避免循环导入
+                positions = await core.ibkr_client.get_positions()
                 
                 # 查找指定资产的持仓
                 position_qty = 0
