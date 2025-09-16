@@ -9,6 +9,9 @@ const INTERVAL_MINUTES_MAP = {
     '1hour': 60
 };
 
+const MONITOR_SOURCE_TZ = 'America/New_York';
+const MONITOR_FALLBACK_TZ = 'Asia/Shanghai';
+
 function slugifyStrategyName(name) {
     return (name || '')
         .toLowerCase()
@@ -38,6 +41,7 @@ class TradingApp {
         this.orders = [];
         // 通知列表
         this.notifications = [];
+        this.monitorChartTimezone = null;
         // 价格缓存机制
         this.priceCache = new Map();
         this.priceCacheTimeout = 30000; // 30秒缓存
@@ -1242,7 +1246,7 @@ class TradingApp {
             if (Array.isArray(this.orders)) {
                 const latestOrderTime = this.orders
                     .filter(o => o.symbol === symbol && o.submit_time)
-                    .map(o => new Date(o.submit_time))
+                    .map(o => this.parseMonitorChartTime(o.submit_time))
                     .filter(d => !isNaN(d.getTime()))
                     .sort((a, b) => b - a)[0];
                 if (latestOrderTime) {
@@ -1967,6 +1971,127 @@ class TradingApp {
         }
     }
 
+    getMonitorTimezone() {
+        if (!this.monitorChartTimezone) {
+            let zone = null;
+            if (typeof luxon !== 'undefined' && luxon && luxon.DateTime) {
+                try {
+                    zone = luxon.DateTime.local().zoneName;
+                } catch (err) {
+                    console.warn('Failed to resolve timezone from Luxon, falling back to Intl API.', err);
+                }
+            }
+            if (!zone && typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function') {
+                try {
+                    zone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+                } catch (err) {
+                    console.warn('Failed to resolve timezone from Intl API, using fallback timezone.', err);
+                }
+            }
+            this.monitorChartTimezone = zone || MONITOR_FALLBACK_TZ;
+        }
+        return this.monitorChartTimezone;
+    }
+
+    parseMonitorChartTime(raw) {
+        const buildFallbackDate = () => {
+            if (raw == null || raw === '') {
+                return new Date();
+            }
+            if (raw instanceof Date) {
+                return raw;
+            }
+            if (typeof raw === 'number' && !Number.isNaN(raw)) {
+                const value = raw > 1e10 ? raw : raw * 1000;
+                const date = new Date(value);
+                if (!Number.isNaN(date.getTime())) {
+                    return date;
+                }
+            }
+            if (typeof raw === 'string') {
+                const trimmed = raw.trim();
+                if (trimmed) {
+                    const numeric = Number(trimmed);
+                    if (!Number.isNaN(numeric)) {
+                        const value = numeric > 1e10 ? numeric : numeric * 1000;
+                        const date = new Date(value);
+                        if (!Number.isNaN(date.getTime())) {
+                            return date;
+                        }
+                    }
+                    const parsed = new Date(trimmed);
+                    if (!Number.isNaN(parsed.getTime())) {
+                        return parsed;
+                    }
+                }
+            }
+            const fallback = new Date(raw);
+            return Number.isNaN(fallback.getTime()) ? new Date() : fallback;
+        };
+
+        try {
+            if (typeof luxon !== 'undefined' && luxon && luxon.DateTime) {
+                const { DateTime } = luxon;
+                const targetZone = this.getMonitorTimezone();
+                let dt = null;
+
+                if (raw instanceof Date) {
+                    return raw;
+                }
+
+                if (typeof raw === 'string') {
+                    const value = raw.trim();
+                    if (value) {
+                        if (/[zZ]|[+\-]\d{2}:?\d{2}$/.test(value)) {
+                            dt = DateTime.fromISO(value);
+                        }
+                        if (!dt || !dt.isValid) {
+                            dt = DateTime.fromISO(value, { zone: MONITOR_SOURCE_TZ });
+                        }
+                        if (!dt || !dt.isValid) {
+                            dt = DateTime.fromSQL(value, { zone: MONITOR_SOURCE_TZ });
+                        }
+                        if (!dt || !dt.isValid) {
+                            dt = DateTime.fromFormat(value, 'yyyy-MM-dd HH:mm:ss', { zone: MONITOR_SOURCE_TZ });
+                        }
+                        if (!dt || !dt.isValid) {
+                            dt = DateTime.fromFormat(value, 'yyyyMMdd HH:mm:ss', { zone: MONITOR_SOURCE_TZ });
+                        }
+                        if (!dt || !dt.isValid) {
+                            dt = DateTime.fromFormat(value, "yyyyMMdd'T'HHmmss", { zone: MONITOR_SOURCE_TZ });
+                        }
+                        if (!dt || !dt.isValid) {
+                            dt = DateTime.fromFormat(value, 'yyyy-MM-dd', { zone: MONITOR_SOURCE_TZ });
+                        }
+                        if (!dt || !dt.isValid) {
+                            dt = DateTime.fromFormat(value, 'yyyyMMdd', { zone: MONITOR_SOURCE_TZ });
+                        }
+                        if ((!dt || !dt.isValid) && !Number.isNaN(Number(value))) {
+                            const numeric = Number(value);
+                            const isSeconds = numeric < 1e12;
+                            dt = isSeconds
+                                ? DateTime.fromSeconds(numeric, { zone: 'utc' })
+                                : DateTime.fromMillis(numeric, { zone: 'utc' });
+                        }
+                    }
+                } else if (typeof raw === 'number' && !Number.isNaN(raw)) {
+                    const isSeconds = raw < 1e12;
+                    dt = isSeconds
+                        ? DateTime.fromSeconds(raw, { zone: 'utc' })
+                        : DateTime.fromMillis(raw, { zone: 'utc' });
+                }
+
+                if (dt && dt.isValid) {
+                    return dt.setZone(targetZone).toJSDate();
+                }
+            }
+        } catch (error) {
+            console.warn('Failed to parse monitor chart time with Luxon, falling back to native Date.', error, raw);
+        }
+
+        return buildFallbackDate();
+    }
+
     // 添加图表数据缓存
     chartDataCache = {};
     
@@ -2053,20 +2178,7 @@ class TradingApp {
                 // 先解析原始时间并保存Date对象
                 const timeValues = response.data.map(bar => {
                     const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
-                    let date;
-                    if (typeof raw === 'string') {
-                        date = new Date(raw);
-                        if (isNaN(date.getTime())) {
-                            const num = parseFloat(raw);
-                            date = new Date(num > 1e10 ? num : num * 1000);
-                        }
-                    } else if (typeof raw === 'number') {
-                        date = new Date(raw > 1e10 ? raw : raw * 1000);
-                    } else {
-                        date = new Date();
-                    }
-                    // 日期对象已包含时区信息，直接返回
-                    return date;
+                    return this.parseMonitorChartTime(raw);
                 });
                 // 根据时间生成显示标签
                 const labels = timeValues.map(date => {
@@ -2120,18 +2232,7 @@ class TradingApp {
                     currentTime: new Date().toISOString()
                 });
                 const lastRaw = (lastBar.time !== undefined && lastBar.time !== null) ? lastBar.time : lastBar.date;
-                let lastDate;
-                if (typeof lastRaw === 'string') {
-                    lastDate = new Date(lastRaw);
-                    if (isNaN(lastDate.getTime())) {
-                        const num = parseFloat(lastRaw);
-                        lastDate = new Date(num > 1e10 ? num : num * 1000);
-                    }
-                } else if (typeof lastRaw === 'number') {
-                    lastDate = new Date(lastRaw > 1e10 ? lastRaw : lastRaw * 1000);
-                } else {
-                    lastDate = new Date();
-                }
+                const lastDate = this.parseMonitorChartTime(lastRaw);
                 // 打印解析后的最后一个数据点时间
                 console.log('解析后的最后一个数据点时间:', {
                     lastRaw,
@@ -2248,7 +2349,7 @@ class TradingApp {
                 // 使用最近持仓订单的成交时间作为方框起点
                 let startIndex = 0;
                 if (this.currentMonitor?.lastOrderTime) {
-                    const lastOrderTime = new Date(this.currentMonitor.lastOrderTime);
+                    const lastOrderTime = this.parseMonitorChartTime(this.currentMonitor.lastOrderTime);
                     // 打印作为起点时间的订单对象
                     console.log('作为起点时间的订单对象:', {
                         lastOrderTime: this.currentMonitor.lastOrderTime,
@@ -2258,7 +2359,7 @@ class TradingApp {
                     startIndex = displayTimes.findIndex(t => t >= lastOrderTime);
                     if (startIndex === -1) startIndex = Math.max(0, displayTimes.length - spanBars - 1);
                 } else if (this.currentMonitor?.entryTime) {
-                    const entryTime = new Date(this.currentMonitor.entryTime);
+                    const entryTime = this.parseMonitorChartTime(this.currentMonitor.entryTime);
                     startIndex = displayTimes.findIndex(t => t >= entryTime);
                     if (startIndex === -1) startIndex = Math.max(0, displayTimes.length - spanBars - 1);
                 } else {
