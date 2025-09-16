@@ -249,6 +249,7 @@ class TradingApp {
         }
         if (this.monitorTrendChart?.data?.datasets?.[0]) {
             this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
+            this.syncTrendReferenceLines();
             this.monitorTrendChart.update('none');
         }
     }
@@ -274,6 +275,93 @@ class TradingApp {
         return this.monitorTrendData
             .map(point => this.formatTrendPointForChart(point))
             .filter(point => point !== null);
+    }
+
+    syncTrendReferenceLines() {
+        if (!this.monitorTrendChart || !Array.isArray(this.monitorTrendChart.data?.datasets)) return;
+
+        const chart = this.monitorTrendChart;
+        const baseDataset = chart.data.datasets[0];
+        if (!baseDataset) return;
+
+        // Hide primary dataset from legend so that legend focuses on reference lines
+        baseDataset._excludeFromLegend = true;
+
+        const parsedPoints = Array.isArray(baseDataset.data)
+            ? baseDataset.data.map((point) => {
+                if (!point) return null;
+                const xValue = point.x instanceof Date
+                    ? point.x
+                    : (Number.isFinite(point.timestamp) ? new Date(point.timestamp) : (Number.isFinite(point.x) ? new Date(point.x) : null));
+                const rawY = typeof point.y === 'number' ? point.y
+                    : (typeof point.value === 'number' ? point.value
+                        : (typeof point.score === 'number' ? point.score : null));
+                if (!xValue || !Number.isFinite(rawY)) return null;
+                return { x: xValue, y: rawY };
+            }).filter(Boolean)
+            : [];
+
+        const legend = chart.options?.plugins?.legend;
+        if (legend) {
+            legend.display = true;
+            legend.position = 'top';
+            legend.align = 'end';
+            legend.labels = legend.labels || {};
+            if (typeof legend.labels.padding !== 'number') legend.labels.padding = 12;
+            legend.labels.filter = (legendItem, data) => {
+                const dataset = data?.datasets?.[legendItem.datasetIndex];
+                return !!dataset && !dataset._excludeFromLegend;
+            };
+        }
+
+        if (!parsedPoints.length) {
+            chart.data.datasets = chart.data.datasets.filter((_, index) => index === 0);
+            return;
+        }
+
+        const values = parsedPoints.map(point => point.y);
+        if (!values.length) {
+            chart.data.datasets = chart.data.datasets.filter((_, index) => index === 0);
+            return;
+        }
+
+        const latestValue = values[values.length - 1];
+        const minValue = Math.min(...values);
+        const maxValue = Math.max(...values);
+
+        const lineTypes = [
+            { key: 'latest', label: '最新值', color: 'rgba(255, 205, 86, 0.9)', value: latestValue, dash: [6, 4], order: 4 },
+            { key: 'min', label: '最小值', color: 'rgba(220, 53, 69, 0.85)', value: minValue, dash: [], order: 3 },
+            { key: 'max', label: '最大值', color: 'rgba(25, 135, 84, 0.85)', value: maxValue, dash: [], order: 3 }
+        ];
+
+        const lineDatasets = lineTypes.map((descriptor) => {
+            const dataset = {
+                type: 'line',
+                label: `${descriptor.label}: ${this.formatNumber(descriptor.value)}`,
+                data: parsedPoints.map(point => ({ x: point.x, y: descriptor.value })),
+                borderColor: descriptor.color,
+                backgroundColor: descriptor.color,
+                borderWidth: 1.5,
+                pointRadius: 0,
+                pointHoverRadius: 0,
+                pointHitRadius: 0,
+                fill: false,
+                tension: 0,
+                parsing: false,
+                spanGaps: true,
+                stepped: false,
+                borderDash: descriptor.dash,
+                segment: descriptor.dash.length ? { borderDash: descriptor.dash } : undefined,
+                yAxisID: 'y',
+                xAxisID: 'x',
+                order: descriptor.order,
+                _refLineType: descriptor.key
+            };
+            return dataset;
+        });
+
+        chart.data.datasets = [baseDataset, ...lineDatasets];
     }
 
     deriveTrendLevel(score) {
@@ -418,6 +506,7 @@ class TradingApp {
         if (this.monitorTrendChart?.data?.datasets?.[0]) {
             console.log('[App] addMonitorTrendPoint - 更新monitorTrendChart，数据点数量:', this.monitorTrendData.length);
             this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
+            this.syncTrendReferenceLines();
             this.monitorTrendChart.update('none');
             console.log('[App] addMonitorTrendPoint - 图表更新完成');
         } else {
@@ -2809,7 +2898,10 @@ class TradingApp {
 
                 // 检查当前选择的图表类型
                 const chartTypeRadio = document.querySelector('input[name="chartType"]:checked');
-                const chartType = chartTypeRadio ? chartTypeRadio.value : 'line';
+                const rawChartType = chartTypeRadio ? chartTypeRadio.value : 'line';
+                const chartType = typeof rawChartType === 'string'
+                    ? rawChartType.trim().toLowerCase()
+                    : 'line';
                 const isCandlestick = chartType === 'candlestick';
 
                 // 计算时间跨度相关参数
@@ -3502,7 +3594,14 @@ class TradingApp {
                                     maintainAspectRatio: false,
                                     interaction: { intersect: false, mode: 'index' },
                                     plugins: {
-                                        legend: { display: false },
+                                        legend: {
+                                            display: true,
+                                            position: 'top',
+                                            align: 'end',
+                                            labels: {
+                                                padding: 12
+                                            }
+                                        },
                                         zoom: {
                                             pan: { enabled: true, mode: 'x' },
                                             zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
@@ -3551,10 +3650,13 @@ class TradingApp {
                             });
                             console.log('[loadMonitorChart] MonitorTrendChart created successfully');
                             console.log('[loadMonitorChart] Chart data after creation:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
+                            this.syncTrendReferenceLines();
+                            this.monitorTrendChart.update('none');
                         } else {
                             console.log('[loadMonitorChart] Updating existing monitorTrendChart');
                             console.log('[loadMonitorChart] Current chart data length:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
                             this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
+                            this.syncTrendReferenceLines();
                             this.monitorTrendChart.update('none');
                             console.log('[loadMonitorChart] MonitorTrendChart updated');
                         }
@@ -4075,6 +4177,7 @@ class TradingApp {
             if (this.monitorChart && this.monitorChart.data && this.monitorChart.data.datasets && this.monitorChart.data.datasets.length > 0) {
                 const dataset = this.monitorChart.data.datasets[0];
                 const chartType = this.monitorChart.config.type || '';
+                let candlestickData = null;
 
                 // 获取当前图表的interval设置
                 const intervalSelect = document.getElementById('monitorInterval');
@@ -4134,6 +4237,7 @@ class TradingApp {
 
                 if (chartType === 'candlestick') {
                     const ohlcData = dataset.data;
+                    candlestickData = ohlcData;
                     const volumeDataset = this.monitorChart.data.datasets[1];
                     const vData = volumeDataset.data;
                     if (ohlcData.length > 0) {
@@ -4210,11 +4314,11 @@ class TradingApp {
                         volumeDataset.data.shift();
                     }
 
-                    if (this.currentMonitor) {
-                        const normalizedTime = new Date(timeValue);
-                        let displayTimes = Array.isArray(this.currentMonitor.displayTimes) ? [...this.currentMonitor.displayTimes] : [];
-                        if (shouldUpdateLast && displayTimes.length) {
-                            displayTimes[displayTimes.length - 1] = normalizedTime;
+                if (this.currentMonitor) {
+                    const normalizedTime = new Date(timeValue);
+                    let displayTimes = Array.isArray(this.currentMonitor.displayTimes) ? [...this.currentMonitor.displayTimes] : [];
+                    if (shouldUpdateLast && displayTimes.length) {
+                        displayTimes[displayTimes.length - 1] = normalizedTime;
                         } else {
                             displayTimes.push(normalizedTime);
                         }
@@ -4230,6 +4334,69 @@ class TradingApp {
                         this.currentMonitor.displayTimes = displayTimes;
                         this.currentMonitor.displayLabels = labels.slice();
                     }
+                }
+                if (chartType === 'candlestick' && Array.isArray(candlestickData)) {
+                    const extremes = candlestickData.reduce((acc, bar) => {
+                        if (!bar) return acc;
+                        const high = Number(bar.h);
+                        const low = Number(bar.l);
+                        if (Number.isFinite(high)) acc.max = Math.max(acc.max, high);
+                        if (Number.isFinite(low)) acc.min = Math.min(acc.min, low);
+                        return acc;
+                    }, { min: Number.POSITIVE_INFINITY, max: Number.NEGATIVE_INFINITY });
+                    if (Number.isFinite(extremes.min) && Number.isFinite(extremes.max)) {
+                        const span = extremes.max - extremes.min;
+                        const padding = span > 0 ? span * 0.05 : (extremes.max || 0) * 0.002 || 0.5;
+                        const yScale = this.monitorChart.options?.scales?.y;
+                        if (yScale) {
+                            yScale.min = Math.max(0, extremes.min - padding);
+                            yScale.max = extremes.max + padding;
+                        }
+                    }
+                }
+
+                const pluginConfig = this.monitorChart.options.plugins = this.monitorChart.options.plugins || {};
+                const annotationConfig = pluginConfig.annotation = pluginConfig.annotation || { annotations: {} };
+                const annotations = annotationConfig.annotations = annotationConfig.annotations || {};
+                const currentPriceLabel = `$${this.formatNumber(price)}`;
+                if (annotations.currentPrice) {
+                    annotations.currentPrice.yMin = price;
+                    annotations.currentPrice.yMax = price;
+                    annotations.currentPrice.borderColor = annotations.currentPrice.borderColor || 'rgb(255, 206, 84)';
+                    annotations.currentPrice.borderWidth = annotations.currentPrice.borderWidth || 2;
+                    if (annotations.currentPrice.label) {
+                        annotations.currentPrice.label.content = currentPriceLabel;
+                        annotations.currentPrice.label.backgroundColor = 'rgba(255, 206, 84, 0.8)';
+                        annotations.currentPrice.label.color = 'black';
+                        annotations.currentPrice.label.position = 'end';
+                        annotations.currentPrice.label.enabled = true;
+                        annotations.currentPrice.label.padding = 4;
+                    } else {
+                        annotations.currentPrice.label = {
+                            content: currentPriceLabel,
+                            enabled: true,
+                            position: 'end',
+                            backgroundColor: 'rgba(255, 206, 84, 0.8)',
+                            color: 'black',
+                            padding: 4
+                        };
+                    }
+                } else {
+                    annotations.currentPrice = {
+                        type: 'line',
+                        yMin: price,
+                        yMax: price,
+                        borderColor: 'rgb(255, 206, 84)',
+                        borderWidth: 2,
+                        label: {
+                            content: currentPriceLabel,
+                            enabled: true,
+                            position: 'end',
+                            backgroundColor: 'rgba(255, 206, 84, 0.8)',
+                            color: 'black',
+                            padding: 4
+                        }
+                    };
                 }
                 // 调整成交量轴的最大值，使柱状图高度不超过整体三分之一
                 const volDataset = this.monitorChart.data.datasets[1];
