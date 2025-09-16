@@ -339,6 +339,9 @@ class DOMManager {
         const obi = typeof m.obi5 === 'number' ? m.obi5 : null;
         const ofi = typeof m.ofi === 'number' ? m.ofi : null;
         const trendScore = typeof m.trend_score === 'number' ? m.trend_score : null;
+        
+        // 调试日志：检查trend_score数据
+        console.log('[DOM Manager] addMetricPoint - trend_score:', trendScore, 'raw data:', m.trend_score, 'full metric:', m);
         let suggestion = null;
         if (m.long === true) suggestion = 'buy';
         else if (m.short === true) suggestion = 'sell';
@@ -420,6 +423,7 @@ class DOMManager {
             this.lastTrendDir = dir;
 
             if (typeof this.app.addMonitorTrendPoint === 'function') {
+                console.log('[DOM Manager] 调用addMonitorTrendPoint - trendScore:', trendScore, 'level:', level, 'suggestion:', suggestion);
                 this.app.addMonitorTrendPoint(now, trendScore, {
                     reason,
                     suggestion,
@@ -431,6 +435,8 @@ class DOMManager {
                     maxPoints: 240,
                     threshold: 0.5
                 });
+            } else {
+                console.warn('[DOM Manager] addMonitorTrendPoint方法不存在');
             }
         }
         this.priceData.push({ x: now, y: price });

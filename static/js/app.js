@@ -149,12 +149,19 @@ class TradingApp {
     }
 
     addMonitorTrendPoint(time, score, options = {}) {
-        if (typeof score !== 'number' || Number.isNaN(score)) return;
+        console.log('[App] addMonitorTrendPoint 开始 - score:', score, 'time:', time, 'options:', options);
+        
+        if (typeof score !== 'number' || Number.isNaN(score)) {
+            console.warn('[App] addMonitorTrendPoint - 无效的score值:', score);
+            return;
+        }
 
         let x = this.normalizeMonitorTime(time ?? Date.now());
         if (x == null) {
             x = Date.now();
         }
+        
+        console.log('[App] addMonitorTrendPoint - 标准化时间:', x);
 
         const providedReason = typeof options.reason === 'string' ? options.reason : '';
         const reasonLines = [];
@@ -214,6 +221,7 @@ class TradingApp {
 
         if (!Array.isArray(this.monitorTrendData)) {
             this.monitorTrendData = [];
+            console.log('[App] addMonitorTrendPoint - 初始化monitorTrendData数组');
         }
 
         const newPoint = {
@@ -224,6 +232,9 @@ class TradingApp {
             level,
             price
         };
+        
+        console.log('[App] addMonitorTrendPoint - 创建新数据点:', newPoint);
+        console.log('[App] addMonitorTrendPoint - 当前monitorTrendData长度:', this.monitorTrendData.length);
 
         let inserted = false;
         for (let i = 0; i < this.monitorTrendData.length; i++) {
@@ -243,6 +254,9 @@ class TradingApp {
         if (!inserted) {
             this.monitorTrendData.push(newPoint);
         }
+        
+        console.log('[App] addMonitorTrendPoint - 数据插入后monitorTrendData长度:', this.monitorTrendData.length);
+        console.log('[App] addMonitorTrendPoint - 最新5个数据点:', this.monitorTrendData.slice(-5));
 
         const windowMs = typeof options.windowMs === 'number' && options.windowMs > 0
             ? options.windowMs
@@ -263,17 +277,31 @@ class TradingApp {
         }
 
         if (this.monitorTrendChart?.data?.datasets?.[0]) {
+            console.log('[App] addMonitorTrendPoint - 更新monitorTrendChart，数据点数量:', this.monitorTrendData.length);
             this.monitorTrendChart.data.datasets[0].data = this.monitorTrendData;
+            
             if (this.monitorChart?.scales?.x) {
                 const scale = this.monitorChart.scales.x;
                 const min = this.normalizeMonitorTime(scale.min);
                 const max = this.normalizeMonitorTime(scale.max);
+                console.log('[App] addMonitorTrendPoint - 同步x轴时间范围 min:', min, 'max:', max);
                 if (min != null) this.monitorTrendChart.options.scales.x.min = min;
                 if (max != null) this.monitorTrendChart.options.scales.x.max = max;
             } else if (this.currentMonitor?.chartTimeRange) {
+                console.log('[App] addMonitorTrendPoint - 应用当前监控时间范围:', this.currentMonitor.chartTimeRange);
                 this.applyRangeToTrendChart(this.currentMonitor.chartTimeRange);
             }
+            
             this.monitorTrendChart.update('none');
+            console.log('[App] addMonitorTrendPoint - 图表更新完成');
+        } else {
+            console.warn('[App] addMonitorTrendPoint - monitorTrendChart不存在或未初始化');
+            console.log('[App] addMonitorTrendPoint - monitorTrendChart状态:', {
+                exists: !!this.monitorTrendChart,
+                hasData: !!this.monitorTrendChart?.data,
+                hasDatasets: !!this.monitorTrendChart?.data?.datasets,
+                hasFirstDataset: !!this.monitorTrendChart?.data?.datasets?.[0]
+            });
         }
     }
 
@@ -1692,6 +1720,16 @@ class TradingApp {
             if (modalEl) {
                 const modal = new bootstrap.Modal(modalEl);
                 modal.show();
+                
+                // 检查monitorTrendChart初始化状态
+                console.log('[Monitor Modal] Modal shown, checking monitorTrendChart status:');
+                console.log('[Monitor Modal] monitorTrendChart exists:', !!this.monitorTrendChart);
+                console.log('[Monitor Modal] monitorTrendData length:', this.monitorTrendData ? this.monitorTrendData.length : 'undefined');
+                if (this.monitorTrendChart) {
+                    console.log('[Monitor Modal] monitorTrendChart data length:', this.monitorTrendChart.data ? this.monitorTrendChart.data.datasets[0].data.length : 'no data');
+                } else {
+                    console.warn('[Monitor Modal] monitorTrendChart is not initialized!');
+                }
 
                 if (this.domManager && typeof this.domManager.updateToggleButton === 'function') {
                     this.domManager.updateToggleButton();
@@ -3214,9 +3252,14 @@ class TradingApp {
 
                     // Initialize or update trend chart with synchronized time range
                     const trendCtx = document.getElementById('monitorTrendChart')?.getContext('2d');
+                    console.log('[loadMonitorChart] Trend chart context:', trendCtx ? 'found' : 'not found');
+                    console.log('[loadMonitorChart] Current monitorTrendData length:', this.monitorTrendData?.length || 0);
+                    console.log('[loadMonitorChart] MonitorTrendData sample:', this.monitorTrendData?.slice(0, 3));
                     if (trendCtx) {
                         const timeRange = this.currentMonitor?.chartTimeRange;
+                        console.log('[loadMonitorChart] Time range for trend chart:', timeRange);
                         if (!this.monitorTrendChart) {
+                            console.log('[loadMonitorChart] Creating new monitorTrendChart with data points:', this.monitorTrendData?.length || 0);
                             this.monitorTrendChart = new Chart(trendCtx, {
                                 type: 'line',
                                 data: {
@@ -3299,14 +3342,22 @@ class TradingApp {
                                 },
                                 plugins: [TrendSignalLabelPlugin]
                             });
+                            console.log('[loadMonitorChart] MonitorTrendChart created successfully');
+                            console.log('[loadMonitorChart] Chart data after creation:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
                         } else {
+                            console.log('[loadMonitorChart] Updating existing monitorTrendChart');
+                            console.log('[loadMonitorChart] Current chart data length:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
                             const range = this.extractRangeFromMonitorChart();
                             if (range) {
+                                console.log('[loadMonitorChart] Applying range to trend chart:', range);
                                 this.currentMonitor.chartTimeRange = range;
                                 this.applyRangeToTrendChart(range);
                             }
                             this.monitorTrendChart.update('none');
+                            console.log('[loadMonitorChart] MonitorTrendChart updated');
                         }
+                    } else {
+                        console.warn('[loadMonitorChart] Trend chart context not found - cannot create/update trend chart');
                     }
 
                     this.updateDomSignalAnnotations();
