@@ -41,7 +41,9 @@ class NotificationManager:
             'Position Closed',
             'Risk Rule Triggered',
             'Strategy Started',
-            'Strategy Stopped'
+            'Strategy Stopped',
+            'DOM Level 3',
+            'DOM Level 4'
         ]
         default_settings = {
             "chrome": {

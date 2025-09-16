@@ -12,6 +12,102 @@ const INTERVAL_MINUTES_MAP = {
 const MONITOR_SOURCE_TZ = 'America/New_York';
 const MONITOR_FALLBACK_TZ = 'Asia/Shanghai';
 
+const TREND_LEVEL_STYLES = {
+    0: {
+        buyColor: '#60a5fa',
+        sellColor: '#f87171',
+        neutralColor: '#94a3b8',
+        barBuyColor: 'rgba(96,165,250,0.3)',
+        barSellColor: 'rgba(248,113,113,0.3)',
+        barNeutralColor: 'rgba(148,163,184,0.25)',
+        pointRadius: 2.5,
+        hoverRadius: 4,
+        borderWidth: 1,
+        borderColor: '#ffffff',
+        labelFont: '600 11px sans-serif',
+        labelOffset: 16,
+        labelBuyColor: '#60a5fa',
+        labelSellColor: '#f87171'
+    },
+    1: {
+        buyColor: 'rgba(134,239,172,0.85)',
+        sellColor: 'rgba(252,165,165,0.85)',
+        neutralColor: '#94a3b8',
+        barBuyColor: 'rgba(134,239,172,0.35)',
+        barSellColor: 'rgba(252,165,165,0.35)',
+        barNeutralColor: 'rgba(148,163,184,0.25)',
+        pointRadius: 3.5,
+        hoverRadius: 5,
+        borderWidth: 1,
+        borderColor: '#ffffff',
+        labelFont: '600 12px sans-serif',
+        labelOffset: 18,
+        labelBuyColor: '#4ade80',
+        labelSellColor: '#f87171'
+    },
+    2: {
+        buyColor: 'rgba(74,222,128,0.9)',
+        sellColor: 'rgba(248,113,113,0.9)',
+        neutralColor: '#94a3b8',
+        barBuyColor: 'rgba(74,222,128,0.4)',
+        barSellColor: 'rgba(248,113,113,0.4)',
+        barNeutralColor: 'rgba(148,163,184,0.25)',
+        pointRadius: 4.5,
+        hoverRadius: 6,
+        borderWidth: 1.5,
+        borderColor: '#f0fdf4',
+        labelFont: '600 13px sans-serif',
+        labelOffset: 20,
+        labelBuyColor: '#22c55e',
+        labelSellColor: '#ef4444'
+    },
+    3: {
+        buyColor: 'rgba(34,197,94,0.95)',
+        sellColor: 'rgba(239,68,68,0.95)',
+        neutralColor: '#94a3b8',
+        barBuyColor: 'rgba(34,197,94,0.45)',
+        barSellColor: 'rgba(239,68,68,0.45)',
+        barNeutralColor: 'rgba(148,163,184,0.25)',
+        pointRadius: 5.5,
+        hoverRadius: 7,
+        borderWidth: 2,
+        borderColor: '#dcfce7',
+        labelFont: '700 14px sans-serif',
+        labelOffset: 22,
+        labelBuyColor: '#16a34a',
+        labelSellColor: '#dc2626'
+    },
+    4: {
+        buyColor: '#16a34a',
+        sellColor: '#b91c1c',
+        neutralColor: '#94a3b8',
+        barBuyColor: 'rgba(22,163,74,0.55)',
+        barSellColor: 'rgba(185,28,28,0.55)',
+        barNeutralColor: 'rgba(148,163,184,0.25)',
+        pointRadius: 6.5,
+        hoverRadius: 8,
+        borderWidth: 2.5,
+        borderColor: '#fef9c3',
+        labelFont: '700 15px sans-serif',
+        labelOffset: 24,
+        labelBuyColor: '#15803d',
+        labelSellColor: '#b91c1c',
+        shadowBlur: 10,
+        shadowColor: 'rgba(250,204,21,0.55)',
+        outlineColor: '#fef08a',
+        outlineWidth: 1.5
+    }
+};
+
+function getTrendLevelStyle(level) {
+    const key = Number.isFinite(level) ? Number(level) : 0;
+    return TREND_LEVEL_STYLES[key] || TREND_LEVEL_STYLES[0];
+}
+
+if (typeof window !== 'undefined') {
+    window.getTrendLevelStyle = getTrendLevelStyle;
+}
+
 const TrendSignalLabelPlugin = {
     id: 'trendSignalLabel',
     afterDatasetsDraw(chart, args, opts) {
@@ -29,13 +125,28 @@ const TrendSignalLabelPlugin = {
             const raw = dataset.data?.[index];
             if (!raw || !raw.suggestion) return;
             const { x, y } = element.tooltipPosition();
+            const level = raw.level ?? 0;
+            const style = getTrendLevelStyle(level);
             const text = raw.suggestion === 'buy' ? 'Buy' : 'Sell';
-            const yOffset = raw.suggestion === 'buy' ? -offset : offset;
+            const resolvedOffset = style.labelOffset ?? offset;
+            const yOffset = raw.suggestion === 'buy' ? -resolvedOffset : resolvedOffset;
             ctx.save();
-            ctx.font = font;
-            ctx.fillStyle = raw.suggestion === 'buy' ? buyColor : sellColor;
+            ctx.font = style.labelFont || font;
+            const fillColor = raw.suggestion === 'buy'
+                ? (style.labelBuyColor || style.buyColor || buyColor)
+                : (style.labelSellColor || style.sellColor || sellColor);
+            ctx.fillStyle = fillColor;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
+            if (style.shadowBlur) {
+                ctx.shadowColor = style.shadowColor || fillColor;
+                ctx.shadowBlur = style.shadowBlur;
+            }
+            if (style.outlineColor) {
+                ctx.strokeStyle = style.outlineColor;
+                ctx.lineWidth = style.outlineWidth || 1;
+                ctx.strokeText(text, x, y + yOffset);
+            }
             ctx.fillText(text, x, y + yOffset);
             ctx.restore();
         });
@@ -130,12 +241,20 @@ class TradingApp {
         this.monitorChart.update('none');
     }
 
-    resetMonitorTrendData() {
-        this.monitorTrendData = [];
+    setMonitorTrendHistory(points = []) {
+        if (Array.isArray(points)) {
+            this.monitorTrendData = points.map(point => ({ ...point }));
+        } else {
+            this.monitorTrendData = [];
+        }
         if (this.monitorTrendChart?.data?.datasets?.[0]) {
             this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
             this.monitorTrendChart.update('none');
         }
+    }
+
+    resetMonitorTrendData() {
+        this.setMonitorTrendHistory([]);
     }
 
     formatTrendPointForChart(point) {
@@ -3216,21 +3335,35 @@ class TradingApp {
                                         data: this.getFormattedTrendChartData(),
                                         borderColor: 'rgba(255,165,0,0.9)',
                                         backgroundColor: 'rgba(255,165,0,0.1)',
-                                        pointRadius: 3,
-                                        pointHoverRadius: 5,
-                                        pointHitRadius: 12,
-                                        pointBackgroundColor: (ctx) => {
-                                            const suggestion = ctx.raw?.suggestion;
-                                            if (suggestion === 'buy') return '#16a34a';
-                                            if (suggestion === 'sell') return '#dc2626';
-                                            const value = ctx.parsed?.y;
-                                            if (typeof value === 'number') {
-                                                return value >= 0 ? '#60a5fa' : '#f87171';
-                                            }
-                                            return '#94a3b8';
+                                        pointRadius: (ctx) => {
+                                            const level = ctx.raw?.level ?? 0;
+                                            return getTrendLevelStyle(level).pointRadius ?? 3;
                                         },
-                                        pointBorderColor: '#ffffff',
-                                        pointBorderWidth: 1,
+                                        pointHoverRadius: (ctx) => {
+                                            const level = ctx.raw?.level ?? 0;
+                                            return getTrendLevelStyle(level).hoverRadius ?? 5;
+                                        },
+                                        pointHitRadius: (ctx) => {
+                                            const level = ctx.raw?.level ?? 0;
+                                            const style = getTrendLevelStyle(level);
+                                            const base = style.hoverRadius ?? 5;
+                                            return Math.max(10, base + 6);
+                                        },
+                                        pointBackgroundColor: (ctx) => {
+                                            const raw = ctx.raw || {};
+                                            const style = getTrendLevelStyle(raw.level ?? 0);
+                                            if (raw.suggestion === 'buy') return style.buyColor || '#16a34a';
+                                            if (raw.suggestion === 'sell') return style.sellColor || '#dc2626';
+                                            return style.neutralColor || '#94a3b8';
+                                        },
+                                        pointBorderColor: (ctx) => {
+                                            const style = getTrendLevelStyle(ctx.raw?.level ?? 0);
+                                            return style.borderColor || '#ffffff';
+                                        },
+                                        pointBorderWidth: (ctx) => {
+                                            const style = getTrendLevelStyle(ctx.raw?.level ?? 0);
+                                            return style.borderWidth ?? 1;
+                                        },
                                         tension: 0.2,
                                         spanGaps: true,
                                         yAxisID: 'y'

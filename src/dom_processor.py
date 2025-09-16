@@ -214,9 +214,12 @@ class DOMProcessor:
             mid_tick = asks[0][0]
         else:
             mid_tick = 0
-        ts_ns = data.get("ts_ns", time.time_ns())
+        ts_ns = int(data.get("ts_ns", time.time_ns()))
         self.buffer.append_snapshot(bids, asks, mid_tick, ts_ns)
         features = self.compute_features()
+        timestamp_ms = ts_ns // 1_000_000
+        features["timestamp_ns"] = ts_ns
+        features["timestamp"] = float(timestamp_ms)
         self.features_history.append(features)
         self.last_metrics = features
         self.last_events = self.detect_events(self.features_history)

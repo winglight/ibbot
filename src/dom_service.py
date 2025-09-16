@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Any
 
 import core
 from core import connection_manager, depth_subscriber, dom_config, DOMProcessor
+from src.dom_cache import DomCacheManager
 
 
 class DOMService:
@@ -18,13 +19,40 @@ class DOMService:
         self._cleanup_task: Optional[asyncio.Task] = None
         # Store last raw depth update for monitoring
         self._last_depth: Dict[str, Any] = {}
+        self._last_depth_by_symbol: Dict[str, Dict[str, Any]] = {}
+        self._last_metrics_by_symbol: Dict[str, Dict[str, Any]] = {}
+        self._active_symbol: Optional[str] = None
+        self._cache = DomCacheManager()
 
     # --------------------------------------------------------------
-    def _on_depth_update(self, data: Dict) -> None:
+    def _on_depth_update(self, symbol: str, data: Dict) -> None:
         """Internal callback from DepthSubscriber."""
         # Keep raw depth snapshot for external monitoring
-        self._last_depth = data
-        self.processor.on_depth_update(data)
+        symbol_key = (symbol or "").upper()
+        snapshot = dict(data)
+        snapshot.setdefault("symbol", symbol_key)
+        ts_ns = snapshot.get("ts_ns")
+        if not isinstance(ts_ns, int):
+            try:
+                ts_ns = int(ts_ns)
+            except (TypeError, ValueError):
+                ts_ns = None
+        if ts_ns is None or ts_ns < 1_000_000_000_000:
+            ts_ns = time.time_ns()
+        snapshot["ts_ns"] = ts_ns
+        self._last_depth = snapshot
+        if symbol_key:
+            self._last_depth_by_symbol[symbol_key] = snapshot
+
+        self.processor.on_depth_update(snapshot)
+        metrics = dict(self.processor.last_metrics)
+        if symbol_key:
+            metrics["symbol"] = symbol_key
+            self._last_metrics_by_symbol[symbol_key] = metrics
+        timestamp = metrics.get("timestamp") or (ts_ns / 1_000_000.0)
+        snapshot.setdefault("timestamp", timestamp)
+        self._cache.append(symbol_key, snapshot, metrics)
+
         ts = time.time()
         for evt in self.processor.last_events:
             self._alerts.append({"id": self._next_alert_id, "event": evt, "timestamp": ts})
@@ -47,26 +75,45 @@ class DOMService:
     def start(self, symbol: str, num_rows: int = 5) -> bool:
         if not connection_manager.is_connected():
             return False
+        self._active_symbol = (symbol or "").upper()
         if self._cleanup_task is None or self._cleanup_task.done():
             try:
                 self._cleanup_task = asyncio.create_task(self._cleanup_loop())
             except RuntimeError:
                 self._cleanup_task = None
         return depth_subscriber.start_depth_stream(
-            symbol, self._on_depth_update, num_rows=num_rows
+            symbol, lambda data, sym=symbol: self._on_depth_update(sym, data), num_rows=num_rows
         )
 
     # --------------------------------------------------------------
     def stop(self, symbol: str) -> bool:
+        if self._active_symbol and symbol and symbol.upper() == self._active_symbol:
+            self._active_symbol = None
         return depth_subscriber.stop_depth_stream(symbol)
 
     # --------------------------------------------------------------
-    def get_metrics(self) -> Dict[str, float]:
-        return dict(self.processor.last_metrics)
+    def get_metrics(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        target = (symbol or self._active_symbol or "").upper()
+        active = dict(self.processor.last_metrics)
+        if active:
+            active_symbol = active.get("symbol")
+            if not target or not active_symbol or active_symbol == target:
+                return active
+        if target and target in self._last_metrics_by_symbol:
+            return dict(self._last_metrics_by_symbol[target])
+        if target:
+            cached = self._cache.get_latest_metrics(target)
+            if cached:
+                self._last_metrics_by_symbol[target] = dict(cached)
+                return cached
+        return {}
 
     # --------------------------------------------------------------
-    def get_last_depth(self) -> Dict[str, Any]:
+    def get_last_depth(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         """Return last raw depth data received from IB."""
+        target = (symbol or self._active_symbol or "").upper()
+        if target and target in self._last_depth_by_symbol:
+            return dict(self._last_depth_by_symbol[target])
         return dict(self._last_depth)
 
     # --------------------------------------------------------------
@@ -91,6 +138,10 @@ class DOMService:
     # --------------------------------------------------------------
     def get_events(self) -> List[str]:
         return list(self.processor.last_events)
+
+    # --------------------------------------------------------------
+    def get_history(self, symbol: str) -> Dict[str, List[Dict[str, Any]]]:
+        return self._cache.get_history(symbol)
 
 
 # Global service instance
