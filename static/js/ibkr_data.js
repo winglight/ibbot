@@ -98,9 +98,9 @@ class IBKRDataManager {
      */
     async loadPortfolio() {
         try {
-            const response = await fetch('/api/positions?fast=false&use_cache=false');
-            if (response.ok) {
-                const positions = await response.json();
+            const response = await this.app.apiCall('/positions?fast=false&use_cache=false');
+            if (response.success && response.positions) {
+                const positions = await response.positions;
                 this.updatePositionsUI(positions);
             } else {
                 console.error('Failed to fetch positions:', response.statusText);
@@ -213,7 +213,7 @@ class IBKRDataManager {
                 return response.price;
             }
         } catch (error) {
-            // /api/current_price接口不重要，静默处理错误
+            // /current_price接口不重要，静默处理错误
         }
         
         return null;
