@@ -14,7 +14,6 @@ order_logger = logger.bind(module="order_manager", request_id="-")
 
 from .database import get_db_manager
 import asyncio
-import core
 
 class OrderStatus(Enum):
     """订单状态枚举"""
@@ -416,6 +415,7 @@ class OrderManager:
                     async def _broadcast():
                         await self.websocket_manager.broadcast(message)
                         try:
+                            import core  # 延迟导入避免循环导入
                             positions = await core.ibkr_client.get_positions()
                         except Exception:
                             positions = []

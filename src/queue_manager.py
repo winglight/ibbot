@@ -5,7 +5,6 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 from loguru import logger
 import json
-import core
 
 # 为队列管理器绑定模块日志记录器
 queue_logger = logger.bind(module="queue_manager", request_id="-")
@@ -308,6 +307,7 @@ class QueueManager:
         order_type_for_record = "MKT" if order_type == "MARKET" else "LMT"
         
         # 真实IBKR路径：使用 ibkr_client
+        import core  # 延迟导入避免循环导入
         if order_type == "MARKET":
             trade = core.ibkr_client.place_market_order(
                 symbol=payload['symbol'],

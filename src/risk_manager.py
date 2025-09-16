@@ -20,7 +20,6 @@ from .notification_manager import NotificationManager
 from .database import DatabaseManager, get_db_manager
 from .database import AutoOrder as DatabaseAutoOrder
 from .database import RiskRule as DatabaseRiskRule
-import core
 
 load_dotenv()
 
@@ -670,6 +669,7 @@ class RiskManager:
         
         # 获取最新实时价格，而不是使用position中的价格
         try:
+            import core  # 延迟导入避免循环导入
             # 尝试在后台线程获取最新实时价格，避免阻塞事件循环
             real_time_data = await asyncio.to_thread(core.ibkr_client.get_real_time_data, symbol)
             price = None
@@ -750,6 +750,7 @@ class RiskManager:
             if should_trigger:
                 risk_logger.info(f"Price reaches take profit for {symbol}, placing market order")
                 try:
+                    import core  # 延迟导入避免循环导入
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
                     trade = core.ibkr_client.place_market_order(
@@ -1156,6 +1157,7 @@ class RiskManager:
         risk_logger.info(f"开始执行订单: {order_request.order_type.value} for {order_request.symbol}, quantity: {order_request.quantity}")
         
         try:
+            import core  # 延迟导入避免循环导入
             # 检查连接状态
             if not core.ibkr_client or not getattr(core.ibkr_client, 'connected', False):
                 risk_logger.error(f"Cannot execute order for {order_request.symbol}: IBKR client not ready")
