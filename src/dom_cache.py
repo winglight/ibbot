@@ -154,6 +154,10 @@ class DomCacheManager:
             metrics = [dict(item) for item in container.get("metrics", [])]
         metrics.sort(key=lambda item: self._timestamp_ms(item))
         snapshots.sort(key=lambda item: self._timestamp_ms(item))
+
+        # 保证 snapshots 长度不超过 10000（保留最新的 10000 条）
+        snapshots = snapshots[-10000:]
+
         return {"snapshots": snapshots, "metrics": metrics}
 
     # ------------------------------------------------------------------
