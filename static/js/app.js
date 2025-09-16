@@ -157,13 +157,6 @@ class TradingApp {
             .filter(point => point !== null);
     }
 
-    getTrendChartScaleValue(value) {
-        const normalized = this.normalizeMonitorTime(value);
-        if (normalized == null) return undefined;
-        const date = new Date(normalized);
-        return Number.isNaN(date.getTime()) ? undefined : date;
-    }
-
     deriveTrendLevel(score) {
         const value = Math.abs(Number(score));
         if (!Number.isFinite(value)) return 0;
@@ -306,18 +299,6 @@ class TradingApp {
         if (this.monitorTrendChart?.data?.datasets?.[0]) {
             console.log('[App] addMonitorTrendPoint - 更新monitorTrendChart，数据点数量:', this.monitorTrendData.length);
             this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
-
-            const range = this.extractRangeFromMonitorChart();
-            if (range) {
-                console.log('[App] addMonitorTrendPoint - 同步x轴时间范围:', range);
-                if (!this.currentMonitor) this.currentMonitor = {};
-                this.currentMonitor.chartTimeRange = range;
-                this.applyRangeToTrendChart(range);
-            } else if (this.currentMonitor?.chartTimeRange) {
-                console.log('[App] addMonitorTrendPoint - 应用当前监控时间范围:', this.currentMonitor.chartTimeRange);
-                this.applyRangeToTrendChart(this.currentMonitor.chartTimeRange);
-            }
-
             this.monitorTrendChart.update('none');
             console.log('[App] addMonitorTrendPoint - 图表更新完成');
         } else {
@@ -334,30 +315,19 @@ class TradingApp {
     syncCharts(source, target) {
         if (!source || !target) return;
 
-        if (source === this.monitorChart && target === this.monitorTrendChart) {
-            const range = this.extractRangeFromMonitorChart();
-            if (range) {
-                if (!this.currentMonitor) this.currentMonitor = {};
-                this.currentMonitor.chartTimeRange = range;
-                this.applyRangeToTrendChart(range);
-            }
-        } else if (source === this.monitorTrendChart && target === this.monitorChart) {
-            const range = this.extractRangeFromTrendChart();
-            if (range) {
-                if (!this.currentMonitor) this.currentMonitor = {};
-                this.currentMonitor.chartTimeRange = range;
-                this.applyRangeToMonitorChart(range);
-            }
-        } else {
+        const isMonitorTrendPair =
+            (source === this.monitorChart && target === this.monitorTrendChart) ||
+            (source === this.monitorTrendChart && target === this.monitorChart);
+
+        if (!isMonitorTrendPair) {
             const srcScale = source.scales?.x;
             const targetScale = target.options?.scales?.x;
             if (srcScale && targetScale) {
                 targetScale.min = srcScale.min;
                 targetScale.max = srcScale.max;
             }
+            target.update('none');
         }
-
-        target.update('none');
         if (source === this.monitorChart || target === this.monitorChart) {
             this.updateDomSignalAnnotations();
         }
@@ -424,54 +394,6 @@ class TradingApp {
         const maxTime = this.normalizeMonitorTime(times[maxIdx]);
         if (minTime == null || maxTime == null) return null;
         return { min: minTime, max: maxTime };
-    }
-
-    extractRangeFromTrendChart() {
-        if (!this.monitorTrendChart || !this.monitorTrendChart.scales?.x) return null;
-        const min = this.normalizeMonitorTime(this.monitorTrendChart.scales.x.min);
-        const max = this.normalizeMonitorTime(this.monitorTrendChart.scales.x.max);
-        if (min == null || max == null) return null;
-        return { min, max };
-    }
-
-    applyRangeToMonitorChart(range) {
-        if (!this.monitorChart || !range) return;
-        const scale = this.monitorChart.options?.scales?.x;
-        if (!scale) return;
-
-        const chartType = this.currentMonitor?.chartType || this.monitorChart.config?.type;
-        if (chartType === 'candlestick') {
-            scale.min = range.min;
-            scale.max = range.max;
-            return;
-        }
-
-        const labels = this.getMonitorDisplayLabels();
-        const times = this.getMonitorDisplayTimes();
-        if (!labels.length || labels.length !== times.length) return;
-
-        const findLabel = (time, fallback) => {
-            if (!Number.isFinite(time)) return fallback;
-            let idx = times.findIndex(val => {
-                const ts = this.normalizeMonitorTime(val);
-                return ts != null && ts >= time;
-            });
-            if (idx === -1) idx = labels.length - 1;
-            return labels[idx] ?? fallback;
-        };
-
-        scale.min = findLabel(range.min, labels[0]);
-        scale.max = findLabel(range.max, labels[labels.length - 1]);
-    }
-
-    applyRangeToTrendChart(range) {
-        if (!this.monitorTrendChart || !range) return;
-        const scale = this.monitorTrendChart.options?.scales?.x;
-        if (!scale) return;
-        const min = this.getTrendChartScaleValue(range.min);
-        const max = this.getTrendChartScaleValue(range.max);
-        if (min !== undefined) scale.min = min; else delete scale.min;
-        if (max !== undefined) scale.max = max; else delete scale.max;
     }
 
     // Detect security type based on symbol (simple heuristic for common cases)
@@ -3284,8 +3206,6 @@ class TradingApp {
                     console.log('[loadMonitorChart] Current monitorTrendData length:', this.monitorTrendData?.length || 0);
                     console.log('[loadMonitorChart] MonitorTrendData sample:', this.monitorTrendData?.slice(0, 3));
                     if (trendCtx) {
-                        const timeRange = this.currentMonitor?.chartTimeRange;
-                        console.log('[loadMonitorChart] Time range for trend chart:', timeRange);
                         if (!this.monitorTrendChart) {
                             console.log('[loadMonitorChart] Creating new monitorTrendChart with data points:', this.monitorTrendData?.length || 0);
                             this.monitorTrendChart = new Chart(trendCtx, {
@@ -3354,9 +3274,7 @@ class TradingApp {
                                     scales: {
                                         x: {
                                             type: 'time',
-                                            time: { unit: 'minute', displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'MMM dd' } },
-                                            min: this.getTrendChartScaleValue(timeRange?.min ?? this.monitorTrendData[0]?.x) ?? null,
-                                            max: this.getTrendChartScaleValue(timeRange?.max ?? this.monitorTrendData[this.monitorTrendData.length - 1]?.x) ?? null
+                                            time: { unit: 'minute', displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'MMM dd' } }
                                         },
                                         y: {
                                             position: 'left',
@@ -3376,12 +3294,6 @@ class TradingApp {
                             console.log('[loadMonitorChart] Updating existing monitorTrendChart');
                             console.log('[loadMonitorChart] Current chart data length:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
                             this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
-                            const range = this.extractRangeFromMonitorChart();
-                            if (range) {
-                                console.log('[loadMonitorChart] Applying range to trend chart:', range);
-                                this.currentMonitor.chartTimeRange = range;
-                                this.applyRangeToTrendChart(range);
-                            }
                             this.monitorTrendChart.update('none');
                             console.log('[loadMonitorChart] MonitorTrendChart updated');
                         }
@@ -4032,10 +3944,6 @@ class TradingApp {
                 if (updatedRange) {
                     if (!this.currentMonitor) this.currentMonitor = {};
                     this.currentMonitor.chartTimeRange = updatedRange;
-                    if (this.monitorTrendChart) {
-                        this.applyRangeToTrendChart(updatedRange);
-                        this.monitorTrendChart.update('none');
-                    }
                 }
             }
 
