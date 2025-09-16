@@ -2476,6 +2476,8 @@ class TradingApp {
                     return parsed instanceof Date ? parsed : new Date(value);
                 });
 
+                let chartTimeRange = this.currentMonitor?.chartTimeRange;
+
                 if (this.currentMonitor) {
                     this.currentMonitor.displayTimes = normalizedTimes;
                     this.currentMonitor.displayLabels = Array.from(displayLabels);
@@ -2735,7 +2737,6 @@ class TradingApp {
                 let candlestickVisibleCount = 1;
                 let candlestickFirst = null;
                 let candlestickLast = null;
-                let chartTimeRange = this.currentMonitor?.chartTimeRange;
 
                 if (chartType === 'candlestick') {
                     const toTimestamp = (raw) => {
