@@ -102,13 +102,143 @@ class TradingApp {
 
     syncCharts(source, target) {
         if (!source || !target) return;
-        const srcScale = source.scales.x;
-        target.options.scales.x.min = srcScale.min;
-        target.options.scales.x.max = srcScale.max;
+
+        if (source === this.monitorChart && target === this.monitorTrendChart) {
+            const range = this.extractRangeFromMonitorChart();
+            if (range) {
+                if (!this.currentMonitor) this.currentMonitor = {};
+                this.currentMonitor.chartTimeRange = range;
+                this.applyRangeToTrendChart(range);
+            }
+        } else if (source === this.monitorTrendChart && target === this.monitorChart) {
+            const range = this.extractRangeFromTrendChart();
+            if (range) {
+                if (!this.currentMonitor) this.currentMonitor = {};
+                this.currentMonitor.chartTimeRange = range;
+                this.applyRangeToMonitorChart(range);
+            }
+        } else {
+            const srcScale = source.scales?.x;
+            const targetScale = target.options?.scales?.x;
+            if (srcScale && targetScale) {
+                targetScale.min = srcScale.min;
+                targetScale.max = srcScale.max;
+            }
+        }
+
         target.update('none');
         if (source === this.monitorChart || target === this.monitorChart) {
             this.updateDomSignalAnnotations();
         }
+    }
+
+    normalizeMonitorTime(value) {
+        try {
+            if (value == null) return null;
+            if (value instanceof Date) return value.getTime();
+            if (typeof value === 'number') {
+                return Number.isFinite(value) ? value : null;
+            }
+            const parsed = this.parseMonitorChartTime(value);
+            if (parsed && !Number.isNaN(parsed.getTime())) {
+                return parsed.getTime();
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    getMonitorDisplayTimes() {
+        const times = this.currentMonitor?.displayTimes;
+        return Array.isArray(times) ? times : [];
+    }
+
+    getMonitorDisplayLabels() {
+        const labels = this.currentMonitor?.displayLabels;
+        return Array.isArray(labels) ? labels : [];
+    }
+
+    extractRangeFromMonitorChart() {
+        if (!this.monitorChart || !this.monitorChart.scales?.x) return null;
+        const chartType = this.currentMonitor?.chartType || this.monitorChart.config?.type;
+        const times = this.getMonitorDisplayTimes();
+        if (!times.length) return null;
+
+        if (chartType === 'candlestick') {
+            const min = this.normalizeMonitorTime(this.monitorChart.scales.x.min);
+            const max = this.normalizeMonitorTime(this.monitorChart.scales.x.max);
+            if (min == null || max == null) return null;
+            return { min, max };
+        }
+
+        const labels = this.getMonitorDisplayLabels();
+        if (!labels.length || labels.length !== times.length) return null;
+
+        const toIndex = (value, fallback) => {
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                return Math.round(value);
+            }
+            if (typeof value === 'string') {
+                const idx = labels.indexOf(value);
+                if (idx !== -1) return idx;
+            }
+            return fallback;
+        };
+
+        const minIdx = Math.max(0, Math.min(times.length - 1, toIndex(this.monitorChart.scales.x.min, 0)));
+        const maxIdx = Math.max(minIdx, Math.min(times.length - 1, toIndex(this.monitorChart.scales.x.max, times.length - 1)));
+
+        const minTime = this.normalizeMonitorTime(times[minIdx]);
+        const maxTime = this.normalizeMonitorTime(times[maxIdx]);
+        if (minTime == null || maxTime == null) return null;
+        return { min: minTime, max: maxTime };
+    }
+
+    extractRangeFromTrendChart() {
+        if (!this.monitorTrendChart || !this.monitorTrendChart.scales?.x) return null;
+        const min = this.normalizeMonitorTime(this.monitorTrendChart.scales.x.min);
+        const max = this.normalizeMonitorTime(this.monitorTrendChart.scales.x.max);
+        if (min == null || max == null) return null;
+        return { min, max };
+    }
+
+    applyRangeToMonitorChart(range) {
+        if (!this.monitorChart || !range) return;
+        const scale = this.monitorChart.options?.scales?.x;
+        if (!scale) return;
+
+        const chartType = this.currentMonitor?.chartType || this.monitorChart.config?.type;
+        if (chartType === 'candlestick') {
+            scale.min = range.min;
+            scale.max = range.max;
+            return;
+        }
+
+        const labels = this.getMonitorDisplayLabels();
+        const times = this.getMonitorDisplayTimes();
+        if (!labels.length || labels.length !== times.length) return;
+
+        const findLabel = (time, fallback) => {
+            if (!Number.isFinite(time)) return fallback;
+            let idx = times.findIndex(val => {
+                const ts = this.normalizeMonitorTime(val);
+                return ts != null && ts >= time;
+            });
+            if (idx === -1) idx = labels.length - 1;
+            return labels[idx] ?? fallback;
+        };
+
+        scale.min = findLabel(range.min, labels[0]);
+        scale.max = findLabel(range.max, labels[labels.length - 1]);
+    }
+
+    applyRangeToTrendChart(range) {
+        if (!this.monitorTrendChart || !range) return;
+        const scale = this.monitorTrendChart.options?.scales?.x;
+        if (!scale) return;
+        scale.min = range.min;
+        scale.max = range.max;
     }
 
     // Detect security type based on symbol (simple heuristic for common cases)
@@ -2337,12 +2467,28 @@ class TradingApp {
                 // 根据图表类型选择对应的标签和时间数组
                 const displayLabels = chartType === 'line' ? validLabels : labels;
                 const displayTimes = chartType === 'line' ? validTimes : timeValues;
-                
+
+                const normalizedTimes = displayTimes.map(value => {
+                    if (value instanceof Date) {
+                        return new Date(value.getTime());
+                    }
+                    const parsed = this.parseMonitorChartTime(value);
+                    return parsed instanceof Date ? parsed : new Date(value);
+                });
+
+                let chartTimeRange = this.currentMonitor?.chartTimeRange;
+
+                if (this.currentMonitor) {
+                    this.currentMonitor.displayTimes = normalizedTimes;
+                    this.currentMonitor.displayLabels = Array.from(displayLabels);
+                    this.currentMonitor.chartType = chartType;
+                }
+
                 // 打印处理后的时间数组信息
                 console.log('处理后的displayTimes数组信息:', {
-                    displayTimesLength: displayTimes.length,
-                    firstTime: displayTimes[0]?.toISOString(),
-                    lastTime: displayTimes[displayTimes.length-1]?.toISOString(),
+                    displayTimesLength: normalizedTimes.length,
+                    firstTime: normalizedTimes[0]?.toISOString(),
+                    lastTime: normalizedTimes[normalizedTimes.length-1]?.toISOString(),
                     chartType
                 });
 
@@ -2368,15 +2514,45 @@ class TradingApp {
                 }
                 const endIndex = Math.min(displayLabels.length - 1, startIndex + spanBars);
                 this.currentMonitor.riskStartIndex = startIndex;
-                
+
                 // 打印最终确定的起点索引和对应的时间
                 console.log('最终确定的起点索引和时间:', {
                     startIndex,
                     endIndex,
-                    startTime: displayTimes[startIndex]?.toISOString(),
-                    endTime: displayTimes[endIndex]?.toISOString(),
+                    startTime: normalizedTimes[startIndex]?.toISOString(),
+                    endTime: normalizedTimes[endIndex]?.toISOString(),
                     spanBars
                 });
+
+                if (this.currentMonitor) {
+                    const totalPoints = normalizedTimes.length;
+                    const clampIndex = (idx) => {
+                        if (!Number.isFinite(idx)) return 0;
+                        return Math.max(0, Math.min(totalPoints - 1, idx));
+                    };
+
+                    let minIdx;
+                    let maxIdx;
+                    if (chartType === 'candlestick' && displayRange && typeof displayRange.minIndex === 'number' && typeof displayRange.maxIndex === 'number') {
+                        minIdx = clampIndex(displayRange.minIndex);
+                        maxIdx = clampIndex(displayRange.maxIndex);
+                    } else {
+                        minIdx = clampIndex(startIndex);
+                        maxIdx = clampIndex(endIndex);
+                    }
+
+                    this.currentMonitor.displayStartIndex = minIdx;
+                    this.currentMonitor.displayEndIndex = maxIdx;
+
+                    const minTime = this.normalizeMonitorTime(normalizedTimes[minIdx]);
+                    const maxTime = this.normalizeMonitorTime(normalizedTimes[maxIdx]);
+                    if (minTime != null && maxTime != null) {
+                        this.currentMonitor.chartTimeRange = { min: minTime, max: maxTime };
+                    } else {
+                        delete this.currentMonitor.chartTimeRange;
+                    }
+                    chartTimeRange = this.currentMonitor.chartTimeRange;
+                }
 
                 // Prepare annotations
                 const annotations = {};
@@ -2555,46 +2731,48 @@ class TradingApp {
                 let chartConfig;
                 let ohlcData; // 声明在外层作用域
                 let maxVolume = 0; // 记录最大成交量以限制柱状图高度
-                
+                let candlestickMinIdx = 0;
+                let candlestickMaxIdx = 0;
+                let candlestickStep = 60000;
+                let candlestickVisibleCount = 1;
+                let candlestickFirst = null;
+                let candlestickLast = null;
                 if (chartType === 'candlestick') {
-                    // 使用标准的Chart.js金融图表插件，参考折线图的数据处理方式
-                      ohlcData = validData.map((bar, index) => {
-                        // 使用与折线图相同的时间处理逻辑
-                        const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
-                        let date;
-                        if (typeof raw === 'string') {
-                            date = new Date(raw);
-                            if (isNaN(date.getTime())) {
-                                const num = parseFloat(raw);
-                                date = new Date(num > 1e10 ? num : num * 1000);
-                            }
-                        } else if (typeof raw === 'number') {
-                            date = new Date(raw > 1e10 ? raw : raw * 1000);
-                        } else {
-                            date = new Date();
+                    const toTimestamp = (raw) => {
+                        const parsed = this.parseMonitorChartTime(raw);
+                        if (parsed && !Number.isNaN(parsed.getTime())) {
+                            return parsed.getTime();
                         }
-                        
-                        // 日期对象已包含时区信息
+                        return NaN;
+                    };
 
+                    ohlcData = validData.map((bar) => {
+                        const raw = (bar.time !== undefined && bar.time !== null) ? bar.time : bar.date;
+                        const timestamp = toTimestamp(raw);
                         return {
-                            x: date.getTime(),  // 转换为时间戳以兼容Luxon
-                            o: parseFloat(bar.open) || parseFloat(bar.close) || 0,
-                            h: parseFloat(bar.high) || parseFloat(bar.close) || 0,
-                            l: parseFloat(bar.low) || parseFloat(bar.close) || 0,
-                          c: parseFloat(bar.close) || 0,
-                          volume: parseFloat(bar.volume) || 0
+                            x: timestamp,
+                            o: parseFloat(bar.open ?? bar.close ?? 0) || 0,
+                            h: parseFloat(bar.high ?? bar.close ?? 0) || 0,
+                            l: parseFloat(bar.low ?? bar.close ?? 0) || 0,
+                            c: parseFloat(bar.close ?? 0) || 0,
+                            volume: parseFloat(bar.volume ?? 0) || 0
                         };
-                      }).filter(item => item.c > 0);  // 只需要确保收盘价有效
+                    }).filter(item => Number.isFinite(item.x) && item.c > 0);
 
-                      // 添加未来时间点以在右侧保留空间
-                      futureTimes.forEach(ft => {
-                          // 未来时间点直接使用
-                          ohlcData.push({ x: ft.getTime(), o: NaN, h: NaN, l: NaN, c: NaN, volume: 0 });
-                      });
-                    
+                    futureTimes.forEach(ft => {
+                        ohlcData.push({ x: ft.getTime(), o: NaN, h: NaN, l: NaN, c: NaN, volume: 0 });
+                    });
+
+                    candlestickMinIdx = Math.max(0, Math.min(ohlcData.length - 1, (displayRange && typeof displayRange.minIndex === 'number') ? displayRange.minIndex : 0));
+                    candlestickMaxIdx = Math.max(0, Math.min(ohlcData.length - 1, (displayRange && typeof displayRange.maxIndex === 'number') ? displayRange.maxIndex : (ohlcData.length - 1)));
+                    candlestickStep = ohlcData.length > 1 ? Math.max(1, Math.abs(ohlcData[1].x - ohlcData[0].x)) : 60000;
+                    candlestickVisibleCount = Math.max(1, candlestickMaxIdx - candlestickMinIdx + 1);
+                    candlestickFirst = ohlcData[0]?.x ?? null;
+                    candlestickLast = ohlcData[ohlcData.length - 1]?.x ?? null;
+
                     console.log('OHLC data sample:', ohlcData.slice(0, 3));
                     console.log('Total OHLC points:', ohlcData.length);
-                    
+
                     const volumeData = ohlcData.map(item => ({ x: item.x, y: item.volume }));
                     maxVolume = Math.max(...volumeData.map(v => v.y), 0);
                     chartConfig = {
@@ -2684,8 +2862,8 @@ class TradingApp {
                             },
                             zoom: {
                                 limits: {
-                                    x: chartType === 'candlestick' ? 
-                                        {min: validData[0]?.x, max: validData[validData.length - 1]?.x} :
+                                    x: chartType === 'candlestick' ?
+                                        {min: chartTimeRange?.min ?? candlestickFirst, max: chartTimeRange?.max ?? candlestickLast} :
                                         {min: 0, max: Math.max(10, labels.length - 1)},
                                     y: {min: 'original', max: 'original'}
                                 },
@@ -2694,10 +2872,10 @@ class TradingApp {
                                     mode: 'x',
                                     modifierKey: null,
                                     threshold: 5,
-                                    rangeMin: chartType === 'candlestick' ? 
-                                        {x: validData[0]?.x} : {x: 0},
-                                    rangeMax: chartType === 'candlestick' ? 
-                                        {x: validData[validData.length - 1]?.x} : {x: Math.max(10, labels.length - 1)}
+                                    rangeMin: chartType === 'candlestick' ?
+                                        {x: chartTimeRange?.min ?? candlestickFirst} : {x: 0},
+                                    rangeMax: chartType === 'candlestick' ?
+                                        {x: chartTimeRange?.max ?? candlestickLast} : {x: Math.max(10, labels.length - 1)}
                                 },
                                 zoom: {
                                     wheel: {
@@ -2711,8 +2889,11 @@ class TradingApp {
                                     mode: 'x',
                                     limits: chartType === 'candlestick' ? {
                                         x: {
-                                            min: Math.max(10, displayRange.maxIndex - displayRange.minIndex + 1) * (validData[1]?.x - validData[0]?.x || 60000),
-                                            max: validData[validData.length - 1]?.x - validData[0]?.x
+                                            min: candlestickVisibleCount * candlestickStep,
+                                            max: (() => {
+                                                const span = (chartTimeRange?.max ?? candlestickLast ?? 0) - (chartTimeRange?.min ?? candlestickFirst ?? 0);
+                                                return span > 0 ? span : candlestickVisibleCount * candlestickStep;
+                                            })()
                                         }
                                     } : {
                                         x: {
@@ -2755,8 +2936,8 @@ class TradingApp {
                                         maxRotation: 45
                                     },
                                     // 蜡烛图的显示范围控制
-                                    min: validData[displayRange.minIndex]?.x,
-                                    max: validData[displayRange.maxIndex]?.x,
+                                    min: chartTimeRange?.min ?? ohlcData[candlestickMinIdx]?.x,
+                                    max: chartTimeRange?.max ?? ohlcData[candlestickMaxIdx]?.x,
                                     // 为右边数据点添加空间
                                     grace: '10%'
                                 } : {
@@ -2847,6 +3028,7 @@ class TradingApp {
                     // Initialize or update trend chart with synchronized time range
                     const trendCtx = document.getElementById('monitorTrendChart')?.getContext('2d');
                     if (trendCtx) {
+                        const timeRange = this.currentMonitor?.chartTimeRange;
                         if (!this.monitorTrendChart) {
                             this.monitorTrendChart = new Chart(trendCtx, {
                                 type: 'line',
@@ -2877,8 +3059,8 @@ class TradingApp {
                                         x: {
                                             type: 'time',
                                             time: { unit: 'minute', displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'MMM dd' } },
-                                            min: this.monitorChart.scales.x.min,
-                                            max: this.monitorChart.scales.x.max
+                                            min: timeRange?.min ?? this.monitorTrendData[0]?.x ?? null,
+                                            max: timeRange?.max ?? this.monitorTrendData[this.monitorTrendData.length - 1]?.x ?? null
                                         },
                                         y: {
                                             position: 'left',
@@ -2891,10 +3073,11 @@ class TradingApp {
                                 }
                             });
                         } else {
-                            const trendScale = this.monitorTrendChart.options.scales.x;
-                            const priceScale = this.monitorChart.scales.x;
-                            trendScale.min = priceScale.min;
-                            trendScale.max = priceScale.max;
+                            const range = this.extractRangeFromMonitorChart();
+                            if (range) {
+                                this.currentMonitor.chartTimeRange = range;
+                                this.applyRangeToTrendChart(range);
+                            }
                             this.monitorTrendChart.update('none');
                         }
                     }
@@ -2906,8 +3089,8 @@ class TradingApp {
                     const handleKeyDown = (event) => {
                         if (!this.monitorChart) return;
                         
-                        const panAmount = chartType === 'candlestick' ? 
-                            (validData[1]?.x - validData[0]?.x || 60000) * 5 : // 5个数据点的时间跨度
+                        const panAmount = chartType === 'candlestick' ?
+                            candlestickStep * 5 : // 5个数据点的时间跨度
                             5; // 折线图移动5个索引
                         
                         if (event.key === 'ArrowLeft') {
@@ -3453,6 +3636,13 @@ class TradingApp {
                         ohlcData.shift();
                         vData.shift();
                     }
+
+                    if (this.currentMonitor) {
+                        this.currentMonitor.displayTimes = ohlcData.map(item => new Date(item.x));
+                        if (Array.isArray(this.monitorChart.data.labels)) {
+                            this.currentMonitor.displayLabels = Array.from(this.monitorChart.data.labels);
+                        }
+                    }
                 } else {
                     const labels = this.monitorChart.data.labels || [];
                     const volumeDataset = this.monitorChart.data.datasets[1];
@@ -3490,6 +3680,27 @@ class TradingApp {
                         dataset.data.shift();
                         volumeDataset.data.shift();
                     }
+
+                    if (this.currentMonitor) {
+                        const normalizedTime = new Date(timeValue);
+                        let displayTimes = Array.isArray(this.currentMonitor.displayTimes) ? [...this.currentMonitor.displayTimes] : [];
+                        if (shouldUpdateLast && displayTimes.length) {
+                            displayTimes[displayTimes.length - 1] = normalizedTime;
+                        } else {
+                            displayTimes.push(normalizedTime);
+                        }
+                        while (displayTimes.length > labels.length) {
+                            displayTimes.shift();
+                        }
+                        if (displayTimes.length < labels.length) {
+                            const filler = displayTimes.length ? new Date(displayTimes[0].getTime()) : normalizedTime;
+                            while (displayTimes.length < labels.length) {
+                                displayTimes.unshift(new Date(filler.getTime()));
+                            }
+                        }
+                        this.currentMonitor.displayTimes = displayTimes;
+                        this.currentMonitor.displayLabels = labels.slice();
+                    }
                 }
                 // 调整成交量轴的最大值，使柱状图高度不超过整体三分之一
                 const volDataset = this.monitorChart.data.datasets[1];
@@ -3500,8 +3711,18 @@ class TradingApp {
                 this.monitorChart.options.scales.y1.max = (maxVol * 3) || 1;
 
                 this.monitorChart.update('none');
+
+                const updatedRange = this.extractRangeFromMonitorChart();
+                if (updatedRange) {
+                    if (!this.currentMonitor) this.currentMonitor = {};
+                    this.currentMonitor.chartTimeRange = updatedRange;
+                    if (this.monitorTrendChart) {
+                        this.applyRangeToTrendChart(updatedRange);
+                        this.monitorTrendChart.update('none');
+                    }
+                }
             }
-            
+
             // 更新预期PnL显示
             this.updateExpectedPnL();
 
