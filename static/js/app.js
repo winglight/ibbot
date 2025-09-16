@@ -44,6 +44,10 @@ class TradingApp {
         this.domSignals = [];
         this.monitorTrendChart = null;
         this.monitorTrendData = [];
+        // 渲染监控图表时使用的定时器句柄，防止重复渲染导致死循环
+        this.monitorChartRenderTimeout = null;
+        // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制
+        this.pendingMonitorChartRender = null;
 
         // 初始化登录管理器
         this.loginManager = new LoginManager(this);
@@ -2039,9 +2043,11 @@ class TradingApp {
             }
 
             // Wait a bit for DOM to update
-            setTimeout(() => {
+            this.pendingMonitorChartRender = () => {
                 const ctx = document.getElementById('monitorChart')?.getContext('2d');
-                if (!ctx) return;
+                if (!ctx) {
+                    return;
+                }
 
                 // Prepare data for Chart.js
                 // 先解析原始时间并保存Date对象
@@ -2950,8 +2956,22 @@ class TradingApp {
                         canvas.style.cursor = 'default';
                     }
                 });
-                
-                     }, 100);
+            };
+
+            if (!this.monitorChartRenderTimeout) {
+                this.monitorChartRenderTimeout = setTimeout(() => {
+                    const renderFn = this.pendingMonitorChartRender;
+                    this.pendingMonitorChartRender = null;
+                    this.monitorChartRenderTimeout = null;
+                    if (typeof renderFn === 'function') {
+                        try {
+                            renderFn();
+                        } catch (renderErr) {
+                            console.error('Failed to render monitor chart:', renderErr);
+                        }
+                    }
+                }, 100);
+            }
 
             // 渲染OHLC价格分布
             const currentPrice = this.currentMonitor?.currentPrice || 0;
