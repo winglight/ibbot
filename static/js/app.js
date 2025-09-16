@@ -12,6 +12,36 @@ const INTERVAL_MINUTES_MAP = {
 const MONITOR_SOURCE_TZ = 'America/New_York';
 const MONITOR_FALLBACK_TZ = 'Asia/Shanghai';
 
+const TrendSignalLabelPlugin = {
+    id: 'trendSignalLabel',
+    afterDatasetsDraw(chart, args, opts) {
+        const dataset = chart.data?.datasets?.[0];
+        if (!dataset) return;
+        const meta = chart.getDatasetMeta(0);
+        if (!meta || !meta.data) return;
+        const ctx = chart.ctx;
+        const offset = typeof opts?.offset === 'number' ? opts.offset : 16;
+        const font = opts?.font || 'bold 12px sans-serif';
+        const buyColor = opts?.buyColor || '#16a34a';
+        const sellColor = opts?.sellColor || '#dc2626';
+        meta.data.forEach((element, index) => {
+            if (!element) return;
+            const raw = dataset.data?.[index];
+            if (!raw || !raw.suggestion) return;
+            const { x, y } = element.tooltipPosition();
+            const text = raw.suggestion === 'buy' ? 'Buy' : 'Sell';
+            const yOffset = raw.suggestion === 'buy' ? -offset : offset;
+            ctx.save();
+            ctx.font = font;
+            ctx.fillStyle = raw.suggestion === 'buy' ? buyColor : sellColor;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, x, y + yOffset);
+            ctx.restore();
+        });
+    }
+};
+
 function slugifyStrategyName(name) {
     return (name || '')
         .toLowerCase()
@@ -1398,6 +1428,10 @@ class TradingApp {
                 timeAlertSent: false,
             };
 
+            if (this.domManager && typeof this.domManager.handleMonitorSymbolChange === 'function') {
+                await this.domManager.handleMonitorSymbolChange(symbol);
+            }
+
             // 清理输入框
             const slInput = document.getElementById('monitorStopLoss');
             if (slInput) slInput.value = '';
@@ -1507,11 +1541,8 @@ class TradingApp {
                 const modal = new bootstrap.Modal(modalEl);
                 modal.show();
 
-                // WebSocket自动更新监控图表，刷新按钮已禁用
-                const refreshBtn = document.getElementById('refreshMonitorChartBtn');
-                if (refreshBtn) {
-                    refreshBtn.disabled = true;
-                    refreshBtn.title = 'WebSocket自动更新，无需手动刷新';
+                if (this.domManager && typeof this.domManager.updateToggleButton === 'function') {
+                    this.domManager.updateToggleButton();
                 }
                 
                 // 重置缩放按钮事件
@@ -3040,9 +3071,25 @@ class TradingApp {
                                     datasets: [{
                                         label: 'Trend Score',
                                         data: this.monitorTrendData,
-                                        borderColor: 'orange',
+                                        borderColor: 'rgba(255,165,0,0.9)',
                                         backgroundColor: 'rgba(255,165,0,0.1)',
-                                        pointRadius: 0,
+                                        pointRadius: 3,
+                                        pointHoverRadius: 5,
+                                        pointHitRadius: 12,
+                                        pointBackgroundColor: (ctx) => {
+                                            const suggestion = ctx.raw?.suggestion;
+                                            if (suggestion === 'buy') return '#16a34a';
+                                            if (suggestion === 'sell') return '#dc2626';
+                                            const value = ctx.parsed?.y;
+                                            if (typeof value === 'number') {
+                                                return value >= 0 ? '#60a5fa' : '#f87171';
+                                            }
+                                            return '#94a3b8';
+                                        },
+                                        pointBorderColor: '#ffffff',
+                                        pointBorderWidth: 1,
+                                        tension: 0.2,
+                                        spanGaps: true,
                                         yAxisID: 'y'
                                     }]
                                 },
@@ -3057,7 +3104,29 @@ class TradingApp {
                                             zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
                                             onZoom: ({chart}) => this.syncCharts(chart, this.monitorChart),
                                             onPan: ({chart}) => this.syncCharts(chart, this.monitorChart)
-                                        }
+                                        },
+                                        tooltip: {
+                                            callbacks: {
+                                                label: (context) => {
+                                                    const lines = [];
+                                                    const value = context.parsed?.y;
+                                                    if (typeof value === 'number') {
+                                                        lines.push(`Trend Score: ${value.toFixed(2)}`);
+                                                    }
+                                                    const rawReason = context.raw?.reason;
+                                                    if (rawReason) {
+                                                        String(rawReason).split('\n').forEach((line) => {
+                                                            if (line) lines.push(line);
+                                                        });
+                                                    }
+                                                    if (context.raw?.suggestion) {
+                                                        lines.push(context.raw.suggestion === 'buy' ? '建议：Buy' : '建议：Sell');
+                                                    }
+                                                    return lines;
+                                                }
+                                            }
+                                        },
+                                        trendSignalLabel: { offset: 18 }
                                     },
                                     scales: {
                                         x: {
@@ -3071,10 +3140,12 @@ class TradingApp {
                                             beginAtZero: true,
                                             suggestedMin: -1,
                                             suggestedMax: 1,
+                                            grace: '20%',
                                             title: { display: true, text: 'Trend Score' }
                                         }
                                     }
-                                }
+                                },
+                                plugins: [TrendSignalLabelPlugin]
                             });
                         } else {
                             const range = this.extractRangeFromMonitorChart();
