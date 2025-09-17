@@ -11,6 +11,7 @@ from ib_insync import Stock
 from loguru import logger
 
 from .connection_manager import ConnectionManager
+from .utils import now_local
 
 # Module-specific logger
 _depth_logger = logger.bind(module="depth_subscriber", request_id="-")
@@ -90,7 +91,7 @@ class DepthSubscriber:
             data = {
                 "bids": [(d.price, d.size) for d in getattr(ticker, "domBids", [])],
                 "asks": [(d.price, d.size) for d in getattr(ticker, "domAsks", [])],
-                "timestamp": datetime.now(),
+                "timestamp": now_local(),
             }
             streams = self._streams.get(symbol)
             if not streams:

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from ib_insync import IB, util, ExecutionFilter
 from loguru import logger
 
+from .utils import now_local
+
 # 为connection模块创建专用logger
 connection_logger = logger.bind(module="connection", request_id="-")
 import os
@@ -244,7 +246,7 @@ class ConnectionManager:
                                 from .order_manager import get_order_manager
                                 om = get_order_manager()
                                 fill_price = getattr(trade.orderStatus, 'avgFillPrice', None)
-                                executed_at = datetime.now() if status in ('Filled', 'PartiallyFilled') else None
+                                executed_at = now_local() if status in ('Filled', 'PartiallyFilled') else None
                                 updated = om.update_order_status(
                                     order_id=order_id,
                                     status=status,

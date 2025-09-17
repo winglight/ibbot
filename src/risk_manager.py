@@ -20,6 +20,7 @@ from .notification_manager import NotificationManager
 from .database import DatabaseManager, get_db_manager
 from .database import AutoOrder as DatabaseAutoOrder
 from .database import RiskRule as DatabaseRiskRule
+from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
 load_dotenv()
 
@@ -53,8 +54,7 @@ class RiskRule:
     created_at: datetime = None
     
     def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
+        self.created_at = ensure_local_timezone(self.created_at) or now_local()
 
 @dataclass
 class OrderRequest:
@@ -64,10 +64,9 @@ class OrderRequest:
     price: Optional[float] = None
     reason: str = ""
     timestamp: datetime = None
-    
+
     def __post_init__(self):
-        if self.timestamp is None:
-            self.timestamp = datetime.now()
+        self.timestamp = ensure_local_timezone(self.timestamp) or now_local()
 
 @dataclass
 class PositionSizingResult:
@@ -152,7 +151,7 @@ class RiskManager:
         self.equity_last: float = 0.0
         self.equity_peak: float = 0.0
         self.sod_equity: float = 0.0
-        self.today_date = datetime.now().date()
+        self.today_date = now_local().date()
         self.daily_loss_currency: float = 0.0
         self.daily_loss_R: float = 0.0
         self.loss_streak: int = 0
@@ -185,7 +184,7 @@ class RiskManager:
                     max_loss_percent=rule_db.max_loss_percent,
                     enabled=getattr(rule_db, 'enabled', True),  # 从数据库读取enabled
                     max_time_span=getattr(rule_db, 'max_time_span', None),
-                    created_at=datetime.fromisoformat(rule_db.timestamp) if rule_db.timestamp else datetime.now()
+                    created_at=parse_local_datetime(rule_db.timestamp) if rule_db.timestamp else now_local()
                 )
                 self.risk_rules[rule.symbol] = rule
             
@@ -460,7 +459,7 @@ class RiskManager:
                 max_loss_percent=max_loss_percent,
                 enabled=True,
                 max_time_span=max_time_span,
-                created_at=datetime.now()
+                created_at=now_local()
             )
             
             # 转换为数据库层的 RiskRule 并保存到数据库
@@ -471,7 +470,7 @@ class RiskManager:
                 max_loss_percent=rule.max_loss_percent,
                 enabled=rule.enabled,
                 max_time_span=rule.max_time_span,
-                timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
             )
             self.db_manager.save_risk_rule(db_rule)
             risk_logger.debug(f"Risk rule persisted: {db_rule}")
@@ -532,7 +531,7 @@ class RiskManager:
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
                     max_time_span=rule.max_time_span,
-                    timestamp=rule.created_at.isoformat()
+                    timestamp=to_local_iso(rule.created_at)
                 )
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.debug(f"Risk rule persisted after update: {db_rule}")
@@ -585,7 +584,7 @@ class RiskManager:
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
                         max_time_span=rule.max_time_span,
-                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                     )
                     self.db_manager.save_risk_rule(db_rule)
                     risk_logger.info(f"Risk rule for {symbol} has been deactivated due to zero position")
@@ -604,7 +603,7 @@ class RiskManager:
         if position['unrealized_pnl'] >= 0:
             return
         
-        current_time = datetime.now()
+        current_time = now_local()
         
         # Check first threshold (notification)
         if loss_percent >= self.loss_threshold_1:
@@ -698,7 +697,7 @@ class RiskManager:
                 max_loss_percent=rule.max_loss_percent,
                 enabled=rule.enabled,
                 max_time_span=rule.max_time_span,
-                timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
             )
             self.db_manager.save_risk_rule(db_rule)
             return
@@ -762,7 +761,7 @@ class RiskManager:
                             order_type="MKT",
                             price=current_price,  # 使用当前市价
                             status="Submitted",
-                            created_at=datetime.now(),
+                            created_at=now_local(),
                             executed_at=None,
                             rule_id=symbol,
                             order_source="tp"
@@ -792,7 +791,7 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                         )
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.info(f"Take profit rule disabled after market order for {symbol}")
@@ -808,7 +807,7 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                         )
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.info(f"Take profit rule disabled due to order failure for {symbol}")
@@ -823,7 +822,7 @@ class RiskManager:
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
                         max_time_span=rule.max_time_span,
-                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                     )
                     self.db_manager.save_risk_rule(db_rule)
                     risk_logger.info(f"Take profit rule disabled due to exception for {symbol}")
@@ -861,7 +860,7 @@ class RiskManager:
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
                     max_time_span=rule.max_time_span,
-                    timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                 )
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.info(f"Take profit order queued for {symbol} at ${current_price:.2f}, rule disabled")
@@ -918,7 +917,7 @@ class RiskManager:
                             order_type="MKT",
                             price=current_price,  # 使用当前市价
                             status="Submitted",
-                            created_at=datetime.now(),
+                            created_at=now_local(),
                             executed_at=None,
                             rule_id=symbol,
                             order_source="sl"
@@ -944,7 +943,7 @@ class RiskManager:
                                 )
 
                                 synced_order = self.order_manager.add_order(order_obj)
-                                executed_at = datetime.now()
+                                executed_at = now_local()
                                 self.order_manager.update_order_status(
                                     order_id=str(trade.order.orderId),
                                     status=OrderStatus.FILLED.value,
@@ -974,7 +973,7 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                         )
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.warning(f"🔒 Stop loss rule disabled for {symbol} after triggering at ${current_price:.2f}")
@@ -991,7 +990,7 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                         )
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.info(f"Stop loss rule disabled due to order failure for {symbol}")
@@ -1006,7 +1005,7 @@ class RiskManager:
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
                         max_time_span=rule.max_time_span,
-                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                     )
                     self.db_manager.save_risk_rule(db_rule)
                     risk_logger.info(f"Stop loss rule disabled due to exception for {symbol}")
@@ -1044,7 +1043,7 @@ class RiskManager:
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
                     max_time_span=rule.max_time_span,
-                    timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                 )
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.info(f"Stop loss order queued for {symbol} at ${current_price:.2f}, rule disabled")
@@ -1120,7 +1119,7 @@ class RiskManager:
                                     order.order_id,
                                     current_status,
                                     fill_price=fill_price,
-                                    executed_at=datetime.now() if current_status == "Filled" else None
+                                    executed_at=now_local() if current_status == "Filled" else None
                                 )
                                 synced_count += 1
                                 risk_logger.debug(f"Order {order.order_id} status updated: {order.status} -> {current_status}")
@@ -1237,7 +1236,7 @@ class RiskManager:
                     order_type="MKT",
                     price=position['current_price'],
                     status="Submitted",
-                    created_at=datetime.now(),
+                    created_at=now_local(),
                     executed_at=None,
                     rule_id=order_request.symbol,  # Use symbol as rule identifier
                     order_source=order_source
@@ -1257,7 +1256,7 @@ class RiskManager:
                         order_type="MARKET",
                         price=position['current_price'],
                         status=OrderStatus.SUBMITTED.value,
-                        created_at=datetime.now(),
+                        created_at=now_local(),
                         order_source=order_source,
                         notes=order_request.reason
                     )
@@ -1268,7 +1267,7 @@ class RiskManager:
                     # 市价单通常会立即成交，所以我们可以直接更新状态
                     if order.order_type == "MARKET":
                         from datetime import datetime
-                        executed_at = datetime.now()
+                        executed_at = now_local()
                         self.order_manager.update_order_status(
                             order_id=str(order_id),
                             status=OrderStatus.FILLED.value,
@@ -1358,11 +1357,11 @@ class RiskManager:
                 action=order.action,
                 order_type=order.order_type,
                 price=order.price,
-                timestamp=order.created_at.isoformat() if order.created_at else datetime.now().isoformat(),
+                timestamp=to_local_iso(order.created_at) or now_local().isoformat(),
                 exchange=getattr(order, 'exchange', 'SMART'),
                 sec_type=getattr(order, 'sec_type', 'STK'),
                 status=order.status if hasattr(order, 'status') else 'pending',
-                executed_at=order.executed_at.isoformat() if getattr(order, 'executed_at', None) else None,
+                executed_at=to_local_iso(getattr(order, 'executed_at', None)),
                 rule_id=getattr(order, 'rule_id', None),
                 order_source=getattr(order, 'order_source', 'auto')
             )
@@ -1389,8 +1388,8 @@ class RiskManager:
                 'order_type': order.order_type,
                 'price': order.price,
                 'status': order.status,
-                'created_at': order.created_at.isoformat() if order.created_at else None,
-                'executed_at': order.executed_at.isoformat() if order.executed_at else None,
+                'created_at': to_local_iso(order.created_at),
+                'executed_at': to_local_iso(order.executed_at),
                 'rule_id': order.rule_id,
                 'order_source': order.order_source
             })
@@ -1434,7 +1433,7 @@ class RiskManager:
                 order = self.auto_orders[order_id]
                 order.status = new_status
                 if new_status in ['Filled', 'Cancelled']:
-                    order.executed_at = datetime.now()
+                    order.executed_at = now_local()
                 
                 # 如果订单是由风险规则自动生成且已成交，则禁用对应的风险规则并持久化
                 if new_status == 'Filled' and getattr(order, 'order_source', None) == 'auto' and getattr(order, 'rule_id', None):
@@ -1450,7 +1449,7 @@ class RiskManager:
                                 max_loss_percent=rule.max_loss_percent,
                                 enabled=rule.enabled,
                                 max_time_span=rule.max_time_span,
-                                timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                                timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                             )
                             self.db_manager.save_risk_rule(db_rule)
                             risk_logger.info(f"Risk rule for {symbol} disabled due to filled order {order_id}")
@@ -1459,7 +1458,7 @@ class RiskManager:
                 
                 # 同步到数据库：同时持久化状态、均价（若有）、执行时间
                 try:
-                    executed_str = order.executed_at.isoformat() if order.executed_at else None
+                    executed_str = to_local_iso(order.executed_at)
                     self.db_manager.update_order(order_id, status=new_status, price=order.price, executed_at=executed_str)
                     risk_logger.info(f"Order {order_id} status persisted to DB: {new_status}, price={order.price}, executed_at={executed_str}")
                 except Exception as db_err:
@@ -1490,7 +1489,7 @@ class RiskManager:
                         'take_profit_price': rule.take_profit_price,
                         'max_loss_percent': rule.max_loss_percent,
                         'enabled': rule.enabled,
-                        'created_at': rule.created_at.isoformat() if rule.created_at else None
+                        'created_at': to_local_iso(rule.created_at)
                     })
             risk_logger.info(f"Risk rules saved to {filename}")
         except Exception as e:
@@ -1513,7 +1512,7 @@ class RiskManager:
                     take_profit_price = float(row['take_profit_price']) if row['take_profit_price'] else None
                     max_loss_percent = float(row['max_loss_percent']) if row['max_loss_percent'] else None
                     enabled = row['enabled'].lower() == 'true' if row['enabled'] else True
-                    created_at = datetime.fromisoformat(row['created_at']) if row['created_at'] else datetime.now()
+                    created_at = parse_local_datetime(row['created_at']) if row['created_at'] else now_local()
                     
                     self.risk_rules[symbol] = RiskRule(
                         symbol=symbol,
@@ -1546,8 +1545,8 @@ class RiskManager:
                         'order_type': order.order_type,
                         'price': order.price,
                         'status': order.status,
-                        'created_at': order.created_at.isoformat() if order.created_at else None,
-                        'executed_at': order.executed_at.isoformat() if order.executed_at else None,
+                        'created_at': to_local_iso(order.created_at),
+                        'executed_at': to_local_iso(order.executed_at),
                         'rule_id': order.rule_id,
                         'order_source': order.order_source
                     })
@@ -1567,8 +1566,8 @@ class RiskManager:
                 reader = csv.DictReader(csvfile)
                 
                 for row in reader:
-                    created_at = datetime.fromisoformat(row['created_at']) if row['created_at'] else None
-                    executed_at = datetime.fromisoformat(row['executed_at']) if row['executed_at'] else None
+                    created_at = parse_local_datetime(row['created_at']) if row['created_at'] else None
+                    executed_at = parse_local_datetime(row['executed_at']) if row['executed_at'] else None
                     
                     auto_order = AutoOrder(
                         order_id=row['order_id'],
@@ -1593,7 +1592,7 @@ class RiskManager:
     def update_equity_state(self, account_info: Dict) -> None:
         """更新权益状态"""
         try:
-            today = datetime.now().date()
+            today = now_local().date()
             net_liq = float(account_info.get('net_liquidation', 0.0) or 0.0)
             realized_pnl = float(account_info.get('realized_pnl', 0.0) or 0.0)
 

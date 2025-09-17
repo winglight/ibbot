@@ -15,6 +15,7 @@ from core import (
 )
 from .auth import get_current_user
 from src.models import OrderRequest
+from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
 router = APIRouter()
 
@@ -607,14 +608,13 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
                         
                         # 更新数据库中的风险规则状态
                         from src.database import DatabaseRiskRule
-                        from datetime import datetime
                         db_rule = DatabaseRiskRule(
                             symbol=rule.symbol,
                             stop_loss_price=rule.stop_loss_price,
                             take_profit_price=rule.take_profit_price,
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                         )
                         risk_manager.db_manager.save_risk_rule(db_rule)
                         
@@ -729,22 +729,17 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
         
-        # 解析start_date（如果提供）。支持Z后缀，统一转换为本地时区的naive时间，便于与订单created_at比较
+        # 解析start_date（如果提供），统一转换为本地时区的有时区时间
         start_dt = None
         if start_date:
             try:
-                s = start_date.replace('Z', '+00:00')
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is not None:
-                    local_tz = datetime.now().astimezone().tzinfo
-                    dt = dt.astimezone(local_tz).replace(tzinfo=None)
-                start_dt = dt
+                start_dt = parse_local_datetime(start_date)
             except Exception as e:
                 logger.warning(f"Invalid start_date '{start_date}': {e}")
                 start_dt = None
         
         # 检查缓存是否有效（当且仅当未指定start_date时才使用缓存）
-        current_time = datetime.now()
+        current_time = now_local()
         if use_cache and not start_dt and orders_cache and orders_cache_timestamp:
             cache_age = (current_time - orders_cache_timestamp).total_seconds()
             if cache_age < ORDERS_CACHE_TTL:
@@ -762,7 +757,11 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
             
             # 根据start_date进行服务端过滤，确保只返回当天（或指定起始时间之后）的订单
             if start_dt:
-                orders = [o for o in orders if getattr(o, 'created_at', None) and o.created_at >= start_dt]
+                orders = [
+                    o for o in orders
+                    if getattr(o, 'created_at', None)
+                    and ensure_local_timezone(o.created_at) >= start_dt
+                ]
             
             # 转换字段名以匹配前端期望
             converted_orders = []
@@ -807,17 +806,9 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                     'filled': o.quantity if o.status == 'Filled' else 0,
                     'remaining': 0 if o.status == 'Filled' else o.quantity,
                     # 标准化时间戳：始终包含时区偏移，避免前端解析成UTC导致跨日
-                    'submit_time': ( 
-                        (lambda dt: (
-                            dt.replace(tzinfo=(datetime.now().astimezone().tzinfo)) if dt and dt.tzinfo is None else dt
-                        ).isoformat() if dt else None)(getattr(o, 'created_at', None))
-                    ),
+                    'submit_time': to_local_iso(getattr(o, 'created_at', None)),
                     # 兼容字段，等同于submit_time
-                    'created_at': ( 
-                        (lambda dt: (
-                            dt.replace(tzinfo=(datetime.now().astimezone().tzinfo)) if dt and dt.tzinfo is None else dt
-                        ).isoformat() if dt else None)(getattr(o, 'created_at', None))
-                    ),
+                    'created_at': to_local_iso(getattr(o, 'created_at', None)),
                     'order_source': getattr(o, 'order_source', 'manual'),
                     'trigger_type': trigger_type,
                     'commission': getattr(o, 'commission', None),
@@ -902,13 +893,13 @@ async def get_order_detail(order_id: str, user: Optional[str] = Depends(get_curr
             'status': o.status,
             'filled': o.quantity if o.status == 'Filled' else 0,
             'remaining': 0 if o.status == 'Filled' else o.quantity,
-            'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
+            'submit_time': to_local_iso(getattr(o, 'created_at', None)),
             'order_source': getattr(o, 'order_source', 'manual'),
             'trigger_type': trigger_type,
             # 详情字段
             'price': price_val if price_val > 0 else None,
-            'executed_at': (o.executed_at.isoformat() if getattr(o, 'executed_at', None) else None),
-            'updated_at': (o.updated_at.isoformat() if getattr(o, 'updated_at', None) else None),
+            'executed_at': to_local_iso(getattr(o, 'executed_at', None)),
+            'updated_at': to_local_iso(getattr(o, 'updated_at', None)),
             'strategy_name': getattr(o, 'strategy_name', None),
             'rule_id': getattr(o, 'rule_id', None),
             'parent_order_id': getattr(o, 'parent_order_id', None),

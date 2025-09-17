@@ -6,6 +6,8 @@ from telegram.error import TelegramError
 from loguru import logger
 from dotenv import load_dotenv
 
+from .utils import now_local
+
 # 为Telegram通知模块绑定日志记录器
 telegram_logger = logger.bind(module="telegram_notifier", request_id="-")
 
@@ -114,8 +116,7 @@ class TelegramNotifier:
         if details:
             message += f"<b>Details:</b> {details}\n\n"
         # 使用系统时间避免事件循环依赖
-        from datetime import datetime
-        message += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        message += f"🕐 Time: {now_local().strftime('%Y-%m-%d %H:%M:%S')}"
         
         await self.send_message(message)
     

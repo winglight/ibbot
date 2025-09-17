@@ -12,6 +12,8 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from loguru import logger
 
+from src.utils import now_local, parse_local_datetime, to_local_iso
+
 # 为数据库模块绑定日志记录器
 database_logger = logger.bind(module="database", request_id="-")
 
@@ -62,6 +64,18 @@ class Strategy:
     description: Optional[str] = None
     created_at: str = None
     updated_at: str = None
+
+def _normalise_iso_timestamp(value: Optional[Any]) -> Optional[str]:
+    """Convert values to ISO strings in the local timezone."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return to_local_iso(value)
+    if isinstance(value, str):
+        dt = parse_local_datetime(value)
+        return to_local_iso(dt) if dt else value
+    return str(value)
+
 
 class DatabaseManager:
     """数据库管理器"""
@@ -264,7 +278,7 @@ class DatabaseManager:
         """保存订单（新）"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            created = order.timestamp or datetime.now().isoformat()
+            created = _normalise_iso_timestamp(order.timestamp) or now_local().isoformat()
             status = order.status or 'Submitted'
             cursor.execute(
                 """
@@ -274,7 +288,7 @@ class DatabaseManager:
                 """,
                 (
                     order.order_id, order.symbol, order.action, order.quantity,
-                    order.order_type, order.price, status, created, created, order.executed_at,
+                    order.order_type, order.price, status, created, created, _normalise_iso_timestamp(order.executed_at),
                     order.order_source, order.rule_id, order.exchange, order.sec_type,
                     getattr(order, 'commission', None), getattr(order, 'pnl', None),
                 ),
@@ -299,7 +313,7 @@ class DatabaseManager:
                 values.append(price)
             if executed_at is not None:
                 update_fields.append("executed_at = ?")
-                values.append(executed_at)
+                values.append(_normalise_iso_timestamp(executed_at))
             if commission is not None:
                 update_fields.append("commission = ?")
                 values.append(commission)
@@ -312,7 +326,7 @@ class DatabaseManager:
             if update_fields:
                 # 总是更新 updated_at
                 update_fields.append("updated_at = ?")
-                values.append(datetime.now().isoformat())
+                values.append(now_local().isoformat())
                 values.append(order_id)
                 update_sql = f"UPDATE orders SET {', '.join(update_fields)} WHERE order_id = ?"
                 database_logger.debug(f"Executing SQL: {update_sql} with values: {values}")
@@ -384,7 +398,7 @@ class DatabaseManager:
         """保存风险规则（按 symbol 幂等：存在则更新，不存在则插入）"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            ts = rule.timestamp or datetime.now().isoformat()
+            ts = _normalise_iso_timestamp(rule.timestamp) or now_local().isoformat()
             enabled_val = 1 if getattr(rule, 'enabled', True) else 0
             cursor.execute(
                 """
@@ -422,7 +436,7 @@ class DatabaseManager:
     # 策略相关方法
     def save_strategy(self, strategy: Strategy):
         """保存策略"""
-        now = datetime.now().isoformat()
+        now = now_local().isoformat()
         if not strategy.created_at:
             strategy.created_at = now
         strategy.updated_at = now
@@ -723,7 +737,7 @@ class DatabaseManager:
         """保存仓位计算历史"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            timestamp = datetime.now().isoformat()
+            timestamp = now_local().isoformat()
             
             cursor.execute(
                 """
@@ -805,7 +819,7 @@ class DatabaseManager:
         """保存通知历史"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            now = datetime.now().isoformat()
+            now = now_local().isoformat()
             sent_at = now if status == 'sent' else None
             
             cursor.execute("""
@@ -882,7 +896,7 @@ class DatabaseManager:
             
             if status == 'sent':
                 updates.append("sent_at = ?")
-                params.append(datetime.now().isoformat())
+                params.append(now_local().isoformat())
             
             if error_message is not None:
                 updates.append("error_message = ?")
@@ -905,7 +919,7 @@ class DatabaseManager:
         """保存配置"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            timestamp = datetime.now().isoformat()
+            timestamp = now_local().isoformat()
             
             # 将配置值转换为JSON字符串
             if isinstance(config_value, (dict, list)):

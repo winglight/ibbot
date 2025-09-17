@@ -6,7 +6,7 @@ from ib_insync import IB, Stock, Future, Order, MarketOrder, LimitOrder, Contrac
 from loguru import logger
 from zoneinfo import ZoneInfo
 
-from src.utils import to_local_time
+from src.utils import now_local, to_local_time
 
 # Module-specific logger for ibkr_client
 ibkr_logger = logger.bind(module="ibkr_client", request_id="-")
@@ -156,7 +156,7 @@ class IBKRClient:
         # 为主要期货合约生成正确的expiry格式
         if symbol in ['MNQ', 'NQ', 'ES', 'MES']:
             # 获取当前日期
-            now = datetime.now()
+            now = now_local()
             
             # 找到下一个季度合约月份
             current_month = now.month
@@ -307,7 +307,7 @@ class IBKRClient:
         #             writer.writeheader()
         #         
         #         writer.writerow({
-        #             'timestamp': datetime.now().isoformat(),
+        #             'timestamp': now_local().isoformat(),
         #             'symbol': symbol,
         #             'quantity': quantity,
         #             'action': action,
@@ -356,7 +356,7 @@ class IBKRClient:
         #     if not os.path.exists(self.order_backup_file):
         #         return []
         #     
-        #     cutoff_date = datetime.now() - timedelta(days=days)
+        #     cutoff_date = now_local() - timedelta(days=days)
         #     orders = []
         #     
         #     with open(self.order_backup_file, 'r', newline='', encoding='utf-8') as csvfile:
@@ -429,7 +429,7 @@ class IBKRClient:
             # 1. 首先检查缓存，提供快速响应
             if symbol in self.price_cache:
                 cached_time = self.price_cache_timestamp.get(symbol)
-                if cached_time and (datetime.now() - cached_time).total_seconds() < self.price_cache_ttl_seconds:
+                if cached_time and (now_local() - cached_time).total_seconds() < self.price_cache_ttl_seconds:
                     ibkr_logger.debug(f"Returning cached data for {symbol}")
                     return {
                         'symbol': symbol,
@@ -493,7 +493,7 @@ class IBKRClient:
             if last and last > 0:
                 ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (immediate)")
                 self.price_cache[symbol] = last
-                self.price_cache_timestamp[symbol] = datetime.now()
+                self.price_cache_timestamp[symbol] = now_local()
                 ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                 result_payload = {
                     'symbol': symbol,
@@ -507,7 +507,7 @@ class IBKRClient:
                 mid = (bid + ask) / 2
                 ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (immediate)")
                 self.price_cache[symbol] = mid
-                self.price_cache_timestamp[symbol] = datetime.now()
+                self.price_cache_timestamp[symbol] = now_local()
                 ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                 result_payload = {
                     'symbol': symbol,
@@ -530,7 +530,7 @@ class IBKRClient:
                     if last and last > 0:
                         ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (waited {waited:.1f}s)")
                         self.price_cache[symbol] = last
-                        self.price_cache_timestamp[symbol] = datetime.now()
+                        self.price_cache_timestamp[symbol] = now_local()
                         ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                         result_payload = {
                             'symbol': symbol,
@@ -546,7 +546,7 @@ class IBKRClient:
                         mid = (bid + ask) / 2
                         ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (waited {waited:.1f}s)")
                         self.price_cache[symbol] = mid
-                        self.price_cache_timestamp[symbol] = datetime.now()
+                        self.price_cache_timestamp[symbol] = now_local()
                         ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                         result_payload = {
                             'symbol': symbol,
@@ -1110,7 +1110,7 @@ class IBKRClient:
                             # Set executed_at if order is filled and not already set
                             if current_status == "Filled" and auto_order.executed_at is None:
                                 from datetime import datetime
-                                auto_order.executed_at = datetime.now()
+                                auto_order.executed_at = now_local()
                                 
                             
                                 # strategy execution tracking removed; orders table records fills
@@ -1143,7 +1143,7 @@ class IBKRClient:
                                 from datetime import datetime
                                 executed_at = None
                                 if current_status == "Filled" and existing_order.executed_at is None:
-                                    executed_at = datetime.now()
+                                    executed_at = now_local()
                                 
                                 # 从Trade对象的fills中提取commission和realizedPNL
                                 commission = None
@@ -1270,7 +1270,7 @@ class IBKRClient:
                                     from datetime import datetime
                                     executed_at = None
                                     if current_status == "Filled":
-                                        executed_at = datetime.now()
+                                        executed_at = now_local()
                                     
                                     # 从Trade对象的fills中提取commission和realizedPNL
                                     commission = None
@@ -1451,7 +1451,7 @@ class IBKRClient:
             # 当发生短暂断线/同步延迟时，IB可能返回空的portfolio快照。
             # 为避免前端仓位瞬时清空，这里使用短期缓存回退。
             if not portfolio_items:
-                if getattr(self, 'positions_cache', None) and getattr(self, 'positions_cache_timestamp', None) and (datetime.now() - self.positions_cache_timestamp) < timedelta(seconds=self.positions_cache_ttl_seconds):
+                if getattr(self, 'positions_cache', None) and getattr(self, 'positions_cache_timestamp', None) and (now_local() - self.positions_cache_timestamp) < timedelta(seconds=self.positions_cache_ttl_seconds):
                     ibkr_logger.warning("IB portfolio() returned empty; using recent positions cache to avoid flicker")
                     return self.positions_cache.copy()
                 else:
@@ -1470,7 +1470,7 @@ class IBKRClient:
                 
                 # 1) 首先检查缓存是否有效
                 ts = self.price_cache_timestamp.get(sym)
-                if ts and datetime.now() - ts < timedelta(seconds=self.price_cache_ttl_seconds):
+                if ts and now_local() - ts < timedelta(seconds=self.price_cache_ttl_seconds):
                     cached_price = self.price_cache.get(sym)
                     if cached_price and cached_price > 0:
                         current_price = cached_price
@@ -1566,7 +1566,7 @@ class IBKRClient:
             # 成功获取非空持仓后，刷新短期缓存
             if position_list:
                 self.positions_cache = position_list.copy()
-                self.positions_cache_timestamp = datetime.now()
+                self.positions_cache_timestamp = now_local()
             
             return position_list
         except Exception as e:
@@ -1692,13 +1692,11 @@ class IBKRClient:
                 connection_logger.error("Cannot backfill commissions: IB not connected")
                 return 0
 
-            import datetime as _dt
-
             async def _backfill_op():
                 try:
                     ib_local = self.ib
                     # Compute start time for the execution filter (local time, format YYYYMMDD-HH:MM:SS)
-                    start_dt = _dt.datetime.now() - _dt.timedelta(days=max(1, int(days)))
+                    start_dt = now_local() - timedelta(days=max(1, int(days)))
                     # IB API expects a hyphen between date and time, e.g. 20250131-13:45:00
                     start_str = start_dt.strftime('%Y%m%d-%H:%M:%S')
 

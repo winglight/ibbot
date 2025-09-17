@@ -6,6 +6,8 @@ from typing import Optional
 import pytest
 import requests
 
+from src.utils import now_local
+
 BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 STRATEGY_NAME = os.getenv("TEST_SCHEDULE_STRATEGY", "strategy_scheduler_e2e")
 
@@ -45,7 +47,7 @@ def cleanup(token):
         pass
 
 def test_strategy_with_schedule(token):
-    now = datetime.now()
+    now = now_local()
     start_time = (now + timedelta(seconds=1)).isoformat()
     end_time = (now + timedelta(seconds=4)).isoformat()
 

@@ -6,6 +6,8 @@ from typing import Optional, Dict
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
+from src.utils import now_local
+
 from .auth import get_current_user
 
 router = APIRouter()
@@ -33,7 +35,7 @@ async def get_logs(
                 content = content[-10000:]
 
         # Filter by date range
-        now = datetime.now()
+        now = now_local()
         if range == "today":
             date_str = now.strftime("%Y-%m-%d")
             content = [line for line in content if line.startswith(f"| {date_str}")]
@@ -112,7 +114,7 @@ async def get_log_modules(
                 content = content[-10000:]
 
         # Filter by date range
-        now = datetime.now()
+        now = now_local()
         if range == "today":
             date_str = now.strftime("%Y-%m-%d")
             content = [line for line in content if line.startswith(f"| {date_str}")]
@@ -163,7 +165,7 @@ async def get_log_stats(
         with open(log_file, "r") as f:
             lines = f.readlines()
 
-        now = datetime.now()
+        now = now_local()
         if range == "today":
             date_str = now.strftime("%Y-%m-%d")
             lines = [line for line in lines if line.startswith(f"| {date_str}")]
