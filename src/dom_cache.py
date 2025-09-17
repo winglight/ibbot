@@ -178,8 +178,8 @@ class DomCacheManager:
         metrics.sort(key=lambda item: self._timestamp_ms(item))
         snapshots.sort(key=lambda item: self._timestamp_ms(item))
 
-        # 保证 snapshots 长度不超过 10000（保留最新的 10000 条）
-        snapshots = snapshots[-10000:]
+        # 保证 snapshots 长度不超过 500（保留最新的 500 条）
+        snapshots = snapshots[-500:]
 
         return {"snapshots": snapshots, "metrics": metrics}
 
