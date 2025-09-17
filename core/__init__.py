@@ -7,15 +7,14 @@ from src.database import get_db_manager
 from src.queue_manager import queue_manager
 from src.order_manager import get_order_manager
 from src.websocket_manager import websocket_manager
-from dataclasses import dataclass, field
-from typing import List
 from loguru import logger
 
-from src.depth_subscriber import DepthSubscriber
 from src.notification_manager import NotificationManager
 from src.dom_processor import DOMProcessor
 from src.dom_service import get_dom_service
 from src.strategies.dom_strategy import DOMStrategy
+from src.dom_dependencies import DOMConfig, get_dom_processor
+import src.dom_dependencies as dom_dependencies
 
 # Initialize shared instances
 telegram_notifier = TelegramNotifier()
@@ -25,19 +24,9 @@ notification_manager = NotificationManager(
     db_manager=get_db_manager(),
 )
 
-@dataclass
-class DOMConfig:
-    window: int = 10000
-    max_levels: int = 30
-    trend_thresholds: List[float] = field(
-        default_factory=lambda: [0.5, 0.7, 0.85, 0.95]
-    )
-
-
-dom_config = DOMConfig()
-dom_processor = DOMProcessor(window=dom_config.window, max_levels=dom_config.max_levels)
-
-depth_subscriber = DepthSubscriber(connection_manager)
+dom_config = dom_dependencies.dom_config
+dom_processor = get_dom_processor()
+depth_subscriber = dom_dependencies.depth_subscriber
 
 risk_manager = RiskManager(notification_manager=notification_manager)
 strategy_manager = StrategyManager()
