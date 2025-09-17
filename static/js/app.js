@@ -230,6 +230,8 @@ class TradingApp {
         this.summaryPrimarySaving = false;
         this.summaryPrimaryCurrent = null;
         this.summaryPushUpdating = false;
+        this.summaryPushAwaitingData = false;
+        this.summaryPushAwaitingTimer = null;
         this.summaryStatusLoading = false;
         this.summaryDataFeedCurrent = null;
         this.data_push_state = {};
@@ -5285,12 +5287,14 @@ class TradingApp {
                 this.showAlert('warning', 'Select a data subscription before enabling push');
                 if (switchEl) switchEl.checked = false;
                 statusEl && (statusEl.textContent = '未推送');
+                this.summaryPushAwaitingData = false;
                 return { error: 'missing_subscription' };
             }
             if (!targetSymbol) {
                 this.showAlert('warning', 'Primary symbol is required to push data');
                 if (switchEl) switchEl.checked = false;
                 statusEl && (statusEl.textContent = '未推送');
+                this.summaryPushAwaitingData = false;
                 return { error: 'missing_symbol' };
             }
         }
@@ -5306,13 +5310,28 @@ class TradingApp {
                 }),
             });
             const state = res?.state || {};
+            const awaitingData = !!state.awaiting_data && !!state.active;
+            this.summaryPushAwaitingData = awaitingData;
             if (switchEl) switchEl.checked = !!state.active;
-            if (statusEl) statusEl.textContent = state.active ? '已推送' : '未推送';
+            if (statusEl) {
+                if (state.active) {
+                    statusEl.textContent = awaitingData ? '等待DOM数据…' : '已推送';
+                } else {
+                    statusEl.textContent = '未推送';
+                }
+            }
             this.data_push_state = {
                 enabled: !!state.active,
+                active: !!state.active,
                 subscription: state.subscription,
                 symbol: state.symbol,
+                awaiting_data: awaitingData,
+                last_data_timestamp: state.last_data_timestamp || null,
             };
+            if (!awaitingData && this.summaryPushAwaitingTimer) {
+                clearTimeout(this.summaryPushAwaitingTimer);
+                this.summaryPushAwaitingTimer = null;
+            }
             await this.loadStrategyStatus(name, { force: true });
             return state;
         } catch (error) {
@@ -5320,6 +5339,11 @@ class TradingApp {
             this.showAlert('danger', 'Failed to update data push state');
             if (switchEl) switchEl.checked = false;
             if (statusEl) statusEl.textContent = '未推送';
+            this.summaryPushAwaitingData = false;
+            if (this.summaryPushAwaitingTimer) {
+                clearTimeout(this.summaryPushAwaitingTimer);
+                this.summaryPushAwaitingTimer = null;
+            }
             return { error: 'request_failed' };
         } finally {
             this.summaryPushUpdating = false;
@@ -5355,23 +5379,45 @@ class TradingApp {
             buyEl && (buyEl.textContent = status.buy_signals ?? '-');
             sellEl && (sellEl.textContent = status.sell_signals ?? '-');
             const pushState = status.data_push || {};
+            let awaitingData = !!pushState.awaiting_data;
+            if (status.is_receiving_data) {
+                awaitingData = false;
+            }
+            if (!pushState.active) {
+                awaitingData = false;
+            }
+            this.summaryPushAwaitingData = awaitingData;
+            if (awaitingData) {
+                if (!this.summaryPushAwaitingTimer) {
+                    this.summaryPushAwaitingTimer = setTimeout(() => {
+                        this.summaryPushAwaitingTimer = null;
+                        if (this.currentStrategyDetails === name) {
+                            this.loadStrategyStatus(name, { force: true });
+                        }
+                    }, 1500);
+                }
+            } else if (this.summaryPushAwaitingTimer) {
+                clearTimeout(this.summaryPushAwaitingTimer);
+                this.summaryPushAwaitingTimer = null;
+            }
             if (pushSwitch && !this.summaryPushUpdating) {
                 pushSwitch.checked = !!pushState.active;
             }
             if (statusPush) {
-                statusPush.textContent = pushState.active ? '已推送' : '未推送';
+                if (pushState.active) {
+                    statusPush.textContent = awaitingData ? '等待DOM数据…' : '已推送';
+                } else {
+                    statusPush.textContent = '未推送';
+                }
             }
             this.data_push_state = {
-                enabled: !!pushState.enabled,
+                enabled: !!pushState.active,
+                active: !!pushState.active,
                 subscription: pushState.subscription,
                 symbol: pushState.symbol,
+                awaiting_data: awaitingData,
+                last_data_timestamp: pushState.last_data_timestamp || null,
             };
-            if (pushSwitch && pushSwitch.checked && !status.is_receiving_data) {
-                this.summaryPushUpdating = true;
-                pushSwitch.checked = false;
-                this.summaryPushUpdating = false;
-                if (statusPush) statusPush.textContent = '未推送';
-            }
         } catch (error) {
             console.error('Failed to load strategy status', error);
             receivingEl.textContent = '-';
@@ -5381,6 +5427,12 @@ class TradingApp {
             buyEl && (buyEl.textContent = '-');
             sellEl && (sellEl.textContent = '-');
             if (statusPush) statusPush.textContent = '未推送';
+            this.summaryPushAwaitingData = false;
+            this.data_push_state = {};
+            if (this.summaryPushAwaitingTimer) {
+                clearTimeout(this.summaryPushAwaitingTimer);
+                this.summaryPushAwaitingTimer = null;
+            }
         } finally {
             this.summaryStatusLoading = false;
         }
@@ -5890,6 +5942,11 @@ class TradingApp {
                 if (pushStatusEl) pushStatusEl.textContent = '未推送';
                 if (pushSwitch) pushSwitch.checked = false;
                 this.data_push_state = {};
+                this.summaryPushAwaitingData = false;
+                if (this.summaryPushAwaitingTimer) {
+                    clearTimeout(this.summaryPushAwaitingTimer);
+                    this.summaryPushAwaitingTimer = null;
+                }
                 const fallbackSymbol = s?.primary_symbol || '';
                 if (symbolInput) {
                     symbolInput.value = fallbackSymbol || '';
@@ -6014,6 +6071,12 @@ class TradingApp {
                 summaryPane?.classList.add('d-none');
                 ordersPane?.classList.add('d-none');
                 if (chartsTabText) chartsTabText.textContent = 'Charts';
+                this.summaryPushAwaitingData = false;
+                this.data_push_state = {};
+                if (this.summaryPushAwaitingTimer) {
+                    clearTimeout(this.summaryPushAwaitingTimer);
+                    this.summaryPushAwaitingTimer = null;
+                }
                 try { new bootstrap.Tab(document.getElementById('charts-tab')).show(); } catch (e) { console.warn('Tab show failed', e); }
             }
 
