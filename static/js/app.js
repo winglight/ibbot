@@ -3275,10 +3275,17 @@ class TradingApp {
                     };
                 }
 
-                if (stopLossPrice && takeProfitPrice && rangeStartAxisValue != null && rangeEndAxisValue != null) {
+                const annotationRangeStart = isCandlestick
+                    ? (rangeStartTimeMs ?? this.normalizeMonitorTime(getTimeValueForIndex(startIndex)))
+                    : rangeStartAxisValue;
+                const annotationRangeEnd = isCandlestick
+                    ? (rangeEndTimeMs ?? this.normalizeMonitorTime(getTimeValueForIndex(endIndex)))
+                    : rangeEndAxisValue;
+
+                if (stopLossPrice && takeProfitPrice && annotationRangeStart != null && annotationRangeEnd != null) {
                     const isLong = (this.currentMonitor?.positionQty || 0) > 0;
-                    const xMin = rangeStartAxisValue;
-                    const xMax = rangeEndAxisValue;
+                    const xMin = annotationRangeStart;
+                    const xMax = annotationRangeEnd;
                     const profitColor = 'rgba(144,238,144,0.3)';
                     const lossColor = 'rgba(255,182,193,0.3)';
 
@@ -3304,7 +3311,7 @@ class TradingApp {
                         enter: (ctx) => { ctx.chart.canvas.style.cursor = 'ew-resize'; },
                         leave: (ctx) => { ctx.chart.canvas.style.cursor = 'default'; }
                     };
-                    
+
                     // 添加调试信息
                     console.log(`绘制${isLong ? '多头' : '空头'}盈亏方框: 成本=${avgCost}, 止损=${stopLossPrice}, 止盈=${takeProfitPrice}`);
                 }
