@@ -133,13 +133,31 @@ class OrderManager:
                     )
                 """)
                 
-                # 兼容老库：缺失 is_deleted 列则补齐
+                # 兼容老库：缺失列则补齐
                 cursor.execute("PRAGMA table_info('orders')")
                 cols = [row[1] for row in cursor.fetchall()]
-                if 'is_deleted' not in cols:
-                    cursor.execute("ALTER TABLE orders ADD COLUMN is_deleted INTEGER DEFAULT 0")
-                    order_logger.info("Added is_deleted column to orders table")
-                
+
+                # 需要确保存在的字段（旧库可能缺失）
+                required_columns = {
+                    'executed_at': "TEXT",
+                    'fill_price': "REAL",
+                    'order_source': "TEXT DEFAULT 'manual'",
+                    'strategy_name': "TEXT",
+                    'rule_id': "TEXT",
+                    'parent_order_id': "TEXT",
+                    'exchange': "TEXT DEFAULT 'SMART'",
+                    'sec_type': "TEXT DEFAULT 'STK'",
+                    'notes': "TEXT",
+                    'commission': "REAL",
+                    'pnl': "REAL",
+                    'is_deleted': "INTEGER DEFAULT 0",
+                }
+
+                for column_name, column_def in required_columns.items():
+                    if column_name not in cols:
+                        cursor.execute(f"ALTER TABLE orders ADD COLUMN {column_name} {column_def}")
+                        order_logger.info(f"Added missing column '{column_name}' to orders table")
+
                 # 检查是否需要从 auto_orders 迁移数据
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='auto_orders'")
                 auto_orders_exists = cursor.fetchone() is not None

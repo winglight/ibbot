@@ -105,6 +105,30 @@ class DatabaseManager:
                 )
                 """
             )
+
+            # 兼容旧库：补齐缺失列
+            cursor.execute("PRAGMA table_info('orders')")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+            required_columns = {
+                'executed_at': "TEXT",
+                'fill_price': "REAL",
+                'order_source': "TEXT DEFAULT 'manual'",
+                'strategy_name': "TEXT",
+                'rule_id': "TEXT",
+                'parent_order_id': "TEXT",
+                'exchange': "TEXT DEFAULT 'SMART'",
+                'sec_type': "TEXT DEFAULT 'STK'",
+                'notes': "TEXT",
+                'commission': "REAL",
+                'pnl': "REAL",
+                'is_deleted': "INTEGER DEFAULT 0",
+            }
+
+            for column_name, column_def in required_columns.items():
+                if column_name not in existing_columns:
+                    cursor.execute(f"ALTER TABLE orders ADD COLUMN {column_name} {column_def}")
+                    database_logger.info(f"Added missing column '{column_name}' to orders table")
+            conn.commit()
             
 
             # 创建风险规则表
