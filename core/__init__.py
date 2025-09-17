@@ -64,8 +64,9 @@ except Exception:
 # Register the DOM internal strategy so it loads automatically
 dom_strategy = None
 try:
-    dom_strategy = DOMStrategy(dom_service=get_dom_service())
+    dom_strategy = DOMStrategy()
     dom_strategy.set_dependencies(
+        dom_service=get_dom_service(),
         strategy_manager=strategy_manager,
         order_manager=order_manager,
         queue_manager=queue_manager,

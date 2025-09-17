@@ -316,7 +316,8 @@ class TradingApp {
         return {
             ...point,
             timestamp: normalized,
-            x: new Date(normalized)
+            x: normalized,
+            displayTime: new Date(normalized)
         };
     }
 
