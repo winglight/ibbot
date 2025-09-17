@@ -103,6 +103,7 @@ class StrategyRequest(BaseModel):
     description: Optional[str] = None
     use_template: bool = False
     selected_file: Optional[str] = None
+    primary_symbol: Optional[str] = None
     sl_enabled: bool = False
     tp_enabled: bool = False
     sl_price: Optional[float] = None
@@ -122,6 +123,13 @@ class StrategyRequest(BaseModel):
             raise ValueError(f'data_subscription must be one of {sorted(allowed)}')
         return value
 
+    @validator('primary_symbol')
+    def validate_primary_symbol(cls, value: Optional[str]):
+        if value is None:
+            return value
+        value = value.strip().upper()
+        return value or None
+
     @validator('position_add_cooldown_minutes', 'close_before_close_minutes')
     def validate_positive_minutes(cls, value: Optional[int]):
         if value is not None and value < 0:
@@ -131,6 +139,27 @@ class StrategyRequest(BaseModel):
 class StrategyRenameRequest(BaseModel):
     new_name: str
     rename_file: Optional[bool] = False
+
+class StrategyDataPushRequest(BaseModel):
+    enabled: bool
+    subscription: Optional[str] = None
+    symbol: Optional[str] = None
+
+    @validator('subscription')
+    def validate_subscription(cls, value: Optional[str]):
+        if value is None:
+            return value
+        allowed = {"market_data", "dom_trend"}
+        if value not in allowed:
+            raise ValueError(f'subscription must be one of {sorted(allowed)}')
+        return value
+
+    @validator('symbol')
+    def normalize_symbol(cls, value: Optional[str]):
+        if value is None:
+            return value
+        value = value.strip().upper()
+        return value or None
 
 class StrategySettingsRequest(BaseModel):
     """策略设置请求模型"""
