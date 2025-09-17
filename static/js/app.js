@@ -303,6 +303,113 @@ class TradingApp {
             .filter(point => point !== null);
     }
 
+    getTrendValues(chart) {
+        const ds0 = chart.data?.datasets?.[0];
+        const arr = Array.isArray(ds0?.data) ? ds0.data : [];
+        const ys = arr.map(p => (typeof p === 'number' ? p : p?.y)).filter(Number.isFinite);
+        if (!ys.length) return null;
+        return { latest: ys[ys.length - 1], min: Math.min(...ys), max: Math.max(...ys) };
+    }
+
+    fmt(v, digits = 2) {
+        return Number.isFinite(v) ? v.toFixed(digits) : String(v);
+    }
+
+
+    // 仅在创建 chart 后、首轮配置时调用一次
+    setupTrendLegendAndAnnotations(chart) {
+        const that = this;
+        const opts = chart.options || (chart.options = {});
+        const plugins = opts.plugins || (opts.plugins = {});
+
+        const hasLegend = Object.prototype.hasOwnProperty.call(plugins, 'legend');
+        const legend = hasLegend ? plugins.legend : null;
+
+        const legendLabels = legend?.labels || {};
+        const newLegend = {
+            ...(legend || {}),
+            display: true,
+            position: 'top',
+            align: 'end',
+            labels: {
+            ...legendLabels,
+            generateLabels(chart) {
+                const v = that.getTrendValues(chart);
+                if (!v) return [];
+                return [
+                { text: `Latest: ${that.fmt(v.latest)}`, fillStyle: 'yellow', strokeStyle: 'yellow', lineWidth: 2 },
+                { text: `Min: ${that.fmt(v.min)}`,       fillStyle: 'red',    strokeStyle: 'red',    lineWidth: 2 },
+                { text: `Max: ${that.fmt(v.max)}`,       fillStyle: 'green',  strokeStyle: 'green',  lineWidth: 2 },
+                ];
+            },
+            // 若还想显示原 datasets 的图例，把这行删掉
+            filter() { return false; }
+            },
+            onClick: () => {}
+        };
+
+        // —— 关键：如果 legend 不存在，不要立刻写入，延后到微任务 —— //
+        if (!hasLegend) {
+            queueMicrotask(() => {
+            // 这里已经不在脚本化解析栈里，安全赋值
+            plugins.legend = newLegend;
+            chart.update('none');
+            });
+        } else {
+            // 已存在时，仅就地合并，不换引用
+            Object.assign(legend, newLegend);
+            legend.labels = newLegend.labels; // 覆盖 labels（对象内仍为就地写入）
+        }
+
+        // annotation：同理，先判断是否存在，缺失则延后创建；存在则就地改
+        // const hasAnno = Object.prototype.hasOwnProperty.call(plugins, 'annotation');
+        // if (!hasAnno) {
+        //     queueMicrotask(() => {
+        //     plugins.annotation = { annotations: {
+        //         latestLine: { type: 'line', borderColor: 'yellow', borderWidth: 1 },
+        //         minLine:    { type: 'line', borderColor: 'red',    borderWidth: 1 },
+        //         maxLine:    { type: 'line', borderColor: 'green',  borderWidth: 1 },
+        //     }};
+        //     chart.update('none');
+        //     });
+        // } else {
+        //     const anns = plugins.annotation.annotations || (plugins.annotation.annotations = {});
+        //     anns.latestLine = anns.latestLine || { type: 'line', borderColor: 'yellow', borderWidth: 1 };
+        //     anns.minLine    = anns.minLine    || { type: 'line', borderColor: 'red',    borderWidth: 1 };
+        //     anns.maxLine    = anns.maxLine    || { type: 'line', borderColor: 'green',  borderWidth: 1 };
+        // }
+    }
+
+    // 需要时手动调用；只在数值变化时更新 yMin/yMax，避免触发外层 watch 循环
+    refreshTrend(chart) {
+        const v = this.getTrendValues(chart);
+        const anns = chart.options.plugins?.annotation?.annotations;
+        if (!anns) return; // 还没初始化
+
+        let changed = false;
+        const setLine = (line, y) => {
+            if (!line) return;
+            if (line.yMin !== y || line.yMax !== y) {
+            line.yMin = y; line.yMax = y;
+            changed = true;
+            }
+        };
+
+        if (!v) {
+            ['latestLine','minLine','maxLine'].forEach(k => {
+            if (anns[k] && ('yMin' in anns[k])) {
+                delete anns[k].yMin; delete anns[k].yMax; changed = true;
+            }
+            });
+        } else {
+            setLine(anns.latestLine, v.latest);
+            setLine(anns.minLine,    v.min);
+            setLine(anns.maxLine,    v.max);
+        }
+        if (changed) chart.update('none');
+    }
+
+
     syncTrendReferenceLines() {
         if (!this.monitorTrendChart || !Array.isArray(this.monitorTrendChart.data?.datasets)) return;
 
@@ -326,19 +433,6 @@ class TradingApp {
                 return { x: xValue, y: rawY };
             }).filter(Boolean)
             : [];
-
-        const legend = chart.options?.plugins?.legend;
-        if (legend) {
-            legend.display = true;
-            legend.position = 'top';
-            legend.align = 'end';
-            legend.labels = legend.labels || {};
-            if (typeof legend.labels.padding !== 'number') legend.labels.padding = 12;
-            legend.labels.filter = (legendItem, data) => {
-                const dataset = data?.datasets?.[legendItem.datasetIndex];
-                return !!dataset && !dataset._excludeFromLegend;
-            };
-        }
 
         if (!parsedPoints.length) {
             chart.data.datasets = chart.data.datasets.filter((_, index) => index === 0);
@@ -2745,7 +2839,7 @@ class TradingApp {
                             force_refresh: forceRefresh
                         }),
                         // 增加超时时间，略高于后端65秒
-                        timeout: 70000
+                        timeout: 6000
                     });
                     
                     // 更新缓存（仅当允许使用缓存且非强制刷新）
@@ -3683,6 +3777,9 @@ class TradingApp {
                             });
                             console.log('[loadMonitorChart] MonitorTrendChart created successfully');
                             console.log('[loadMonitorChart] Chart data after creation:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
+                            // 创建好 chart 后：
+                            this.setupTrendLegendAndAnnotations(this.monitorTrendChart);
+
                             this.syncTrendReferenceLines();
                             this.monitorTrendChart.update('none');
                         } else {
@@ -3690,6 +3787,8 @@ class TradingApp {
                             console.log('[loadMonitorChart] Current chart data length:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
                             this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
                             this.syncTrendReferenceLines();
+                            // 每次你数据有变更（或初始化数据之后），显式调用：
+                            this.refreshTrend(this.monitorTrendChart);
                             this.monitorTrendChart.update('none');
                             console.log('[loadMonitorChart] MonitorTrendChart updated');
                         }
