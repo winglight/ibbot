@@ -46,6 +46,13 @@ class DOMStrategy(BaseStrategy):
         self._last_signal_time: float = 0.0
         self._listener_attached: bool = False
         self._processing: bool = False
+        self._started_at: Optional[float] = None
+        self._last_runtime_duration: float = 0.0
+        self._last_data_timestamp: float = 0.0
+        self._processed_count: int = 0
+        self._threshold_hits: int = 0
+        self._buy_signals: int = 0
+        self._sell_signals: int = 0
         self.file_path = "src/strategies/dom_strategy.py"
         self.summary_points = [
             "实时监听DOM趋势得分与订单流不平衡，信号跨越阈值时自动开仓",
@@ -75,6 +82,13 @@ class DOMStrategy(BaseStrategy):
         started = super().start()
         if not started:
             return False
+        self._started_at = time.time()
+        self._last_runtime_duration = 0.0
+        self._last_data_timestamp = 0.0
+        self._processed_count = 0
+        self._threshold_hits = 0
+        self._buy_signals = 0
+        self._sell_signals = 0
         if not self._listener_attached:
             self.dom_service.add_listener(self._on_dom_metrics)
             self._listener_attached = True
@@ -87,6 +101,9 @@ class DOMStrategy(BaseStrategy):
         if self.dom_service and self._listener_attached:
             self.dom_service.remove_listener(self._on_dom_metrics)
             self._listener_attached = False
+        if self._started_at:
+            self._last_runtime_duration = time.time() - self._started_at
+            self._started_at = None
         return True
 
     # ------------------------------------------------------------------
@@ -132,6 +149,9 @@ class DOMStrategy(BaseStrategy):
         price = metrics.get("mid_price")
         if score is None or price is None:
             return
+        now = time.time()
+        self._last_data_timestamp = now
+        self._processed_count += 1
         threshold = self._resolve_threshold()
         if threshold <= 0:
             return
@@ -144,7 +164,6 @@ class DOMStrategy(BaseStrategy):
             self._last_signal_direction = 0
             return
 
-        now = time.time()
         if (
             self._last_signal_direction == direction
             and (now - self._last_signal_time) < self.cooldown_seconds
@@ -153,6 +172,11 @@ class DOMStrategy(BaseStrategy):
 
         self._last_signal_direction = direction
         self._last_signal_time = now
+        self._threshold_hits += 1
+        if direction > 0:
+            self._buy_signals += 1
+        else:
+            self._sell_signals += 1
         self.logger.info(
             f"DOM trend trigger: score={score:.2f} direction={'BUY' if direction > 0 else 'SELL'} symbol={symbol_code}"
         )
@@ -302,4 +326,26 @@ class DOMStrategy(BaseStrategy):
             info["risk_rules"] = runtime_rules
 
         return info
+
+    # ------------------------------------------------------------------
+    def get_runtime_status(self) -> Dict[str, Any]:
+        """Provide real-time operational statistics for monitoring."""
+
+        now = time.time()
+        runtime_seconds = self._last_runtime_duration
+        if self.active and self._started_at:
+            runtime_seconds = now - self._started_at
+
+        is_receiving = False
+        if self.active and self._last_data_timestamp:
+            is_receiving = (now - self._last_data_timestamp) <= 5.0
+
+        return {
+            "is_receiving_data": bool(is_receiving),
+            "runtime_seconds": max(0.0, float(runtime_seconds)),
+            "processed_count": self._processed_count,
+            "threshold_hits": self._threshold_hits,
+            "buy_signals": self._buy_signals,
+            "sell_signals": self._sell_signals,
+        }
 
