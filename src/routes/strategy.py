@@ -112,9 +112,25 @@ async def set_strategy_data_push_api(
         subscription=payload.subscription,
         symbol=payload.symbol,
     )
+
+    state_snapshot = strategy_manager.get_data_push_state(name) or {}
+    if not state_snapshot:
+        state_snapshot = result
+
+    state_payload = {
+        "active": bool(state_snapshot.get("active")),
+        "subscription": state_snapshot.get("subscription") or result.get("subscription"),
+        "symbol": state_snapshot.get("symbol") or result.get("symbol"),
+        "awaiting_data": bool(state_snapshot.get("awaiting_data")),
+        "last_data_timestamp": state_snapshot.get("last_data_timestamp")
+        or result.get("last_data_timestamp"),
+    }
+
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error") or "Failed to update data push state")
-    return {"success": True, "state": result}
+        error_message = result.get("error") or "Failed to update data push state"
+        return {"success": False, "error": error_message, "state": state_payload}
+
+    return {"success": True, "state": state_payload}
 
 @router.put("/api/strategies/{name}")
 async def update_strategy_api(name: str, updates: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
