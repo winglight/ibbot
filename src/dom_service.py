@@ -6,18 +6,24 @@ from collections import defaultdict
 
 from loguru import logger
 
-DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
-
-import core
-from core import connection_manager, depth_subscriber, dom_config, DOMProcessor
+from src.connection_manager import connection_manager
 from src.dom_cache import DomCacheManager
+from src.dom_dependencies import (
+    dom_config,
+    depth_subscriber,
+    get_dom_processor,
+    set_dom_processor,
+)
+from src.dom_processor import DOMProcessor
+
+DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
 
 
 class DOMService:
     """Service layer wrapping DOM processing and alerts."""
 
     def __init__(self) -> None:
-        self.processor: DOMProcessor = core.dom_processor
+        self.processor: DOMProcessor = get_dom_processor()
         self._alerts: List[Dict[str, Any]] = []
         self._next_alert_id: int = 1
         self._max_alerts = 100
@@ -30,7 +36,7 @@ class DOMService:
         self._active_symbol: Optional[str] = None
         self._cache = DomCacheManager()
         self.trend_thresholds: List[float] = list(
-            getattr(core.dom_config, "trend_thresholds", DEFAULT_TREND_THRESHOLDS)
+            getattr(dom_config, "trend_thresholds", DEFAULT_TREND_THRESHOLDS)
         ) or list(DEFAULT_TREND_THRESHOLDS)
         self._listeners: DefaultDict[str, List[Callable]] = defaultdict(list)
 
@@ -191,7 +197,13 @@ class DOMService:
             dom_config.trend_thresholds = self._sanitize_thresholds(trend_thresholds)
         self.trend_thresholds = list(dom_config.trend_thresholds)
         self.processor = DOMProcessor(window=window, max_levels=max_levels)
-        core.dom_processor = self.processor
+        set_dom_processor(self.processor)
+        try:
+            import core as core_module
+
+            core_module.dom_processor = self.processor
+        except Exception:
+            pass
 
     def _sanitize_thresholds(self, values: List[float]) -> List[float]:
         if not isinstance(values, (list, tuple)):

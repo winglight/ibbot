@@ -62,7 +62,7 @@ class StrategyManager:
         normalized_strategy_dir = self._normalize_strategy_path_value(strategy_dir)
         self.strategy_dir = Path(normalized_strategy_dir)
         self.data_dir.mkdir(exist_ok=True)
-        self.strategy_dir.mkdir(exist_ok=True)
+        self.strategy_dir.mkdir(parents=True, exist_ok=True)
         
         # External and internal API clients
         self.external_clients = {}
