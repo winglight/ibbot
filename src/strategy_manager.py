@@ -48,6 +48,7 @@ class Strategy:
     trigger_count: int = 0
     last_triggered: Optional[datetime] = None
     schedule: Optional[List[Dict[str, Any]]] = None
+    primary_symbol: Optional[str] = None
     
     def __post_init__(self):
         if self.created_at is None:
@@ -81,6 +82,7 @@ class StrategyManager:
         self.internal_strategies_runtime: Dict[str, "BaseStrategy"] = {}
         self._last_position_add: Dict[Tuple[str, str, str], datetime] = {}
         self._auto_close_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
+        self.data_push_state: Dict[str, Dict[str, Any]] = {}
 
         # 认证token（用于外部策略访问）
         self.auth_token = None
@@ -355,6 +357,9 @@ class StrategyManager:
                     last_triggered=None,
                     schedule=schedule
                 )
+                primary_symbol = self.settings.get(f"{strategy_data.name}_primary_symbol")
+                if primary_symbol:
+                    strategy.primary_symbol = primary_symbol
                 self.strategies[strategy.name] = strategy
             
             strategy_logger.info(f"Loaded {len(self.strategies)} strategies from database")
@@ -485,6 +490,116 @@ class StrategyManager:
     def _get_strategy_setting(self, strategy_name: str, suffix: str, default: Any = None) -> Any:
         key = f"{strategy_name}_{suffix}"
         return (self.settings or {}).get(key, default)
+
+    def get_data_push_state(self, strategy_name: str) -> Dict[str, Any]:
+        return dict(self.data_push_state.get(strategy_name, {}))
+
+    def set_data_push(
+        self,
+        strategy_name: str,
+        enabled: bool,
+        subscription: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Control live data push for an internal strategy."""
+
+        record = self.strategies.get(strategy_name)
+        if not record or record.strategy_type != "internal":
+            return {"success": False, "error": "Strategy not found or not internal"}
+
+        state = self.data_push_state.setdefault(strategy_name, {})
+        stored_subscription = subscription or self._get_strategy_setting(strategy_name, "data_subscription")
+        if not stored_subscription:
+            state.update({"enabled": False, "active": False})
+            return {"success": False, "error": "No subscription configured"}
+
+        # Determine target symbol
+        target_symbol = symbol or state.get("symbol") or getattr(record, "primary_symbol", None)
+        if not target_symbol:
+            target_symbol = self._get_strategy_setting(strategy_name, "primary_symbol")
+        if target_symbol:
+            target_symbol = str(target_symbol).strip().upper()
+
+        if enabled:
+            if not target_symbol:
+                state.update({"enabled": False, "active": False})
+                return {"success": False, "error": "Primary symbol required"}
+
+            ok = False
+            error: Optional[str] = None
+            try:
+                if stored_subscription == "dom_trend":
+                    from src.dom_service import get_dom_service
+
+                    dom_service = get_dom_service()
+                    ok = dom_service.start(target_symbol)
+                elif stored_subscription == "market_data":
+                    try:
+                        import core
+
+                        if not core.connection_manager.is_connected():
+                            error = "IBKR connection required"
+                            ok = False
+                        else:
+                            if core.ibkr_client is None:
+                                core.ibkr_client = core.IBKRClient()
+                            data = core.ibkr_client.get_real_time_data(target_symbol)
+                            ok = bool(data)
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        error = str(exc)
+                        ok = False
+                else:
+                    error = f"Unsupported subscription: {stored_subscription}"
+            except Exception as exc:  # pragma: no cover - defensive guard
+                error = str(exc)
+                ok = False
+
+            if not ok:
+                state.update({
+                    "enabled": False,
+                    "active": False,
+                    "subscription": stored_subscription,
+                    "symbol": target_symbol,
+                })
+                payload = {"success": False, "error": error or "Failed to start data push"}
+                return payload
+
+            state.update({
+                "enabled": True,
+                "active": True,
+                "subscription": stored_subscription,
+                "symbol": target_symbol,
+                "last_started": datetime.utcnow().isoformat(),
+            })
+            return {
+                "success": True,
+                "active": True,
+                "subscription": stored_subscription,
+                "symbol": target_symbol,
+            }
+
+        # Disable
+        try:
+            if state.get("subscription") == "dom_trend" and state.get("symbol"):
+                from src.dom_service import get_dom_service
+
+                dom_service = get_dom_service()
+                dom_service.stop(state.get("symbol"))
+        except Exception:  # pragma: no cover - defensive guard
+            pass
+
+        state.update({
+            "enabled": False,
+            "active": False,
+            "subscription": stored_subscription,
+            "symbol": target_symbol,
+        })
+        return {
+            "success": True,
+            "active": False,
+            "subscription": stored_subscription,
+            "symbol": target_symbol,
+        }
 
     def _handle_position_setting_change(self, strategy_name: str) -> None:
         """Adjust runtime helpers when position-related settings are updated."""
@@ -696,6 +811,10 @@ class StrategyManager:
                 data_subscription = strategy_data.get('data_subscription')
                 if data_subscription:
                     position_updates[f"{name}_data_subscription"] = data_subscription
+                primary_symbol = strategy_data.get('primary_symbol')
+                if primary_symbol:
+                    position_updates[f"{name}_primary_symbol"] = primary_symbol
+                    strategy.primary_symbol = primary_symbol
                 cooldown = strategy_data.get('position_add_cooldown_minutes')
                 if isinstance(cooldown, (int, float)) and cooldown > 0:
                     position_updates[f"{name}_position_add_cooldown_minutes"] = int(cooldown)
@@ -738,6 +857,11 @@ class StrategyManager:
             tp_enabled = settings.get(f"{name}_tp_enabled", False)
             strategy_dict['sl_enabled'] = sl_enabled
             strategy_dict['tp_enabled'] = tp_enabled
+            stored_primary = settings.get(f"{name}_primary_symbol")
+            if stored_primary:
+                strategy_dict['primary_symbol'] = stored_primary
+            elif getattr(strategy, 'primary_symbol', None):
+                strategy_dict['primary_symbol'] = strategy.primary_symbol
             strategy_dict['sl_price'] = settings.get(f"{name}_sl_price") if sl_enabled else None
             strategy_dict['tp_price'] = settings.get(f"{name}_tp_price") if tp_enabled else None
             strategy_dict['sl_type'] = settings.get(f"{name}_sl_type", 'amount')
@@ -762,6 +886,10 @@ class StrategyManager:
         strategy = self.get_strategy(name)
         if not strategy or strategy.get("strategy_type") != "internal":
             return None
+
+        saved_symbol = self._get_strategy_setting(name, "primary_symbol")
+        if saved_symbol and not strategy.get("primary_symbol"):
+            strategy["primary_symbol"] = saved_symbol
 
         symbols: Set[str] = set()
         schedule_items = strategy.get("schedule") or []
@@ -837,6 +965,15 @@ class StrategyManager:
             return None
         if not isinstance(status, dict):
             return None
+        push_state = self.data_push_state.get(name)
+        if push_state:
+            status["data_push"] = {
+                "enabled": bool(push_state.get("enabled")),
+                "active": bool(push_state.get("active")),
+                "subscription": push_state.get("subscription"),
+                "symbol": push_state.get("symbol"),
+                "last_started": push_state.get("last_started"),
+            }
         return status
 
     def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
@@ -856,6 +993,7 @@ class StrategyManager:
             settings_to_save: Dict[str, Any] = {}
             settings_to_remove: Set[str] = set()
             position_settings_changed = False
+            restart_data_push = False
             for key, value in updates.items():
                 if key in sl_tp_keys:
                     # 构造持久化键
@@ -865,6 +1003,20 @@ class StrategyManager:
                     elif key.startswith('tp_'):
                         settings_key = f"{name}_{key}"
                         settings_to_save[settings_key] = value
+                elif key == 'primary_symbol':
+                    storage_key = f"{name}_primary_symbol"
+                    symbol_value = None
+                    if isinstance(value, str):
+                        symbol_value = value.strip().upper() or None
+                    elif value:
+                        symbol_value = str(value).strip().upper() or None
+                    if symbol_value:
+                        settings_to_save[storage_key] = symbol_value
+                        setattr(strategy, 'primary_symbol', symbol_value)
+                    else:
+                        settings_to_remove.add(storage_key)
+                        setattr(strategy, 'primary_symbol', None)
+                    restart_data_push = True
                 elif key == 'schedule':
                     setattr(strategy, key, value)
                     settings_to_save[f"{name}_schedule"] = value
@@ -876,6 +1028,7 @@ class StrategyManager:
                             settings_to_save[storage_key] = value
                         else:
                             settings_to_remove.add(storage_key)
+                        restart_data_push = True
                     else:
                         try:
                             minutes_value = int(value) if value is not None else None
@@ -899,6 +1052,12 @@ class StrategyManager:
 
             if position_settings_changed:
                 self._handle_position_setting_change(name)
+
+            if restart_data_push and self.data_push_state.get(name, {}).get('enabled'):
+                try:
+                    self.set_data_push(name, True)
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(f"Failed to restart data push for {name}: {exc}")
 
             strategy_logger.info(f"Updated strategy: {name}")
             if 'enabled' in updates:
