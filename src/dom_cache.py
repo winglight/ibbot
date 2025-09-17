@@ -7,6 +7,24 @@ from threading import Lock
 from typing import Any, Dict, List
 
 
+DOM_RETENTION_ENV = "DOM_CACHE_RETENTION_DAYS"
+
+
+def _resolve_retention_seconds(default_days: float = 1.0) -> int:
+    """Resolve DOM cache retention in seconds using an environment variable."""
+
+    env_value = os.getenv(DOM_RETENTION_ENV)
+    days = default_days
+    if env_value:
+        try:
+            days = float(env_value)
+        except (TypeError, ValueError):
+            days = default_days
+    seconds = int(days * 24 * 60 * 60)
+    # Ensure we always retain at least one minute of history
+    return max(seconds, 60)
+
+
 def _ensure_directory(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
@@ -17,11 +35,13 @@ class DomCacheManager:
     def __init__(
         self,
         base_dir: str = "data",
-        retention_seconds: int = 24 * 60 * 60,
+        retention_seconds: int = None,
         save_interval_seconds: int = 30,
     ) -> None:
         self.base_dir = base_dir
-        self.retention_seconds = max(retention_seconds, 60)
+        if retention_seconds is None:
+            retention_seconds = _resolve_retention_seconds()
+        self.retention_seconds = max(int(retention_seconds), 60)
         self.save_interval_seconds = max(save_interval_seconds, 1)
         self._lock = Lock()
         self._containers: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}

@@ -1,8 +1,8 @@
-from typing import Optional
+from typing import List, Optional
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import core
 from .auth import get_current_user
@@ -41,19 +41,30 @@ async def dom_stop(req: StopRequest, user: Optional[str] = Depends(get_current_u
 class DOMConfigModel(BaseModel):
     window: int = dom_config.window
     max_levels: int = dom_config.max_levels
+    trend_thresholds: List[float] = Field(
+        default_factory=lambda: list(getattr(dom_config, "trend_thresholds", []))
+    )
 
 
 @router.get("/api/config/dom")
 async def get_dom_config(user: Optional[str] = Depends(get_current_user)):
-    return {"window": dom_config.window, "max_levels": dom_config.max_levels}
+    return {
+        "window": dom_config.window,
+        "max_levels": dom_config.max_levels,
+        "trend_thresholds": list(getattr(dom_config, "trend_thresholds", [])),
+    }
 
 
 @router.put("/api/config/dom")
 async def update_dom_config(cfg: DOMConfigModel, user: Optional[str] = Depends(get_current_user)):
-    dom_service.update_config(cfg.window, cfg.max_levels)
+    dom_service.update_config(cfg.window, cfg.max_levels, cfg.trend_thresholds)
     return {
         "success": True,
-        "config": {"window": dom_config.window, "max_levels": dom_config.max_levels},
+        "config": {
+            "window": dom_config.window,
+            "max_levels": dom_config.max_levels,
+            "trend_thresholds": list(getattr(dom_config, "trend_thresholds", [])),
+        },
     }
 
 

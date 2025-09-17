@@ -5,11 +5,15 @@
         constructor(app) {
             this.app = app;
             this.notificationHistory = [];
+            if (this.app) {
+                this.app.filterNotificationHistory = this.filterNotificationHistory.bind(this);
+            }
         }
-        
+
         init() {
             this.initEventListeners();
-            this.loadNotificationHistory();
+            this.initializeHistoryFilters();
+            this.filterNotificationHistory();
         }
         
         initEventListeners() {
@@ -18,6 +22,42 @@
             if (clearNotificationsBtn) {
                 clearNotificationsBtn.addEventListener('click', () => this.clearNotifications());
             }
+        }
+
+        initializeHistoryFilters() {
+            this.ensureDefaultHistorySince();
+        }
+
+        getTodayDateString() {
+            const now = new Date();
+            const month = `${now.getMonth() + 1}`.padStart(2, '0');
+            const day = `${now.getDate()}`.padStart(2, '0');
+            return `${now.getFullYear()}-${month}-${day}`;
+        }
+
+        ensureDefaultHistorySince() {
+            const sinceInput = document.getElementById('historySinceFilter');
+            if (sinceInput && !sinceInput.value) {
+                sinceInput.value = this.getTodayDateString();
+            }
+            return sinceInput ? sinceInput.value : '';
+        }
+
+        getHistoryFilters() {
+            const status = document.getElementById('historyStatusFilter')?.value || '';
+            const channel = document.getElementById('historyChannelFilter')?.value || '';
+            const sinceInput = document.getElementById('historySinceFilter');
+            const since = sinceInput?.value || this.ensureDefaultHistorySince();
+            return {
+                status: status === 'all' ? '' : status,
+                channel: channel === 'all' ? '' : channel,
+                since
+            };
+        }
+
+        filterNotificationHistory() {
+            const filters = this.getHistoryFilters();
+            return this.loadNotificationHistory(filters);
         }
         
         // 添加通知到面板
@@ -437,44 +477,82 @@
         }
         
         // 加载通知历史记录
-        async loadNotificationHistory() {
+        async loadNotificationHistory(filters = null) {
             try {
-                const response = await this.app.apiCall('/notifications/history?limit=50');
+                const resolved = filters || this.getHistoryFilters();
+                const params = new URLSearchParams({ limit: '50' });
+                if (resolved?.status) params.set('status', resolved.status);
+                if (resolved?.channel) params.set('channel', resolved.channel);
+                if (resolved?.since) params.set('since', resolved.since);
+                const query = params.toString();
+                const response = await this.app.apiCall(`/notifications/history?${query}`);
                 const history = response.history || [];
-                
+
                 this.notificationHistory = history;
                 this.renderNotificationHistoryRows(history);
             } catch (error) {
                 console.error('Failed to load notification history:', error);
                 const tbody = document.getElementById('notificationHistoryBody');
                 if (tbody) {
-                    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">Failed to load notification history</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Failed to load notification history</td></tr>';
                 }
             }
         }
-        
+
+        escapeHtml(text) {
+            if (text === null || text === undefined) return '';
+            return String(text)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        formatTimestamp(value) {
+            if (!value) return this.escapeHtml('-');
+            try {
+                const date = new Date(value);
+                if (!Number.isNaN(date.getTime())) {
+                    return this.escapeHtml(date.toLocaleString());
+                }
+            } catch (err) {
+                console.warn('formatTimestamp error:', err);
+            }
+            return this.escapeHtml(value);
+        }
+
         // 渲染通知历史记录行
         renderNotificationHistoryRows(history) {
             const tbody = document.getElementById('notificationHistoryBody');
             if (!tbody) return;
-            
+
             if (!history || history.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No notification history found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No notification history found</td></tr>';
                 return;
             }
-            
+
             tbody.innerHTML = history.map(notification => {
-                const timestamp = new Date(notification.timestamp).toLocaleString();
+                const timestamp = this.formatTimestamp(notification.sent_at || notification.created_at || notification.timestamp);
                 const statusBadge = this.getNotificationStatusBadge(notification.status);
                 const channelIcon = this.getChannelIcon(notification.channel);
-                
+                const channelLabel = this.escapeHtml(notification.channel || '');
+                const eventLabel = this.escapeHtml(notification.event_type || 'N/A');
+                const messageText = this.escapeHtml(notification.message || '');
+                const messageTitle = messageText || this.escapeHtml('(empty)');
+                const errorMessage = notification.error_message ? this.escapeHtml(notification.error_message) : '';
+                const errorCell = errorMessage
+                    ? `<span class="text-danger" title="${errorMessage}">${errorMessage}</span>`
+                    : '<span class="text-muted">-</span>';
+
                 return `
                     <tr>
                         <td>${timestamp}</td>
-                        <td>${channelIcon} ${notification.channel}</td>
-                        <td>${notification.event_type || 'N/A'}</td>
-                        <td class="text-truncate" style="max-width: 200px;" title="${notification.message}">${notification.message}</td>
+                        <td>${channelIcon} ${channelLabel}</td>
+                        <td>${eventLabel}</td>
+                        <td class="text-truncate" style="max-width: 200px;" title="${messageTitle}">${messageText || '<span class="text-muted">(empty)</span>'}</td>
                         <td>${statusBadge}</td>
+                        <td>${errorCell}</td>
                     </tr>
                 `;
             }).join('');
@@ -503,7 +581,7 @@
         // 显示通知历史记录
         showNotificationHistory() {
             try {
-                this.loadNotificationHistory();
+                this.filterNotificationHistory();
                 const table = document.getElementById('notificationHistoryTable') || document.getElementById('notificationHistoryBody');
                 if (table && table.scrollIntoView) {
                     table.scrollIntoView({ behavior: 'smooth', block: 'center' });

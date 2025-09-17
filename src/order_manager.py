@@ -631,23 +631,6 @@ class OrderManager:
                     except Exception as e:
                         order_logger.error(f"发送风险规则停用通知失败: {e}")
                 
-                # 发送浏览器通知
-                if hasattr(self, 'websocket_manager') and self.websocket_manager:
-                    try:
-                        notification = {
-                            "type": "risk_rule_deactivated",
-                            "symbol": symbol,
-                            "message": f"风险规则已自动停用: {symbol} ({deactivate_reason})"
-                        }
-                        import asyncio
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.create_task(self.websocket_manager.broadcast(notification))
-                        else:
-                            asyncio.run(self.websocket_manager.broadcast(notification))
-                    except Exception as e:
-                        order_logger.error(f"发送风险规则停用浏览器通知失败: {e}")
-                
         except Exception as e:
             order_logger.error(f"检查和停用风险规则失败 ({symbol}): {e}")
 

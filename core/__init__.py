@@ -7,7 +7,8 @@ from src.database import get_db_manager
 from src.queue_manager import queue_manager
 from src.order_manager import get_order_manager
 from src.websocket_manager import websocket_manager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 from src.depth_subscriber import DepthSubscriber
 from src.notification_manager import NotificationManager
@@ -25,6 +26,9 @@ notification_manager = NotificationManager(
 class DOMConfig:
     window: int = 10000
     max_levels: int = 30
+    trend_thresholds: List[float] = field(
+        default_factory=lambda: [0.5, 0.7, 0.85, 0.95]
+    )
 
 
 dom_config = DOMConfig()

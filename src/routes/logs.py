@@ -68,8 +68,21 @@ async def get_logs(
                 return None
             content = [line for line in content if extract_level(line) in allowed]
 
-        if module != "all":
-            content = [line for line in content if f"| {module} |" in line]
+        if module and module != "all":
+            target_module = module.strip()
+
+            def extract_module(line: str) -> Optional[str]:
+                try:
+                    parts = line.split('|')
+                    if len(parts) >= 4:
+                        return parts[3].strip()
+                except Exception:
+                    return None
+                return None
+
+            content = [
+                line for line in content if extract_module(line) == target_module
+            ]
 
         if request_id:
             content = [line for line in content if request_id in line]
