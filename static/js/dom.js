@@ -27,7 +27,15 @@ class DOMManager {
             settingsBtn.addEventListener('click', () => {
                 const modalEl = document.getElementById('domSettingsModal');
                 if (!modalEl) return;
-                const modal = new bootstrap.Modal(modalEl);
+
+                // 将设置弹窗节点移动到 <body> 末尾，确保它的层级高于监控弹窗
+                if (modalEl.parentElement) {
+                    document.body.appendChild(modalEl);
+                }
+
+                const modal = (bootstrap?.Modal?.getOrCreateInstance)
+                    ? bootstrap.Modal.getOrCreateInstance(modalEl)
+                    : new bootstrap.Modal(modalEl);
                 modal.show();
             });
         }
