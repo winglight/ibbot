@@ -912,7 +912,21 @@ class DatabaseManager:
         config = self.get_config('notification_settings', {})
         database_logger.debug(f"Loaded notification config from config table: {list(config.keys()) if config else 'empty'}")
         return config
-    
+
+    def save_dom_config(self, settings: Dict[str, Any]):
+        """保存DOM设置到config表"""
+        self.save_config('dom_config', settings, 'DOM configuration settings')
+        database_logger.debug("DOM config saved to config table")
+
+    def load_dom_config(self) -> Dict[str, Any]:
+        """从config表加载DOM设置"""
+        config = self.get_config('dom_config', {})
+        database_logger.debug(
+            "Loaded DOM config from config table: {}",
+            list(config.keys()) if isinstance(config, dict) else 'empty'
+        )
+        return config if isinstance(config, dict) else {}
+
     def save_strategy_config(self, settings: Dict[str, Any]):
         """保存策略配置到config表"""
         self.save_config('strategy_settings', settings, 'Strategy configuration settings')

@@ -40,6 +40,8 @@ class NotificationManager:
             'Position Opened',
             'Position Closed',
             'Risk Rule Triggered',
+            'Take Profit Triggered',
+            'Stop Loss Triggered',
             'Strategy Started',
             'Strategy Stopped',
             'DOM Level 3',
@@ -266,9 +268,11 @@ class NotificationManager:
         message += f"订单ID: {order_id_str}\n\n"
         message += f"📈 风险管理系统执行的自动{action}订单。"
         
+        event_type = "take_profit" if order_type == "profit" else "stop_loss"
+
         return await self.send_notification(
             message=message,
-            event_type=f"stop_loss_{order_type}",
+            event_type=event_type,
             symbol=symbol,
             position=position,
             trigger_price=trigger_price,

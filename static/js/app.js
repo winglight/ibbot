@@ -4435,10 +4435,10 @@ class TradingApp {
                 const timeValue = intervalTime.getTime();
 
                 if (chartType === 'candlestick') {
-                    const ohlcData = dataset.data;
+                    const ohlcData = Array.isArray(dataset.data) ? dataset.data : [];
                     candlestickData = ohlcData;
                     const volumeDataset = this.monitorChart.data.datasets[1];
-                    const vData = volumeDataset.data;
+                    const vData = Array.isArray(volumeDataset.data) ? volumeDataset.data : [];
                     if (ohlcData.length > 0) {
                         const lastBar = ohlcData[ohlcData.length - 1];
                         if (lastBar.x === timeValue) {
@@ -4470,6 +4470,26 @@ class TradingApp {
                         this.currentMonitor.displayTimes = ohlcData.map(item => new Date(item.x));
                         if (Array.isArray(this.monitorChart.data.labels)) {
                             this.currentMonitor.displayLabels = Array.from(this.monitorChart.data.labels);
+                        }
+                    }
+
+                    // 重新分配新的数据引用，确保Chart.js能检测到变更
+                    dataset.data = ohlcData.map(bar => ({ ...bar }));
+                    volumeDataset.data = vData.map(entry => ({ ...entry }));
+
+                    const xOptions = this.monitorChart.options?.scales?.x;
+                    if (xOptions) {
+                        const firstBar = dataset.data[0];
+                        const latestBar = dataset.data[dataset.data.length - 1];
+                        const previousBar = dataset.data[dataset.data.length - 2];
+                        const step = previousBar && latestBar
+                            ? Math.max(1, Math.abs(latestBar.x - previousBar.x))
+                            : 60000;
+                        if (firstBar && Number.isFinite(firstBar.x) && !Number.isFinite(xOptions.min)) {
+                            xOptions.min = firstBar.x;
+                        }
+                        if (latestBar && Number.isFinite(latestBar.x)) {
+                            xOptions.max = latestBar.x + step * 0.1;
                         }
                     }
                 } else {
@@ -4513,11 +4533,16 @@ class TradingApp {
                         volumeDataset.data.shift();
                     }
 
-                if (this.currentMonitor) {
-                    const normalizedTime = new Date(timeValue);
-                    let displayTimes = Array.isArray(this.currentMonitor.displayTimes) ? [...this.currentMonitor.displayTimes] : [];
-                    if (shouldUpdateLast && displayTimes.length) {
-                        displayTimes[displayTimes.length - 1] = normalizedTime;
+                    // 重新分配引用，避免Chart.js跳过数据变更
+                    this.monitorChart.data.labels = labels.slice();
+                    dataset.data = dataset.data.slice();
+                    volumeDataset.data = volumeDataset.data.slice();
+
+                    if (this.currentMonitor) {
+                        const normalizedTime = new Date(timeValue);
+                        let displayTimes = Array.isArray(this.currentMonitor.displayTimes) ? [...this.currentMonitor.displayTimes] : [];
+                        if (shouldUpdateLast && displayTimes.length) {
+                            displayTimes[displayTimes.length - 1] = normalizedTime;
                         } else {
                             displayTimes.push(normalizedTime);
                         }
