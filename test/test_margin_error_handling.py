@@ -26,19 +26,18 @@ test_logger = logger.bind(module="test_margin_error")
 
 class TestMarginErrorHandling:
     """测试保证金不足错误处理"""
-    
-    def __init__(self):
-        self.ibkr_client = None
-        self.order_manager = None
-        
-    def setup(self):
+
+    def setup_method(self):
         """设置测试环境"""
+        self._setup_environment()
+
+    def _setup_environment(self):
         test_logger.info("Setting up test environment...")
-        
+
         # 创建IBKR客户端实例
         self.ibkr_client = IBKRClient()
         self.order_manager = get_order_manager()
-        
+
         test_logger.info("Test environment setup complete")
     
     def test_margin_error_detection(self):
@@ -175,10 +174,12 @@ class TestMarginErrorHandling:
             self.ibkr_client.req_id_to_order_id[test_req_id] = test_order_id
             
             # 模拟错误处理
-            connection_manager._handle_order_error(
-                req_id=test_req_id,
-                error_code=201,
-                error_string="Order rejected - insufficient buying power"
+            asyncio.run(
+                self.ibkr_client._handle_order_error(
+                    req_id=test_req_id,
+                    error_code=201,
+                    error_string="Order rejected - insufficient buying power"
+                )
             )
             
             # 验证订单状态更新
@@ -200,7 +201,7 @@ class TestMarginErrorHandling:
         test_logger.info("Starting margin error handling tests...")
         
         try:
-            self.setup()
+            self._setup_environment()
             
             # 运行各项测试
             self.test_margin_error_detection()

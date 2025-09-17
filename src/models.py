@@ -4,8 +4,9 @@ Pydantic 请求模型定义
 基于 main.py 中的 API 端点分析，定义所有必需的请求模型
 """
 
-from pydantic import BaseModel, validator, root_validator, Field
 from typing import Optional, Dict, Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 class HistoricalDataRequest(BaseModel):
     """历史数据请求模型"""
@@ -24,15 +25,14 @@ class ChartDataRequest(BaseModel):
     use_cache: Optional[bool] = Field(True, alias="useCache")
     force_refresh: Optional[bool] = Field(False, alias="forceRefresh")
 
-    class Config:
-        allow_population_by_field_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 class RiskRuleRequest(BaseModel):
     """风险规则请求模型"""
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
-    
-    @validator('stop_loss_price', 'take_profit_price')
+
+    @field_validator('stop_loss_price', 'take_profit_price')
     def prices_must_be_positive(cls, v):
         if v is not None and v <= 0:
             raise ValueError('risk rule prices must be greater than 0 when provided')
@@ -52,14 +52,14 @@ class OrderRequest(BaseModel):
     risk_rule: Optional[RiskRuleRequest] = None  # 新增风险规则字段
 
     # 校验：数量必须大于0
-    @validator('quantity')
+    @field_validator('quantity')
     def quantity_must_be_positive(cls, v):
         if v is None or v <= 0:
             raise ValueError('quantity must be greater than 0')
         return v
 
     # 校验：如提供 price/stop_loss/take_profit，则必须大于0
-    @validator('price', 'stop_loss', 'take_profit')
+    @field_validator('price', 'stop_loss', 'take_profit')
     def optional_prices_must_be_positive(cls, v):
         if v is not None and v <= 0:
             raise ValueError('price values must be greater than 0 when provided')
@@ -86,10 +86,10 @@ class RiskRuleRequest(BaseModel):
     max_time_span: Optional[int] = 30  # 以分钟为单位的最大持仓时间，默认30分钟
 
     # 至少提供一个止盈/止损价格，且提供的价格必须 > 0
-    @root_validator(skip_on_failure=True)
-    def validate_sl_tp_prices(cls, values):
-        sl = values.get('stop_loss_price')
-        tp = values.get('take_profit_price')
+    @model_validator(mode='after')
+    def validate_sl_tp_prices(cls, values: 'RiskRuleRequest'):
+        sl = values.stop_loss_price
+        tp = values.take_profit_price
         if (sl is None or sl <= 0) and (tp is None or tp <= 0):
             raise ValueError('At least one of stop_loss_price or take_profit_price must be provided and > 0')
         return values
@@ -114,7 +114,7 @@ class StrategyRequest(BaseModel):
     position_add_cooldown_minutes: Optional[int] = None
     close_before_close_minutes: Optional[int] = None
 
-    @validator('data_subscription')
+    @field_validator('data_subscription')
     def validate_data_subscription(cls, value: Optional[str]):
         if value is None:
             return value
@@ -123,14 +123,14 @@ class StrategyRequest(BaseModel):
             raise ValueError(f'data_subscription must be one of {sorted(allowed)}')
         return value
 
-    @validator('primary_symbol')
+    @field_validator('primary_symbol')
     def validate_primary_symbol(cls, value: Optional[str]):
         if value is None:
             return value
         value = value.strip().upper()
         return value or None
 
-    @validator('position_add_cooldown_minutes', 'close_before_close_minutes')
+    @field_validator('position_add_cooldown_minutes', 'close_before_close_minutes')
     def validate_positive_minutes(cls, value: Optional[int]):
         if value is not None and value < 0:
             raise ValueError('minute values must be >= 0 when provided')
@@ -145,7 +145,7 @@ class StrategyDataPushRequest(BaseModel):
     subscription: Optional[str] = None
     symbol: Optional[str] = None
 
-    @validator('subscription')
+    @field_validator('subscription')
     def validate_subscription(cls, value: Optional[str]):
         if value is None:
             return value
@@ -154,7 +154,7 @@ class StrategyDataPushRequest(BaseModel):
             raise ValueError(f'subscription must be one of {sorted(allowed)}')
         return value
 
-    @validator('symbol')
+    @field_validator('symbol')
     def normalize_symbol(cls, value: Optional[str]):
         if value is None:
             return value
@@ -195,14 +195,16 @@ class RiskConfigUpdateRequest(BaseModel):
 
     point_value_map: Optional[Dict[str, float]] = None
 
-    @validator('risk_per_trade_r', 'rv_ref_value', 'exec_min_volume', 'exec_max_spread', 'exec_max_slippage',
-               'dd_step', 'dd_scale', 'price_threshold', 'cb_daily_r')
+    @field_validator(
+        'risk_per_trade_r', 'rv_ref_value', 'exec_min_volume', 'exec_max_spread', 'exec_max_slippage',
+        'dd_step', 'dd_scale', 'price_threshold', 'cb_daily_r'
+    )
     def positive_or_zero(cls, v):
         if v is not None and v < 0:
             raise ValueError('numeric values must be >= 0 when provided')
         return v
 
-    @validator('vol_window', 'dd_max_steps', 'leverage_mnq', 'cb_streak')
+    @field_validator('vol_window', 'dd_max_steps', 'leverage_mnq', 'cb_streak')
     def positive_int(cls, v):
         if v is not None and v < 0:
             raise ValueError('integer values must be >= 0 when provided')
@@ -217,13 +219,13 @@ class PositionSizingRequest(BaseModel):
     signal_tier: Optional[str] = 'A'
     execution_metrics: Optional[Dict[str, float]] = None
 
-    @validator('symbol')
+    @field_validator('symbol')
     def symbol_not_empty(cls, v):
         if not v or not v.strip():
             raise ValueError('symbol cannot be empty')
         return v.strip().upper()
 
-    @validator('stop_distance')
+    @field_validator('stop_distance')
     def stop_distance_positive(cls, v):
         if v <= 0:
             raise ValueError('stop_distance must be greater than 0')
@@ -234,7 +236,7 @@ class CurrentPriceRequest(BaseModel):
     symbol: str
     exchange: str = "SMART"
     
-    @validator('symbol')
+    @field_validator('symbol')
     def symbol_not_empty(cls, v):
         if not v or not v.strip():
             raise ValueError('symbol cannot be empty')

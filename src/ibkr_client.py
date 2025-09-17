@@ -17,7 +17,7 @@ import csv
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import math
-from .connection_manager import connection_manager, ConnectionConfig
+from .connection_manager import connection_manager, ConnectionConfig, connection_logger
 from .database import get_db_manager
 
 NY_TZ = ZoneInfo("America/New_York")
@@ -1576,8 +1576,7 @@ class IBKRClient:
     async def _handle_order_error(self, req_id, error_code, error_string):
         """处理订单错误，更新订单状态为失败"""
         try:
-            from .order_manager import get_order_manager
-            from .models import OrderStatus
+            from .order_manager import get_order_manager, OrderStatus
             
             # 记录错误信息
             connection_logger.error(f"Order error - ReqId: {req_id}, Code: {error_code}, Message: {error_string}")
