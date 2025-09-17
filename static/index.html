@@ -1068,6 +1068,14 @@
                   <h6>Risk Controls</h6>
                   <ul id="summaryRiskParams" class="list-unstyled mb-0"></ul>
                 </div>
+                <div class="mb-3">
+                  <h6>Data Subscription</h6>
+                  <div id="summaryDataSubscription" class="text-muted">-</div>
+                </div>
+                <div class="mb-3">
+                  <h6>Position Timing Controls</h6>
+                  <ul id="summaryPositionSettings" class="list-unstyled mb-0"></ul>
+                </div>
                 <div>
                   <h6>SL/TP Settings</h6>
                   <div class="table-responsive">
@@ -1695,6 +1703,33 @@
                 </div>
               </div>
             </div>
+            <div id="subscriptionGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Data Subscription</label>
+              <select class="form-select" id="dataSubscriptionSelect">
+                <option value="market_data">Real-time Price + Volume</option>
+                <option value="dom_trend">DOM + Trend Score</option>
+              </select>
+              <div class="form-text">Select the market data feed required for this internal strategy.</div>
+            </div>
+            <div id="positionTimingGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Position Timing Controls</label>
+              <div class="row g-2">
+                <div class="col-sm-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Add Cooldown (min)</span>
+                    <input type="number" min="0" class="form-control" id="positionAddCooldownInput" placeholder="Leave blank for no limit">
+                  </div>
+                  <div class="form-text">Block additional entries for this many minutes after opening or adding.</div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Exit Before Close (min)</span>
+                    <input type="number" min="0" class="form-control" id="closeBeforeCloseInput" placeholder="Leave blank to skip auto-close">
+                  </div>
+                  <div class="form-text">Automatically flatten remaining positions this many minutes before Nasdaq close.</div>
+                </div>
+              </div>
+            </div>
             <div class="mb-3">
               <label class="form-label">Description</label>
               <textarea class="form-control" id="strategyDescriptionInput" rows="3" placeholder="Optional description..."></textarea>
@@ -1754,6 +1789,31 @@
                     <option value="amount">Amount</option>
                     <option value="percent">Percent</option>
                   </select>
+                </div>
+              </div>
+            </div>
+            <div id="editSubscriptionGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Data Subscription</label>
+              <select class="form-select" id="editDataSubscriptionSelect">
+                <option value="">--</option>
+                <option value="market_data">Real-time Price + Volume</option>
+                <option value="dom_trend">DOM + Trend Score</option>
+              </select>
+            </div>
+            <div id="editPositionTimingGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Position Timing Controls</label>
+              <div class="row g-2">
+                <div class="col-sm-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Add Cooldown (min)</span>
+                    <input type="number" min="0" class="form-control" id="editPositionAddCooldownInput" placeholder="Leave blank for no limit">
+                  </div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Exit Before Close (min)</span>
+                    <input type="number" min="0" class="form-control" id="editCloseBeforeCloseInput" placeholder="Leave blank to skip auto-close">
+                  </div>
                 </div>
               </div>
             </div>

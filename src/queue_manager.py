@@ -296,6 +296,21 @@ class QueueManager:
         else:
             exchange = payload.get('exchange', 'SMART')
         
+        pre_trade_state: Optional[Dict[str, Any]] = None
+        if strategy.get('strategy_type') == 'internal' and self.strategy_manager:
+            try:
+                pre_trade_state = await self.strategy_manager.prepare_internal_order(
+                    strategy_name=strategy['name'],
+                    symbol=payload['symbol'],
+                    action=action,
+                    quantity=payload['qty'],
+                )
+            except ValueError as exc:
+                raise Exception(str(exc))
+            except Exception as exc:
+                queue_logger.error(f"Internal order pre-check failed: {exc}")
+                raise
+
         # 下单
         try:
             loop = asyncio.get_running_loop()
@@ -336,7 +351,19 @@ class QueueManager:
         
         if not order_id:
             raise Exception("Failed to obtain order id")
-        
+
+        if strategy.get('strategy_type') == 'internal' and self.strategy_manager:
+            try:
+                await self.strategy_manager.finalize_internal_order(
+                    strategy_name=strategy['name'],
+                    symbol=payload['symbol'],
+                    action=action,
+                    quantity=payload['qty'],
+                    pre_trade=pre_trade_state,
+                )
+            except Exception as exc:
+                queue_logger.warning(f"Finalize internal order state failed: {exc}")
+
         # 记录订单（优先使用 OrderManager）
         if getattr(self, 'order_manager', None):
             try:

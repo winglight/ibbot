@@ -955,6 +955,11 @@ class TradingApp {
                 const fileGroup = document.getElementById('strategyFileGroup');
                 const fileSelect = document.getElementById('strategyFileSelect');
                 const slTpGroup = document.getElementById('slTpGroup');
+                const subscriptionGroup = document.getElementById('subscriptionGroup');
+                const positionTimingGroup = document.getElementById('positionTimingGroup');
+                const dataSubscriptionSelect = document.getElementById('dataSubscriptionSelect');
+                const addCooldownInput = document.getElementById('positionAddCooldownInput');
+                const closeBeforeInput = document.getElementById('closeBeforeCloseInput');
                 const filenamePreview = document.getElementById('strategyFilenamePreview');
                 if (!nameInput || !typeSelect || !descInput) return;
                 // reset form
@@ -966,6 +971,11 @@ class TradingApp {
                 if (useTemplateGroup) useTemplateGroup.style.display = 'none';
                 if (fileGroup) fileGroup.style.display = 'none';
                 if (slTpGroup) slTpGroup.style.display = 'none';
+                if (subscriptionGroup) subscriptionGroup.style.display = 'none';
+                if (positionTimingGroup) positionTimingGroup.style.display = 'none';
+                if (dataSubscriptionSelect) dataSubscriptionSelect.value = 'market_data';
+                if (addCooldownInput) addCooldownInput.value = '';
+                if (closeBeforeInput) closeBeforeInput.value = '';
                 if (fileSelect) fileSelect.innerHTML = '';
                 const modal = new bootstrap.Modal(document.getElementById('addStrategyModal'));
                 modal.show();
@@ -980,10 +990,14 @@ class TradingApp {
                 const fileGroup = document.getElementById('strategyFileGroup');
                 const fileSelect = document.getElementById('strategyFileSelect');
                 const slTpGroup = document.getElementById('slTpGroup');
+                const subscriptionGroup = document.getElementById('subscriptionGroup');
+                const positionTimingGroup = document.getElementById('positionTimingGroup');
                 const isInternal = e.target.value === 'internal';
                 if (useTemplateGroup) useTemplateGroup.style.display = isInternal ? '' : 'none';
                 if (fileGroup) fileGroup.style.display = isInternal ? '' : 'none';
                 if (slTpGroup) slTpGroup.style.display = isInternal ? '' : 'none';
+                if (subscriptionGroup) subscriptionGroup.style.display = isInternal ? '' : 'none';
+                if (positionTimingGroup) positionTimingGroup.style.display = isInternal ? '' : 'none';
                 if (isInternal && fileSelect) {
                     try {
                         const data = await this.apiCall('/strategy/files');
@@ -1014,6 +1028,11 @@ class TradingApp {
                 const tp_price = tp_enabled && tp_price_val !== '' ? parseFloat(tp_price_val) : undefined;
                 const sl_type = document.getElementById('slTypeSelect')?.value || 'amount';
                 const tp_type = document.getElementById('tpTypeSelect')?.value || 'amount';
+                const data_subscription = strategy_type === 'internal' ? (document.getElementById('dataSubscriptionSelect')?.value || '') : undefined;
+                const cooldown_raw = document.getElementById('positionAddCooldownInput')?.value;
+                const close_raw = document.getElementById('closeBeforeCloseInput')?.value;
+                const cooldown_minutes = cooldown_raw !== undefined && cooldown_raw !== '' ? parseInt(cooldown_raw, 10) : null;
+                const close_minutes = close_raw !== undefined && close_raw !== '' ? parseInt(close_raw, 10) : null;
                 let name = nameRaw;
                 if (strategy_type === 'internal' && (!name || name.length === 0)) {
                     const sel = selected_file || 'new';
@@ -1027,6 +1046,9 @@ class TradingApp {
                     const payload = { name, strategy_type, description };
                     if (strategy_type === 'internal') {
                         Object.assign(payload, { use_template, selected_file, sl_enabled, tp_enabled, sl_price, tp_price, sl_type, tp_type });
+                        if (data_subscription) payload.data_subscription = data_subscription;
+                        if (Number.isFinite(cooldown_minutes) && cooldown_minutes > 0) payload.position_add_cooldown_minutes = cooldown_minutes;
+                        if (Number.isFinite(close_minutes) && close_minutes > 0) payload.close_before_close_minutes = close_minutes;
                     }
                     await this.apiCall('/strategies', { method: 'POST', body: JSON.stringify(payload) });
                     this.showAlert('success', `Strategy ${name} created`);
@@ -5464,7 +5486,11 @@ class TradingApp {
 
             // SL/TP: 仅对内部策略显示并填充
             const sltpGroup = document.getElementById('editSlTpGroup');
+            const subscriptionGroup = document.getElementById('editSubscriptionGroup');
+            const positionTimingGroup = document.getElementById('editPositionTimingGroup');
             if (sltpGroup) sltpGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
+            if (subscriptionGroup) subscriptionGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
+            if (positionTimingGroup) positionTimingGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
             const slEnabled = document.getElementById('editSlEnabledSwitch');
             const tpEnabled = document.getElementById('editTpEnabledSwitch');
             const slPrice = document.getElementById('editSlPriceInput');
@@ -5477,6 +5503,12 @@ class TradingApp {
             if (tpPrice) tpPrice.value = s.tp_price ?? '';
             if (slType) slType.value = s.sl_type || 'amount';
             if (tpType) tpType.value = s.tp_type || 'amount';
+            const editDataSubscription = document.getElementById('editDataSubscriptionSelect');
+            if (editDataSubscription) editDataSubscription.value = s.data_subscription || '';
+            const editCooldownInput = document.getElementById('editPositionAddCooldownInput');
+            if (editCooldownInput) editCooldownInput.value = s.position_add_cooldown_minutes ?? '';
+            const editCloseInput = document.getElementById('editCloseBeforeCloseInput');
+            if (editCloseInput) editCloseInput.value = s.close_before_close_minutes ?? '';
 
             const modal = new bootstrap.Modal(document.getElementById('editStrategyModal'));
             modal.show();
@@ -5499,6 +5531,14 @@ class TradingApp {
                         updates.tp_price = tpv ? Number(tpv) : null;
                         updates.sl_type = document.getElementById('editSlTypeSelect')?.value || 'amount';
                         updates.tp_type = document.getElementById('editTpTypeSelect')?.value || 'amount';
+                        const dataSub = document.getElementById('editDataSubscriptionSelect')?.value || '';
+                        updates.data_subscription = dataSub || null;
+                        const coolRaw = document.getElementById('editPositionAddCooldownInput')?.value;
+                        const closeRaw = document.getElementById('editCloseBeforeCloseInput')?.value;
+                        const coolVal = coolRaw !== undefined && coolRaw !== '' ? parseInt(coolRaw, 10) : null;
+                        const closeVal = closeRaw !== undefined && closeRaw !== '' ? parseInt(closeRaw, 10) : null;
+                        updates.position_add_cooldown_minutes = Number.isFinite(coolVal) ? coolVal : null;
+                        updates.close_before_close_minutes = Number.isFinite(closeVal) ? closeVal : null;
                     }
                     try {
                         await this.apiCall(`/strategies/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(updates) });
@@ -5601,6 +5641,36 @@ class TradingApp {
                                 });
                             } else {
                                 riskParamEl.innerHTML = '<li class="text-muted">No dedicated parameters</li>';
+                            }
+                        }
+                        const summaryDataSub = document.getElementById('summaryDataSubscription');
+                        if (summaryDataSub) {
+                            const subscriptionLabels = {
+                                market_data: 'Real-time Price + Volume',
+                                dom_trend: 'DOM + Trend Score'
+                            };
+                            const subKey = info.data_subscription || s?.data_subscription || '';
+                            summaryDataSub.textContent = subKey ? (subscriptionLabels[subKey] || subKey) : 'Not specified';
+                        }
+                        const positionList = document.getElementById('summaryPositionSettings');
+                        if (positionList) {
+                            const timing = info.position_settings || {};
+                            positionList.innerHTML = '';
+                            const entries = [];
+                            if (timing.position_add_cooldown_minutes) {
+                                entries.push(['Add Cooldown', `${timing.position_add_cooldown_minutes} min`]);
+                            }
+                            if (timing.close_before_close_minutes) {
+                                entries.push(['Exit Before Close', `${timing.close_before_close_minutes} min`]);
+                            }
+                            if (entries.length) {
+                                entries.forEach(([label, value]) => {
+                                    const li = document.createElement('li');
+                                    li.innerHTML = `<span class="text-muted">${label}:</span> <span class="fw-semibold">${value}</span>`;
+                                    positionList.appendChild(li);
+                                });
+                            } else {
+                                positionList.innerHTML = '<li class="text-muted">No timing limits</li>';
                             }
                         }
                         const schedList = document.getElementById('summarySchedule');

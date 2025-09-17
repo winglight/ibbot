@@ -14,7 +14,8 @@ import sys
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, TYPE_CHECKING, Set
+from zoneinfo import ZoneInfo
+from typing import Dict, List, Optional, Any, TYPE_CHECKING, Set, Tuple, Iterable
 from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -78,6 +79,8 @@ class StrategyManager:
         self.strategies: Dict[str, Strategy] = {}
         self.settings: Dict[str, Any] = {}
         self.internal_strategies_runtime: Dict[str, "BaseStrategy"] = {}
+        self._last_position_add: Dict[Tuple[str, str, str], datetime] = {}
+        self._auto_close_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
 
         # 认证token（用于外部策略访问）
         self.auth_token = None
@@ -448,7 +451,84 @@ class StrategyManager:
             strategy_logger.info("Strategy settings saved to database")
         except Exception as e:
             strategy_logger.error(f"Failed to save settings to database: {e}")
-            
+
+    def _persist_strategy_settings(self, updates: Optional[Dict[str, Any]] = None, removals: Optional[Iterable[str]] = None) -> None:
+        """Persist incremental strategy setting changes while keeping existing entries intact."""
+
+        if not updates and not removals:
+            return
+
+        current = dict(self.settings) if isinstance(self.settings, dict) else {}
+        changed = False
+
+        if updates:
+            for key, value in updates.items():
+                if current.get(key) != value:
+                    current[key] = value
+                    changed = True
+
+        if removals:
+            for key in removals:
+                if key in current:
+                    current.pop(key)
+                    changed = True
+
+        if not changed:
+            return
+
+        try:
+            self.db_manager.save_strategy_config(current)
+            self.settings = current
+        except Exception as exc:
+            strategy_logger.error(f"Failed to persist strategy settings: {exc}")
+
+    def _get_strategy_setting(self, strategy_name: str, suffix: str, default: Any = None) -> Any:
+        key = f"{strategy_name}_{suffix}"
+        return (self.settings or {}).get(key, default)
+
+    def _handle_position_setting_change(self, strategy_name: str) -> None:
+        """Adjust runtime helpers when position-related settings are updated."""
+
+        close_minutes = self._get_strategy_setting(strategy_name, "close_before_close_minutes")
+        try:
+            close_value = int(close_minutes) if close_minutes is not None else 0
+        except (TypeError, ValueError):
+            close_value = 0
+
+        if close_value <= 0:
+            keys_to_cancel = [key for key in list(self._auto_close_tasks.keys()) if key[0] == strategy_name]
+            for key in keys_to_cancel:
+                task = self._auto_close_tasks.pop(key, None)
+                if task:
+                    task.cancel()
+
+    def _rename_internal_state(self, old_name: str, new_name: str) -> None:
+        if old_name == new_name:
+            return
+
+        for key in list(self._last_position_add.keys()):
+            strategy_key, symbol, direction = key
+            if strategy_key == old_name:
+                timestamp = self._last_position_add.pop(key)
+                self._last_position_add[(new_name, symbol, direction)] = timestamp
+
+        for key in list(self._auto_close_tasks.keys()):
+            strategy_key, symbol = key
+            if strategy_key == old_name:
+                task = self._auto_close_tasks.pop(key)
+                self._auto_close_tasks[(new_name, symbol)] = task
+
+    def _cleanup_internal_state(self, strategy_name: str) -> None:
+        for key in list(self._last_position_add.keys()):
+            if key[0] == strategy_name:
+                self._last_position_add.pop(key, None)
+
+        for key in list(self._auto_close_tasks.keys()):
+            if key[0] == strategy_name:
+                task = self._auto_close_tasks.pop(key, None)
+                if task:
+                    task.cancel()
+
     def _load_strategies(self):
         """Load strategies from CSV file - 兼容性方法"""
         if self.strategies_file.exists():
@@ -602,17 +682,29 @@ class StrategyManager:
                 sl_tp_settings[f"{name}_tp_type"] = strategy_data.get('tp_type', 'amount')
                 
             if sl_tp_settings:
-                self.db_manager.save_strategy_config(sl_tp_settings)
-                # 同步到内存中的 settings，确保后续 get_strategy 能直接读取
-                self.settings.update(sl_tp_settings)
+                self._persist_strategy_settings(sl_tp_settings)
                 strategy_logger.info(f"Saved SL/TP settings for strategy {name}")
 
             # 保存schedule配置
             if strategy.schedule:
                 schedule_key = f"{name}_schedule"
-                self.db_manager.save_strategy_config({schedule_key: strategy.schedule})
-                self.settings[schedule_key] = strategy.schedule
-                
+                self._persist_strategy_settings({schedule_key: strategy.schedule})
+
+            # Position & subscription specific settings for internal strategies
+            if strategy.strategy_type == "internal":
+                position_updates: Dict[str, Any] = {}
+                data_subscription = strategy_data.get('data_subscription')
+                if data_subscription:
+                    position_updates[f"{name}_data_subscription"] = data_subscription
+                cooldown = strategy_data.get('position_add_cooldown_minutes')
+                if isinstance(cooldown, (int, float)) and cooldown > 0:
+                    position_updates[f"{name}_position_add_cooldown_minutes"] = int(cooldown)
+                close_minutes = strategy_data.get('close_before_close_minutes')
+                if isinstance(close_minutes, (int, float)) and close_minutes > 0:
+                    position_updates[f"{name}_close_before_close_minutes"] = int(close_minutes)
+                if position_updates:
+                    self._persist_strategy_settings(position_updates)
+
             strategy_logger.info(f"Strategy {name} added successfully")
             # 重新启动调度器以应用新的调度配置
             self.restart_scheduler()
@@ -651,6 +743,17 @@ class StrategyManager:
             strategy_dict['sl_type'] = settings.get(f"{name}_sl_type", 'amount')
             strategy_dict['tp_type'] = settings.get(f"{name}_tp_type", 'amount')
             strategy_dict['schedule'] = settings.get(f"{name}_schedule")
+            strategy_dict['data_subscription'] = settings.get(f"{name}_data_subscription")
+            cooldown_val = settings.get(f"{name}_position_add_cooldown_minutes")
+            try:
+                strategy_dict['position_add_cooldown_minutes'] = int(cooldown_val) if cooldown_val is not None else None
+            except (TypeError, ValueError):
+                strategy_dict['position_add_cooldown_minutes'] = None
+            close_val = settings.get(f"{name}_close_before_close_minutes")
+            try:
+                strategy_dict['close_before_close_minutes'] = int(close_val) if close_val is not None else None
+            except (TypeError, ValueError):
+                strategy_dict['close_before_close_minutes'] = None
             return strategy_dict
         return None
 
@@ -705,6 +808,17 @@ class StrategyManager:
                     combined_rules[sym] = asdict(rule)
 
         strategy["risk_rules"] = combined_rules
+
+        position_settings: Dict[str, Any] = {}
+        cooldown_value = strategy.get("position_add_cooldown_minutes")
+        if cooldown_value:
+            position_settings["position_add_cooldown_minutes"] = cooldown_value
+        close_minutes = strategy.get("close_before_close_minutes")
+        if close_minutes:
+            position_settings["close_before_close_minutes"] = close_minutes
+        if position_settings:
+            strategy["position_settings"] = position_settings
+
         return strategy
 
     def get_internal_strategy_status(self, name: str) -> Optional[Dict[str, Any]]:
@@ -734,7 +848,14 @@ class StrategyManager:
             strategy = self.strategies[name]
             # 将SL/TP更新与常规字段分离
             sl_tp_keys = {"sl_enabled", "sl_price", "sl_type", "tp_enabled", "tp_price", "tp_type"}
+            position_setting_map = {
+                "data_subscription": "data_subscription",
+                "position_add_cooldown_minutes": "position_add_cooldown_minutes",
+                "close_before_close_minutes": "close_before_close_minutes",
+            }
             settings_to_save: Dict[str, Any] = {}
+            settings_to_remove: Set[str] = set()
+            position_settings_changed = False
             for key, value in updates.items():
                 if key in sl_tp_keys:
                     # 构造持久化键
@@ -747,17 +868,37 @@ class StrategyManager:
                 elif key == 'schedule':
                     setattr(strategy, key, value)
                     settings_to_save[f"{name}_schedule"] = value
+                elif key in position_setting_map:
+                    position_settings_changed = True
+                    storage_key = f"{name}_{position_setting_map[key]}"
+                    if key == 'data_subscription':
+                        if value:
+                            settings_to_save[storage_key] = value
+                        else:
+                            settings_to_remove.add(storage_key)
+                    else:
+                        try:
+                            minutes_value = int(value) if value is not None else None
+                        except (TypeError, ValueError):
+                            minutes_value = None
+                        if minutes_value and minutes_value > 0:
+                            settings_to_save[storage_key] = minutes_value
+                        else:
+                            settings_to_remove.add(storage_key)
                 elif hasattr(strategy, key):
                     setattr(strategy, key, value)
-            
+
             # 先保存策略实体（常规字段）
             self._save_strategies()
 
             # 持久化SL/TP设置
-            if settings_to_save:
-                self.db_manager.save_strategy_config(settings_to_save)
-                # 更新内存
-                self.settings.update(settings_to_save)
+            self._persist_strategy_settings(settings_to_save, settings_to_remove)
+
+            if settings_to_remove:
+                strategy_logger.info(f"Removed strategy settings for {name}: {', '.join(sorted(settings_to_remove))}")
+
+            if position_settings_changed:
+                self._handle_position_setting_change(name)
 
             strategy_logger.info(f"Updated strategy: {name}")
             if 'enabled' in updates:
@@ -772,6 +913,216 @@ class StrategyManager:
         except Exception as e:
             strategy_logger.error(f"Failed to update strategy {name}: {e}")
             return False
+
+    async def prepare_internal_order(self, strategy_name: str, symbol: str, action: str, quantity: float) -> Dict[str, Any]:
+        """Validate and capture state before executing an internal strategy order."""
+
+        record = self.strategies.get(strategy_name)
+        if not record or record.strategy_type != "internal":
+            return {}
+
+        symbol_code = (symbol or "").upper()
+        if not symbol_code:
+            return {}
+
+        cooldown_setting = self._get_strategy_setting(strategy_name, "position_add_cooldown_minutes")
+        try:
+            cooldown_minutes = int(cooldown_setting) if cooldown_setting is not None else 0
+        except (TypeError, ValueError):
+            cooldown_minutes = 0
+
+        current_position = await self._fetch_symbol_position(symbol_code)
+        direction_flag, new_position = self._analyze_order_effect(current_position, action, quantity)
+
+        if cooldown_minutes > 0 and direction_flag:
+            key = (strategy_name, symbol_code, direction_flag)
+            last_time = self._last_position_add.get(key)
+            if last_time and datetime.utcnow() - last_time < timedelta(minutes=cooldown_minutes):
+                raise ValueError(
+                    f"Add-position cooldown active for {symbol_code}: remaining"
+                    f" {round((timedelta(minutes=cooldown_minutes) - (datetime.utcnow() - last_time)).total_seconds() / 60, 2)} min"
+                )
+
+        return {
+            "symbol": symbol_code,
+            "current_position": current_position,
+            "new_position": new_position,
+            "direction_flag": direction_flag,
+        }
+
+    async def finalize_internal_order(
+        self,
+        strategy_name: str,
+        symbol: str,
+        action: str,
+        quantity: float,
+        pre_trade: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Update cooldown state and auto-close schedule after an internal order."""
+
+        record = self.strategies.get(strategy_name)
+        if not record or record.strategy_type != "internal":
+            return
+
+        if not pre_trade:
+            return
+
+        symbol_code = (pre_trade.get("symbol") or symbol or "").upper()
+        if not symbol_code:
+            return
+
+        direction_flag = pre_trade.get("direction_flag")
+        new_position = pre_trade.get("new_position")
+
+        if direction_flag:
+            key = (strategy_name, symbol_code, direction_flag)
+            self._last_position_add[key] = datetime.utcnow()
+
+        try:
+            numeric_position = float(new_position) if new_position is not None else None
+        except (TypeError, ValueError):
+            numeric_position = None
+
+        await self._update_auto_close_schedule(strategy_name, symbol_code, numeric_position)
+
+    async def _update_auto_close_schedule(self, strategy_name: str, symbol: str, position: Optional[float]) -> None:
+        close_setting = self._get_strategy_setting(strategy_name, "close_before_close_minutes")
+        try:
+            close_minutes = int(close_setting) if close_setting is not None else 0
+        except (TypeError, ValueError):
+            close_minutes = 0
+
+        key = (strategy_name, symbol)
+        if position is None or abs(position) < 1e-6 or close_minutes <= 0:
+            task = self._auto_close_tasks.pop(key, None)
+            if task:
+                task.cancel()
+            return
+
+        self._schedule_auto_close_task(strategy_name, symbol, close_minutes)
+
+    async def _fetch_symbol_position(self, symbol: str) -> float:
+        try:
+            import core  # 延迟导入避免循环导入
+            positions = await core.ibkr_client.get_positions(fast=True)
+            for item in positions or []:
+                if str(item.get('symbol', '')).upper() == symbol:
+                    return float(item.get('position', 0.0) or 0.0)
+        except Exception as exc:
+            strategy_logger.warning(f"Failed to fetch position for {symbol}: {exc}")
+        return 0.0
+
+    def _analyze_order_effect(self, current_position: float, action: str, quantity: float) -> Tuple[Optional[str], float]:
+        try:
+            qty = float(quantity)
+        except (TypeError, ValueError):
+            qty = 0.0
+        action_upper = (action or "SELL").upper()
+        direction = 1.0 if action_upper == "BUY" else -1.0
+        new_position = current_position + direction * qty
+        direction_flag: Optional[str] = None
+        if new_position > 0 and direction > 0:
+            if current_position <= 0 or new_position > current_position:
+                direction_flag = "long"
+        elif new_position < 0 and direction < 0:
+            if current_position >= 0 or new_position < current_position:
+                direction_flag = "short"
+        return direction_flag, new_position
+
+    def _schedule_auto_close_task(self, strategy_name: str, symbol: str, minutes_before_close: int) -> None:
+        key = (strategy_name, symbol)
+        existing = self._auto_close_tasks.get(key)
+        if existing and not existing.done():
+            existing.cancel()
+
+        async def worker():
+            try:
+                run_at = self._compute_next_close_time(minutes_before_close)
+                now_eastern = datetime.now(ZoneInfo("America/New_York"))
+                wait_seconds = max(0.0, (run_at - now_eastern).total_seconds())
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+                await self._execute_auto_close(strategy_name, symbol)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                strategy_logger.error(f"Auto close task error for {strategy_name}/{symbol}: {exc}")
+            finally:
+                current_task = asyncio.current_task()
+                stored_task = self._auto_close_tasks.get(key)
+                if stored_task is current_task:
+                    self._auto_close_tasks.pop(key, None)
+
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(worker())
+        except RuntimeError:
+            task = asyncio.create_task(worker())
+
+        self._auto_close_tasks[key] = task
+
+    def _compute_next_close_time(self, minutes_before_close: int) -> datetime:
+        tz = ZoneInfo("America/New_York")
+        now = datetime.now(tz)
+        close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        if now >= close_time:
+            close_time = self._next_trading_close(now)
+        run_time = close_time - timedelta(minutes=minutes_before_close)
+        if run_time < now:
+            run_time = now
+        return run_time
+
+    def _next_trading_close(self, reference: datetime) -> datetime:
+        tz = reference.tzinfo or ZoneInfo("America/New_York")
+        next_day = reference + timedelta(days=1)
+        while next_day.weekday() >= 5:  # Skip weekends
+            next_day += timedelta(days=1)
+        return next_day.replace(hour=16, minute=0, second=0, microsecond=0)
+
+    async def _execute_auto_close(self, strategy_name: str, symbol: str) -> None:
+        if not self.queue_manager:
+            strategy_logger.warning("QueueManager not available; skip auto close order")
+            return
+
+        symbol_code = symbol.upper()
+        try:
+            import core
+            positions = await core.ibkr_client.get_positions(fast=True)
+        except Exception as exc:
+            strategy_logger.error(f"Auto close position fetch failed for {symbol_code}: {exc}")
+            return
+
+        position_info = None
+        for item in positions or []:
+            if str(item.get('symbol', '')).upper() == symbol_code:
+                position_info = item
+                break
+
+        if not position_info:
+            return
+
+        try:
+            raw_qty = float(position_info.get('position') or 0.0)
+        except (TypeError, ValueError):
+            raw_qty = 0.0
+
+        quantity = int(abs(raw_qty))
+        if quantity <= 0:
+            return
+
+        action = 'SELL' if raw_qty > 0 else 'BUY'
+        payload = {
+            "strategy": strategy_name,
+            "symbol": symbol_code,
+            "action": action,
+            "qty": quantity,
+            "type": "MARKET",
+        }
+
+        self.queue_manager.add_task("strategy_order", payload)
+        strategy_logger.info(
+            f"Auto close triggered for strategy {strategy_name} on {symbol_code} with {action} {quantity}"
+        )
 
     def rename_strategy(self, old_name: str, new_name: str, rename_file: bool = False) -> bool:
         """重命名策略，并迁移相关配置与历史记录
@@ -840,6 +1191,8 @@ class StrategyManager:
             del self.strategies[old_name]
             strategy.name = normalized_new
             self.strategies[normalized_new] = strategy
+
+            self._rename_internal_state(old_name, normalized_new)
 
             # 保存所有策略到数据库（会写入新名称）
             self._save_strategies()
@@ -958,13 +1311,14 @@ if __name__ == "__main__":
         try:
             if name not in self.strategies:
                 return False
-                
+
             # Delete from memory
             del self.strategies[name]
-            
+            self._cleanup_internal_state(name)
+
             # Delete from database directly
             self.db_manager.delete_strategy(name)
-            
+
             # Also clean strategy orders from database
             self.db_manager.delete_strategy_orders(name)
             
