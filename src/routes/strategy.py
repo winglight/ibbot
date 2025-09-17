@@ -87,6 +87,16 @@ async def get_internal_strategy_info_api(name: str, user: Optional[str] = Depend
         raise HTTPException(status_code=404, detail="Strategy not found")
     return {"success": True, "strategy": info}
 
+
+@router.get("/api/strategies/{name}/status")
+async def get_internal_strategy_status_api(name: str, user: Optional[str] = Depends(get_current_user)):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    status = strategy_manager.get_internal_strategy_status(name)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Strategy status unavailable")
+    return {"success": True, "status": status}
+
 @router.put("/api/strategies/{name}")
 async def update_strategy_api(name: str, updates: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:

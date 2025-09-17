@@ -707,6 +707,24 @@ class StrategyManager:
         strategy["risk_rules"] = combined_rules
         return strategy
 
+    def get_internal_strategy_status(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return runtime status metrics for an internal strategy."""
+
+        runtime = self.internal_strategies_runtime.get(name)
+        if not runtime:
+            return None
+        status_provider = getattr(runtime, "get_runtime_status", None)
+        if not callable(status_provider):
+            return None
+        try:
+            status = status_provider()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            strategy_logger.warning(f"Runtime status for {name} failed: {exc}")
+            return None
+        if not isinstance(status, dict):
+            return None
+        return status
+
     def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
         """Update a strategy"""
         try:
