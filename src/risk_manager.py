@@ -554,21 +554,11 @@ class RiskManager:
         """监控持仓风险"""
         try:
             import core  # 延迟导入避免循环导入
-            if not core.ibkr_client or not getattr(core.ibkr_client, 'connected', False):
-                risk_logger.warning("IBKR client not ready, skipping position monitoring")
-                return
-            
             risk_logger.info("=== Starting position monitoring cycle ===")
             
             # 设置fast=False确保获取最新实时价格，而不是使用缓存
-            # get_positions 是异步方法，直接await调用
-            # get_account_info 是同步阻塞方法，使用 asyncio.to_thread 在后台线程执行
             positions = await core.ibkr_client.get_positions(fast=False)
-            try:
-                account_info = await core.ibkr_client.get_account_info()
-            except Exception as e:
-                risk_logger.warning(f"Failed to get account info: {e}")
-                account_info = {}
+            account_info = await core.ibkr_client.get_account_info()
             
             risk_logger.info(f"Found {len(positions)} positions to monitor")
             risk_logger.info(f"Active risk rules: {len([r for r in self.risk_rules.values() if r.enabled])}")
@@ -671,7 +661,7 @@ class RiskManager:
         try:
             import core  # 延迟导入避免循环导入
             # 尝试在后台线程获取最新实时价格，避免阻塞事件循环
-            real_time_data = await asyncio.to_thread(core.ibkr_client.get_real_time_data, symbol)
+            real_time_data = core.ibkr_client.get_real_time_data(symbol)
             price = None
             if real_time_data:
                 # get_real_time_data 返回的键为 'last'
@@ -753,7 +743,7 @@ class RiskManager:
                     import core  # 延迟导入避免循环导入
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
-                    trade = core.ibkr_client.place_market_order(
+                    trade = await core.ibkr_client.place_market_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
                         action=action
@@ -897,7 +887,7 @@ class RiskManager:
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
-                    trade = core.ibkr_client.place_market_order(
+                    trade = await core.ibkr_client.place_market_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
                         action=action
@@ -1080,9 +1070,6 @@ class RiskManager:
                 risk_logger.debug("已清理订单状态倒退警告记录")
             
             import core  # 延迟导入避免循环导入
-            if not core.ibkr_client or not core.ibkr_client.is_connected():
-                return
-            
             # 获取订单管理器
             order_manager = getattr(self, 'order_manager', None)
             if not order_manager:
@@ -1195,16 +1182,8 @@ class RiskManager:
         
         try:
             import core  # 延迟导入避免循环导入
-            # 检查连接状态
-            if not core.ibkr_client or not getattr(core.ibkr_client, 'connected', False):
-                risk_logger.error(f"Cannot execute order for {order_request.symbol}: IBKR client not ready")
-                return
-            
-            risk_logger.debug(f"IBKR连接状态正常，开始获取持仓信息 for {order_request.symbol}")
-            
             # Determine order action
-            # get_positions 为同步阻塞方法，放到后台线程执行
-            positions = await asyncio.to_thread(core.ibkr_client.get_positions)
+            positions = await core.ibkr_client.get_positions(fast=False)
             risk_logger.debug(f"获取到 {len(positions)} 个持仓")
             
             position = next((p for p in positions if p['symbol'] == order_request.symbol), None)
@@ -1236,13 +1215,10 @@ class RiskManager:
             
             try:
                 import core  # 延迟导入避免循环导入
-                trade = await loop.run_in_executor(
-                    None,
-                    lambda: core.ibkr_client.place_market_order(
-                        symbol=order_request.symbol,
-                        quantity=order_request.quantity,
-                        action=action
-                    )
+                trade = await core.ibkr_client.place_market_order(
+                    symbol=order_request.symbol,
+                    quantity=order_request.quantity,
+                    action=action
                 )
                 risk_logger.info(f"下单操作完成，trade结果: {trade is not None}")
             except Exception as executor_error:
@@ -1319,16 +1295,9 @@ class RiskManager:
 
                         # 触发一次佣金/PNL回填（使用executor避免阻塞事件循环）
                         try:
-                            cm = getattr(core.ibkr_client, "connection_manager", None)
-                            if cm is not None:
-                                risk_logger.info("触发commission/PNL回填以避免市价单本地成交后缺失")
-                                updated = await loop.run_in_executor(
-                                    None,
-                                    lambda: cm.backfill_commissions()
-                                )
-                                risk_logger.info(f"commission/PNL回填完成，尝试更新次数: {updated}")
-                            else:
-                                risk_logger.warning("未找到connection_manager，跳过commission/PNL回填")
+                            risk_logger.info("触发commission/PNL回填以避免市价单本地成交后缺失")
+                            updated = await core.ibkr_client.backfill_commissions()
+                            risk_logger.info(f"commission/PNL回填完成，尝试更新次数: {updated}")
                         except Exception as bf_err:
                             risk_logger.warning(f"commission/PNL回填失败: {bf_err}")
                 else:
@@ -1368,11 +1337,8 @@ class RiskManager:
     async def _send_daily_summary(self):
         """发送每日摘要"""
         try:
-            if not core.ibkr_client or not getattr(core.ibkr_client, 'connected', False):
-                return
-            
             account_info = await core.ibkr_client.get_account_info()
-            positions = await core.ibkr_client.get_positions()
+            positions = await core.ibkr_client.get_positions(Fast=True)
             
             await self.notification_manager.send_daily_summary_notification(account_info, positions)
             
@@ -1790,7 +1756,7 @@ class RiskManager:
             risk_logger.error(f"_estimate_rv error: {e}")
             return None, None, "rv:auto=error"
 
-    def position_sizing(self,
+    async def position_sizing(self,
                         symbol: str,
                         stop_distance: float,
                         rv_current: Optional[float] = None,
@@ -1798,17 +1764,9 @@ class RiskManager:
                         execution_metrics: Optional[Dict[str, float]] = None,
                         rv_ref: Optional[float] = None) -> PositionSizingResult:
         account_info = {}
-        try:
-            # 使用缓存的账户信息避免阻塞调用
-            if hasattr(core.ibkr_client, '_cached_account_info'):
-                account_info = core.ibkr_client._cached_account_info or {}
-            # 如果没有可用缓存，则使用默认净值
-            if not account_info or not account_info.get('net_liquidation'):
-                account_info = {'net_liquidation': 100000.0}
-                risk_logger.warning(f"[PS] No cached account info, using default net_liquidation")
-        except Exception as e:
-            risk_logger.error(f"[PS] get_account_info error: {e}")
-            account_info = {'net_liquidation': 100000.0}
+        import core
+        positions = await core.ibkr_client.get_positions(fast=True)
+        account_info = await core.ibkr_client.get_account_info()
         self.update_equity_state(account_info)
         risk_logger.info(f"[PS] After update_equity_state: equity_last={self.equity_last}, account_info={account_info}")
 

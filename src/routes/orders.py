@@ -29,7 +29,7 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
     try:
         # 直接调用下单方法，避免嵌套的事件循环调用
         if order.order_type.upper() == "MARKET":
-            trade = core.ibkr_client.place_market_order(
+            trade = await core.ibkr_client.place_market_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 action=order.action,
@@ -256,7 +256,7 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
         quantity = abs(int(position_qty))
         
         # 执行平仓市价单
-        trade = core.ibkr_client.place_market_order(
+        trade = await core.ibkr_client.place_market_order(
             symbol=symbol,
             quantity=quantity,
             action=action,
@@ -516,7 +516,7 @@ async def _validate_g2_capital_adequacy(order: OrderRequest) -> dict:
     try:
         if connection_manager.is_connected():
             # 获取账户信息
-            account_info = core.ibkr_client.get_account_summary()
+            account_info = await core.ibkr_client.get_account_summary()
             
             if account_info:
                 # 检查可用资金
@@ -630,7 +630,7 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
             logger.warning(f"反向下单前停用风险规则失败: {e}")
         
         # 执行反向市价单
-        trade = core.ibkr_client.place_market_order(
+        trade = await core.ibkr_client.place_market_order(
             symbol=symbol,
             quantity=quantity,
             action=action,

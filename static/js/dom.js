@@ -504,6 +504,7 @@ class DOMManager {
             try {
                 const data = JSON.parse(evt.data);
                 if (data.metrics && Object.keys(data.metrics).length > 0) {
+                    console.log('DOM metrics', data.metrics);
                     this.addMetricPoint(data.metrics);
                 }
             } catch (e) {

@@ -61,7 +61,6 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
                 queue_manager.set_dependencies(
                     risk_manager=risk_manager,
                     strategy_manager=strategy_manager,
-                    connection_manager=connection_manager,
                     websocket_manager=websocket_manager,
                     order_manager=order_manager,
                 )
@@ -82,7 +81,7 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
 
             # 广播账户信息快照，供前端取消HTTP轮询
             try:
-                info = await asyncio.wait_for(ibkr_client_local.get_account_info(), timeout=8.0)
+                info = await ibkr_client_local.get_account_info()
                 await websocket_manager.broadcast({
                     "type": "account_update",
                     "account_info": info

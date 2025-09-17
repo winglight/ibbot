@@ -59,7 +59,6 @@ try:
     queue_manager.set_dependencies(
         risk_manager=risk_manager,
         strategy_manager=strategy_manager,
-        connection_manager=connection_manager,
         websocket_manager=websocket_manager,
         order_manager=order_manager,
     )

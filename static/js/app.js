@@ -840,19 +840,19 @@ class TradingApp {
         }
         // Logs search and filter controls
         const searchLogsBtn = document.getElementById('searchLogsBtn');
-        if (searchLogsBtn) searchLogsBtn.addEventListener('click', () => this.loadLogs());
+        if (searchLogsBtn) searchLogsBtn.addEventListener('click', () => this.logsManager.loadLogs());
 
         const logModule = document.getElementById('logModule');
-        if (logModule) logModule.addEventListener('change', () => this.loadLogs());
+        if (logModule) logModule.addEventListener('change', () => this.logsManager.loadLogs());
 
         const logRange = document.getElementById('logRange');
         if (logRange) logRange.addEventListener('change', () => {
             this.loadLogModules();
-            this.loadLogs();
+            this.logsManager.loadLogs();
         });
 
         const logLevel = document.getElementById('logLevel');
-        if (logLevel) logLevel.addEventListener('change', () => this.loadLogs());
+        if (logLevel) logLevel.addEventListener('change', () => this.logsManager.loadLogs());
 
         const logStatsBtn = document.getElementById('logStatsBtn');
         if (logStatsBtn) logStatsBtn.addEventListener('click', () => this.showLogStats());
@@ -3268,8 +3268,8 @@ class TradingApp {
                     const isLong = (this.currentMonitor?.positionQty || 0) > 0;
                     const xMin = rangeStartAxisValue;
                     const xMax = rangeEndAxisValue;
-                    const profitColor = isLong ? 'rgba(144,238,144,0.3)' : 'rgba(255,182,193,0.3)';
-                    const lossColor = isLong ? 'rgba(255,182,193,0.3)' : 'rgba(144,238,144,0.3)';
+                    const profitColor = 'rgba(144,238,144,0.3)';
+                    const lossColor = 'rgba(255,182,193,0.3)';
 
                     // 确保无论是多头还是空头，都能正确绘制盈亏方框
                     if (isLong) {

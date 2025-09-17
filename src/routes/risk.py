@@ -222,19 +222,13 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
         # 只传递必需的参数，其他参数使用默认值或让risk_manager自动估算
         loop = asyncio.get_event_loop()
         try:
-            res = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: risk_manager.position_sizing(
-                        symbol=payload.symbol,
-                        stop_distance=payload.stop_distance,
-                        rv_current=None,  # 让risk_manager自动估算当前价格
-                        signal_tier='A',  # 使用默认信号等级
-                        execution_metrics=None,  # 使用默认执行指标
-                        rv_ref=None,  # 使用默认参考价格
-                    )
-                ),
-                timeout=10.0  # 10秒超时
+            res = await risk_manager.position_sizing(
+                symbol=payload.symbol,
+                stop_distance=payload.stop_distance,
+                rv_current=None,  # 让risk_manager自动估算当前价格
+                signal_tier='A',  # 使用默认信号等级
+                execution_metrics=None,  # 使用默认执行指标
+                rv_ref=None,  # 使用默认参考价格
             )
         except asyncio.TimeoutError:
             logger.warning(f"Position sizing request timed out for {payload.symbol}")

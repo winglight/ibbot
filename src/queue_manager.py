@@ -38,7 +38,6 @@ class QueueManager:
         # 依赖注入的对象
         self.risk_manager = None
         self.strategy_manager = None
-        self.connection_manager = None
         self.websocket_manager = None
         self.order_manager = None
         
@@ -50,11 +49,10 @@ class QueueManager:
         # 启动时加载持久化的任务
         self._load_tasks()
     
-    def set_dependencies(self, risk_manager, strategy_manager, connection_manager, websocket_manager, order_manager=None):
+    def set_dependencies(self, risk_manager, strategy_manager, websocket_manager, order_manager=None):
         """设置依赖对象"""
         self.risk_manager = risk_manager
         self.strategy_manager = strategy_manager
-        self.connection_manager = connection_manager
         self.websocket_manager = websocket_manager
         self.order_manager = order_manager
         queue_logger.info("Dependencies set for QueueManager")
@@ -172,9 +170,10 @@ class QueueManager:
                     task_id = self.pending_queue.pop(0)
                     task = self.tasks.get(task_id)
                     
+                    import core
                     if task and task.status == "pending":
                         # 当任务需要IBKR连接但当前未连接时，延后处理，避免无意义的失败与重试
-                        if task.task_type in ("strategy_order",) and self.connection_manager and not self.connection_manager.is_connected():
+                        if task.task_type in ("strategy_order",) and core.ibkr_client.is_connected():
                             # 重新放回队列尾部，并短暂休眠以避免紧密轮询
                             self.pending_queue.append(task_id)
                             queue_logger.debug(f"Deferring task {task_id} due to IBKR not connected")
@@ -227,7 +226,8 @@ class QueueManager:
             task.error_message = error_msg
 
             # 针对未连接IBKR的情况进行延后处理而非计为失败/重试
-            if ("Not connected to IBKR" in error_msg) or (self.connection_manager and not self.connection_manager.is_connected()):
+            import core
+            if ("Not connected to IBKR" in error_msg) or (not core.ibkr_client.is_connected()):
                 task.status = "pending"
                 task.started_at = None
                 # 重新排队等待连接恢复
@@ -267,14 +267,14 @@ class QueueManager:
         from datetime import datetime
         
         # 检查依赖对象是否已设置
-        if not all([self.risk_manager, self.strategy_manager, 
-                   self.connection_manager, self.websocket_manager]):
+        if not all([self.risk_manager, self.strategy_manager, self.websocket_manager]):
             raise Exception("Dependencies not properly set")
         
         payload = task.payload
         
         # 检查连接状态（无需 ibkr_client）
-        if not self.connection_manager or not self.connection_manager.is_connected():
+        import core
+        if not core.ibkr_client.is_connected():
             raise Exception("Not connected to IBKR")
         
         # 验证策略
@@ -309,7 +309,7 @@ class QueueManager:
         # 真实IBKR路径：使用 ibkr_client
         import core  # 延迟导入避免循环导入
         if order_type == "MARKET":
-            trade = core.ibkr_client.place_market_order(
+            trade = await core.ibkr_client.place_market_order(
                 symbol=payload['symbol'],
                 quantity=payload['qty'],
                 action=action,

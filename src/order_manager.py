@@ -400,6 +400,7 @@ class OrderManager:
         """更新订单状态"""
         try:
             # 统一标准化为字符串，避免传入 int 导致无法匹配内存订单
+            self._load_orders_from_database()
             order_id = str(order_id)
             if order_id not in self.orders:
                 order_logger.warning(f"Order {order_id} not found for status update")
@@ -735,6 +736,7 @@ class OrderManager:
                   strategy_name: Optional[str] = None,
                   limit: Optional[int] = None) -> List[Order]:
         """获取订单列表"""
+        self._load_orders_from_database()
         orders = list(self.orders.values())
         
         # 过滤条件

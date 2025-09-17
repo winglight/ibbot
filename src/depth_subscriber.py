@@ -90,7 +90,7 @@ class DepthSubscriber:
             data = {
                 "bids": [(d.price, d.size) for d in getattr(ticker, "domBids", [])],
                 "asks": [(d.price, d.size) for d in getattr(ticker, "domAsks", [])],
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(),
             }
             streams = self._streams.get(symbol)
             if not streams:

@@ -223,7 +223,8 @@ class ConnectionManager:
                             if is_order_error:
                                 connection_logger.error(f"Order {reqId} rejected - Code: {errorCode}, Reason: {errorString}")
                                 # 异步更新订单状态为失败
-                                asyncio.create_task(self._handle_order_error(reqId, errorCode, errorString))
+                                import core
+                                asyncio.create_task(core.ibkr_client._handle_order_error(reqId, errorCode, errorString))
                     
                         # 绑定错误处理器到wrapper
                     self.ib.wrapper.error = error_handler
@@ -254,7 +255,8 @@ class ConnectionManager:
 
                             # 如果订单已成交，处理佣金和PnL
                             if status == 'Filled':
-                                asyncio.create_task(self._handle_order_filled(trade))
+                                import core
+                                asyncio.create_task(core.ibkr_client._handle_order_filled(trade))
                         except Exception as e:
                             connection_logger.error(f"Error in order status handler: {e}")
                     
@@ -278,7 +280,8 @@ class ConnectionManager:
                                 f"Commission report for order {order_id}: commission={commission}, pnl={pnl}"
                             )
                             # 异步更新订单的佣金和PnL
-                            asyncio.create_task(self._update_order_commission_pnl(order_id, commission, pnl))
+                            import core
+                            asyncio.create_task(core.ibkr_client._update_order_commission_pnl(order_id, commission, pnl))
                         except Exception as e:
                             connection_logger.error(f"Error in commission report handler: {e}")
                     
@@ -482,230 +485,7 @@ class ConnectionManager:
             return self.ib
         return None
     
-    def get_account_info(self) -> Dict[str, Any]:
-        """获取账户信息"""
-        if not self.is_connected():
-            raise Exception("Not connected to IBKR")
-            
-        try:
-            account_values = self.ib.accountValues()
-            account_summary = self.ib.accountSummary()
-            
-            # 提取关键信息
-            info = {
-                'account_id': '',
-                'account_type': 'Paper' if self.config.paper_trading else 'Live',
-                'total_cash': 0.0,
-                'net_liquidation': 0.0,
-                'buying_power': 0.0
-            }
-            
-            # 从account_values中提取信息
-            for av in account_values:
-                if av.tag == 'AccountCode':
-                    info['account_id'] = av.value
-                elif av.tag == 'TotalCashValue' and av.currency == 'USD':
-                    info['total_cash'] = float(av.value)
-                elif av.tag == 'NetLiquidation' and av.currency == 'USD':
-                    info['net_liquidation'] = float(av.value)
-                elif av.tag == 'BuyingPower' and av.currency == 'USD':
-                    info['buying_power'] = float(av.value)
-            
-            return info
-            
-        except Exception as e:
-            connection_logger.error(f"Failed to get account info: {e}")
-            raise
     
-    async def _handle_order_error(self, req_id, error_code, error_string):
-        """处理订单错误，更新订单状态为失败"""
-        try:
-            from .order_manager import get_order_manager
-            from .models import OrderStatus
-            
-            # 记录错误信息
-            connection_logger.error(f"Order error - ReqId: {req_id}, Code: {error_code}, Message: {error_string}")
-            
-            # 从IBKRClient获取reqId到订单ID的映射
-            if hasattr(self, '_ibkr_client_ref') and self._ibkr_client_ref:
-                ibkr_client = self._ibkr_client_ref()
-                if ibkr_client and hasattr(ibkr_client, 'req_id_to_order_id'):
-                    order_id = ibkr_client.req_id_to_order_id.get(req_id)
-                    if order_id:
-                        # 更新订单状态为失败
-                        order_manager = get_order_manager()
-                        order_manager.update_order_status(
-                            order_id=order_id,
-                            status=OrderStatus.REJECTED.value,
-                            notes=f"IBKR Error {error_code}: {error_string}"
-                        )
-                        connection_logger.info(f"Updated order {order_id} status to REJECTED due to error {error_code}")
-                        
-                        # 清理映射
-                        del ibkr_client.req_id_to_order_id[req_id]
-                    else:
-                        connection_logger.warning(f"No order mapping found for reqId {req_id}")
-                else:
-                    connection_logger.warning(f"IBKRClient reference not available for error handling")
-            
-        except Exception as e:
-            connection_logger.error(f"Failed to handle order error: {e}")
-    
-    async def _handle_order_filled(self, trade):
-        """处理订单成交事件"""
-        try:
-            order_id = str(trade.order.orderId)
-            connection_logger.info(f"Handling filled order: {order_id}")
-            
-            # 获取佣金和PnL信息
-            total_commission = 0
-            total_pnl = 0
-            
-            for fill in trade.fills:
-                if hasattr(fill, 'commissionReport') and fill.commissionReport:
-                    total_commission += fill.commissionReport.commission
-                    if hasattr(fill.commissionReport, 'realizedPNL'):
-                        total_pnl += fill.commissionReport.realizedPNL or 0
-            
-            connection_logger.info(f"Order {order_id} commission: {total_commission}, pnl: {total_pnl}")
-            
-            # 更新数据库中的订单信息
-            await self._update_order_commission_pnl(order_id, total_commission, total_pnl)
-            
-        except Exception as e:
-            connection_logger.error(f"Error handling filled order: {e}")
-    
-    async def _update_order_commission_pnl(self, order_id, commission, pnl):
-        """更新订单的佣金和PnL到数据库并同步内存对象"""
-        try:
-            from .database import get_db_manager
-            
-            db = get_db_manager()
-            oid = str(order_id)
-            await db.update_order_commission_pnl(oid, commission, pnl)
-            connection_logger.info(f"Updated order {oid} commission={commission}, pnl={pnl} in database")
-
-            # 同步内存中的订单（如果存在）
-            try:
-                from .order_manager import get_order_manager
-                om = get_order_manager()
-                oid = str(order_id)
-                order = om.orders.get(oid)
-                if order:
-                    prev_comm, prev_pnl = order.commission, order.pnl
-                    if commission is not None:
-                        order.commission = commission
-                    if pnl is not None:
-                        order.pnl = pnl
-                    connection_logger.debug(
-                        f"Synchronized in-memory order {oid} commission: {prev_comm} -> {order.commission}, pnl: {prev_pnl} -> {order.pnl}"
-                    )
-                else:
-                    connection_logger.debug(f"In-memory order {oid} not found for commission/pnl sync")
-            except Exception as sync_err:
-                connection_logger.debug(f"Failed to sync in-memory order commission/pnl: {sync_err}")
-            
-            # 将最新的佣金和PnL更新通过 WebSocket 广播给前端，触发订单列表刷新
-            try:
-                from .websocket_manager import websocket_manager
-                message = {
-                    "type": "order_update",
-                    "order_id": oid,
-                    "commission": commission,
-                    "pnl": pnl,
-                }
-                # 如果拿到了内存中的订单对象，补充更多字段（与 order_filled 事件保持一致的结构）
-                if 'order' in locals() and order:
-                    message.update({
-                        "symbol": getattr(order, 'symbol', None),
-                        "action": getattr(order, 'action', None),
-                        "quantity": getattr(order, 'quantity', None),
-                        "fill_price": getattr(order, 'fill_price', None),
-                        "order_type": getattr(order, 'order_type', None),
-                        "executed_at": order.executed_at.isoformat() if getattr(order, 'executed_at', None) else None,
-                    })
-                await websocket_manager.broadcast(message)
-                connection_logger.info(f"Broadcasted order_update for order {oid} (commission={commission}, pnl={pnl})")
-            except Exception as ws_err:
-                connection_logger.warning(f"Failed to broadcast order_update for order {oid}: {ws_err}")
-            
-        except Exception as e:
-            connection_logger.error(f"Error updating order commission/pnl in database: {e}")
-    
-    def backfill_commissions(self, days: int = 7) -> int:
-        """Backfill commission and PnL for recent executions by requesting executions from IBKR.
-        This will not override existing non-null commission/pnl in DB thanks to COALESCE guards.
-        Returns the number of update attempts made.
-        """
-        try:
-            if not self.ib or not self.ib.isConnected():
-                connection_logger.error("Cannot backfill commissions: IB not connected")
-                return 0
-
-            import datetime as _dt
-
-            async def _backfill_op():
-                try:
-                    ib_local = self.ib
-                    # Compute start time for the execution filter (local time, format YYYYMMDD-HH:MM:SS)
-                    start_dt = _dt.datetime.now() - _dt.timedelta(days=max(1, int(days)))
-                    # IB API expects a hyphen between date and time, e.g. 20250131-13:45:00
-                    start_str = start_dt.strftime('%Y%m%d-%H:%M:%S')
-
-                    # Request executions; this will also trigger commissionReport events
-                    filt = ExecutionFilter(time=start_str)
-                    connection_logger.info(f"Requesting executions since {start_str} for backfilling commissions/PnL")
-                    try:
-                        await ib_local.reqExecutionsAsync(filt)
-                    except Exception as e:
-                        connection_logger.warning(f"reqExecutionsAsync failed: {e}; trying sync fallback")
-                        try:
-                            ib_local.reqExecutions(filt)
-                        except Exception as e2:
-                            connection_logger.error(f"Sync reqExecutions failed: {e2}")
-                            return 0
-
-                    # Allow some time for commission reports to arrive and pair with executions
-                    await asyncio.sleep(1.5)
-
-                    fills = ib_local.fills()
-                    if not fills:
-                        connection_logger.info("No fills returned from IBKR for the specified window")
-                        return 0
-
-                    update_count = 0
-                    for fill in fills:
-                        try:
-                            # Prefer commissionReport attached to fill
-                            cr = getattr(fill, 'commissionReport', None)
-                            exec_obj = getattr(fill, 'execution', None)
-                            if cr and exec_obj and hasattr(exec_obj, 'orderId'):
-                                order_id = str(exec_obj.orderId)
-                                commission = cr.commission
-                                pnl = getattr(cr, 'realizedPNL', None)
-                                connection_logger.debug(
-                                    f"Backfill commission report for order {order_id}: commission={commission}, pnl={pnl}"
-                                )
-                                # Use the same updater which syncs DB and in-memory order
-                                await self._update_order_commission_pnl(order_id, commission, pnl)
-                                update_count += 1
-                        except Exception as inner_e:
-                            connection_logger.warning(f"Failed to process a fill during backfill: {inner_e}")
-
-                    connection_logger.info(f"Backfill completed. Updates attempted: {update_count}")
-                    return update_count
-                except Exception as e:
-                    connection_logger.error(f"Backfill operation failed: {e}")
-                    return 0
-
-            result = self.run_async_in_connection_thread(_backfill_op())
-            try:
-                return int(result or 0)
-            except Exception:
-                return 0
-        except Exception as e:
-            connection_logger.error(f"Backfill commissions wrapper error: {e}")
-            return 0
 
     def get_config(self) -> ConnectionConfig:
         """获取当前配置"""
