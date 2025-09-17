@@ -336,6 +336,8 @@
                 'Position Opened',
                 'Position Closed',
                 'Risk Rule Triggered',
+                'Take Profit Triggered',
+                'Stop Loss Triggered',
                 'Strategy Started',
                 'Strategy Stopped',
                 'DOM Level 3',

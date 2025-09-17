@@ -1,4 +1,5 @@
 from typing import Optional, Dict, Any
+from datetime import datetime
 from dataclasses import dataclass
 from ib_insync import IB, util, ExecutionFilter
 from loguru import logger
@@ -244,12 +245,69 @@ class ConnectionManager:
                                 om = get_order_manager()
                                 fill_price = getattr(trade.orderStatus, 'avgFillPrice', None)
                                 executed_at = datetime.now() if status in ('Filled', 'PartiallyFilled') else None
-                                om.update_order_status(
+                                updated = om.update_order_status(
                                     order_id=order_id,
                                     status=status,
                                     fill_price=fill_price,
                                     executed_at=executed_at,
                                 )
+
+                                if not updated:
+                                    try:
+                                        contract = getattr(trade, 'contract', None)
+                                        order_obj = getattr(trade, 'order', None)
+                                        symbol = (
+                                            getattr(contract, 'symbol', None)
+                                            or getattr(contract, 'localSymbol', None)
+                                            or getattr(order_obj, 'symbol', None)
+                                            or getattr(order_obj, 'localSymbol', '')
+                                        )
+                                        action = (getattr(order_obj, 'action', None) or '').upper()
+                                        quantity = getattr(order_obj, 'totalQuantity', 0) or 0
+                                        order_type = str(getattr(order_obj, 'orderType', None) or 'MKT').upper()
+                                        lmt_price = getattr(order_obj, 'lmtPrice', None)
+                                        aux_price = getattr(order_obj, 'auxPrice', None)
+                                        price_value = None
+                                        for candidate in (lmt_price, aux_price):
+                                            if isinstance(candidate, (int, float)) and candidate != 0:
+                                                price_value = float(candidate)
+                                                break
+
+                                        order_source = 'manual'
+                                        order_ref = getattr(order_obj, 'orderRef', '')
+                                        if isinstance(order_ref, str) and order_ref:
+                                            lower_ref = order_ref.lower()
+                                            if 'tp' in lower_ref:
+                                                order_source = 'tp'
+                                            elif 'sl' in lower_ref:
+                                                order_source = 'sl'
+                                            elif 'auto' in lower_ref or 'strategy' in lower_ref or 'risk' in lower_ref:
+                                                order_source = 'auto'
+
+                                        om.add_order({
+                                            'order_id': order_id,
+                                            'symbol': str(symbol or ''),
+                                            'action': action,
+                                            'quantity': int(quantity),
+                                            'order_type': order_type,
+                                            'price': price_value,
+                                            'status': status or 'Submitted',
+                                            'order_source': order_source,
+                                            'exchange': str(getattr(contract, 'exchange', 'SMART') or 'SMART'),
+                                            'sec_type': str(getattr(contract, 'secType', 'STK') or 'STK'),
+                                            'fill_price': fill_price,
+                                        })
+
+                                        om.update_order_status(
+                                            order_id=order_id,
+                                            status=status,
+                                            fill_price=fill_price,
+                                            executed_at=executed_at,
+                                        )
+                                    except Exception as add_err:
+                                        connection_logger.warning(
+                                            f"Failed to record order {order_id} from status event: {add_err}"
+                                        )
                             except Exception as e:
                                 connection_logger.warning(f"OrderManager status update failed for {order_id}: {e}")
 

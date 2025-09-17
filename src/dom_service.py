@@ -14,6 +14,7 @@ from src.dom_dependencies import (
     get_dom_processor,
     set_dom_processor,
 )
+from src.database import get_db_manager
 from src.dom_processor import DOMProcessor
 
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
@@ -35,10 +36,20 @@ class DOMService:
         self._last_metrics_by_symbol: Dict[str, Dict[str, Any]] = {}
         self._active_symbol: Optional[str] = None
         self._cache = DomCacheManager()
+        self.db_manager = get_db_manager()
         self.trend_thresholds: List[float] = list(
             getattr(dom_config, "trend_thresholds", DEFAULT_TREND_THRESHOLDS)
         ) or list(DEFAULT_TREND_THRESHOLDS)
         self._listeners: DefaultDict[str, List[Callable]] = defaultdict(list)
+
+        persisted_config = self._load_persisted_config()
+        if persisted_config:
+            self._apply_config(
+                window=persisted_config.get("window", dom_config.window),
+                max_levels=persisted_config.get("max_levels", dom_config.max_levels),
+                trend_thresholds=persisted_config.get("trend_thresholds"),
+                persist=False,
+            )
 
     # --------------------------------------------------------------
     def _on_depth_update(self, symbol: str, data: Dict) -> None:
@@ -109,6 +120,70 @@ class DOMService:
         if callback in self._listeners[event]:
             return
         self._listeners[event].append(callback)
+
+    def _load_persisted_config(self) -> Optional[Dict[str, Any]]:
+        if not getattr(self, "db_manager", None):
+            return None
+        try:
+            config = self.db_manager.load_dom_config()
+        except Exception as exc:
+            logger.warning(f"Failed to load DOM config from database: {exc}")
+            return None
+        if not isinstance(config, dict) or not config:
+            return None
+        return config
+
+    def _apply_config(
+        self,
+        window: Any,
+        max_levels: Any,
+        trend_thresholds: Optional[List[float]] = None,
+        *,
+        persist: bool,
+    ) -> None:
+        def _coerce_positive_int(value: Any, fallback: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return fallback
+            return parsed if parsed > 0 else fallback
+
+        target_window = _coerce_positive_int(window, int(getattr(dom_config, "window", 10000)))
+        target_levels = _coerce_positive_int(max_levels, int(getattr(dom_config, "max_levels", 30)))
+
+        if trend_thresholds is not None:
+            sanitized = self._sanitize_thresholds(trend_thresholds)
+        else:
+            sanitized = list(getattr(dom_config, "trend_thresholds", self.trend_thresholds))
+            if not sanitized:
+                sanitized = list(DEFAULT_TREND_THRESHOLDS)
+
+        dom_config.window = target_window
+        dom_config.max_levels = target_levels
+        dom_config.trend_thresholds = sanitized
+        self.trend_thresholds = list(sanitized)
+
+        self.processor = DOMProcessor(window=target_window, max_levels=target_levels)
+        set_dom_processor(self.processor)
+
+        try:
+            import core as core_module
+
+            core_module.dom_processor = self.processor
+            core_module.dom_config = dom_config
+        except Exception:
+            pass
+
+        if persist and getattr(self, "db_manager", None):
+            payload = {
+                "window": dom_config.window,
+                "max_levels": dom_config.max_levels,
+                "trend_thresholds": list(self.trend_thresholds),
+            }
+            try:
+                self.db_manager.save_dom_config(payload)
+            except Exception as exc:
+                logger.warning(f"Failed to persist DOM config: {exc}")
 
     # --------------------------------------------------------------
     def remove_listener(self, callback: Callable, event: str = "metrics") -> None:
@@ -191,19 +266,12 @@ class DOMService:
         max_levels: int,
         trend_thresholds: Optional[List[float]] = None,
     ) -> None:
-        dom_config.window = window
-        dom_config.max_levels = max_levels
-        if trend_thresholds is not None:
-            dom_config.trend_thresholds = self._sanitize_thresholds(trend_thresholds)
-        self.trend_thresholds = list(dom_config.trend_thresholds)
-        self.processor = DOMProcessor(window=window, max_levels=max_levels)
-        set_dom_processor(self.processor)
-        try:
-            import core as core_module
-
-            core_module.dom_processor = self.processor
-        except Exception:
-            pass
+        self._apply_config(
+            window=window,
+            max_levels=max_levels,
+            trend_thresholds=trend_thresholds,
+            persist=True,
+        )
 
     def _sanitize_thresholds(self, values: List[float]) -> List[float]:
         if not isinstance(values, (list, tuple)):
@@ -240,6 +308,16 @@ class DOMService:
     # --------------------------------------------------------------
     def get_history(self, symbol: str) -> Dict[str, List[Dict[str, Any]]]:
         return self._cache.get_history(symbol)
+
+    # --------------------------------------------------------------
+    def get_config(self) -> Dict[str, Any]:
+        return {
+            "window": int(getattr(dom_config, "window", 10000)),
+            "max_levels": int(getattr(dom_config, "max_levels", 30)),
+            "trend_thresholds": list(getattr(dom_config, "trend_thresholds", self.trend_thresholds))
+            or list(self.trend_thresholds)
+            or list(DEFAULT_TREND_THRESHOLDS),
+        }
 
 
 # Global service instance

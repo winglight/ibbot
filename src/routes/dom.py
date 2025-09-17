@@ -48,11 +48,7 @@ class DOMConfigModel(BaseModel):
 
 @router.get("/api/config/dom")
 async def get_dom_config(user: Optional[str] = Depends(get_current_user)):
-    return {
-        "window": dom_config.window,
-        "max_levels": dom_config.max_levels,
-        "trend_thresholds": list(getattr(dom_config, "trend_thresholds", [])),
-    }
+    return dom_service.get_config()
 
 
 @router.put("/api/config/dom")
@@ -60,11 +56,7 @@ async def update_dom_config(cfg: DOMConfigModel, user: Optional[str] = Depends(g
     dom_service.update_config(cfg.window, cfg.max_levels, cfg.trend_thresholds)
     return {
         "success": True,
-        "config": {
-            "window": dom_config.window,
-            "max_levels": dom_config.max_levels,
-            "trend_thresholds": list(getattr(dom_config, "trend_thresholds", [])),
-        },
+        "config": dom_service.get_config(),
     }
 
 
