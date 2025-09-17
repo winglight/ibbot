@@ -3788,10 +3788,8 @@ class TradingApp {
                                         },
                                         y: {
                                             position: 'left',
-                                            beginAtZero: true,
-                                            suggestedMin: -1,
-                                            suggestedMax: 1,
-                                            grace: '20%',
+                                            min: -1,
+                                            max: 1,
                                             title: { display: true, text: 'Trend Score' }
                                         }
                                     }
@@ -3809,6 +3807,15 @@ class TradingApp {
                             console.log('[loadMonitorChart] Updating existing monitorTrendChart');
                             console.log('[loadMonitorChart] Current chart data length:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
                             this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
+                            const trendYScale = this.monitorTrendChart.options?.scales?.y;
+                            if (trendYScale) {
+                                trendYScale.min = -1;
+                                trendYScale.max = 1;
+                                if ('beginAtZero' in trendYScale) delete trendYScale.beginAtZero;
+                                if ('suggestedMin' in trendYScale) delete trendYScale.suggestedMin;
+                                if ('suggestedMax' in trendYScale) delete trendYScale.suggestedMax;
+                                if ('grace' in trendYScale) delete trendYScale.grace;
+                            }
                             this.syncTrendReferenceLines();
                             // 每次你数据有变更（或初始化数据之后），显式调用：
                             this.refreshTrend(this.monitorTrendChart);
