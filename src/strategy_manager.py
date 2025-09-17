@@ -14,7 +14,7 @@ import sys
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, TYPE_CHECKING
+from typing import Dict, List, Optional, Any, TYPE_CHECKING, Set
 from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -62,6 +62,8 @@ class StrategyManager:
         normalized_strategy_dir = self._normalize_strategy_path_value(strategy_dir)
         self.strategy_dir = Path(normalized_strategy_dir)
         self.data_dir.mkdir(exist_ok=True)
+        self.settings_file = self.data_dir / "strategy_settings.json"
+        self.strategies_file = self.data_dir / "strategies.csv"
         self.strategy_dir.mkdir(exist_ok=True)
         
         # External and internal API clients
@@ -245,7 +247,7 @@ class StrategyManager:
                 strategy_type="internal",
                 enabled=True,
                 api_endpoint=None,
-                file_path=None,
+                file_path=getattr(strategy_instance, "file_path", None),
                 description=getattr(strategy_instance, "description", name),
                 created_at=datetime.now(),
             )
@@ -266,8 +268,12 @@ class StrategyManager:
         else:
             if record.strategy_type != "internal":
                 record.strategy_type = "internal"
-            if getattr(strategy_instance, "description", None) and not record.description:
-                record.description = strategy_instance.description
+            runtime_description = getattr(strategy_instance, "description", None)
+            if runtime_description:
+                record.description = runtime_description
+            runtime_path = getattr(strategy_instance, "file_path", None)
+            if runtime_path:
+                record.file_path = runtime_path
             self._save_strategies()
 
         strategy_instance.enabled = record.enabled if record else strategy_instance.enabled
@@ -286,39 +292,72 @@ class StrategyManager:
     def _load_from_database(self):
         """从数据库加载策略设置、策略和执行记录"""
         try:
-            # 加载策略设置
-            self.settings = self.db_manager.load_strategy_config()
-            
-            # 设置默认值
-            if not self.settings:
-                self.settings = {
-                    "api_endpoint": "/api/strategy",
-                    "api_method": "POST",
-                    "api_payload_template": {
-                        "strategy": "{{strategy_name}}",
-                        "symbol": "{{symbol}}",
-                        "action": "{{action}}",
-                        "qty": "{{quantity}}",
-                        "type": "{{order_type}}",
-                        "price": "{{price}}"
-                    },
-                    "strategy_path": DEFAULT_STRATEGY_PATH,
-                    "enable_auth": False,
-                    "auth_token": None
-                }
-                # 保存默认设置到数据库
-                self.db_manager.save_strategy_config(self.settings)
+            # 加载策略设置并合并默认值，确保缺失键不会导致启动失败
+            api_payload_defaults = {
+                "strategy": "{{strategy_name}}",
+                "symbol": "{{symbol}}",
+                "action": "{{action}}",
+                "qty": "{{quantity}}",
+                "type": "{{order_type}}",
+                "price": "{{price}}",
+            }
+            defaults = {
+                "api_endpoint": "/api/strategy",
+                "api_method": "POST",
+                "api_payload_template": api_payload_defaults,
+                "strategy_path": DEFAULT_STRATEGY_PATH,
+                "enable_auth": False,
+                "auth_token": None,
+            }
 
-            normalized_strategy_path = self._normalize_strategy_path_value(self.settings.get("strategy_path"))
-            if normalized_strategy_path != self.settings.get("strategy_path"):
+            stored_settings = self.db_manager.load_strategy_config() or {}
+            merged_settings = {**defaults, **stored_settings}
+
+            incoming_payload_template = (
+                stored_settings.get("api_payload_template") if isinstance(stored_settings, dict) else None
+            )
+            payload_needs_persist = False
+            if isinstance(incoming_payload_template, dict):
+                merged_payload_template = {**api_payload_defaults, **incoming_payload_template}
+                payload_needs_persist = incoming_payload_template != merged_payload_template
+            else:
+                if incoming_payload_template not in (None, {}):
+                    strategy_logger.warning(
+                        "Invalid api_payload_template detected in strategy settings; restoring defaults"
+                    )
+                merged_payload_template = api_payload_defaults.copy()
+                payload_needs_persist = True
+
+            merged_settings["api_payload_template"] = merged_payload_template
+
+            normalized_strategy_path = self._normalize_strategy_path_value(merged_settings.get("strategy_path"))
+            if normalized_strategy_path != merged_settings.get("strategy_path"):
                 strategy_logger.info(
-                    f"Normalizing legacy strategy_path from {self.settings.get('strategy_path')} to {normalized_strategy_path}"
+                    f"Normalizing legacy strategy_path from {merged_settings.get('strategy_path')} to {normalized_strategy_path}"
                 )
-                self.settings["strategy_path"] = normalized_strategy_path
+                merged_settings["strategy_path"] = normalized_strategy_path
+
+            self.settings = merged_settings
+
+            # 如有缺省或修正，持久化最新设置
+            should_persist = False
+            for key in defaults:
+                if key not in stored_settings:
+                    should_persist = True
+                    break
+                if stored_settings.get(key) is None and defaults[key] is not None:
+                    should_persist = True
+                    break
+            if payload_needs_persist:
+                should_persist = True
+            if not should_persist and isinstance(stored_settings, dict):
+                should_persist = stored_settings.get("strategy_path") != self.settings.get("strategy_path")
+
+            if should_persist:
                 try:
                     self.db_manager.save_strategy_config(self.settings)
                 except Exception as exc:  # pragma: no cover - defensive guard
-                    strategy_logger.warning(f"Failed to persist normalized strategy_path: {exc}")
+                    strategy_logger.warning(f"Failed to persist normalized settings: {exc}")
 
             # 更新实例变量
             self.api_endpoint = self.settings["api_endpoint"]
@@ -656,18 +695,51 @@ class StrategyManager:
         if not strategy or strategy.get("strategy_type") != "internal":
             return None
 
-        risk_rules: Dict[str, Any] = {}
-        if self.risk_manager:
-            symbols = {
-                item.get("symbol")
-                for item in (strategy.get("schedule") or [])
-                if isinstance(item, dict) and item.get("symbol")
-            }
+        symbols: Set[str] = set()
+        schedule_items = strategy.get("schedule") or []
+        if isinstance(schedule_items, list):
+            for item in schedule_items:
+                if isinstance(item, dict):
+                    sym = item.get("symbol")
+                    if sym:
+                        symbols.add(sym)
+
+        runtime = self.internal_strategies_runtime.get(name)
+        runtime_risk_rules: Dict[str, Any] = {}
+        if runtime:
+            runtime_symbol = getattr(runtime, "symbol", None)
+            if runtime_symbol:
+                symbols.add(runtime_symbol)
+            info_provider = getattr(runtime, "get_internal_info", None)
+            if callable(info_provider):
+                try:
+                    runtime_info = info_provider() or {}
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(f"Runtime info for {name} failed: {exc}")
+                    runtime_info = {}
+                if isinstance(runtime_info, dict):
+                    extracted_rules = runtime_info.pop("risk_rules", {})
+                    if isinstance(extracted_rules, dict):
+                        runtime_risk_rules.update(extracted_rules)
+                        symbols.update(extracted_rules.keys())
+                    for key, value in runtime_info.items():
+                        if key in {"name", "strategy_type"}:
+                            continue
+                        if value is None:
+                            continue
+                        strategy[key] = value
+
+        combined_rules: Dict[str, Any] = {}
+        if runtime_risk_rules:
+            combined_rules.update(runtime_risk_rules)
+
+        if self.risk_manager and hasattr(self.risk_manager, "risk_rules"):
             for sym in symbols:
                 rule = self.risk_manager.risk_rules.get(sym)
                 if rule:
-                    risk_rules[sym] = asdict(rule)
-        strategy["risk_rules"] = risk_rules
+                    combined_rules[sym] = asdict(rule)
+
+        strategy["risk_rules"] = combined_rules
         return strategy
 
     def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from dataclasses import asdict
 from typing import Any, Awaitable, Dict, Optional
 
 from loguru import logger
@@ -22,7 +23,11 @@ class DOMStrategy(BaseStrategy):
         self,
         *,
         name: str = "DOM Strategy",
-        description: str = "Automated orders driven by DOM trend signals",
+        description: str = (
+            "基于盘口(Depth of Market)特征的自动化策略：结合订单簿不平衡、订单流失衡和"
+            "扫单/吸收事件评分，在趋势信号跨过阈值时触发下单，并通过冷却期与断路器控"
+            "制噪音交易。"
+        ),
         symbol: Optional[str] = None,
         trend_threshold: Optional[float] = None,
         cooldown_seconds: int = 15,
@@ -41,6 +46,12 @@ class DOMStrategy(BaseStrategy):
         self._last_signal_time: float = 0.0
         self._listener_attached: bool = False
         self._processing: bool = False
+        self.file_path = "src/strategies/dom_strategy.py"
+        self.summary_points = [
+            "实时监听DOM趋势得分与订单流不平衡，信号跨越阈值时自动开仓",
+            "为每次信号提供冷却时间，防止高频噪音连续触发",
+            "跟踪连亏次数并触发断路器，由RiskManager接管仓位与风险"
+        ]
 
     # ------------------------------------------------------------------
     def set_dependencies(self, *, dom_service: Any = None, **kwargs: Any) -> None:
@@ -254,4 +265,41 @@ class DOMStrategy(BaseStrategy):
                 self.logger.exception("Failed to execute coroutine for DOM strategy notification")
         else:
             loop.create_task(coro)  # type: ignore[arg-type]
+
+    # ------------------------------------------------------------------
+    def get_internal_info(self) -> Dict[str, Any]:
+        """Expose summary information for the strategy panel."""
+
+        resolved_threshold = self.trend_threshold
+        if resolved_threshold is None:
+            try:
+                resolved_threshold = float(self._resolve_threshold())
+            except Exception:
+                resolved_threshold = None
+
+        info: Dict[str, Any] = {
+            "description": self.description,
+            "file_path": self.file_path,
+            "risk_parameters": {
+                "trend_threshold": float(resolved_threshold) if resolved_threshold is not None else None,
+                "cooldown_seconds": self.cooldown_seconds,
+                "max_loss_streak": self.max_loss_streak,
+                "default_quantity": self.default_quantity,
+            },
+            "summary_points": list(self.summary_points),
+        }
+
+        if self.symbol:
+            info["primary_symbol"] = self.symbol
+
+        runtime_rules: Dict[str, Any] = {}
+        if self.symbol and self.risk_manager and hasattr(self.risk_manager, "risk_rules"):
+            rule = self.risk_manager.risk_rules.get(self.symbol)
+            if rule:
+                runtime_rules[self.symbol] = asdict(rule)
+
+        if runtime_rules:
+            info["risk_rules"] = runtime_rules
+
+        return info
 
