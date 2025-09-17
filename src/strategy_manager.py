@@ -510,7 +510,7 @@ class StrategyManager:
         state = self.data_push_state.setdefault(strategy_name, {})
         stored_subscription = subscription or self._get_strategy_setting(strategy_name, "data_subscription")
         if not stored_subscription:
-            state.update({"enabled": False, "active": False})
+            state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
             return {"success": False, "error": "No subscription configured"}
 
         # Determine target symbol
@@ -520,9 +520,11 @@ class StrategyManager:
         if target_symbol:
             target_symbol = str(target_symbol).strip().upper()
 
+        dom_service = None
+
         if enabled:
             if not target_symbol:
-                state.update({"enabled": False, "active": False})
+                state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
                 return {"success": False, "error": "Primary symbol required"}
 
             ok = False
@@ -560,9 +562,33 @@ class StrategyManager:
                     "active": False,
                     "subscription": stored_subscription,
                     "symbol": target_symbol,
+                    "awaiting_data": False,
+                    "last_data_timestamp": None,
                 })
                 payload = {"success": False, "error": error or "Failed to start data push"}
                 return payload
+
+            runtime = self.internal_strategies_runtime.get(strategy_name)
+            if runtime:
+                if target_symbol and hasattr(runtime, "symbol"):
+                    try:
+                        setattr(runtime, "symbol", target_symbol)
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        strategy_logger.warning(
+                            f"Failed to update runtime symbol for {strategy_name}: {exc}"
+                        )
+                if dom_service and hasattr(runtime, "set_dependencies"):
+                    try:
+                        runtime.set_dependencies(dom_service=dom_service)
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        strategy_logger.warning(
+                            f"Failed to refresh DOM dependency for {strategy_name}: {exc}"
+                        )
+                if getattr(runtime, "enabled", False) and not getattr(runtime, "active", False):
+                    try:
+                        runtime.start()
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        strategy_logger.warning(f"Failed to start runtime for {strategy_name}: {exc}")
 
             state.update({
                 "enabled": True,
@@ -570,12 +596,16 @@ class StrategyManager:
                 "subscription": stored_subscription,
                 "symbol": target_symbol,
                 "last_started": datetime.utcnow().isoformat(),
+                "awaiting_data": True,
+                "last_data_timestamp": None,
             })
             return {
                 "success": True,
                 "active": True,
                 "subscription": stored_subscription,
                 "symbol": target_symbol,
+                "awaiting_data": True,
+                "last_data_timestamp": None,
             }
 
         # Disable
@@ -593,12 +623,16 @@ class StrategyManager:
             "active": False,
             "subscription": stored_subscription,
             "symbol": target_symbol,
+            "awaiting_data": False,
+            "last_data_timestamp": None,
         })
         return {
             "success": True,
             "active": False,
             "subscription": stored_subscription,
             "symbol": target_symbol,
+            "awaiting_data": False,
+            "last_data_timestamp": None,
         }
 
     def _handle_position_setting_change(self, strategy_name: str) -> None:
@@ -976,13 +1010,35 @@ class StrategyManager:
 
         push_state = self.data_push_state.get(name)
         if push_state:
-            status["data_push"] = {
+            awaiting_data = bool(push_state.get("awaiting_data"))
+            if status.get("is_receiving_data") or not push_state.get("active"):
+                if awaiting_data:
+                    push_state["awaiting_data"] = False
+                awaiting_data = False
+
+            last_data_ts = status.get("last_data_timestamp")
+            last_data_iso: Optional[str] = None
+            if isinstance(last_data_ts, (int, float)) and last_data_ts > 0:
+                try:
+                    last_data_iso = datetime.fromtimestamp(last_data_ts).isoformat()
+                except Exception:  # pragma: no cover - defensive guard
+                    last_data_iso = None
+
+            payload = {
                 "enabled": bool(push_state.get("enabled")),
                 "active": bool(push_state.get("active")),
                 "subscription": push_state.get("subscription"),
                 "symbol": push_state.get("symbol"),
                 "last_started": push_state.get("last_started"),
+                "awaiting_data": awaiting_data,
             }
+            if last_data_iso:
+                payload["last_data_timestamp"] = last_data_iso
+                push_state["last_data_timestamp"] = last_data_iso
+            elif "last_data_timestamp" not in push_state:
+                push_state["last_data_timestamp"] = None
+
+            status["data_push"] = payload
 
         return status
 

@@ -347,5 +347,6 @@ class DOMStrategy(BaseStrategy):
             "threshold_hits": self._threshold_hits,
             "buy_signals": self._buy_signals,
             "sell_signals": self._sell_signals,
+            "last_data_timestamp": float(self._last_data_timestamp) if self._last_data_timestamp else 0.0,
         }
 
