@@ -13,6 +13,7 @@ from src.models import (
     StrategyRequest,
     ExternalStrategyOrderRequest,
     StrategyRenameRequest,
+    StrategyDataPushRequest,
 )
 
 router = APIRouter()
@@ -96,6 +97,24 @@ async def get_internal_strategy_status_api(name: str, user: Optional[str] = Depe
     if status is None:
         raise HTTPException(status_code=404, detail="Strategy status unavailable")
     return {"success": True, "status": status}
+
+@router.post("/api/strategies/{name}/data-push")
+async def set_strategy_data_push_api(
+    name: str,
+    payload: StrategyDataPushRequest,
+    user: Optional[str] = Depends(get_current_user),
+):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    result = strategy_manager.set_data_push(
+        name,
+        enabled=payload.enabled,
+        subscription=payload.subscription,
+        symbol=payload.symbol,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Failed to update data push state")
+    return {"success": True, "state": result}
 
 @router.put("/api/strategies/{name}")
 async def update_strategy_api(name: str, updates: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):

@@ -225,6 +225,15 @@ class TradingApp {
         this.notificationsManager = new NotificationsManager(this);
         this.domManager = new DOMManager(this);
 
+        // Internal strategy summary helpers
+        this.summaryControlsInitialized = false;
+        this.summaryPrimarySaving = false;
+        this.summaryPrimaryCurrent = null;
+        this.summaryPushUpdating = false;
+        this.summaryStatusLoading = false;
+        this.summaryDataFeedCurrent = null;
+        this.data_push_state = {};
+
         this.init();
     }
 
@@ -5106,6 +5115,252 @@ class TradingApp {
         }
     }
 
+    ensureSummaryControls() {
+        if (this.summaryControlsInitialized) return;
+        this.summaryControlsInitialized = true;
+        this.setupSymbolInput('summaryPrimarySymbolInput', 'summaryPrimarySymbolDropdown');
+        const symbolInput = document.getElementById('summaryPrimarySymbolInput');
+        if (symbolInput) {
+            symbolInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    symbolInput.blur();
+                }
+            });
+            const handler = () => this.handleSummaryPrimarySymbolChange();
+            symbolInput.addEventListener('change', handler);
+            symbolInput.addEventListener('blur', handler);
+        }
+        const dataSelect = document.getElementById('summaryDataFeedSelect');
+        if (dataSelect) {
+            dataSelect.addEventListener('change', () => this.handleSummaryDataFeedChange());
+        }
+        const pushSwitch = document.getElementById('summaryDataPushSwitch');
+        if (pushSwitch) {
+            pushSwitch.addEventListener('change', () => this.handleSummaryPushToggle());
+        }
+        const refreshBtn = document.getElementById('summaryStatusRefreshBtn');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => {
+                if (this.currentStrategyDetails) {
+                    this.loadStrategyStatus(this.currentStrategyDetails, { force: true });
+                }
+            });
+        }
+    }
+
+    async handleSummaryPrimarySymbolChange() {
+        if (this.summaryPrimarySaving) return;
+        const name = this.currentStrategyDetails;
+        if (!name) return;
+        const input = document.getElementById('summaryPrimarySymbolInput');
+        if (!input) return;
+        const raw = (input.value || '').trim().toUpperCase();
+        if (!raw) {
+            this.updateSummaryPrimaryStatus('empty');
+            this.summaryPrimaryCurrent = null;
+            return;
+        }
+        if (raw === this.summaryPrimaryCurrent) {
+            this.updateSummaryPrimaryStatus('saved');
+            return;
+        }
+        this.summaryPrimarySaving = true;
+        this.updateSummaryPrimaryStatus('saving');
+        try {
+            await this.apiCall(`/strategies/${encodeURIComponent(name)}`, {
+                method: 'PUT',
+                body: JSON.stringify({ primary_symbol: raw }),
+            });
+            this.summaryPrimaryCurrent = raw;
+            this.updateSummaryPrimaryStatus('saved');
+            if (this.data_push_state?.enabled) {
+                this.loadStrategyStatus(name, { force: true });
+            }
+        } catch (error) {
+            console.error('Failed to save primary symbol', error);
+            this.updateSummaryPrimaryStatus('error');
+            this.showAlert('danger', 'Failed to save primary symbol');
+        } finally {
+            this.summaryPrimarySaving = false;
+        }
+    }
+
+    updateSummaryPrimaryStatus(state) {
+        const statusEl = document.getElementById('summaryPrimarySymbolStatus');
+        if (!statusEl) return;
+        if (state === 'saving') {
+            statusEl.textContent = 'Saving primary symbol...';
+            statusEl.classList.remove('text-danger');
+        } else if (state === 'saved') {
+            statusEl.textContent = 'Primary symbol saved';
+            statusEl.classList.remove('text-danger');
+        } else if (state === 'empty') {
+            statusEl.textContent = 'Select a symbol to save';
+            statusEl.classList.remove('text-danger');
+        } else if (state === 'error') {
+            statusEl.textContent = 'Save failed. Please retry.';
+            statusEl.classList.add('text-danger');
+        } else {
+            statusEl.textContent = '';
+            statusEl.classList.remove('text-danger');
+        }
+    }
+
+    async handleSummaryDataFeedChange() {
+        const name = this.currentStrategyDetails;
+        if (!name) return;
+        const select = document.getElementById('summaryDataFeedSelect');
+        if (!select) return;
+        const value = select.value || null;
+        if (value === this.summaryDataFeedCurrent) return;
+        try {
+            await this.apiCall(`/strategies/${encodeURIComponent(name)}`, {
+                method: 'PUT',
+                body: JSON.stringify({ data_subscription: value || null }),
+            });
+            this.summaryDataFeedCurrent = value;
+            if (this.data_push_state?.enabled) {
+                await this.setStrategyDataPush({ enabled: true });
+            }
+        } catch (error) {
+            console.error('Failed to update data subscription', error);
+            this.showAlert('danger', 'Failed to update data subscription');
+            if (this.summaryDataFeedCurrent !== null) {
+                select.value = this.summaryDataFeedCurrent || '';
+            }
+        }
+    }
+
+    async handleSummaryPushToggle() {
+        if (this.summaryPushUpdating) return;
+        const switchEl = document.getElementById('summaryDataPushSwitch');
+        if (!switchEl) return;
+        const enabled = !!switchEl.checked;
+        const result = await this.setStrategyDataPush({ enabled });
+        if (!result || result.error) {
+            this.summaryPushUpdating = true;
+            switchEl.checked = false;
+            this.summaryPushUpdating = false;
+        }
+    }
+
+    async setStrategyDataPush({ enabled, subscription, symbol } = {}) {
+        const name = this.currentStrategyDetails;
+        if (!name) return null;
+        if (typeof enabled !== 'boolean') enabled = true;
+        const select = document.getElementById('summaryDataFeedSelect');
+        const symbolInput = document.getElementById('summaryPrimarySymbolInput');
+        const switchEl = document.getElementById('summaryDataPushSwitch');
+        const statusEl = document.getElementById('summaryDataPushStatus');
+        const targetSub = subscription || select?.value || null;
+        const targetSymbol = (symbol || symbolInput?.value || '').trim().toUpperCase();
+        if (enabled) {
+            if (!targetSub) {
+                this.showAlert('warning', 'Select a data subscription before enabling push');
+                if (switchEl) switchEl.checked = false;
+                statusEl && (statusEl.textContent = '未推送');
+                return { error: 'missing_subscription' };
+            }
+            if (!targetSymbol) {
+                this.showAlert('warning', 'Primary symbol is required to push data');
+                if (switchEl) switchEl.checked = false;
+                statusEl && (statusEl.textContent = '未推送');
+                return { error: 'missing_symbol' };
+            }
+        }
+        try {
+            this.summaryPushUpdating = true;
+            if (statusEl) statusEl.textContent = enabled ? '推送中…' : '未推送';
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/data-push`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    enabled,
+                    subscription: targetSub || null,
+                    symbol: targetSymbol || null,
+                }),
+            });
+            const state = res?.state || {};
+            if (switchEl) switchEl.checked = !!state.active;
+            if (statusEl) statusEl.textContent = state.active ? '已推送' : '未推送';
+            this.data_push_state = {
+                enabled: !!state.active,
+                subscription: state.subscription,
+                symbol: state.symbol,
+            };
+            await this.loadStrategyStatus(name, { force: true });
+            return state;
+        } catch (error) {
+            console.error('Failed to update data push state', error);
+            this.showAlert('danger', 'Failed to update data push state');
+            if (switchEl) switchEl.checked = false;
+            if (statusEl) statusEl.textContent = '未推送';
+            return { error: 'request_failed' };
+        } finally {
+            this.summaryPushUpdating = false;
+        }
+    }
+
+    async loadStrategyStatus(name, { force = false } = {}) {
+        if (this.summaryStatusLoading && !force) return;
+        const receivingEl = document.getElementById('summaryStatusReceiving');
+        if (!receivingEl) return;
+        this.summaryStatusLoading = true;
+        const runtimeEl = document.getElementById('summaryStatusRuntime');
+        const processedEl = document.getElementById('summaryStatusProcessed');
+        const thresholdEl = document.getElementById('summaryStatusThresholdHits');
+        const buyEl = document.getElementById('summaryStatusBuySignals');
+        const sellEl = document.getElementById('summaryStatusSellSignals');
+        const statusPush = document.getElementById('summaryDataPushStatus');
+        const pushSwitch = document.getElementById('summaryDataPushSwitch');
+        try {
+            receivingEl.textContent = '…';
+            runtimeEl && (runtimeEl.textContent = '…');
+            processedEl && (processedEl.textContent = '…');
+            thresholdEl && (thresholdEl.textContent = '…');
+            buyEl && (buyEl.textContent = '…');
+            sellEl && (sellEl.textContent = '…');
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/status`);
+            if (!res?.success) throw new Error('Failed to fetch status');
+            const status = res.status || {};
+            receivingEl.textContent = status.is_receiving_data ? 'Yes' : 'No';
+            runtimeEl && (runtimeEl.textContent = typeof status.runtime_seconds === 'number' ? status.runtime_seconds.toFixed(1) : '-');
+            processedEl && (processedEl.textContent = status.processed_count ?? '-');
+            thresholdEl && (thresholdEl.textContent = status.threshold_hits ?? '-');
+            buyEl && (buyEl.textContent = status.buy_signals ?? '-');
+            sellEl && (sellEl.textContent = status.sell_signals ?? '-');
+            const pushState = status.data_push || {};
+            if (pushSwitch && !this.summaryPushUpdating) {
+                pushSwitch.checked = !!pushState.active;
+            }
+            if (statusPush) {
+                statusPush.textContent = pushState.active ? '已推送' : '未推送';
+            }
+            this.data_push_state = {
+                enabled: !!pushState.enabled,
+                subscription: pushState.subscription,
+                symbol: pushState.symbol,
+            };
+            if (pushSwitch && pushSwitch.checked && !status.is_receiving_data) {
+                this.summaryPushUpdating = true;
+                pushSwitch.checked = false;
+                this.summaryPushUpdating = false;
+                if (statusPush) statusPush.textContent = '未推送';
+            }
+        } catch (error) {
+            console.error('Failed to load strategy status', error);
+            receivingEl.textContent = '-';
+            runtimeEl && (runtimeEl.textContent = '-');
+            processedEl && (processedEl.textContent = '-');
+            thresholdEl && (thresholdEl.textContent = '-');
+            buyEl && (buyEl.textContent = '-');
+            sellEl && (sellEl.textContent = '-');
+            if (statusPush) statusPush.textContent = '未推送';
+        } finally {
+            this.summaryStatusLoading = false;
+        }
+    }
+
     // cancelAllOrders和syncLimitOrder方法已迁移到OrderManager
 
     async removeRiskRule(symbol) { return this.riskRulesManager.removeRiskRule(symbol); }
@@ -5205,6 +5460,8 @@ class TradingApp {
     setupSymbolInput(inputId, dropdownId) {
         const input = document.getElementById(inputId);
         const dropdown = document.getElementById(dropdownId);
+        if (!input || !dropdown) return;
+        dropdown.dataset.inputId = inputId;
         let searchTimeout;
 
         // Load historical symbols on focus
@@ -5287,10 +5544,11 @@ class TradingApp {
 
     showHistoricalSymbols(dropdownId) {
         const dropdown = document.getElementById(dropdownId);
+        if (!dropdown) return;
         const historicalSymbols = this.getHistoricalSymbols();
-        
+
         let html = '';
-        
+
         if (historicalSymbols.length > 0) {
             html += '<h6 class="dropdown-header">Recent Symbols</h6>';
             historicalSymbols.forEach(symbol => {
@@ -5314,13 +5572,18 @@ class TradingApp {
             item.addEventListener('click', (e) => {
                 e.preventDefault();
                 const symbol = e.target.getAttribute('data-symbol');
-                const inputId = dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol';
-                document.getElementById(inputId).value = symbol;
+                const targetId = dropdown.dataset.inputId || (dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol');
+                const targetInput = document.getElementById(targetId);
+                if (targetInput) {
+                    targetInput.value = symbol;
+                    const changeEvent = new Event('change', { bubbles: true });
+                    targetInput.dispatchEvent(changeEvent);
+                }
                 dropdown.classList.remove('show');
                 this.addToHistoricalSymbols(symbol);
-                
+
                 // 如果是下单弹窗的symbol选择，获取当前价格
-                if (inputId === 'orderSymbol') {
+                if (targetId === 'orderSymbol') {
                     this.fetchCurrentPrice(symbol);
                 }
             });
@@ -5585,6 +5848,7 @@ class TradingApp {
             const ordersPane = document.getElementById('internal-orders');
             const chartsTabText = document.getElementById('charts-tab-text');
             if (isInternal) {
+                this.ensureSummaryControls();
                 summaryWrap?.classList.remove('d-none');
                 ordersWrap?.classList.remove('d-none');
                 execWrap?.classList.add('d-none');
@@ -5594,18 +5858,41 @@ class TradingApp {
                 if (chartsTabText) chartsTabText.textContent = 'Visual Metrics';
                 try { new bootstrap.Tab(document.getElementById('summary-tab')).show(); } catch (e) { console.warn('Tab show failed', e); }
 
+                const symbolInput = document.getElementById('summaryPrimarySymbolInput');
+                const dataSelect = document.getElementById('summaryDataFeedSelect');
+                const pushStatusEl = document.getElementById('summaryDataPushStatus');
+                const pushSwitch = document.getElementById('summaryDataPushSwitch');
+                if (pushStatusEl) pushStatusEl.textContent = '未推送';
+                if (pushSwitch) pushSwitch.checked = false;
+                this.data_push_state = {};
+                const fallbackSymbol = s?.primary_symbol || '';
+                if (symbolInput) {
+                    symbolInput.value = fallbackSymbol || '';
+                    this.summaryPrimaryCurrent = fallbackSymbol ? fallbackSymbol.toUpperCase() : null;
+                    this.updateSummaryPrimaryStatus(fallbackSymbol ? 'saved' : 'empty');
+                }
+                const fallbackSub = s?.data_subscription || '';
+                this.summaryDataFeedCurrent = fallbackSub || null;
+                if (dataSelect) {
+                    dataSelect.value = fallbackSub || 'market_data';
+                }
+
                 try {
                     const infoRes = await this.apiCall(`/strategies/${encodeURIComponent(name)}/internal-info`);
                     if (infoRes.success) {
                         const info = infoRes.strategy || {};
                         const descEl = document.getElementById('summaryDescription');
                         const pathEl = document.getElementById('summaryPath');
-                        const symbolEl = document.getElementById('summaryPrimarySymbol');
                         const highlightsEl = document.getElementById('summaryHighlights');
                         const riskParamEl = document.getElementById('summaryRiskParams');
                         if (descEl) descEl.textContent = info.description || '';
                         if (pathEl) pathEl.textContent = info.file_path || '';
-                        if (symbolEl) symbolEl.textContent = info.primary_symbol || '-';
+                        const resolvedSymbol = info.primary_symbol || s?.primary_symbol || '';
+                        if (symbolInput) {
+                            symbolInput.value = resolvedSymbol || '';
+                            this.summaryPrimaryCurrent = resolvedSymbol ? resolvedSymbol.toUpperCase() : null;
+                            this.updateSummaryPrimaryStatus(resolvedSymbol ? 'saved' : 'empty');
+                        }
                         if (highlightsEl) {
                             const points = Array.isArray(info.summary_points) ? info.summary_points : [];
                             if (points.length) {
@@ -5643,14 +5930,10 @@ class TradingApp {
                                 riskParamEl.innerHTML = '<li class="text-muted">No dedicated parameters</li>';
                             }
                         }
-                        const summaryDataSub = document.getElementById('summaryDataSubscription');
-                        if (summaryDataSub) {
-                            const subscriptionLabels = {
-                                market_data: 'Real-time Price + Volume',
-                                dom_trend: 'DOM + Trend Score'
-                            };
-                            const subKey = info.data_subscription || s?.data_subscription || '';
-                            summaryDataSub.textContent = subKey ? (subscriptionLabels[subKey] || subKey) : 'Not specified';
+                        const subKey = info.data_subscription || s?.data_subscription || '';
+                        this.summaryDataFeedCurrent = subKey || null;
+                        if (dataSelect) {
+                            dataSelect.value = subKey || 'market_data';
                         }
                         const positionList = document.getElementById('summaryPositionSettings');
                         if (positionList) {
@@ -5697,6 +5980,7 @@ class TradingApp {
                 } catch (err) {
                     console.error('Failed to load internal strategy info:', err);
                 }
+                await this.loadStrategyStatus(name, { force: true });
             } else {
                 summaryWrap?.classList.add('d-none');
                 ordersWrap?.classList.add('d-none');
@@ -6247,11 +6531,16 @@ class TradingApp {
             item.addEventListener('click', (e) => {
                 e.preventDefault();
                 const symbol = e.target.getAttribute('data-symbol');
-                const inputId = dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol';
-                document.getElementById(inputId).value = symbol;
+                const inputId = dropdown.dataset.inputId || (dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol');
+                const inputEl = document.getElementById(inputId);
+                if (inputEl) {
+                    inputEl.value = symbol;
+                    const changeEvent = new Event('change', { bubbles: true });
+                    inputEl.dispatchEvent(changeEvent);
+                }
                 dropdown.classList.remove('show');
                 this.addToHistoricalSymbols(symbol);
-                
+
                 // 如果是下单弹窗的symbol选择，获取当前价格
                 if (inputId === 'orderSymbol') {
                     this.fetchCurrentPrice(symbol);
@@ -6262,7 +6551,8 @@ class TradingApp {
 
     async searchSymbols(query, dropdownId) {
         const dropdown = document.getElementById(dropdownId);
-        
+        if (!dropdown) return;
+
         try {
             // Show loading
             dropdown.innerHTML = '<div class="dropdown-item-text">Searching...</div>';
@@ -6299,11 +6589,16 @@ class TradingApp {
                 item.addEventListener('click', (e) => {
                     e.preventDefault();
                     const symbol = e.target.getAttribute('data-symbol');
-                    const inputId = dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol';
-                    document.getElementById(inputId).value = symbol;
+                    const inputId = dropdown.dataset.inputId || (dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol');
+                    const inputEl = document.getElementById(inputId);
+                    if (inputEl) {
+                        inputEl.value = symbol;
+                        const changeEvent = new Event('change', { bubbles: true });
+                        inputEl.dispatchEvent(changeEvent);
+                    }
                     dropdown.classList.remove('show');
                     this.addToHistoricalSymbols(symbol);
-                    
+
                     // 如果是下单弹窗的symbol选择，获取当前价格
                     if (inputId === 'orderSymbol') {
                         this.fetchCurrentPrice(symbol);
