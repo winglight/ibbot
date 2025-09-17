@@ -26,11 +26,14 @@ class FakeDOMService:
 
 
 class FakeQueueManager:
-    def __init__(self):
+    def __init__(self, order_manager=None):
         self.tasks = []
+        self.order_manager = order_manager
 
     def add_task(self, task_type, payload, max_retries=3):
         self.tasks.append((task_type, payload))
+        if self.order_manager is not None:
+            self.order_manager.record(payload)
         return f"task-{len(self.tasks)}"
 
 
@@ -50,10 +53,19 @@ class FakeRiskManager:
         return True, "ok"
 
 
+class FakeOrderManager:
+    def __init__(self):
+        self.orders = []
+
+    def record(self, payload):
+        self.orders.append(payload)
+
+
 @pytest.fixture
 def strategy_setup():
     dom_service = FakeDOMService()
-    queue = FakeQueueManager()
+    order_manager = FakeOrderManager()
+    queue = FakeQueueManager(order_manager=order_manager)
     risk_manager = FakeRiskManager()
     rule = RiskRule(symbol="MNQ", stop_loss_price=14980.0)
     risk_manager.risk_rules["MNQ"] = rule
@@ -63,13 +75,14 @@ def strategy_setup():
         dom_service=dom_service,
         queue_manager=queue,
         risk_manager=risk_manager,
+        order_manager=order_manager,
     )
     strategy.enable()
-    return strategy, dom_service, queue, risk_manager
+    return strategy, dom_service, queue, risk_manager, order_manager
 
 
 def test_dom_strategy_places_order_on_signal(strategy_setup):
-    strategy, dom_service, queue, risk_manager = strategy_setup
+    strategy, dom_service, queue, _, order_manager = strategy_setup
 
     metrics = {"trend_score": 0.9, "mid_price": 15000.0, "symbol": "MNQ"}
     dom_service.emit("MNQ", metrics)
@@ -81,10 +94,11 @@ def test_dom_strategy_places_order_on_signal(strategy_setup):
     assert payload["symbol"] == "MNQ"
     # risk budget: 100000 * 0.01 = 1000; stop distance = 20; point value = 2 -> qty = 25
     assert payload["qty"] == 25
+    assert order_manager.orders and order_manager.orders[0] == payload
 
 
 def test_dom_strategy_breaker_blocks_after_losses(strategy_setup):
-    strategy, dom_service, queue, _ = strategy_setup
+    strategy, dom_service, queue, _, order_manager = strategy_setup
 
     # Trip breaker by recording losses
     strategy.register_trade_result(-100)
@@ -94,11 +108,13 @@ def test_dom_strategy_breaker_blocks_after_losses(strategy_setup):
 
     dom_service.emit("MNQ", {"trend_score": 0.9, "mid_price": 15000.0, "symbol": "MNQ"})
     assert len(queue.tasks) == 0
+    assert order_manager.orders == []
 
 
 def test_dom_strategy_stop_prevents_orders(strategy_setup):
-    strategy, dom_service, queue, _ = strategy_setup
+    strategy, dom_service, queue, _, order_manager = strategy_setup
 
-    strategy.stop()
+    strategy.disable()
     dom_service.emit("MNQ", {"trend_score": 0.9, "mid_price": 15000.0, "symbol": "MNQ"})
     assert len(queue.tasks) == 0
+    assert order_manager.orders == []
