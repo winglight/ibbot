@@ -5,6 +5,7 @@
         constructor(app) {
             this.app = app;
             this.notificationHistory = [];
+            this.settingsListenersAttached = false;
             if (this.app) {
                 this.app.filterNotificationHistory = this.filterNotificationHistory.bind(this);
             }
@@ -181,6 +182,7 @@
         
         // 添加通知设置事件监听器
         addNotificationSettingsListeners() {
+            if (this.settingsListenersAttached) return;
             // 基础设置开关变化时更新输入状态
             ['telegramEnabled', 'emailEnabled', 'tradingReminderEnabled'].forEach(id => {
                 const element = document.getElementById(id);
@@ -188,23 +190,30 @@
                     element.addEventListener('change', () => this.updateNotificationInputStates());
                 }
             });
-            
+
             // 测试按钮
             const testReminderBtn = document.getElementById('testTradingReminderBtn');
             if (testReminderBtn) {
                 testReminderBtn.addEventListener('click', () => this.testTradingReminder());
             }
-            
+
             const testNotificationBtn = document.getElementById('testNotificationBtn');
             if (testNotificationBtn) {
                 testNotificationBtn.addEventListener('click', () => this.testNotification());
             }
-            
+
+            const checkStatusBtn = document.getElementById('checkTradingReminderStatusBtn');
+            if (checkStatusBtn) {
+                checkStatusBtn.addEventListener('click', () => this.checkTradingReminderStatus());
+            }
+
             // 保存按钮
             const saveBtn = document.getElementById('saveNotificationSettingsBtn');
             if (saveBtn) {
                 saveBtn.addEventListener('click', () => this.saveNotificationSettings());
             }
+
+            this.settingsListenersAttached = true;
         }
         
         // 填充基础设置
@@ -453,7 +462,47 @@
                 this.app.showAlert('danger', 'Test reminder failed: ' + error.message);
             }
         }
-        
+
+        // 检查交易提醒状态
+        checkTradingReminderStatus() {
+            try {
+                const statusEl = document.getElementById('tradingReminderStatus');
+                const enabled = document.getElementById('tradingReminderEnabled')?.checked;
+                const startTime = document.getElementById('startTradingTime')?.value || '20:30';
+                const endTime = document.getElementById('endTradingTime')?.value || '22:30';
+                const telegramReminderEnabled = document.getElementById('telegramReminderEnabled')?.checked;
+
+                const statusParts = [];
+                if (!('Notification' in window)) {
+                    statusParts.push('浏览器不支持通知');
+                } else {
+                    statusParts.push(`浏览器通知权限：${Notification.permission}`);
+                }
+
+                if (enabled) {
+                    statusParts.push(`提醒时间：${startTime} - ${endTime}`);
+                } else {
+                    statusParts.push('交易提醒已关闭');
+                }
+
+                statusParts.push(this.app.startReminderTimeout || this.app.endReminderTimeout
+                    ? '提醒计时器已设置'
+                    : '提醒计时器未设置');
+
+                statusParts.push(telegramReminderEnabled ? 'Telegram 提醒开启' : 'Telegram 提醒关闭');
+
+                const message = statusParts.join(' | ');
+                if (statusEl) {
+                    statusEl.textContent = message;
+                }
+
+                this.app.showAlert('info', message);
+            } catch (error) {
+                console.error('checkTradingReminderStatus error:', error);
+                this.app.showAlert('danger', 'Failed to check reminder status: ' + error.message);
+            }
+        }
+
         // 测试通知
         async testNotification() {
             try {

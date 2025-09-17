@@ -2142,10 +2142,10 @@
                                 </div>
                                 <div class="mt-3">
                                     <div class="d-flex gap-2 align-items-center">
-                                        <button type="button" class="btn btn-outline-primary btn-sm" onclick="app.testTradingReminder()">
+                                        <button type="button" class="btn btn-outline-primary btn-sm" id="testTradingReminderBtn">
                                             🔔 Test Reminder
                                         </button>
-                                        <button type="button" class="btn btn-outline-info btn-sm" onclick="app.checkTradingReminderStatus()">
+                                        <button type="button" class="btn btn-outline-info btn-sm" id="checkTradingReminderStatusBtn">
                                             📊 Check Status
                                         </button>
                                         <small class="text-muted" id="tradingReminderStatus">Click to check reminder status</small>
@@ -2189,8 +2189,8 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="button" class="btn btn-success" onclick="app.testNotification()">Test</button>
-                    <button type="button" class="btn btn-primary" onclick="app.saveNotificationSettings()">Save</button>
+                    <button type="button" class="btn btn-success" id="testNotificationBtn">Test</button>
+                    <button type="button" class="btn btn-primary" id="saveNotificationSettingsBtn">Save</button>
                 </div>
             </div>
         </div>
