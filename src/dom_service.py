@@ -1,6 +1,10 @@
 import time
 import asyncio
-from typing import Dict, List, Optional, Any
+import inspect
+from typing import Dict, List, Optional, Any, Callable, DefaultDict
+from collections import defaultdict
+
+from loguru import logger
 
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
 
@@ -28,6 +32,7 @@ class DOMService:
         self.trend_thresholds: List[float] = list(
             getattr(core.dom_config, "trend_thresholds", DEFAULT_TREND_THRESHOLDS)
         ) or list(DEFAULT_TREND_THRESHOLDS)
+        self._listeners: DefaultDict[str, List[Callable]] = defaultdict(list)
 
     # --------------------------------------------------------------
     def _on_depth_update(self, symbol: str, data: Dict) -> None:
@@ -63,6 +68,26 @@ class DOMService:
             self._alerts.append({"id": self._next_alert_id, "event": evt, "timestamp": ts})
             self._next_alert_id += 1
         self._perform_cleanup()
+        self._dispatch_event("metrics", symbol_key, metrics, snapshot)
+
+    def _dispatch_event(self, event: str, *args, **kwargs) -> None:
+        listeners = list(self._listeners.get(event, []))
+        if not listeners:
+            return
+        for callback in listeners:
+            try:
+                result = callback(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(result)  # type: ignore[arg-type]
+                    except RuntimeError:
+                        try:
+                            asyncio.run(result)
+                        except RuntimeError:
+                            logger.exception("Failed to run async DOM listener callback")
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.error(f"DOM listener error: {exc}")
 
     # --------------------------------------------------------------
     def _perform_cleanup(self) -> None:
@@ -70,6 +95,26 @@ class DOMService:
         self._alerts = [a for a in self._alerts if a["timestamp"] >= cutoff]
         if len(self._alerts) > self._max_alerts:
             self._alerts = self._alerts[-self._max_alerts :]
+
+    # --------------------------------------------------------------
+    def add_listener(self, callback: Callable, event: str = "metrics") -> None:
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        if callback in self._listeners[event]:
+            return
+        self._listeners[event].append(callback)
+
+    # --------------------------------------------------------------
+    def remove_listener(self, callback: Callable, event: str = "metrics") -> None:
+        listeners = self._listeners.get(event)
+        if not listeners:
+            return
+        try:
+            listeners.remove(callback)
+        except ValueError:
+            return
+        if not listeners:
+            self._listeners.pop(event, None)
 
     async def _cleanup_loop(self) -> None:
         while True:

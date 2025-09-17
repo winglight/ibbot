@@ -9,10 +9,13 @@ from src.order_manager import get_order_manager
 from src.websocket_manager import websocket_manager
 from dataclasses import dataclass, field
 from typing import List
+from loguru import logger
 
 from src.depth_subscriber import DepthSubscriber
 from src.notification_manager import NotificationManager
 from src.dom_processor import DOMProcessor
+from src.dom_service import get_dom_service
+from src.strategies.dom_strategy import DOMStrategy
 
 # Initialize shared instances
 telegram_notifier = TelegramNotifier()
@@ -68,6 +71,21 @@ try:
     )
 except Exception:
     pass
+
+# Register the DOM internal strategy so it loads automatically
+dom_strategy = None
+try:
+    dom_strategy = DOMStrategy(dom_service=get_dom_service())
+    dom_strategy.set_dependencies(
+        strategy_manager=strategy_manager,
+        order_manager=order_manager,
+        queue_manager=queue_manager,
+        risk_manager=risk_manager,
+        notification_manager=notification_manager,
+    )
+    strategy_manager.register_internal_strategy(dom_strategy)
+except Exception as exc:  # pragma: no cover - defensive guard
+    logger.warning(f"Failed to initialize DOM strategy: {exc}")
 
 # IBKR client is created on demand
 ibkr_client = None
