@@ -448,13 +448,12 @@ class TradingApp {
         const parsedPoints = Array.isArray(baseDataset.data)
             ? baseDataset.data.map((point) => {
                 if (!point) return null;
-                const xValue = point.x instanceof Date
-                    ? point.x
-                    : (Number.isFinite(point.timestamp) ? new Date(point.timestamp) : (Number.isFinite(point.x) ? new Date(point.x) : null));
+                const rawTime = point.timestamp ?? point.x ?? point.displayTime ?? null;
+                const xValue = that.normalizeMonitorTime(rawTime);
                 const rawY = typeof point.y === 'number' ? point.y
                     : (typeof point.value === 'number' ? point.value
                         : (typeof point.score === 'number' ? point.score : null));
-                if (!xValue || !Number.isFinite(rawY)) return null;
+                if (!Number.isFinite(xValue) || !Number.isFinite(rawY)) return null;
                 return { x: xValue, y: rawY };
             }).filter(Boolean)
             : [];
