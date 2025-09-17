@@ -109,6 +109,24 @@ class StrategyRequest(BaseModel):
     tp_price: Optional[float] = None
     sl_type: str = "amount"  # "amount" or "percent"
     tp_type: str = "amount"  # "amount" or "percent"
+    data_subscription: Optional[str] = None
+    position_add_cooldown_minutes: Optional[int] = None
+    close_before_close_minutes: Optional[int] = None
+
+    @validator('data_subscription')
+    def validate_data_subscription(cls, value: Optional[str]):
+        if value is None:
+            return value
+        allowed = {"market_data", "dom_trend"}
+        if value not in allowed:
+            raise ValueError(f'data_subscription must be one of {sorted(allowed)}')
+        return value
+
+    @validator('position_add_cooldown_minutes', 'close_before_close_minutes')
+    def validate_positive_minutes(cls, value: Optional[int]):
+        if value is not None and value < 0:
+            raise ValueError('minute values must be >= 0 when provided')
+        return value
 
 class StrategyRenameRequest(BaseModel):
     new_name: str
