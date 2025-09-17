@@ -414,7 +414,8 @@ class OrderManager:
                           fill_price: Optional[float] = None,
                           executed_at: Optional[datetime] = None,
                           commission: Optional[float] = None,
-                          pnl: Optional[float] = None) -> bool:
+                          pnl: Optional[float] = None,
+                          notes: Optional[str] = None) -> bool:
         """更新订单状态"""
         try:
             # 统一标准化为字符串，避免传入 int 导致无法匹配内存订单
@@ -449,16 +450,19 @@ class OrderManager:
             # 更新订单状态
             order.status = status
             order.updated_at = datetime.now()
-            
+
             if fill_price is not None:
                 order.fill_price = fill_price
                 if order.price is None or order.price == 0:
                     order.price = fill_price
-            
+
             if executed_at is not None:
                 order.executed_at = executed_at
             elif status == OrderStatus.FILLED.value:
                 order.executed_at = datetime.now()
+
+            if notes:
+                order.notes = f"{order.notes} | {notes}" if order.notes else notes
             
             # 只有在新值不为None时才更新commission和pnl，避免覆盖已有的有效值
             if commission is not None:
