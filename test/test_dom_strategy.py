@@ -6,6 +6,7 @@ os.environ.setdefault("IBBOT_SKIP_SERVER", "1")
 
 from src.risk_manager import RiskRule
 from src.strategies.dom_strategy import DOMStrategy
+from src.strategy_manager import StrategyManager
 
 
 class FakeDOMService:
@@ -118,3 +119,45 @@ def test_dom_strategy_stop_prevents_orders(strategy_setup):
     dom_service.emit("MNQ", {"trend_score": 0.9, "mid_price": 15000.0, "symbol": "MNQ"})
     assert len(queue.tasks) == 0
     assert order_manager.orders == []
+
+
+def test_internal_strategy_info_exposes_dom_summary(tmp_path, monkeypatch):
+    from src import database as db_module
+
+    db_path = tmp_path / "test_trading.db"
+    db_manager = db_module.DatabaseManager(db_path)
+    monkeypatch.setattr(db_module, "db_manager", db_manager, raising=False)
+    monkeypatch.setattr(db_module, "get_db_manager", lambda db_path=db_path: db_manager, raising=False)
+
+    from src import strategy_manager as strategy_module
+
+    monkeypatch.setattr(strategy_module, "get_db_manager", lambda: db_manager, raising=False)
+
+    manager = StrategyManager(data_dir=tmp_path / "data", strategy_dir=tmp_path / "strategies")
+
+    rule = RiskRule(symbol="MNQ", stop_loss_price=14980.0, take_profit_price=15040.0)
+
+    class StubRisk:
+        def __init__(self):
+            self.risk_rules = {"MNQ": rule}
+
+    manager.set_dependencies(risk_manager=StubRisk(), queue_manager=None)
+
+    strategy = DOMStrategy(symbol="MNQ", trend_threshold=0.9, cooldown_seconds=20, max_loss_streak=4)
+    manager.register_internal_strategy(strategy)
+
+    info = manager.get_internal_strategy_info(strategy.name)
+    assert info
+    assert info["strategy_type"] == "internal"
+    assert info["description"] == strategy.description
+    assert info.get("file_path", "").endswith("dom_strategy.py")
+
+    risk_rules = info.get("risk_rules", {})
+    assert "MNQ" in risk_rules
+    assert pytest.approx(risk_rules["MNQ"].get("stop_loss_price")) == 14980.0
+
+    params = info.get("risk_parameters", {})
+    assert params.get("cooldown_seconds") == 20
+    assert params.get("max_loss_streak") == 4
+    assert pytest.approx(params.get("trend_threshold")) == 0.9
+    assert params.get("default_quantity") == strategy.default_quantity
