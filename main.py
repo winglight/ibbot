@@ -93,7 +93,7 @@ module_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("module", defau
 
 
 # Timezone helpers
-LOCAL_TZ = datetime.now().astimezone().tzinfo
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 NY_TZ = ZoneInfo("America/New_York")
 
 

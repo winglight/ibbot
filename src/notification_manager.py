@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from loguru import logger
 
+from .utils import now_local
+
 from .telegram_notifier import TelegramNotifier
 from .websocket_manager import WebSocketManager
 from .database import DatabaseManager
@@ -149,7 +151,7 @@ class NotificationManager:
                 notification_data = {
                     "type": event_type,
                     "message": message,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": now_local().isoformat(),
                     **kwargs
                 }
                 await self.websocket_manager.broadcast(notification_data)
@@ -210,7 +212,7 @@ class NotificationManager:
             "quantity": quantity,
             "fill_price": price,
             "order_type": order_type,
-            "executed_at": datetime.now().isoformat()
+            "executed_at": now_local().isoformat()
         }
         
         return await self.send_notification(
@@ -244,7 +246,7 @@ class NotificationManager:
         message = f"{emoji} IBKR {title} {emoji}\n\n"
         if details:
             message += f"详情: {details}\n\n"
-        message += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        message += f"时间: {now_local().strftime('%Y-%m-%d %H:%M:%S')}"
         
         return await self.send_notification(
             message=message,

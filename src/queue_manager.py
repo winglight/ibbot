@@ -10,6 +10,8 @@ import json
 queue_logger = logger.bind(module="queue_manager", request_id="-")
 from pathlib import Path
 
+from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
+
 @dataclass
 class QueueTask:
     """队列任务数据结构"""
@@ -23,6 +25,11 @@ class QueueTask:
     error_message: Optional[str] = None
     retry_count: int = 0
     max_retries: int = 3
+
+    def __post_init__(self):
+        self.created_at = ensure_local_timezone(self.created_at) or now_local()
+        self.started_at = ensure_local_timezone(self.started_at)
+        self.completed_at = ensure_local_timezone(self.completed_at)
 
 class QueueManager:
     """简单的FIFO队列管理器"""
@@ -65,7 +72,7 @@ class QueueManager:
             task_type=task_type,
             payload=payload,
             status="pending",
-            created_at=datetime.now(),
+            created_at=now_local(),
             max_retries=max_retries
         )
         
@@ -88,9 +95,9 @@ class QueueManager:
             "task_id": task.task_id,
             "task_type": task.task_type,
             "status": task.status,
-            "created_at": task.created_at.isoformat(),
-            "started_at": task.started_at.isoformat() if task.started_at else None,
-            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            "created_at": to_local_iso(task.created_at),
+            "started_at": to_local_iso(task.started_at),
+            "completed_at": to_local_iso(task.completed_at),
             "error_message": task.error_message,
             "retry_count": task.retry_count
         }
@@ -120,9 +127,9 @@ class QueueManager:
                 "task_id": task.task_id,
                 "task_type": task.task_type,
                 "status": task.status,
-                "created_at": task.created_at.isoformat(),
-                "started_at": task.started_at.isoformat() if task.started_at else None,
-                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                "created_at": to_local_iso(task.created_at),
+                "started_at": to_local_iso(task.started_at),
+                "completed_at": to_local_iso(task.completed_at),
                 "error_message": task.error_message,
                 "retry_count": task.retry_count,
                 "payload": task.payload
@@ -205,7 +212,7 @@ class QueueManager:
     async def _process_task(self, task: QueueTask):
         """处理单个任务"""
         task.status = "processing"
-        task.started_at = datetime.now()
+        task.started_at = now_local()
         self._save_tasks()
         
         queue_logger.info(f"Processing task {task.task_id}, type: {task.task_type}")
@@ -218,7 +225,7 @@ class QueueManager:
                 raise ValueError(f"Unknown task type: {task.task_type}")
             
             task.status = "completed"
-            task.completed_at = datetime.now()
+            task.completed_at = now_local()
             queue_logger.info(f"Task {task.task_id} completed successfully")
             
         except Exception as e:
@@ -238,7 +245,7 @@ class QueueManager:
             elif "Strategy disabled" in error_msg or "Strategy not found" in error_msg:
                 # 对于禁用或不存在的策略，不进行重试，直接标记为失败
                 task.status = "failed"
-                task.completed_at = datetime.now()
+                task.completed_at = now_local()
                 queue_logger.error(f"Task {task.task_id} failed permanently: {error_msg}")
             else:
                 task.retry_count += 1
@@ -254,7 +261,7 @@ class QueueManager:
                     queue_logger.info(f"Task {task.task_id} requeued for retry")
                 else:
                     task.status = "failed"
-                    task.completed_at = datetime.now()
+                    task.completed_at = now_local()
                     queue_logger.error(
                         f"Task {task.task_id} failed permanently after {task.max_retries} retries"
                     )
@@ -392,7 +399,7 @@ class QueueManager:
                         order_type=order_type_for_record,
                         price=payload.get('price', 0.0),
                         status="Submitted",
-                        created_at=datetime.now(),
+                        created_at=now_local(),
                         executed_at=None,
                         rule_id=payload['strategy'],
                         order_source="strategy"
@@ -409,7 +416,7 @@ class QueueManager:
                 order_type=order_type_for_record,
                 price=payload.get('price', 0.0),
                 status="Submitted",
-                created_at=datetime.now(),
+                created_at=now_local(),
                 executed_at=None,
                 rule_id=payload['strategy'],
                 order_source="strategy"
@@ -442,11 +449,11 @@ class QueueManager:
             for task_id, task in self.tasks.items():
                 task_dict = asdict(task)
                 # 转换datetime为字符串
-                task_dict['created_at'] = task.created_at.isoformat()
+                task_dict['created_at'] = to_local_iso(task.created_at)
                 if task.started_at:
-                    task_dict['started_at'] = task.started_at.isoformat()
+                    task_dict['started_at'] = to_local_iso(task.started_at)
                 if task.completed_at:
-                    task_dict['completed_at'] = task.completed_at.isoformat()
+                    task_dict['completed_at'] = to_local_iso(task.completed_at)
                 tasks_data[task_id] = task_dict
             
             data = {
@@ -472,11 +479,11 @@ class QueueManager:
             tasks_data = data.get('tasks', {})
             for task_id, task_dict in tasks_data.items():
                 # 转换字符串为datetime
-                task_dict['created_at'] = datetime.fromisoformat(task_dict['created_at'])
+                task_dict['created_at'] = parse_local_datetime(task_dict['created_at'])
                 if task_dict.get('started_at'):
-                    task_dict['started_at'] = datetime.fromisoformat(task_dict['started_at'])
+                    task_dict['started_at'] = parse_local_datetime(task_dict['started_at'])
                 if task_dict.get('completed_at'):
-                    task_dict['completed_at'] = datetime.fromisoformat(task_dict['completed_at'])
+                    task_dict['completed_at'] = parse_local_datetime(task_dict['completed_at'])
                 
                 task = QueueTask(**task_dict)
                 self.tasks[task_id] = task

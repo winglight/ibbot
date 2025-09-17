@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
 
+from src.utils import now_local, parse_local_datetime
+
 from core import strategy_manager, queue_manager, order_manager
 from .auth import get_current_user
 from src.database import get_db_manager
@@ -178,17 +180,17 @@ async def get_strategy_performance_api(name: str, range: str = "1d", start: Opti
         end_date = None
         if start:
             try:
-                start_date = datetime.fromisoformat(start)
+                start_date = parse_local_datetime(start)
             except Exception:
                 start_date = None
         if end:
             try:
-                end_date = datetime.fromisoformat(end)
+                end_date = parse_local_datetime(end)
             except Exception:
                 end_date = None
         
         # Quick ranges
-        now = datetime.now()
+        now = now_local()
         if range == "1d":
             start_date = now - timedelta(days=1)
         elif range == "1w":
