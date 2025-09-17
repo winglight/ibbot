@@ -5328,6 +5328,10 @@ class TradingApp {
                 awaiting_data: awaitingData,
                 last_data_timestamp: state.last_data_timestamp || null,
             };
+            if (!res?.success) {
+                const message = res?.error || 'Failed to update data push state';
+                this.showAlert('danger', message);
+            }
             if (!awaitingData && this.summaryPushAwaitingTimer) {
                 clearTimeout(this.summaryPushAwaitingTimer);
                 this.summaryPushAwaitingTimer = null;
