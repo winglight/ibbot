@@ -187,6 +187,8 @@ class TradingApp {
         this.strategiesLoaded = false;
         this.startReminderTimeout = null;
         this.endReminderTimeout = null;
+        this.currentStrategyDetails = null;
+        this.internalStrategyOrders = [];
         // 当前订阅实时行情的合约符号，null 表示未订阅
         this.monitorRealtimeSymbol = null;
         // 缓存当日订单列表，供监控时查找最新建仓/加仓时间
@@ -4954,10 +4956,77 @@ class TradingApp {
     // 智能更新Orders表格，只更新发生变化的行
     // 订单表格相关方法已迁移到OrderManager
 
-    renderInternalOrders() {
+    renderInternalOrders(name, orders = null) {
         const tbody = document.querySelector('#internalOrdersTable tbody');
         if (!tbody) return;
-        this.orderManager.updateOrdersTableSmart(this.orders || [], tbody);
+
+        const strategyName = name || this.currentStrategyDetails;
+        const sourceOrders = Array.isArray(orders) ? orders : this.internalStrategyOrders;
+        const data = Array.isArray(sourceOrders) ? sourceOrders : [];
+        if (!strategyName || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No strategy orders</td></tr>';
+            return;
+        }
+
+        const frag = document.createDocumentFragment();
+        data.forEach(order => {
+            if (!order) return;
+            const normalized = {
+                order_id: order.order_id,
+                symbol: order.symbol,
+                action: order.action,
+                quantity: order.quantity,
+                order_type: order.order_type || 'MKT',
+                limit_price: order.price ?? order.limit_price ?? null,
+                price: order.price ?? null,
+                avg_fill_price: order.fill_price ?? order.price ?? 0,
+                status: order.status || 'Submitted',
+                pnl: Number(order.pnl ?? 0),
+                commission: Number(order.commission ?? 0),
+                order_source: order.order_source || 'strategy',
+                notes: order.notes || ''
+            };
+            const row = this.orderManager.generateOrderRowHtml(normalized);
+            if (row) {
+                frag.appendChild(row);
+            }
+        });
+
+        if (!frag.childNodes.length) {
+            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No strategy orders</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = '';
+        tbody.appendChild(frag);
+    }
+
+    async loadInternalStrategyOrders(name, limit = 200) {
+        try {
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/executions?limit=${limit}`);
+            if (!res.success) {
+                this.internalStrategyOrders = [];
+                this.renderInternalOrders(name, []);
+                return [];
+            }
+            const orders = Array.isArray(res.executions) ? res.executions.slice() : [];
+            orders.sort((a, b) => {
+                const at = a?.timestamp ? new Date(a.timestamp).getTime() : 0;
+                const bt = b?.timestamp ? new Date(b.timestamp).getTime() : 0;
+                if (bt !== at) return bt - at;
+                const aid = Number(a?.order_id) || 0;
+                const bid = Number(b?.order_id) || 0;
+                return bid - aid;
+            });
+            this.internalStrategyOrders = orders;
+            this.renderInternalOrders(name, orders);
+            return orders;
+        } catch (error) {
+            console.error('Failed to load internal strategy orders:', error);
+            this.internalStrategyOrders = [];
+            this.renderInternalOrders(name, []);
+            return [];
+        }
     }
 
     async loadPortfolio() {
@@ -5452,6 +5521,7 @@ class TradingApp {
 
     async openStrategyDetails(name) {
         try {
+            this.currentStrategyDetails = name;
             const nameEl = document.getElementById('detailsStrategyName');
             if (nameEl) nameEl.textContent = name;
             let s = null;
@@ -5490,8 +5560,49 @@ class TradingApp {
                         const info = infoRes.strategy || {};
                         const descEl = document.getElementById('summaryDescription');
                         const pathEl = document.getElementById('summaryPath');
+                        const symbolEl = document.getElementById('summaryPrimarySymbol');
+                        const highlightsEl = document.getElementById('summaryHighlights');
+                        const riskParamEl = document.getElementById('summaryRiskParams');
                         if (descEl) descEl.textContent = info.description || '';
                         if (pathEl) pathEl.textContent = info.file_path || '';
+                        if (symbolEl) symbolEl.textContent = info.primary_symbol || '-';
+                        if (highlightsEl) {
+                            const points = Array.isArray(info.summary_points) ? info.summary_points : [];
+                            if (points.length) {
+                                highlightsEl.innerHTML = '';
+                                points.forEach(text => {
+                                    const li = document.createElement('li');
+                                    li.textContent = text;
+                                    highlightsEl.appendChild(li);
+                                });
+                            } else {
+                                highlightsEl.innerHTML = '<li class="text-muted">No additional highlights</li>';
+                            }
+                        }
+                        if (riskParamEl) {
+                            const params = info.risk_parameters || {};
+                            const mappings = {
+                                trend_threshold: 'Trend Threshold',
+                                cooldown_seconds: 'Cooldown',
+                                max_loss_streak: 'Breaker (Max Loss Streak)',
+                                default_quantity: 'Base Quantity'
+                            };
+                            const entries = Object.entries(params).filter(([, value]) => value !== null && value !== undefined);
+                            if (entries.length) {
+                                riskParamEl.innerHTML = '';
+                                entries.forEach(([key, value]) => {
+                                    const label = mappings[key] || key;
+                                    const displayValue = typeof value === 'number' && !Number.isNaN(value)
+                                        ? (key === 'trend_threshold' ? value.toFixed(2) : value)
+                                        : value;
+                                    const li = document.createElement('li');
+                                    li.innerHTML = `<span class="text-muted">${label}:</span> <span class="fw-semibold">${displayValue}</span>`;
+                                    riskParamEl.appendChild(li);
+                                });
+                            } else {
+                                riskParamEl.innerHTML = '<li class="text-muted">No dedicated parameters</li>';
+                            }
+                        }
                         const schedList = document.getElementById('summarySchedule');
                         if (schedList) {
                             schedList.innerHTML = '';
@@ -5516,7 +5627,6 @@ class TradingApp {
                 } catch (err) {
                     console.error('Failed to load internal strategy info:', err);
                 }
-                this.renderInternalOrders();
             } else {
                 summaryWrap?.classList.add('d-none');
                 ordersWrap?.classList.add('d-none');
@@ -5688,11 +5798,15 @@ class TradingApp {
                 };
             }
 
-            await Promise.all([
+            const loaders = [
                 this.loadStrategyPerformance(name, { range: '1d' }),
                 this.loadStrategyExecutions(name),
                 this.loadPnLCalendar(name)
-            ]);
+            ];
+            if (isInternal) {
+                loaders.push(this.loadInternalStrategyOrders(name));
+            }
+            await Promise.all(loaders);
         } catch (e) {
             console.error('Open details error:', e);
             this.showAlert('danger', 'Failed to open strategy details');

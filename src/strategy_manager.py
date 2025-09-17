@@ -14,7 +14,7 @@ import sys
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, TYPE_CHECKING
+from typing import Dict, List, Optional, Any, TYPE_CHECKING, Set
 from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -245,7 +245,7 @@ class StrategyManager:
                 strategy_type="internal",
                 enabled=True,
                 api_endpoint=None,
-                file_path=None,
+                file_path=getattr(strategy_instance, "file_path", None),
                 description=getattr(strategy_instance, "description", name),
                 created_at=datetime.now(),
             )
@@ -266,8 +266,12 @@ class StrategyManager:
         else:
             if record.strategy_type != "internal":
                 record.strategy_type = "internal"
-            if getattr(strategy_instance, "description", None) and not record.description:
-                record.description = strategy_instance.description
+            runtime_description = getattr(strategy_instance, "description", None)
+            if runtime_description:
+                record.description = runtime_description
+            runtime_path = getattr(strategy_instance, "file_path", None)
+            if runtime_path:
+                record.file_path = runtime_path
             self._save_strategies()
 
         strategy_instance.enabled = record.enabled if record else strategy_instance.enabled
@@ -656,18 +660,51 @@ class StrategyManager:
         if not strategy or strategy.get("strategy_type") != "internal":
             return None
 
-        risk_rules: Dict[str, Any] = {}
-        if self.risk_manager:
-            symbols = {
-                item.get("symbol")
-                for item in (strategy.get("schedule") or [])
-                if isinstance(item, dict) and item.get("symbol")
-            }
+        symbols: Set[str] = set()
+        schedule_items = strategy.get("schedule") or []
+        if isinstance(schedule_items, list):
+            for item in schedule_items:
+                if isinstance(item, dict):
+                    sym = item.get("symbol")
+                    if sym:
+                        symbols.add(sym)
+
+        runtime = self.internal_strategies_runtime.get(name)
+        runtime_risk_rules: Dict[str, Any] = {}
+        if runtime:
+            runtime_symbol = getattr(runtime, "symbol", None)
+            if runtime_symbol:
+                symbols.add(runtime_symbol)
+            info_provider = getattr(runtime, "get_internal_info", None)
+            if callable(info_provider):
+                try:
+                    runtime_info = info_provider() or {}
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(f"Runtime info for {name} failed: {exc}")
+                    runtime_info = {}
+                if isinstance(runtime_info, dict):
+                    extracted_rules = runtime_info.pop("risk_rules", {})
+                    if isinstance(extracted_rules, dict):
+                        runtime_risk_rules.update(extracted_rules)
+                        symbols.update(extracted_rules.keys())
+                    for key, value in runtime_info.items():
+                        if key in {"name", "strategy_type"}:
+                            continue
+                        if value is None:
+                            continue
+                        strategy[key] = value
+
+        combined_rules: Dict[str, Any] = {}
+        if runtime_risk_rules:
+            combined_rules.update(runtime_risk_rules)
+
+        if self.risk_manager and hasattr(self.risk_manager, "risk_rules"):
             for sym in symbols:
                 rule = self.risk_manager.risk_rules.get(sym)
                 if rule:
-                    risk_rules[sym] = asdict(rule)
-        strategy["risk_rules"] = risk_rules
+                    combined_rules[sym] = asdict(rule)
+
+        strategy["risk_rules"] = combined_rules
         return strategy
 
     def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
