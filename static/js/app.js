@@ -4976,7 +4976,7 @@ class TradingApp {
             document.getElementById('strategyApiPayload').value = JSON.stringify(s.api_payload_template || {
                 strategy: '{{strategy_name}}', symbol: '{{symbol}}', action: '{{action}}', qty: '{{quantity}}', type: '{{order_type}}', price: '{{price}}'
             }, null, 2);
-            document.getElementById('strategyPath').value = s.strategy_path || 'strategy/';
+            document.getElementById('strategyPath').value = s.strategy_path || 'src/strategies/';
             document.getElementById('enableStrategyAuth').checked = !!s.enable_auth;
             document.getElementById('strategyAuthToken').value = s.auth_token || '';
         } catch (error) {
@@ -4991,7 +4991,7 @@ class TradingApp {
             const payloadText = document.getElementById('strategyApiPayload').value || '{}';
             let api_payload_template = {};
             try { api_payload_template = JSON.parse(payloadText); } catch (e) { this.showAlert('danger', 'Invalid JSON for payload template'); return; }
-            const strategy_path = document.getElementById('strategyPath').value.trim() || 'strategy/';
+            const strategy_path = document.getElementById('strategyPath').value.trim() || 'src/strategies/';
             const enable_auth = document.getElementById('enableStrategyAuth').checked;
             const auth_token = document.getElementById('strategyAuthToken').value || null;
             await this.apiCall('/strategy/settings', {

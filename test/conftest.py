@@ -1,4 +1,5 @@
 import os
+import os
 import sys
 import time
 import subprocess
@@ -25,6 +26,9 @@ def server():
     """Ensure FastAPI server is running on localhost:8000 for API tests.
     If not running, start a uvicorn subprocess and stop it after the session.
     """
+    if os.getenv("IBBOT_SKIP_SERVER", "0") == "1":
+        yield
+        return
     if _is_server_up():
         # Assume external server provided
         yield

@@ -14,12 +14,19 @@ import sys
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .utils import slugify_strategy_name
+
+DEFAULT_STRATEGY_PATH = "src/strategies/"
+LEGACY_STRATEGY_PATHS = {"strategy", "strategy/", "./strategy", "./strategy/"}
+LEGACY_STRATEGY_PATHS_NORMALIZED = {p.replace("\\", "/").rstrip("/") for p in LEGACY_STRATEGY_PATHS}
+
+if TYPE_CHECKING:
+    from src.strategies.base import BaseStrategy
 
 # Module-specific logger for strategy_manager
 strategy_logger = logger.bind(module="strategy_manager", request_id="-")
@@ -50,9 +57,10 @@ class Strategy:
 class StrategyManager:
     """Strategy Manager Class"""
     
-    def __init__(self, data_dir: str = "data", strategy_dir: str = "strategy"):
+    def __init__(self, data_dir: str = "data", strategy_dir: str = DEFAULT_STRATEGY_PATH):
         self.data_dir = Path(data_dir)
-        self.strategy_dir = Path(strategy_dir)
+        normalized_strategy_dir = self._normalize_strategy_path_value(strategy_dir)
+        self.strategy_dir = Path(normalized_strategy_dir)
         self.data_dir.mkdir(exist_ok=True)
         self.strategy_dir.mkdir(exist_ok=True)
         
@@ -69,6 +77,7 @@ class StrategyManager:
         # 内存缓存，从数据库加载
         self.strategies: Dict[str, Strategy] = {}
         self.settings: Dict[str, Any] = {}
+        self.internal_strategies_runtime: Dict[str, "BaseStrategy"] = {}
 
         # 认证token（用于外部策略访问）
         self.auth_token = None
@@ -87,6 +96,17 @@ class StrategyManager:
             f"Dependencies set for StrategyManager: risk_manager={'initialized' if risk_manager else 'None'}, "
             f"queue_manager={'initialized' if queue_manager else 'None'}"
         )
+
+        # Propagate dependencies to runtime strategies
+        for strategy in self.internal_strategies_runtime.values():
+            try:
+                strategy.set_dependencies(
+                    strategy_manager=self,
+                    risk_manager=self.risk_manager,
+                    queue_manager=self.queue_manager,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(f"Failed to propagate dependencies to {strategy.name}: {exc}")
 
     def start(self):
         """Start strategy manager scheduler"""
@@ -112,6 +132,24 @@ class StrategyManager:
         """Restart scheduler after strategy updates"""
         self.stop()
         self.start()
+
+    def _normalize_strategy_path_value(self, path_value: Optional[str]) -> str:
+        """Normalize incoming strategy path values and migrate legacy defaults."""
+
+        if path_value is None:
+            return DEFAULT_STRATEGY_PATH
+
+        path_str = str(path_value).strip()
+        if not path_str:
+            return DEFAULT_STRATEGY_PATH
+
+        normalized = path_str.replace("\\", "/")
+        stripped = normalized.rstrip("/")
+
+        if stripped in LEGACY_STRATEGY_PATHS_NORMALIZED:
+            return DEFAULT_STRATEGY_PATH
+
+        return path_str
 
     def _start_scheduler(self):
         """Start scheduler and schedule jobs"""
@@ -184,6 +222,67 @@ class StrategyManager:
                     max_instances=1,
                 )
 
+    def register_internal_strategy(self, strategy_instance: "BaseStrategy") -> None:
+        """Register a runtime-managed internal strategy instance."""
+
+        name = strategy_instance.name
+        self.internal_strategies_runtime[name] = strategy_instance
+        strategy_instance.strategy_manager = self
+
+        try:
+            strategy_instance.set_dependencies(
+                strategy_manager=self,
+                risk_manager=self.risk_manager,
+                queue_manager=self.queue_manager,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            strategy_logger.warning(f"Failed to set dependencies for {name}: {exc}")
+
+        record = self.strategies.get(name)
+        if not record:
+            record = Strategy(
+                name=name,
+                strategy_type="internal",
+                enabled=True,
+                api_endpoint=None,
+                file_path=None,
+                description=getattr(strategy_instance, "description", name),
+                created_at=datetime.now(),
+            )
+            self.strategies[name] = record
+            try:
+                db_strategy = DatabaseStrategy(
+                    name=record.name,
+                    strategy_type=record.strategy_type,
+                    enabled=record.enabled,
+                    api_endpoint=record.api_endpoint,
+                    file_path=record.file_path,
+                    description=record.description,
+                    created_at=record.created_at.isoformat(),
+                )
+                self.db_manager.save_strategy(db_strategy)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(f"Failed to persist internal strategy {name}: {exc}")
+        else:
+            if record.strategy_type != "internal":
+                record.strategy_type = "internal"
+            if getattr(strategy_instance, "description", None) and not record.description:
+                record.description = strategy_instance.description
+            self._save_strategies()
+
+        strategy_instance.enabled = record.enabled if record else strategy_instance.enabled
+        if strategy_instance.enabled:
+            strategy_instance.start()
+        else:
+            strategy_instance.stop()
+
+        try:
+            strategy_instance.on_registered()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            strategy_logger.warning(f"Strategy {name} on_registered hook failed: {exc}")
+
+        strategy_logger.info(f"Internal strategy registered: {name}")
+
     def _load_from_database(self):
         """从数据库加载策略设置、策略和执行记录"""
         try:
@@ -203,13 +302,24 @@ class StrategyManager:
                         "type": "{{order_type}}",
                         "price": "{{price}}"
                     },
-                    "strategy_path": "strategy/",
+                    "strategy_path": DEFAULT_STRATEGY_PATH,
                     "enable_auth": False,
                     "auth_token": None
                 }
                 # 保存默认设置到数据库
                 self.db_manager.save_strategy_config(self.settings)
-            
+
+            normalized_strategy_path = self._normalize_strategy_path_value(self.settings.get("strategy_path"))
+            if normalized_strategy_path != self.settings.get("strategy_path"):
+                strategy_logger.info(
+                    f"Normalizing legacy strategy_path from {self.settings.get('strategy_path')} to {normalized_strategy_path}"
+                )
+                self.settings["strategy_path"] = normalized_strategy_path
+                try:
+                    self.db_manager.save_strategy_config(self.settings)
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(f"Failed to persist normalized strategy_path: {exc}")
+
             # 更新实例变量
             self.api_endpoint = self.settings["api_endpoint"]
             self.api_method = self.settings["api_method"]
@@ -302,13 +412,20 @@ class StrategyManager:
                 "type": "{{order_type}}",
                 "price": "{{price}}"
             },
-            "strategy_path": "strategy/",
+            "strategy_path": DEFAULT_STRATEGY_PATH,
             "enable_auth": False,
             "auth_token": None
         }
-        
+
         self.settings = {**defaults, **data}
-        
+
+        normalized_strategy_path = self._normalize_strategy_path_value(self.settings.get("strategy_path"))
+        if normalized_strategy_path != self.settings.get("strategy_path"):
+            strategy_logger.info(
+                f"Normalizing legacy strategy_path from {self.settings.get('strategy_path')} to {normalized_strategy_path}"
+            )
+            self.settings["strategy_path"] = normalized_strategy_path
+
         # Update instance variables
         self.api_endpoint = self.settings["api_endpoint"]
         self.api_method = self.settings["api_method"]
@@ -385,6 +502,8 @@ class StrategyManager:
         try:
             # 过滤掉值为 None 的字段，避免覆盖已有设置
             cleaned = {k: v for k, v in new_settings.items() if v is not None}
+            if "strategy_path" in cleaned:
+                cleaned["strategy_path"] = self._normalize_strategy_path_value(cleaned["strategy_path"])
             self.settings.update(cleaned)
             self._save_settings()
             self._load_from_database()  # 重新加载以更新实例变量
@@ -578,7 +697,7 @@ class StrategyManager:
             
             # 先保存策略实体（常规字段）
             self._save_strategies()
-            
+
             # 持久化SL/TP设置
             if settings_to_save:
                 self.db_manager.save_strategy_config(settings_to_save)
@@ -586,6 +705,13 @@ class StrategyManager:
                 self.settings.update(settings_to_save)
 
             strategy_logger.info(f"Updated strategy: {name}")
+            if 'enabled' in updates:
+                runtime = self.internal_strategies_runtime.get(name)
+                if runtime:
+                    if strategy.enabled:
+                        runtime.enable()
+                    else:
+                        runtime.disable()
             self.restart_scheduler()
             return True
         except Exception as e:
