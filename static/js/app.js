@@ -1161,7 +1161,7 @@ class TradingApp {
 
         
         // 加载通知历史记录到面板
-        this.notificationsManager.loadNotificationHistory();
+        this.notificationsManager.filterNotificationHistory();
         
         console.log('All event listeners bound successfully');
     }

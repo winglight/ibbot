@@ -589,6 +589,36 @@
                 <label class="form-label">Depth Rows</label>
                 <input type="number" class="form-control" id="domNumRows" value="5">
               </div>
+              <div class="mb-3">
+                <label class="form-label">Trend Score Thresholds</label>
+                <div class="row g-2">
+                  <div class="col-6 col-md-3">
+                    <div class="input-group input-group-sm">
+                      <span class="input-group-text">L1</span>
+                      <input type="number" class="form-control" id="domTrendThreshold1" min="0" step="0.01" placeholder="0.50">
+                    </div>
+                  </div>
+                  <div class="col-6 col-md-3">
+                    <div class="input-group input-group-sm">
+                      <span class="input-group-text">L2</span>
+                      <input type="number" class="form-control" id="domTrendThreshold2" min="0" step="0.01" placeholder="0.70">
+                    </div>
+                  </div>
+                  <div class="col-6 col-md-3">
+                    <div class="input-group input-group-sm">
+                      <span class="input-group-text">L3</span>
+                      <input type="number" class="form-control" id="domTrendThreshold3" min="0" step="0.01" placeholder="0.85">
+                    </div>
+                  </div>
+                  <div class="col-6 col-md-3">
+                    <div class="input-group input-group-sm">
+                      <span class="input-group-text">L4</span>
+                      <input type="number" class="form-control" id="domTrendThreshold4" min="0" step="0.01" placeholder="0.95">
+                    </div>
+                  </div>
+                </div>
+                <div class="form-text">仅需填写正向阈值，负向阈值会自动取相反数。</div>
+              </div>
             </form>
           </div>
           <div class="modal-footer">

@@ -978,18 +978,7 @@ class RiskManager:
                         )
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.warning(f"🔒 Stop loss rule disabled for {symbol} after triggering at ${current_price:.2f}")
-                        
-                        # Send unified notification and return to avoid duplicate processing
-                        try:
-                            await self.notification_manager.send_stop_loss_notification(
-                                symbol=symbol,
-                                position=position_qty,
-                                trigger_price=current_price,
-                                order_type="loss",
-                                order_id=trade.order.orderId
-                            )
-                        except Exception as e:
-                            risk_logger.error(f"Failed to send stop-loss notification: {e}")
+
                         return
                     else:
                         risk_logger.warning(f"Failed to place stop loss market order for {symbol}")

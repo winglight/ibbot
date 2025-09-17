@@ -2,6 +2,8 @@ import time
 import asyncio
 from typing import Dict, List, Optional, Any
 
+DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
+
 import core
 from core import connection_manager, depth_subscriber, dom_config, DOMProcessor
 from src.dom_cache import DomCacheManager
@@ -23,6 +25,9 @@ class DOMService:
         self._last_metrics_by_symbol: Dict[str, Dict[str, Any]] = {}
         self._active_symbol: Optional[str] = None
         self._cache = DomCacheManager()
+        self.trend_thresholds: List[float] = list(
+            getattr(core.dom_config, "trend_thresholds", DEFAULT_TREND_THRESHOLDS)
+        ) or list(DEFAULT_TREND_THRESHOLDS)
 
     # --------------------------------------------------------------
     def _on_depth_update(self, symbol: str, data: Dict) -> None:
@@ -129,11 +134,47 @@ class DOMService:
         return False
 
     # --------------------------------------------------------------
-    def update_config(self, window: int, max_levels: int) -> None:
+    def update_config(
+        self,
+        window: int,
+        max_levels: int,
+        trend_thresholds: Optional[List[float]] = None,
+    ) -> None:
         dom_config.window = window
         dom_config.max_levels = max_levels
+        if trend_thresholds is not None:
+            dom_config.trend_thresholds = self._sanitize_thresholds(trend_thresholds)
+        self.trend_thresholds = list(dom_config.trend_thresholds)
         self.processor = DOMProcessor(window=window, max_levels=max_levels)
         core.dom_processor = self.processor
+
+    def _sanitize_thresholds(self, values: List[float]) -> List[float]:
+        if not isinstance(values, (list, tuple)):
+            values = [values]
+        filtered = [
+            float(v)
+            for v in values
+            if isinstance(v, (int, float)) and float(v) > 0
+        ]
+        if len(filtered) < len(values):
+            # attempt to coerce non numeric entries
+            for v in values:
+                if isinstance(v, str):
+                    try:
+                        f = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if f > 0:
+                        filtered.append(f)
+        if not filtered:
+            return list(DEFAULT_TREND_THRESHOLDS)
+        filtered = sorted(set(filtered))
+        # Ensure we always have 4 thresholds for the 4 segments
+        while len(filtered) < 4:
+            filtered.append(filtered[-1])
+        if len(filtered) > 4:
+            filtered = filtered[-4:]
+        return filtered
 
     # --------------------------------------------------------------
     def get_events(self) -> List[str]:

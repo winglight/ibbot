@@ -1,3 +1,5 @@
+const DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95];
+
 class DOMManager {
     constructor(app) {
         this.app = app;
@@ -12,6 +14,7 @@ class DOMManager {
         this.toggleButton = null;
         this.active = false;
         this.shouldReconnect = false;
+        this.trendThresholds = [...DEFAULT_TREND_THRESHOLDS];
         this.init();
     }
 
@@ -37,6 +40,7 @@ class DOMManager {
         if (this.metricsChartEl) {
             this.initCharts();
         }
+        this.applyTrendThresholds(this.trendThresholds);
         await this.loadConfig();
     }
 
@@ -46,11 +50,17 @@ class DOMManager {
             return { level: 0, suggestion: null };
         }
         const absScore = Math.abs(value);
+        const thresholds = (Array.isArray(this.trendThresholds) && this.trendThresholds.length)
+            ? this.trendThresholds
+            : DEFAULT_TREND_THRESHOLDS;
         let level = 0;
-        if (absScore >= 0.95) level = 4;
-        else if (absScore >= 0.85) level = 3;
-        else if (absScore >= 0.7) level = 2;
-        else if (absScore >= 0.5) level = 1;
+        for (let i = 0; i < thresholds.length; i += 1) {
+            const threshold = Number(thresholds[i]);
+            if (!Number.isFinite(threshold) || threshold <= 0) continue;
+            if (absScore >= threshold) {
+                level = i + 1;
+            }
+        }
         if (!level) return { level: 0, suggestion: null };
         return { level, suggestion: value > 0 ? 'buy' : 'sell' };
     }
@@ -204,6 +214,7 @@ class DOMManager {
             if (data) {
                 document.getElementById('domWindow').value = data.window;
                 document.getElementById('domMaxLevels').value = data.max_levels;
+                this.applyTrendThresholds(data.trend_thresholds);
             }
         } catch (e) {
             console.error('Failed to load DOM config', e);
@@ -214,13 +225,19 @@ class DOMManager {
         const windowEl = document.getElementById('domWindow');
         const maxLevelsEl = document.getElementById('domMaxLevels');
         const numRowsEl = document.getElementById('domNumRows');
+        const thresholds = this.getTrendThresholdsFromForm();
         const window = parseInt(windowEl.value, 10) || 0;
         const maxLevels = parseInt(maxLevelsEl.value, 10) || 0;
         this.numRows = parseInt(numRowsEl.value, 10) || 5;
+        this.trendThresholds = thresholds;
         try {
             await this.app.apiCall('/config/dom', {
                 method: 'PUT',
-                body: JSON.stringify({ window: window, max_levels: maxLevels })
+                body: JSON.stringify({
+                    window: window,
+                    max_levels: maxLevels,
+                    trend_thresholds: thresholds
+                })
             });
             const modalEl = document.getElementById('domSettingsModal');
             if (modalEl) bootstrap.Modal.getInstance(modalEl)?.hide();
@@ -229,6 +246,68 @@ class DOMManager {
             console.error('Failed to save DOM settings', e);
             this.app.showAlert('danger', 'Failed to save DOM settings');
         }
+    }
+
+    getTrendThresholdInputs() {
+        return [
+            document.getElementById('domTrendThreshold1'),
+            document.getElementById('domTrendThreshold2'),
+            document.getElementById('domTrendThreshold3'),
+            document.getElementById('domTrendThreshold4')
+        ];
+    }
+
+    normalizeTrendThresholds(rawValues) {
+        const source = Array.isArray(rawValues) ? rawValues : DEFAULT_TREND_THRESHOLDS;
+        const numeric = [];
+        for (const value of source) {
+            if (value === null || value === undefined || value === '') continue;
+            const parsed = typeof value === 'string' ? parseFloat(value) : Number(value);
+            if (Number.isFinite(parsed) && parsed > 0) {
+                numeric.push(parsed);
+            }
+        }
+        numeric.sort((a, b) => a - b);
+        const final = [];
+        if (!numeric.length) {
+            return [...DEFAULT_TREND_THRESHOLDS];
+        }
+        for (let i = 0; i < numeric.length && final.length < 4; i += 1) {
+            const current = numeric[i];
+            if (!final.length) {
+                final.push(current);
+            } else {
+                const last = final[final.length - 1];
+                final.push(Math.max(current, last));
+            }
+        }
+        while (final.length < 4) {
+            const fallback = DEFAULT_TREND_THRESHOLDS[final.length] ?? final[final.length - 1] ?? DEFAULT_TREND_THRESHOLDS[0];
+            const last = final[final.length - 1] ?? 0;
+            final.push(Math.max(fallback, last));
+        }
+        if (final.length > 4) {
+            final.length = 4;
+        }
+        return final;
+    }
+
+    applyTrendThresholds(rawValues) {
+        const normalized = this.normalizeTrendThresholds(rawValues);
+        this.trendThresholds = normalized;
+        const inputs = this.getTrendThresholdInputs();
+        normalized.forEach((value, idx) => {
+            const input = inputs[idx];
+            if (input) {
+                input.value = Number.isFinite(value) ? value.toFixed(2) : '';
+            }
+        });
+    }
+
+    getTrendThresholdsFromForm() {
+        const inputs = this.getTrendThresholdInputs();
+        const values = inputs.map(input => (input ? input.value : undefined));
+        return this.normalizeTrendThresholds(values);
     }
 
     async start() {
@@ -255,6 +334,7 @@ class DOMManager {
                     this.numRows = parsed;
                 }
             }
+            this.trendThresholds = this.getTrendThresholdsFromForm();
             this.resetCharts();
             this.app.domSignals = [];
             if (typeof this.app.updateDomSignalAnnotations === 'function') {
