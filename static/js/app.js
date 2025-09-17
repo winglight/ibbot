@@ -104,8 +104,18 @@ function getTrendLevelStyle(level) {
     return TREND_LEVEL_STYLES[key] || TREND_LEVEL_STYLES[0];
 }
 
+function getTrendSuggestionLabel(suggestion, level) {
+    if (!suggestion) return '';
+    const numericLevel = Number(level);
+    const resolvedLevel = Number.isFinite(numericLevel) ? Math.min(4, Math.max(1, Math.round(numericLevel))) : 1;
+    if (suggestion === 'buy') return `B${resolvedLevel}`;
+    if (suggestion === 'sell') return `S${resolvedLevel}`;
+    return '';
+}
+
 if (typeof window !== 'undefined') {
     window.getTrendLevelStyle = getTrendLevelStyle;
+    window.getTrendSuggestionLabel = getTrendSuggestionLabel;
 }
 
 const TrendSignalLabelPlugin = {
@@ -127,7 +137,8 @@ const TrendSignalLabelPlugin = {
             const { x, y } = element.tooltipPosition();
             const level = raw.level ?? 0;
             const style = getTrendLevelStyle(level);
-            const text = raw.suggestion === 'buy' ? 'Buy' : 'Sell';
+            const text = getTrendSuggestionLabel(raw.suggestion, raw.level)
+                || (raw.suggestion === 'buy' ? 'Buy' : 'Sell');
             const resolvedOffset = style.labelOffset ?? offset;
             const yOffset = raw.suggestion === 'buy' ? -resolvedOffset : resolvedOffset;
             ctx.save();
@@ -3750,7 +3761,12 @@ class TradingApp {
                                                         });
                                                     }
                                                     if (context.raw?.suggestion) {
-                                                        lines.push(context.raw.suggestion === 'buy' ? '建议：Buy' : '建议：Sell');
+                                                        const label = getTrendSuggestionLabel(context.raw.suggestion, context.raw.level);
+                                                        if (label) {
+                                                            lines.push(`建议：${label}`);
+                                                        } else {
+                                                            lines.push(context.raw.suggestion === 'buy' ? '建议：Buy' : '建议：Sell');
+                                                        }
                                                     }
                                                     return lines;
                                                 }
