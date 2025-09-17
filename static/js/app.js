@@ -444,7 +444,7 @@ class TradingApp {
 
         // Hide primary dataset from legend so that legend focuses on reference lines
         baseDataset._excludeFromLegend = true;
-
+        const that = this;
         const parsedPoints = Array.isArray(baseDataset.data)
             ? baseDataset.data.map((point) => {
                 if (!point) return null;
