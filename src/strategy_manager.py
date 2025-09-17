@@ -953,18 +953,27 @@ class StrategyManager:
         """Return runtime status metrics for an internal strategy."""
 
         runtime = self.internal_strategies_runtime.get(name)
-        if not runtime:
-            return None
-        status_provider = getattr(runtime, "get_runtime_status", None)
-        if not callable(status_provider):
-            return None
-        try:
-            status = status_provider()
-        except Exception as exc:  # pragma: no cover - defensive guard
-            strategy_logger.warning(f"Runtime status for {name} failed: {exc}")
-            return None
-        if not isinstance(status, dict):
-            return None
+        status_provider = getattr(runtime, "get_runtime_status", None) if runtime else None
+        default_status: Dict[str, Any] = {
+            "is_receiving_data": False,
+            "runtime_seconds": 0.0,
+            "processed_count": 0,
+            "threshold_hits": 0,
+            "buy_signals": 0,
+            "sell_signals": 0,
+        }
+
+        status: Dict[str, Any] = dict(default_status)
+
+        if callable(status_provider):
+            try:
+                runtime_status = status_provider()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(f"Runtime status for {name} failed: {exc}")
+            else:
+                if isinstance(runtime_status, dict):
+                    status.update(runtime_status)
+
         push_state = self.data_push_state.get(name)
         if push_state:
             status["data_push"] = {
@@ -974,6 +983,7 @@ class StrategyManager:
                 "symbol": push_state.get("symbol"),
                 "last_started": push_state.get("last_started"),
             }
+
         return status
 
     def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
