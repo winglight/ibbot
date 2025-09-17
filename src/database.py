@@ -12,7 +12,12 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from loguru import logger
 
-from src.utils import now_local, parse_local_datetime, to_local_iso
+from src.utils import (
+    ensure_local_timezone,
+    now_local,
+    parse_local_datetime,
+    to_local_iso,
+)
 
 # 为数据库模块绑定日志记录器
 database_logger = logger.bind(module="database", request_id="-")
@@ -701,10 +706,21 @@ class DatabaseManager:
             have_start = pd.to_datetime(have_df['date'].iloc[0])
             have_end = pd.to_datetime(have_df['date'].iloc[-1])
         else:
-            have_start = pd.to_datetime(have_df['date'].iloc[0] + 'T' + (have_df['time'].iloc[0] or '00:00:00'))
-            have_end = pd.to_datetime(have_df['date'].iloc[-1] + 'T' + (have_df['time'].iloc[-1] or '23:59:59'))
-        need_start = pd.to_datetime(start_dt)
-        need_end = pd.to_datetime(end_dt)
+            have_start = pd.to_datetime(
+                have_df['date'].iloc[0]
+                + 'T'
+                + (have_df['time'].iloc[0] or '00:00:00')
+            )
+            have_end = pd.to_datetime(
+                have_df['date'].iloc[-1]
+                + 'T'
+                + (have_df['time'].iloc[-1] or '23:59:59')
+            )
+
+        have_start = ensure_local_timezone(have_start.to_pydatetime())
+        have_end = ensure_local_timezone(have_end.to_pydatetime())
+        need_start = ensure_local_timezone(pd.to_datetime(start_dt).to_pydatetime())
+        need_end = ensure_local_timezone(pd.to_datetime(end_dt).to_pydatetime())
         # 若需求范围不在已有范围内，则认为缺失
         return need_start < have_start or need_end > have_end
     
