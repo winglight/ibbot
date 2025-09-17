@@ -16,7 +16,7 @@ from src.models import (
     ChartDataRequest,
     CurrentPriceRequest,
 )
-from src.utils import to_local_time
+from src.utils import now_local, to_local_iso, to_local_time
 
 router = APIRouter()
 
@@ -61,7 +61,7 @@ def _parse_duration_to_minutes(duration: str) -> int:
 def _clean_expired_cache() -> None:
     """清理过期的内存缓存"""
     global historical_data_cache
-    now = datetime.now()
+    now = now_local()
     expired_keys = [
         key
         for key, value in historical_data_cache.items()
@@ -85,7 +85,7 @@ async def get_historical_data(
     try:
         _clean_expired_cache()
         cache_key = f"{request.symbol}_{request.duration}_{request.bar_size}_{request.exchange}"
-        now = datetime.now()
+        now = now_local()
 
         if cache_key in historical_data_cache:
             cache_entry = historical_data_cache[cache_key]
@@ -223,7 +223,7 @@ async def get_chart_data(
     try:
         # 统一使用与历史接口一致的缓存策略，使用前缀避免冲突
         _clean_expired_cache()
-        now = datetime.now()
+        now = now_local()
         use_cache = True if (getattr(request, "use_cache", True) is not False) else False
         force_refresh = True if (getattr(request, "force_refresh", False) is True) else False
 
@@ -490,7 +490,7 @@ async def get_realtime_data(
                         "bid": 0,
                         "ask": 0,
                         "volume": 0,
-                        "timestamp": datetime.now().astimezone().isoformat(),
+                        "timestamp": now_local().isoformat(),
                         "is_cached": True,
                     }
             if cached_data:
@@ -517,7 +517,7 @@ async def get_realtime_data(
                         "bid": 0,
                         "ask": 0,
                         "volume": 0,
-                        "timestamp": datetime.now().astimezone().isoformat(),
+                        "timestamp": now_local().isoformat(),
                         "is_cached": True,
                     }
                     logger.info(
@@ -545,14 +545,14 @@ async def get_current_price(
                     "success": True,
                     "symbol": request.symbol,
                     "price": cached_price,
-                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "timestamp": now_local().isoformat(),
                     "source": "cache_only",
                 }
         return {
             "success": False,
             "symbol": request.symbol,
             "price": None,
-            "timestamp": datetime.now().astimezone().isoformat(),
+            "timestamp": now_local().isoformat(),
             "error": "Cache-only mode: no cached price",
         }
 
@@ -567,7 +567,7 @@ async def get_current_price(
                     "success": True,
                     "symbol": request.symbol,
                     "price": cached_price,
-                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "timestamp": now_local().isoformat(),
                     "source": "cache",
                 }
 
@@ -589,7 +589,7 @@ async def get_current_price(
                     "success": True,
                     "symbol": request.symbol,
                     "price": price,
-                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "timestamp": now_local().isoformat(),
                     "source": "realtime",
                 }
         except asyncio.TimeoutError:
@@ -618,7 +618,7 @@ async def get_current_price(
                     "success": True,
                     "symbol": request.symbol,
                     "price": latest_price,
-                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "timestamp": now_local().isoformat(),
                     "source": "historical",
                 }
         except asyncio.TimeoutError:
@@ -630,7 +630,7 @@ async def get_current_price(
             "success": False,
             "symbol": request.symbol,
             "price": None,
-            "timestamp": datetime.now().astimezone().isoformat(),
+            "timestamp": now_local().isoformat(),
             "error": "Unable to get current price",
         }
 

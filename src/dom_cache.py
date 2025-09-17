@@ -6,6 +6,8 @@ from datetime import datetime
 from threading import Lock
 from typing import Any, Dict, List
 
+from .utils import parse_local_datetime
+
 
 DOM_RETENTION_ENV = "DOM_CACHE_RETENTION_DAYS"
 
@@ -69,7 +71,8 @@ class DomCacheManager:
             ts = item["timestamp_ns"] / 1_000_000.0
         if isinstance(ts, str):
             try:
-                ts = datetime.fromisoformat(ts).timestamp() * 1000.0
+                dt = parse_local_datetime(ts)
+                ts = dt.timestamp() * 1000.0 if dt else None
             except ValueError:
                 ts = None
         if ts is None:

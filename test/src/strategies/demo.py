@@ -1,10 +1,12 @@
 """
 Strategy: demo
-Created: 2025-09-17 20:20:53
+Created: 2025-09-17 21:44:46
 """
 
 from datetime import datetime
 from typing import Dict, Any, Optional
+
+from src.utils import now_local
 
 
 class demoStrategy:
@@ -15,7 +17,7 @@ class demoStrategy:
     def __init__(self):
         self.name = "demo"
         self.description = "Strategy template for demo"
-        self.created_at = datetime.now()
+        self.created_at = now_local()
         
     def initialize(self):
         """Initialize the strategy"""

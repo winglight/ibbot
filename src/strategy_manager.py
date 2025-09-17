@@ -20,7 +20,13 @@ from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from .utils import slugify_strategy_name
+from .utils import (
+    ensure_local_timezone,
+    now_local,
+    parse_local_datetime,
+    slugify_strategy_name,
+    to_local_iso,
+)
 
 DEFAULT_STRATEGY_PATH = "src/strategies/"
 LEGACY_STRATEGY_PATHS = {"strategy", "strategy/", "./strategy", "./strategy/"}
@@ -49,10 +55,10 @@ class Strategy:
     last_triggered: Optional[datetime] = None
     schedule: Optional[List[Dict[str, Any]]] = None
     primary_symbol: Optional[str] = None
-    
+
     def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
+        self.created_at = ensure_local_timezone(self.created_at) or now_local()
+        self.last_triggered = ensure_local_timezone(self.last_triggered)
 
 
 
@@ -252,7 +258,7 @@ class StrategyManager:
                 api_endpoint=None,
                 file_path=getattr(strategy_instance, "file_path", None),
                 description=getattr(strategy_instance, "description", name),
-                created_at=datetime.now(),
+                created_at=now_local(),
             )
             self.strategies[name] = record
             try:
@@ -263,7 +269,7 @@ class StrategyManager:
                     api_endpoint=record.api_endpoint,
                     file_path=record.file_path,
                     description=record.description,
-                    created_at=record.created_at.isoformat(),
+                    created_at=to_local_iso(record.created_at),
                 )
                 self.db_manager.save_strategy(db_strategy)
             except Exception as exc:  # pragma: no cover - defensive guard
@@ -352,7 +358,7 @@ class StrategyManager:
                     api_endpoint=strategy_data.api_endpoint,
                     file_path=strategy_data.file_path,
                     description=strategy_data.description,
-                    created_at=datetime.fromisoformat(strategy_data.created_at) if strategy_data.created_at else datetime.now(),
+                    created_at=parse_local_datetime(strategy_data.created_at) if strategy_data.created_at else now_local(),
                     trigger_count=0,  # 数据库数据类中没有这个字段，设为默认值
                     last_triggered=None,
                     schedule=schedule
@@ -391,7 +397,7 @@ class StrategyManager:
                     api_endpoint=strategy.api_endpoint,
                     file_path=strategy.file_path,
                     description=strategy.description,
-                    created_at=strategy.created_at.isoformat()
+                    created_at=to_local_iso(strategy.created_at)
                 )
                 self.db_manager.save_strategy(db_strategy)
 
@@ -595,7 +601,7 @@ class StrategyManager:
                 "active": True,
                 "subscription": stored_subscription,
                 "symbol": target_symbol,
-                "last_started": datetime.utcnow().isoformat(),
+                "last_started": now_local().isoformat(),
                 "awaiting_data": True,
                 "last_data_timestamp": None,
             })
@@ -688,9 +694,9 @@ class StrategyManager:
                         # Convert string values back to appropriate types
                         row['enabled'] = row['enabled'].lower() == 'true'
                         if row['created_at']:
-                            row['created_at'] = datetime.fromisoformat(row['created_at'])
+                            row['created_at'] = parse_local_datetime(row['created_at'])
                         if row['last_triggered']:
-                            row['last_triggered'] = datetime.fromisoformat(row['last_triggered'])
+                            row['last_triggered'] = parse_local_datetime(row['last_triggered'])
                         else:
                             row['last_triggered'] = None
                         if row['trigger_count']:
@@ -719,7 +725,7 @@ class StrategyManager:
                     api_endpoint=strategy.api_endpoint,
                     file_path=strategy.file_path,
                     description=strategy.description,
-                    created_at=strategy.created_at.isoformat() if strategy.created_at else datetime.now().isoformat()
+                    created_at=to_local_iso(strategy.created_at) if strategy.created_at else now_local().isoformat()
                 )
                 self.db_manager.save_strategy(db_strategy)
             strategy_logger.info("Strategies saved to database")
@@ -791,7 +797,7 @@ class StrategyManager:
                 api_endpoint=strategy_data.get('api_endpoint'),
                 file_path=final_file_path,
                 description=strategy_data.get('description'),
-                created_at=datetime.now(),
+                created_at=now_local(),
                 schedule=strategy_data.get('schedule')
             )
             
@@ -803,7 +809,7 @@ class StrategyManager:
                 api_endpoint=strategy.api_endpoint,
                 file_path=strategy.file_path,
                 description=strategy.description,
-                created_at=strategy.created_at.isoformat()
+                created_at=to_local_iso(strategy.created_at)
             )
             self.db_manager.save_strategy(db_strategy)
             
@@ -874,14 +880,14 @@ class StrategyManager:
             strategy_dict = asdict(strategy)
             orders = self.db_manager.load_strategy_orders(strategy.name, 'strategy', limit=1000)
             strategy_dict['trigger_count'] = len(orders)
-            times = [datetime.fromisoformat(o.timestamp) for o in orders if o.timestamp]
+            times = [parse_local_datetime(o.timestamp) for o in orders if o.timestamp]
             if times:
                 strategy_dict['last_triggered'] = max(times)
             # Convert datetime objects to strings for JSON serialization
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
-                strategy_dict['created_at'] = strategy_dict['created_at'].isoformat()
+                strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
             if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
-                strategy_dict['last_triggered'] = strategy_dict['last_triggered'].isoformat()
+                strategy_dict['last_triggered'] = to_local_iso(strategy_dict['last_triggered'])
             # 合并SL/TP设置
             try:
                 settings = self.db_manager.load_strategy_config()
@@ -1020,7 +1026,7 @@ class StrategyManager:
             last_data_iso: Optional[str] = None
             if isinstance(last_data_ts, (int, float)) and last_data_ts > 0:
                 try:
-                    last_data_iso = datetime.fromtimestamp(last_data_ts).isoformat()
+                    last_data_iso = to_local_iso(ensure_local_timezone(datetime.fromtimestamp(last_data_ts)))
                 except Exception:  # pragma: no cover - defensive guard
                     last_data_iso = None
 
@@ -1162,10 +1168,10 @@ class StrategyManager:
         if cooldown_minutes > 0 and direction_flag:
             key = (strategy_name, symbol_code, direction_flag)
             last_time = self._last_position_add.get(key)
-            if last_time and datetime.utcnow() - last_time < timedelta(minutes=cooldown_minutes):
+            if last_time and now_local() - last_time < timedelta(minutes=cooldown_minutes):
                 raise ValueError(
                     f"Add-position cooldown active for {symbol_code}: remaining"
-                    f" {round((timedelta(minutes=cooldown_minutes) - (datetime.utcnow() - last_time)).total_seconds() / 60, 2)} min"
+                    f" {round((timedelta(minutes=cooldown_minutes) - (now_local() - last_time)).total_seconds() / 60, 2)} min"
                 )
 
         return {
@@ -1201,7 +1207,7 @@ class StrategyManager:
 
         if direction_flag:
             key = (strategy_name, symbol_code, direction_flag)
-            self._last_position_add[key] = datetime.utcnow()
+            self._last_position_add[key] = now_local()
 
         try:
             numeric_position = float(new_position) if new_position is not None else None
@@ -1444,11 +1450,12 @@ class StrategyManager:
         """Create a Python strategy template file"""
         template_content = f'''"""
 Strategy: {strategy_name}
-Created: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Created: {now_local().strftime('%Y-%m-%d %H:%M:%S')}
 """
 
-from datetime import datetime
 from typing import Dict, Any, Optional
+
+from src.utils import now_local
 
 
 class {strategy_name.replace(' ', '').replace('-', '').replace('_', '')}Strategy:
@@ -1459,7 +1466,7 @@ class {strategy_name.replace(' ', '').replace('-', '').replace('_', '')}Strategy
     def __init__(self):
         self.name = "{strategy_name}"
         self.description = "Strategy template for {strategy_name}"
-        self.created_at = datetime.now()
+        self.created_at = now_local()
         
     def initialize(self):
         """Initialize the strategy"""
@@ -1518,14 +1525,14 @@ if __name__ == "__main__":
             strategy_dict = asdict(strategy)
             orders = self.db_manager.load_strategy_orders(strategy.name, 'strategy', limit=1000)
             strategy_dict['trigger_count'] = len(orders)
-            times = [datetime.fromisoformat(o.timestamp) for o in orders if o.timestamp]
+            times = [parse_local_datetime(o.timestamp) for o in orders if o.timestamp]
             if times:
                 strategy_dict['last_triggered'] = max(times)
             # Convert datetime objects to strings for JSON serialization
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
-                strategy_dict['created_at'] = strategy_dict['created_at'].isoformat()
+                strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
             if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
-                strategy_dict['last_triggered'] = strategy_dict['last_triggered'].isoformat()
+                strategy_dict['last_triggered'] = to_local_iso(strategy_dict['last_triggered'])
             result.append(strategy_dict)
         return result
         
@@ -1570,9 +1577,9 @@ if __name__ == "__main__":
         try:
             orders = self.db_manager.load_strategy_orders(strategy_name, 'strategy', limit=1000)
             if start_date:
-                orders = [o for o in orders if o.timestamp and datetime.fromisoformat(o.timestamp) >= start_date]
+                orders = [o for o in orders if o.timestamp and parse_local_datetime(o.timestamp) >= start_date]
             if end_date:
-                orders = [o for o in orders if o.timestamp and datetime.fromisoformat(o.timestamp) <= end_date]
+                orders = [o for o in orders if o.timestamp and parse_local_datetime(o.timestamp) <= end_date]
             pnl_values = [o.pnl for o in orders if o.pnl is not None]
             total_executions = len(orders)
             if total_executions == 0:

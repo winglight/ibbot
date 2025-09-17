@@ -14,6 +14,12 @@ order_logger = logger.bind(module="order_manager", request_id="-")
 
 from .database import get_db_manager
 import asyncio
+from .utils import (
+    ensure_local_timezone,
+    now_local,
+    parse_local_datetime,
+    to_local_iso,
+)
 
 class OrderStatus(Enum):
     """订单状态枚举"""
@@ -67,12 +73,11 @@ class Order:
     pnl: Optional[float] = None  # 新增：订单盈亏（来自IB API）
     # 新增：软删除标记，防止被 IBKR 同步重新创建
     is_deleted: int = 0
-    
+
     def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-        if self.updated_at is None:
-            self.updated_at = self.created_at
+        self.created_at = ensure_local_timezone(self.created_at) or now_local()
+        self.updated_at = ensure_local_timezone(self.updated_at) or self.created_at
+        self.executed_at = ensure_local_timezone(self.executed_at)
 
 
 class OrderManager:
@@ -234,9 +239,9 @@ class OrderManager:
                         order_type=row[4],
                         price=row[5],
                         status=row[6] or OrderStatus.SUBMITTED.value,
-                        created_at=datetime.fromisoformat(row[7]) if row[7] else datetime.now(),
-                        updated_at=datetime.fromisoformat(row[8]) if row[8] else datetime.now(),
-                        executed_at=datetime.fromisoformat(row[9]) if row[9] else None,
+                        created_at=parse_local_datetime(row[7]) or now_local(),
+                        updated_at=parse_local_datetime(row[8]) or None,
+                        executed_at=parse_local_datetime(row[9]),
                         fill_price=row[10],
                         order_source=row[11] or OrderSource.MANUAL.value,
                         strategy_name=row[12],
@@ -254,7 +259,7 @@ class OrderManager:
                 order_logger.info(f"Loaded {len(self.orders)} orders from database")
                 
         except Exception as e:
-            order_logger.error(f"Error loading orders from database: {e}")
+                    order_logger.error(f"Error loading orders from database: {e}")
 
     def create_order(self,
                     order_id: str,
@@ -294,7 +299,7 @@ class OrderManager:
                     existing_order.status = OrderStatus.SUBMITTED.value
                     if price is not None:
                         existing_order.price = price
-                    existing_order.updated_at = datetime.now()
+                    existing_order.updated_at = now_local()
                     self._update_order_in_database(existing_order)
                     return existing_order
             
@@ -353,8 +358,10 @@ class OrderManager:
             if not order.order_source:
                 order.order_source = OrderSource.MANUAL.value
             if order.created_at is None:
-                order.created_at = datetime.now()
-            order.updated_at = datetime.now()
+                order.created_at = now_local()
+            order.created_at = ensure_local_timezone(order.created_at)
+            order.updated_at = ensure_local_timezone(order.updated_at) or now_local()
+            order.executed_at = ensure_local_timezone(order.executed_at)
             order.is_deleted = 0
 
             # 如果之前被软删除，重新激活
@@ -392,7 +399,7 @@ class OrderManager:
                         continue
                     setattr(existing_order, name, value)
 
-                existing_order.updated_at = datetime.now()
+                existing_order.updated_at = now_local()
                 existing_order.is_deleted = 0
                 self._update_order_in_database(existing_order)
                 order_logger.info(f"🔄 更新已有订单信息: {order_id}")
@@ -449,7 +456,7 @@ class OrderManager:
             
             # 更新订单状态
             order.status = status
-            order.updated_at = datetime.now()
+            order.updated_at = now_local()
 
             if fill_price is not None:
                 order.fill_price = fill_price
@@ -457,9 +464,9 @@ class OrderManager:
                     order.price = fill_price
 
             if executed_at is not None:
-                order.executed_at = executed_at
+                order.executed_at = ensure_local_timezone(executed_at)
             elif status == OrderStatus.FILLED.value:
-                order.executed_at = datetime.now()
+                order.executed_at = now_local()
 
             if notes:
                 order.notes = f"{order.notes} | {notes}" if order.notes else notes
@@ -501,7 +508,7 @@ class OrderManager:
                 "quantity": order.quantity,
                 "fill_price": order.fill_price,
                 "order_type": order.order_type,
-                "executed_at": order.executed_at.isoformat() if order.executed_at else None,
+                "executed_at": to_local_iso(order.executed_at),
                 "commission": order.commission,
                 "pnl": order.pnl,
                 "message": f"订单已成交: {order.symbol} {order.action} {order.quantity}股 @ {order.fill_price or 'N/A'}"
@@ -617,14 +624,13 @@ class OrderManager:
                 
                 # 更新数据库中的风险规则状态
                 from .database import RiskRule as DatabaseRiskRule
-                from datetime import datetime
                 db_rule = DatabaseRiskRule(
                     symbol=rule.symbol,
                     stop_loss_price=rule.stop_loss_price,
                     take_profit_price=rule.take_profit_price,
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
-                    timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
                 )
                 self.risk_manager.db_manager.save_risk_rule(db_rule)
                 
@@ -672,7 +678,7 @@ class OrderManager:
             
             # 更新状态
             order.status = OrderStatus.CANCELLED.value
-            order.updated_at = datetime.now()
+            order.updated_at = now_local()
             if reason:
                 order.notes = (order.notes or "") + f" | 取消原因: {reason}"
             
@@ -715,7 +721,7 @@ class OrderManager:
             if new_quantity is not None:
                 order.quantity = new_quantity
             
-            order.updated_at = datetime.now()
+            order.updated_at = now_local()
             order.notes = (order.notes or "") + f" | 修改: 价格 {old_price} → {order.price}, 数量 {old_quantity} → {order.quantity}"
             
             # 更新数据库
@@ -790,7 +796,7 @@ class OrderManager:
             匹配的订单对象，如果没有找到则返回None
         """
         try:
-            current_time = datetime.now()
+            current_time = now_local()
             time_threshold = current_time - timedelta(seconds=time_window_seconds)
             
             # 在内存中查找匹配的订单
@@ -880,9 +886,9 @@ class OrderManager:
                     (
                         order.order_id, order.symbol, order.action, order.quantity,
                         order.order_type, order.price, order.status,
-                        order.created_at.isoformat() if order.created_at else datetime.now().isoformat(),
-                        order.updated_at.isoformat() if order.updated_at else datetime.now().isoformat(),
-                        order.executed_at.isoformat() if order.executed_at else None,
+                        to_local_iso(order.created_at) or now_local().isoformat(),
+                        to_local_iso(order.updated_at) or now_local().isoformat(),
+                        to_local_iso(order.executed_at),
                         order.fill_price, order.order_source, order.strategy_name,
                         order.rule_id, order.parent_order_id, order.exchange,
                         order.sec_type, order.notes, order.commission, order.is_deleted
@@ -911,8 +917,8 @@ class OrderManager:
                     (
                         order.symbol, order.action, order.quantity, order.order_type,
                         order.price, order.status, 
-                        order.updated_at.isoformat() if order.updated_at else datetime.now().isoformat(),
-                        order.executed_at.isoformat() if order.executed_at else None,
+                        to_local_iso(order.updated_at) or now_local().isoformat(),
+                        to_local_iso(order.executed_at),
                         order.fill_price, order.order_source, order.strategy_name,
                         order.rule_id, order.parent_order_id, order.exchange,
                         order.sec_type, order.notes, order.commission, order.pnl, order.is_deleted,

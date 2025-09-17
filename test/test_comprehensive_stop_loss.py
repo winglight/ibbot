@@ -28,6 +28,7 @@ from src.risk_manager import RiskManager, RiskRule, OrderRequest, OrderType
 from src.ibkr_client import IBKRClient
 from src.connection_manager import ConnectionManager
 from src.telegram_notifier import TelegramNotifier
+from src.utils import now_local
 
 # 配置日志
 logging.basicConfig(
@@ -78,7 +79,7 @@ class MockIBKRClient:
             'symbol': symbol,
             'quantity': quantity,
             'action': action,
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': now_local().isoformat(),
             'status': 'FILLED'
         }
         self.orders_placed.append(order_dict)
@@ -96,7 +97,7 @@ class MockIBKRClient:
                 self.totalQuantity = order_data['quantity']
                 self.action = order_data['action']
                 self.orderType = 'MKT'
-                self.orderId = f"MOCK_{symbol}_{int(datetime.now().timestamp())}"
+                self.orderId = f"MOCK_{symbol}_{int(now_local().timestamp())}"
                 
         class MockOrderStatus:
             def __init__(self):
@@ -138,7 +139,7 @@ class MockTelegramNotifier:
         logger.info(f"Mock Telegram: {message}")
         self.notifications_sent.append({
             'message': message,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': now_local().isoformat()
         })
         return True
         
@@ -156,7 +157,7 @@ class MockTelegramNotifier:
             'order_type': order_type,
             'order_id': order_id,
             'message': message,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': now_local().isoformat()
         })
         return True
 
@@ -183,7 +184,7 @@ async def _test_comprehensive_stop_loss():
             stop_loss_price=145.0,  # 止损价格
             max_loss_percent=3.0,  # 3%止损
             enabled=True,  # 设置为激活状态
-            created_at=datetime.now()
+            created_at=now_local()
         )
         
         # 添加到风险管理器
@@ -201,7 +202,7 @@ async def _test_comprehensive_stop_loss():
         price_data = {
             'symbol': 'AAPL',
             'price': 145.0,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': now_local().isoformat()
         }
         
         logger.info(f"模拟价格数据: {price_data}")

@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from src.utils import now_local
+
 import core
 from core import connection_manager
 from .auth import get_current_user
@@ -104,7 +106,7 @@ async def get_positions(
         }
 
     try:
-        current_time = datetime.now()
+        current_time = now_local()
         if use_cache and positions_cache and positions_cache_timestamp:
             cache_age = (current_time - positions_cache_timestamp).total_seconds()
             if cache_age < POSITIONS_CACHE_TTL:
