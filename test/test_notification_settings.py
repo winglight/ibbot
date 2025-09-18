@@ -28,7 +28,7 @@ def test_module_settings_persist():
 
     payload = {
         "chrome": {"enabled": True, "config": {}, "events": ["Order Filled"]},
-        "telegram": {"enabled": True, "config": {"bot_token": "x", "chat_id": "1"}, "events": ["Risk Rule Triggered"]},
+        "telegram": {"enabled": True, "config": {"bot_token": "x", "chat_id": "1"}, "events": ["Risk Rule"]},
         "trading_reminder": {
             "enabled": False,
             "start_trading_time": "09:30",
@@ -48,4 +48,4 @@ def test_module_settings_persist():
     assert resp.status_code == 200
     data = resp.json()["settings"]
     assert "Order Filled" in data["chrome"]["events"]
-    assert "Risk Rule Triggered" in data["telegram"]["events"]
+    assert "Risk Rule" in data["telegram"]["events"]

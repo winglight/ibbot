@@ -41,13 +41,16 @@ class NotificationManager:
             'Order Filled',
             'Position Opened',
             'Position Closed',
-            'Risk Rule Triggered',
+            'Risk Rule',
+            'Risk Rule Deactivated',
             'Take Profit Triggered',
             'Stop Loss Triggered',
             'Strategy Started',
             'Strategy Stopped',
             'DOM Level 3',
-            'DOM Level 4'
+            'DOM Level 4',
+            'Trading Reminder',
+            'General'
         ]
         default_settings = {
             "chrome": {
