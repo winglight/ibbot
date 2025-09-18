@@ -2078,6 +2078,9 @@ class TradingApp {
                 symbol = normalizedSymbol;
             }
 
+            const multiplierSymbol = lookupSymbol || (typeof symbol === 'string' ? symbol.toUpperCase() : '');
+            const contractMultiplier = this.getContractMultiplier(multiplierSymbol);
+
             positionQty = resolvedPositionQty;
             currentPrice = resolvedCurrentPrice;
             avgCost = resolvedAvgCost;
@@ -2089,7 +2092,10 @@ class TradingApp {
             if (!symEl) return;
             symEl.textContent = symbol || '—';
             const combinedEl = document.getElementById('monitorPositionCombined');
-            if (combinedEl) combinedEl.textContent = `${(positionQty || 0)} ($${this.formatNumber((Math.abs(positionQty) || 0) * (currentPrice || 0))})`;
+            if (combinedEl) {
+                const positionValue = (Math.abs(positionQty) || 0) * (currentPrice || 0) * (contractMultiplier || 1);
+                combinedEl.textContent = `${(positionQty || 0)} ($${this.formatNumber(positionValue)})`;
+            }
             const curEl = document.getElementById('monitorCurrentPrice');
             if (curEl) curEl.textContent = `$${this.formatNumber(currentPrice || 0)}`;
             const avgEl = document.getElementById('monitorAvgCost');
@@ -2133,6 +2139,7 @@ class TradingApp {
                 avgCost: Number(avgCost) || 0,
                 pnl: Number(pnl) || 0,
                 pnlPercent: Number(pnlPercent) || 0,
+                contractMultiplier: Number(contractMultiplier) || 1,
                 maxTimeSpan: (this.riskRules && this.riskRules[symbol] && this.riskRules[symbol].max_time_span) || 30,
                 entryTime,
                 lastOrderTime, // 添加最近订单时间
@@ -4536,7 +4543,13 @@ class TradingApp {
 
             const qty = Number(this.currentMonitor.positionQty || 0);
             const avgCost = Number(this.currentMonitor.avgCost || 0);
-            
+            const storedMultiplier = Number(this.currentMonitor.contractMultiplier || 0);
+            const multiplierSymbol = (this.currentMonitor.symbol || symbol || '').toString().toUpperCase();
+            const contractMultiplier = (Number.isFinite(storedMultiplier) && storedMultiplier > 0)
+                ? storedMultiplier
+                : this.getContractMultiplier(multiplierSymbol);
+            this.currentMonitor.contractMultiplier = contractMultiplier;
+
             // 更新当前价格到监控上下文
             this.currentMonitor.currentPrice = price;
 
@@ -4544,18 +4557,21 @@ class TradingApp {
             if (curEl) curEl.textContent = `$${this.formatNumber(price)}`;
 
             const combinedEl = document.getElementById('monitorPositionCombined');
-            if (combinedEl) combinedEl.textContent = `${qty} ($${this.formatNumber(Math.abs(qty) * price)})`;
+            if (combinedEl) {
+                const positionValue = Math.abs(qty) * price * (contractMultiplier || 1);
+                combinedEl.textContent = `${qty} ($${this.formatNumber(positionValue)})`;
+            }
 
             // 计算未实现盈亏，区分多头和空头持仓
             let pnl = 0;
             if (qty > 0) {  // 多头
                 // 多头盈亏 = (当前价格 - 成本价) * 持仓数量
-                pnl = (price - avgCost) * qty;
+                pnl = (price - avgCost) * qty * (contractMultiplier || 1);
             } else {  // 空头
                 // 空头盈亏 = (成本价 - 当前价格) * 持仓数量的绝对值
-                pnl = (avgCost - price) * Math.abs(qty);
+                pnl = (avgCost - price) * Math.abs(qty) * (contractMultiplier || 1);
             }
-            
+
             const pnlEl = document.getElementById('monitorPnL');
             if (pnlEl) {
                 pnlEl.textContent = `$${this.formatNumber(pnl)}`;
@@ -4563,7 +4579,12 @@ class TradingApp {
                 pnlEl.classList.toggle('text-danger', pnl < 0);
             }
 
-            const denom = Math.max(1e-9, Math.abs(avgCost) * Math.max(1, Math.abs(qty)));
+            const denom = Math.max(
+                1e-9,
+                Math.abs(avgCost)
+                    * Math.max(1, Math.abs(qty))
+                    * Math.max(Math.abs(contractMultiplier) || 0, 1e-9)
+            );
             const pnlPct = (pnl / denom) * 100;
             const pnlPctEl = document.getElementById('monitorPnLPercent');
             if (pnlPctEl) {
@@ -4571,6 +4592,9 @@ class TradingApp {
                 pnlPctEl.classList.toggle('text-success', pnl >= 0);
                 pnlPctEl.classList.toggle('text-danger', pnl < 0);
             }
+
+            this.currentMonitor.pnl = pnl;
+            this.currentMonitor.pnlPercent = pnlPct;
 
             // Update asset change (daily change) in real-time
             if (this.currentMonitor.todayOpenPrice && price) {
