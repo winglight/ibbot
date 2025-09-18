@@ -337,8 +337,22 @@ class DOMService:
         return list(self.processor.last_events)
 
     # --------------------------------------------------------------
-    def get_history(self, symbol: str) -> Dict[str, List[Dict[str, Any]]]:
-        return self._cache.get_history(symbol)
+    def get_history(
+        self,
+        symbol: str,
+        *,
+        limit: Optional[int] = 500,
+        start_time: Optional[Any] = None,
+        end_time: Optional[Any] = None,
+        include_snapshots: bool = True,
+    ) -> Dict[str, Any]:
+        return self._cache.get_history(
+            symbol,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            include_snapshots=include_snapshots,
+        )
 
     # --------------------------------------------------------------
     def get_config(self) -> Dict[str, Any]:
