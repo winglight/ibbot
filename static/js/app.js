@@ -191,6 +191,9 @@ class TradingApp {
         this.internalStrategyOrders = [];
         // 当前订阅实时行情的合约符号，null 表示未订阅
         this.monitorRealtimeSymbol = null;
+        // 记录用户是否希望在重新打开时自动恢复实时行情
+        this.monitorRealtimeShouldResume = false;
+        this.monitorRealtimeResumeSymbol = null;
         // 缓存当日订单列表，供监控时查找最新建仓/加仓时间
         this.orders = [];
         // 通知列表
@@ -208,6 +211,9 @@ class TradingApp {
         this.pendingMonitorChartRender = null;
         // 图表联动时的递归保护开关
         this._syncingCharts = false;
+        // 监控弹窗全屏状态
+        this.monitorModalFullscreen = false;
+        this._monitorFullscreenChangeHandler = null;
 
         // 初始化登录管理器
         this.loginManager = new LoginManager(this);
@@ -1874,6 +1880,107 @@ class TradingApp {
         }
     }
 
+    shouldResumeMonitorRealtime(symbol) {
+        if (typeof symbol !== 'string') return false;
+        const target = symbol.trim();
+        if (!target) return false;
+        return !!(this.monitorRealtimeShouldResume && this.monitorRealtimeResumeSymbol === target);
+    }
+
+    async subscribeMonitorRealtime(symbol, options = {}) {
+        const { skipReload = false, reason = 'manual' } = options || {};
+        if (typeof symbol !== 'string') return false;
+        const target = symbol.trim();
+        if (!target) return false;
+
+        if (this.monitorRealtimeSymbol && this.monitorRealtimeSymbol !== target) {
+            this.unsubscribeMonitorRealtime({ keepPreference: false, reason: 'switch-symbol' });
+        }
+        if (this.monitorRealtimeResumeSymbol && this.monitorRealtimeResumeSymbol !== target) {
+            this.monitorRealtimeShouldResume = false;
+            this.monitorRealtimeResumeSymbol = null;
+        }
+
+        if (this.monitorRealtimeSymbol === target) {
+            this.monitorRealtimeShouldResume = true;
+            this.monitorRealtimeResumeSymbol = target;
+            if (this.currentMonitor) {
+                this.currentMonitor.realtimeActive = true;
+            }
+            if (!skipReload) {
+                this.loadMonitorChart(target, { useCache: false, forceRefresh: true });
+            }
+            return true;
+        }
+
+        try {
+            console.log('[monitor] subscribe realtime', { symbol: target, reason });
+            this.ibkrManager.ws?.send(JSON.stringify({ type: 'subscribe_realtime', symbol: target }));
+            this.monitorRealtimeSymbol = target;
+            this.monitorRealtimeShouldResume = true;
+            this.monitorRealtimeResumeSymbol = target;
+            if (this.currentMonitor) {
+                this.currentMonitor.realtimeActive = true;
+            }
+            if (!skipReload) {
+                this.loadMonitorChart(target, { useCache: false, forceRefresh: true });
+            }
+            return true;
+        } catch (err) {
+            console.error('subscribe realtime failed', err);
+            return false;
+        }
+    }
+
+    unsubscribeMonitorRealtime(options = {}) {
+        const { keepPreference = false, reason = 'manual' } = options || {};
+        const activeSymbol = this.monitorRealtimeSymbol;
+        if (activeSymbol) {
+            try {
+                console.log('[monitor] unsubscribe realtime', activeSymbol, reason);
+                this.ibkrManager.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: activeSymbol }));
+            } catch (err) {
+                console.warn('unsubscribe realtime failed', err);
+            }
+        }
+        this.monitorRealtimeSymbol = null;
+        if (this.currentMonitor) {
+            this.currentMonitor.realtimeActive = keepPreference ? !!this.currentMonitor.realtimeActive : false;
+        }
+        if (!keepPreference) {
+            this.monitorRealtimeShouldResume = false;
+            this.monitorRealtimeResumeSymbol = null;
+        } else if (activeSymbol) {
+            this.monitorRealtimeShouldResume = true;
+            this.monitorRealtimeResumeSymbol = activeSymbol;
+        }
+        return activeSymbol;
+    }
+
+    async exitMonitorFullscreen(options = {}) {
+        const { removeListener = true } = options || {};
+        const modalEl = document.getElementById('monitorModal');
+        if (modalEl) {
+            modalEl.classList.remove('monitor-fullscreen');
+        }
+        this.monitorModalFullscreen = false;
+        if (document.fullscreenElement) {
+            try {
+                if (document.exitFullscreen) {
+                    await document.exitFullscreen();
+                } else if (document.webkitExitFullscreen) {
+                    await document.webkitExitFullscreen();
+                }
+            } catch (err) {
+                console.warn('exitFullscreen failed', err);
+            }
+        }
+        if (removeListener && this._monitorFullscreenChangeHandler) {
+            document.removeEventListener('fullscreenchange', this._monitorFullscreenChangeHandler);
+            this._monitorFullscreenChangeHandler = null;
+        }
+    }
+
     async openMonitorModal(symbol, positionQty = 0, currentPrice = 0, avgCost = 0, pnl = 0, pnlPercent = 0) {
         try {
             // 获取最新订单以确定建仓/加仓时间
@@ -2111,7 +2218,14 @@ class TradingApp {
             if (modalEl) {
                 const modal = new bootstrap.Modal(modalEl);
                 modal.show();
-                
+
+                if (this._monitorFullscreenChangeHandler) {
+                    document.removeEventListener('fullscreenchange', this._monitorFullscreenChangeHandler);
+                    this._monitorFullscreenChangeHandler = null;
+                }
+                this.monitorModalFullscreen = false;
+                modalEl.classList.remove('monitor-fullscreen');
+
                 // 检查monitorTrendChart初始化状态
                 console.log('[Monitor Modal] Modal shown, checking monitorTrendChart status:');
                 console.log('[Monitor Modal] monitorTrendChart exists:', !!this.monitorTrendChart);
@@ -2125,7 +2239,11 @@ class TradingApp {
                 if (this.domManager && typeof this.domManager.updateToggleButton === 'function') {
                     this.domManager.updateToggleButton();
                 }
-                
+                if (this.domManager && this.domManager.active && typeof this.domManager.connectWS === 'function') {
+                    this.domManager.shouldReconnect = true;
+                    this.domManager.connectWS();
+                }
+
                 // 重置缩放按钮事件
                 const resetZoomBtn = document.getElementById('resetChartZoomBtn');
                 if (resetZoomBtn) {
@@ -2138,7 +2256,7 @@ class TradingApp {
                         }
                     };
                 }
-                
+
                 // 图表类型切换事件
                 const chartTypeRadios = document.querySelectorAll('input[name="chartType"]');
                 chartTypeRadios.forEach(radio => {
@@ -2148,6 +2266,76 @@ class TradingApp {
                         }
                     };
                 });
+
+                let updateFullscreenButton = null;
+                const fullscreenBtn = document.getElementById('monitorFullscreenBtn');
+                if (fullscreenBtn) {
+                    updateFullscreenButton = (active) => {
+                        fullscreenBtn.classList.toggle('monitor-fullscreen-active', active);
+                        fullscreenBtn.classList.toggle('monitor-fullscreen-inactive', !active);
+                        const icon = fullscreenBtn.querySelector('i');
+                        if (icon) {
+                            icon.classList.toggle('fa-expand', !active);
+                            icon.classList.toggle('fa-compress', active);
+                        }
+                        fullscreenBtn.setAttribute('title', active ? '退出全屏' : '全屏');
+                    };
+                    updateFullscreenButton(false);
+
+                    const enterFullscreen = async () => {
+                        modalEl.classList.add('monitor-fullscreen');
+                        try {
+                            if (modalEl.requestFullscreen) {
+                                await modalEl.requestFullscreen();
+                            } else if (modalEl.webkitRequestFullscreen) {
+                                await modalEl.webkitRequestFullscreen();
+                            }
+                        } catch (err) {
+                            console.warn('requestFullscreen failed', err);
+                        }
+                        this.monitorModalFullscreen = true;
+                        updateFullscreenButton(true);
+                    };
+
+                    const exitFullscreen = async () => {
+                        await this.exitMonitorFullscreen({ removeListener: false });
+                        updateFullscreenButton(false);
+                    };
+
+                    fullscreenBtn.onclick = async () => {
+                        const isFullscreen = document.fullscreenElement === modalEl
+                            || document.webkitFullscreenElement === modalEl;
+                        if (this.monitorModalFullscreen || modalEl.classList.contains('monitor-fullscreen') || isFullscreen) {
+                            await exitFullscreen();
+                        } else {
+                            await enterFullscreen();
+                        }
+                    };
+
+                    this._monitorFullscreenChangeHandler = () => {
+                        const activeElement = document.fullscreenElement || document.webkitFullscreenElement;
+                        if (activeElement === modalEl) {
+                            this.monitorModalFullscreen = true;
+                            modalEl.classList.add('monitor-fullscreen');
+                            updateFullscreenButton(true);
+                        } else {
+                            this.monitorModalFullscreen = false;
+                            modalEl.classList.remove('monitor-fullscreen');
+                            updateFullscreenButton(false);
+                        }
+                    };
+                    document.addEventListener('fullscreenchange', this._monitorFullscreenChangeHandler);
+                }
+
+                if (this.monitorRealtimeResumeSymbol && this.monitorRealtimeResumeSymbol !== symbol) {
+                    this.monitorRealtimeShouldResume = false;
+                    this.monitorRealtimeResumeSymbol = null;
+                }
+                if (this.monitorRealtimeSymbol && this.monitorRealtimeSymbol !== symbol) {
+                    this.unsubscribeMonitorRealtime({ keepPreference: false, reason: 'symbol-change' });
+                }
+                const shouldResumeRealtime = this.shouldResumeMonitorRealtime(symbol);
+
                 const realtimeBtn = document.getElementById('monitorRealtimeBtn');
                 if (realtimeBtn) {
                     const setActive = (active) => {
@@ -2158,37 +2346,25 @@ class TradingApp {
                             icon.classList.toggle('fa-play', !active);
                             icon.classList.toggle('fa-pause', active);
                         }
+                        realtimeBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
                     };
-                    // 如果之前订阅了其他合约，先取消订阅
-                    if (this.monitorRealtimeSymbol && this.monitorRealtimeSymbol !== symbol) {
-                        try {
-                            console.log('[monitor] unsubscribe realtime', this.monitorRealtimeSymbol);
-            this.ibkrManager.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
-                        } catch (e) {}
-                        this.monitorRealtimeSymbol = null;
-                        setActive(false);
-                    }
-                    realtimeBtn.onclick = () => {
+
+                    realtimeBtn.onclick = async () => {
                         if (this.monitorRealtimeSymbol) {
-                            try {
-                                console.log('[monitor] unsubscribe realtime', this.monitorRealtimeSymbol);
-            this.ibkrManager.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
-                            } catch (e) {}
-                            this.monitorRealtimeSymbol = null;
+                            this.unsubscribeMonitorRealtime({ reason: 'manual' });
                             setActive(false);
                         } else {
-                            try {
-                                console.log('[monitor] subscribe realtime', { symbol });
-            this.ibkrManager.ws?.send(JSON.stringify({ type: 'subscribe_realtime', symbol }));
-                                this.monitorRealtimeSymbol = symbol;
-                                setActive(true);
-                                // 开启实时后强制刷新图表，绕过缓存
-                                this.loadMonitorChart(symbol, { useCache: false, forceRefresh: true });
-                            } catch (e) {
-                                console.error('subscribe realtime failed', e);
-                            }
+                            const subscribed = await this.subscribeMonitorRealtime(symbol);
+                            setActive(subscribed && this.monitorRealtimeSymbol === symbol);
                         }
                     };
+
+                    if (shouldResumeRealtime) {
+                        const subscribed = await this.subscribeMonitorRealtime(symbol, { skipReload: true, reason: 'auto-resume' });
+                        setActive(subscribed && this.monitorRealtimeSymbol === symbol);
+                    } else {
+                        setActive(this.monitorRealtimeSymbol === symbol);
+                    }
                 }
 
                 const slInput = document.getElementById('monitorStopLoss');
@@ -2339,15 +2515,14 @@ class TradingApp {
                     };
                 }
 
-                // 关闭时取消实时订阅
-                modalEl.addEventListener('hidden.bs.modal', () => {
-                    if (this.monitorRealtimeSymbol) {
-                        try {
-                            console.log('[monitor] unsubscribe realtime', this.monitorRealtimeSymbol);
-            this.ibkrManager.ws?.send(JSON.stringify({ type: 'unsubscribe_realtime', symbol: this.monitorRealtimeSymbol }));
-                        } catch (e) {}
-                        this.monitorRealtimeSymbol = null;
+                // 关闭时释放资源并根据用户偏好保留实时订阅状态
+                modalEl.addEventListener('hidden.bs.modal', async () => {
+                    const keepPreference = this.shouldResumeMonitorRealtime(symbol);
+                    this.unsubscribeMonitorRealtime({ keepPreference, reason: 'modal-hidden' });
+                    if (typeof updateFullscreenButton === 'function') {
+                        updateFullscreenButton(false);
                     }
+                    await this.exitMonitorFullscreen({ removeListener: true });
                 }, { once: true });
 
                 // 订单状态过滤器事件绑定
@@ -2360,8 +2535,10 @@ class TradingApp {
                     };
                 });
                 
+                const chartLoadOptions = shouldResumeRealtime ? { useCache: false, forceRefresh: true } : undefined;
+
                 // 初次载入图表
-                this.loadMonitorChart(symbol);
+                this.loadMonitorChart(symbol, chartLoadOptions);
                 
                 // 初始化预期PnL显示
                 this.updateExpectedPnL();
@@ -4309,12 +4486,17 @@ class TradingApp {
             if (!payload || (payload.symbol && payload.symbol !== symbol)) return;
 
             let price = null;
-            if (typeof payload.last === 'number') price = payload.last;
-            else if (typeof payload.price === 'number') price = payload.price;
-            else if (typeof payload.close === 'number') price = payload.close;
-            if (price == null) return;
+            const priceCandidates = [payload.last, payload.price, payload.close, payload.mark, payload.current];
+            for (const candidate of priceCandidates) {
+                const numeric = Number(candidate);
+                if (Number.isFinite(numeric)) {
+                    price = numeric;
+                    break;
+                }
+            }
+            if (!Number.isFinite(price)) return;
 
-            const volume = payload.volume || payload.vol || 0;
+            const volume = Number(payload.volume ?? payload.vol ?? payload.lastVolume ?? 0) || 0;
 
             const qty = Number(this.currentMonitor.positionQty || 0);
             const avgCost = Number(this.currentMonitor.avgCost || 0);
@@ -4380,38 +4562,45 @@ class TradingApp {
                 const chartType = this.monitorChart.config.type || '';
                 let candlestickData = null;
 
-                // 获取当前图表的interval设置
                 const intervalSelect = document.getElementById('monitorInterval');
                 const intervalRaw = intervalSelect ? intervalSelect.value : '1 min';
-
-                // 标准化interval格式，移除空格，与loadMonitorChart方法保持一致
                 const interval = intervalRaw.replace(/\s+/g, '');
-
-                // 根据interval计算正确的时间点
-                const now = new Date();
-                const intervalTime = new Date(now);
-
-                switch(interval) {
-                    case '1min':
-                        intervalTime.setSeconds(0, 0);
-                        break;
-                    case '5min':
-                        const minutes5 = Math.floor(intervalTime.getMinutes() / 5) * 5;
-                        intervalTime.setMinutes(minutes5, 0, 0);
-                        break;
-                    case '15min':
-                        const minutes15 = Math.floor(intervalTime.getMinutes() / 15) * 15;
-                        intervalTime.setMinutes(minutes15, 0, 0);
-                        break;
-                    case '1hour':
-                        intervalTime.setMinutes(0, 0, 0);
-                        break;
-                    default:
-                        break;
-                }
-
                 const durationSelect = document.getElementById('monitorDuration');
                 const duration = durationSelect?.value || '1 D';
+
+                const rawTimestamp = payload.timestamp ?? payload.lastTimestamp ?? payload.lastTime ?? payload.time ?? payload.last_time ?? payload.updateTime ?? payload.datetime ?? null;
+                let baseTime = this.parseMonitorChartTime(rawTimestamp);
+                if (!(baseTime instanceof Date) || Number.isNaN(baseTime.getTime())) {
+                    baseTime = new Date();
+                }
+
+                const alignToInterval = (date) => {
+                    const aligned = new Date(date.getTime());
+                    switch (interval) {
+                        case '1min':
+                            aligned.setSeconds(0, 0);
+                            break;
+                        case '5min': {
+                            const minutes5 = Math.floor(aligned.getMinutes() / 5) * 5;
+                            aligned.setMinutes(minutes5, 0, 0);
+                            break;
+                        }
+                        case '15min': {
+                            const minutes15 = Math.floor(aligned.getMinutes() / 15) * 15;
+                            aligned.setMinutes(minutes15, 0, 0);
+                            break;
+                        }
+                        case '1hour':
+                            aligned.setMinutes(0, 0, 0);
+                            break;
+                        default:
+                            break;
+                    }
+                    return aligned;
+                };
+
+                let intervalTime = alignToInterval(baseTime);
+                let timeValue = this.normalizeMonitorTime(intervalTime);
 
                 let timeLabel;
                 if (intervalRaw.includes('day') || duration.includes('M') || duration.includes('Y')) {
@@ -4434,50 +4623,118 @@ class TradingApp {
                     });
                 }
 
-                const timeValue = intervalTime.getTime();
-
                 if (chartType === 'candlestick') {
-                    const ohlcData = Array.isArray(dataset.data) ? dataset.data : [];
+                    const sourceOhlc = Array.isArray(dataset.data) ? dataset.data : [];
+                    const ohlcData = sourceOhlc.map(bar => ({ ...bar }));
                     candlestickData = ohlcData;
                     const volumeDataset = this.monitorChart.data.datasets[1];
-                    const vData = Array.isArray(volumeDataset.data) ? volumeDataset.data : [];
+                    const sourceVolumes = Array.isArray(volumeDataset.data) ? volumeDataset.data : [];
+                    const vData = sourceVolumes.map(entry => ({ ...entry }));
+                    const labelArray = Array.isArray(this.monitorChart.data.labels)
+                        ? [...this.monitorChart.data.labels]
+                        : [];
+                    let estimatedStep = null;
                     if (ohlcData.length > 0) {
                         const lastBar = ohlcData[ohlcData.length - 1];
-                        if (lastBar.x === timeValue) {
-                            lastBar.c = price;
-                            lastBar.h = Math.max(lastBar.h || price, price);
-                            lastBar.l = Math.min(lastBar.l || price, price);
-                            lastBar.volume = volume;
-                            if (vData.length > 0 && vData[vData.length - 1].x === timeValue) {
-                                vData[vData.length - 1].y = volume;
+                        const prevBar = ohlcData.length > 1 ? ohlcData[ohlcData.length - 2] : null;
+                        if (prevBar && Number.isFinite(lastBar?.x) && Number.isFinite(prevBar.x)) {
+                            estimatedStep = Math.max(1, Math.abs(lastBar.x - prevBar.x));
+                        }
+                        if (Number.isFinite(lastBar?.x)) {
+                            const diff = timeValue - lastBar.x;
+                            if (estimatedStep) {
+                                if (Math.abs(diff) <= estimatedStep * 0.75) {
+                                    timeValue = lastBar.x;
+                                } else if (diff > estimatedStep * 0.75) {
+                                    const multiples = Math.max(1, Math.round(diff / estimatedStep));
+                                    timeValue = lastBar.x + multiples * estimatedStep;
+                                } else if (diff < -estimatedStep * 0.75) {
+                                    timeValue = lastBar.x;
+                                }
+                            } else if (timeValue <= lastBar.x) {
+                                timeValue = lastBar.x;
+                            }
+                            intervalTime = new Date(timeValue);
+                        }
+                    }
+
+                    const tolerance = (estimatedStep || 60000) * 0.75;
+                    if (ohlcData.length > 0) {
+                        const lastBar = ohlcData[ohlcData.length - 1];
+                        if (Number.isFinite(lastBar?.x) && Math.abs(lastBar.x - timeValue) <= tolerance) {
+                            const updatedBar = {
+                                ...lastBar,
+                                x: Number.isFinite(lastBar.x) ? lastBar.x : timeValue,
+                                c: price,
+                                h: Math.max(Number(lastBar.h ?? price), price),
+                                l: Math.min(Number(lastBar.l ?? price), price),
+                                volume
+                            };
+                            ohlcData[ohlcData.length - 1] = updatedBar;
+
+                            if (labelArray.length) {
+                                labelArray[labelArray.length - 1] = timeLabel;
+                            } else {
+                                labelArray.push(timeLabel);
+                            }
+
+                            if (vData.length > 0) {
+                                const lastVolume = vData[vData.length - 1];
+                                if (Number.isFinite(lastVolume?.x) && Math.abs(lastVolume.x - timeValue) <= tolerance) {
+                                    vData[vData.length - 1] = {
+                                        ...lastVolume,
+                                        x: Number.isFinite(lastVolume.x) ? lastVolume.x : timeValue,
+                                        y: volume
+                                    };
+                                } else {
+                                    vData.push({ x: timeValue, y: volume });
+                                }
                             } else {
                                 vData.push({ x: timeValue, y: volume });
                             }
                         } else {
                             ohlcData.push({ x: timeValue, o: price, h: price, l: price, c: price, volume });
                             vData.push({ x: timeValue, y: volume });
+                            labelArray.push(timeLabel);
                         }
                     } else {
                         ohlcData.push({ x: timeValue, o: price, h: price, l: price, c: price, volume });
                         vData.push({ x: timeValue, y: volume });
+                        labelArray.push(timeLabel);
                     }
 
                     const MAX_POINTS = 300;
                     if (ohlcData.length > MAX_POINTS) {
                         ohlcData.shift();
                         vData.shift();
+                        if (labelArray.length > MAX_POINTS) {
+                            while (labelArray.length > MAX_POINTS) {
+                                labelArray.shift();
+                            }
+                        } else if (labelArray.length > 0) {
+                            labelArray.shift();
+                        }
                     }
 
                     if (this.currentMonitor) {
                         this.currentMonitor.displayTimes = ohlcData.map(item => new Date(item.x));
-                        if (Array.isArray(this.monitorChart.data.labels)) {
-                            this.currentMonitor.displayLabels = Array.from(this.monitorChart.data.labels);
-                        }
+                        this.currentMonitor.displayLabels = labelArray.slice();
                     }
 
-                    // 重新分配新的数据引用，确保Chart.js能检测到变更
-                    dataset.data = ohlcData.map(bar => ({ ...bar }));
-                    volumeDataset.data = vData.map(entry => ({ ...entry }));
+                    dataset.data = ohlcData.map(bar => ({
+                        x: Number(bar.x),
+                        o: Number(bar.o ?? bar.open ?? price),
+                        h: Number(bar.h ?? bar.high ?? price),
+                        l: Number(bar.l ?? bar.low ?? price),
+                        c: Number(bar.c ?? bar.close ?? price),
+                        volume: Number(bar.volume ?? bar.v ?? 0)
+                    }));
+                    volumeDataset.data = vData.map(entry => ({
+                        x: Number(entry.x ?? timeValue),
+                        y: Number(entry.y ?? entry.volume ?? 0)
+                    }));
+                    candlestickData = dataset.data;
+                    this.monitorChart.data.labels = labelArray;
 
                     const xOptions = this.monitorChart.options?.scales?.x;
                     if (xOptions) {
@@ -4495,70 +4752,96 @@ class TradingApp {
                         }
                     }
                 } else {
-                    const labels = this.monitorChart.data.labels || [];
+                    const baseLabels = Array.isArray(this.monitorChart.data.labels)
+                        ? [...this.monitorChart.data.labels]
+                        : [];
                     const volumeDataset = this.monitorChart.data.datasets[1];
-                    let shouldUpdateLast = false;
+                    const priceData = Array.isArray(dataset.data) ? [...dataset.data] : [];
+                    const volumeData = Array.isArray(volumeDataset.data) ? [...volumeDataset.data] : [];
+                    let displayTimes = Array.isArray(this.currentMonitor?.displayTimes)
+                        ? this.currentMonitor.displayTimes.map(value => {
+                            if (value instanceof Date) return new Date(value.getTime());
+                            const parsed = this.parseMonitorChartTime(value);
+                            return parsed instanceof Date ? parsed : new Date(value);
+                        })
+                        : [];
 
-                    if (labels.length > 0) {
-                        const lastLabel = labels[labels.length - 1];
-                        console.log(`[实时更新] 比较: 最后标签="${lastLabel}", 当前标签="${timeLabel}"`);
-                        console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
-                        console.log(`[实时更新] 时间值: ${intervalTime.toISOString()}, 本地时间: ${new Date().toISOString()}`);
-                        console.log(`[实时更新] 接收到的数据 - 价格: ${price}, 成交量: ${volume}`);
-
-                        if (lastLabel === timeLabel) {
-                            dataset.data[dataset.data.length - 1] = price;
-                            volumeDataset.data[volumeDataset.data.length - 1] = volume;
-                            shouldUpdateLast = true;
-                            console.log(`[实时更新] 更新最后一个数据点: ${timeLabel}, 价格: ${price}`);
-                        } else {
-                            labels.push(timeLabel);
-                            dataset.data.push(price);
-                            volumeDataset.data.push(volume);
-                            shouldUpdateLast = false;
-                            console.log(`[实时更新] 添加新数据点: ${timeLabel}, 价格: ${price}`);
+                    const intervalMinutes = INTERVAL_MINUTES_MAP[interval] || 1;
+                    const fallbackStep = Math.max(60000, intervalMinutes * 60 * 1000);
+                    let estimatedStep = fallbackStep;
+                    if (displayTimes.length > 1) {
+                        const lastTime = this.normalizeMonitorTime(displayTimes[displayTimes.length - 1]);
+                        const prevTime = this.normalizeMonitorTime(displayTimes[displayTimes.length - 2]);
+                        if (Number.isFinite(lastTime) && Number.isFinite(prevTime) && Math.abs(lastTime - prevTime) > 0) {
+                            estimatedStep = Math.max(1, Math.abs(lastTime - prevTime));
                         }
+                    }
+
+                    const tolerance = estimatedStep * 0.75;
+                    const lastStoredTime = displayTimes.length
+                        ? this.normalizeMonitorTime(displayTimes[displayTimes.length - 1])
+                        : null;
+                    let updatedExisting = false;
+
+                    console.log(`[实时更新] interval="${intervalRaw}" duration="${duration}" 时间值=${intervalTime.toISOString()}`);
+                    console.log(`[实时更新] 最新数据 - 价格: ${price}, 成交量: ${volume}`);
+
+                    if (lastStoredTime != null && Math.abs(timeValue - lastStoredTime) <= tolerance) {
+                        if (priceData.length) {
+                            priceData[priceData.length - 1] = price;
+                        } else {
+                            priceData.push(price);
+                        }
+                        if (volumeData.length) {
+                            volumeData[volumeData.length - 1] = volume;
+                        } else {
+                            volumeData.push(volume);
+                        }
+                        if (baseLabels.length) {
+                            baseLabels[baseLabels.length - 1] = timeLabel;
+                        } else {
+                            baseLabels.push(timeLabel);
+                        }
+                        displayTimes[displayTimes.length - 1] = new Date(timeValue);
+                        updatedExisting = true;
+                        console.log(`[实时更新] 更新最后一个数据点: ${timeLabel}, 价格: ${price}`);
                     } else {
-                        labels.push(timeLabel);
-                        dataset.data.push(price);
-                        volumeDataset.data.push(volume);
-                        shouldUpdateLast = false;
-                        console.log(`[实时更新] 添加首个数据点: ${timeLabel}, 价格: ${price}`);
-                        console.log(`[实时更新] 使用的interval="${intervalRaw}", duration="${duration}"`);
-                        console.log(`[实时更新] 时间值: ${intervalTime.toISOString()}, 本地时间: ${new Date().toISOString()}`);
+                        baseLabels.push(timeLabel);
+                        priceData.push(price);
+                        volumeData.push(volume);
+                        displayTimes.push(new Date(timeValue));
+                        console.log(`[实时更新] 添加新数据点: ${timeLabel}, 价格: ${price}`);
                     }
 
                     const MAX_POINTS = 300;
-                    if (labels.length > MAX_POINTS) {
-                        labels.shift();
-                        dataset.data.shift();
-                        volumeDataset.data.shift();
+                    while (priceData.length > MAX_POINTS) {
+                        priceData.shift();
+                        if (volumeData.length) volumeData.shift();
+                        if (baseLabels.length) baseLabels.shift();
+                        if (displayTimes.length) displayTimes.shift();
                     }
 
-                    // 重新分配引用，避免Chart.js跳过数据变更
-                    this.monitorChart.data.labels = labels.slice();
-                    dataset.data = dataset.data.slice();
-                    volumeDataset.data = volumeDataset.data.slice();
+                    this.monitorChart.data.labels = baseLabels.slice();
+                    dataset.data = priceData.slice();
+                    volumeDataset.data = volumeData.slice();
 
                     if (this.currentMonitor) {
-                        const normalizedTime = new Date(timeValue);
-                        let displayTimes = Array.isArray(this.currentMonitor.displayTimes) ? [...this.currentMonitor.displayTimes] : [];
-                        if (shouldUpdateLast && displayTimes.length) {
-                            displayTimes[displayTimes.length - 1] = normalizedTime;
-                        } else {
-                            displayTimes.push(normalizedTime);
+                        this.currentMonitor.displayTimes = displayTimes.map(value =>
+                            value instanceof Date ? new Date(value.getTime()) : new Date(value)
+                        );
+                        this.currentMonitor.displayLabels = baseLabels.slice();
+                    }
+
+                    const xScale = this.monitorChart.options?.scales?.x;
+                    if (xScale && baseLabels.length) {
+                        const firstLabel = baseLabels[0];
+                        const lastLabel = baseLabels[baseLabels.length - 1];
+                        if (typeof xScale.min === 'string' || xScale.min == null) {
+                            xScale.min = firstLabel;
                         }
-                        while (displayTimes.length > labels.length) {
-                            displayTimes.shift();
+                        if (typeof xScale.max === 'string' || xScale.max == null || !updatedExisting) {
+                            xScale.max = lastLabel;
                         }
-                        if (displayTimes.length < labels.length) {
-                            const filler = displayTimes.length ? new Date(displayTimes[0].getTime()) : normalizedTime;
-                            while (displayTimes.length < labels.length) {
-                                displayTimes.unshift(new Date(filler.getTime()));
-                            }
-                        }
-                        this.currentMonitor.displayTimes = displayTimes;
-                        this.currentMonitor.displayLabels = labels.slice();
                     }
                 }
                 if (chartType === 'candlestick' && Array.isArray(candlestickData)) {
