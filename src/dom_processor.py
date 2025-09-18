@@ -3,6 +3,8 @@ from typing import List, Tuple, Dict, Optional
 
 import numpy as np
 
+from src.dom_parameter_tuner import DOMParameterTuner
+
 
 class DOMRingBuffer:
     """NumPy-based ring buffer for DOM snapshots."""
@@ -95,8 +97,15 @@ class DOMRingBuffer:
 class DOMProcessor:
     """Process depth updates using a ring buffer and compute features."""
 
-    def __init__(self, window: int = 10000, max_levels: int = 30):
+    def __init__(
+        self,
+        window: int = 10000,
+        max_levels: int = 30,
+        parameter_tuner: Optional[DOMParameterTuner] = None,
+    ):
         self.buffer = DOMRingBuffer(window=window, max_levels=max_levels)
+        self.parameter_tuner = parameter_tuner or DOMParameterTuner()
+        self.thresholds: Dict[str, Dict[str, float]] = dict(self.parameter_tuner.thresholds)
         self.last_metrics: Dict[str, float] = {}
         self.last_signals: Dict[str, bool] = {"long": False, "short": False}
         self.last_events: List[str] = []
@@ -152,7 +161,11 @@ class DOMProcessor:
         }
 
     # ------------------------------------------------------------------
-    def detect_events(self, history: List[Dict[str, float]]) -> List[str]:
+    def detect_events(
+        self,
+        history: List[Dict[str, float]],
+        thresholds: Optional[Dict[str, Dict[str, float]]] = None,
+    ) -> List[str]:
         """Detect absorb/sweep events from feature history."""
         if not history:
             return []
@@ -160,29 +173,58 @@ class DOMProcessor:
         prev = history[-2] if len(history) > 1 else {}
         events: List[str] = []
 
-        if cur.get("ofi", 0) > 0 and cur.get("obi5", 0) < 0.4:
+        params = thresholds or self.thresholds
+        absorb_cfg = params.get("absorb", {}) if isinstance(params, dict) else {}
+        sweep_cfg = params.get("sweep", {}) if isinstance(params, dict) else {}
+        buy_absorb_obi = absorb_cfg.get("obi_buy", 0.4)
+        sell_absorb_obi = absorb_cfg.get("obi_sell", 0.6)
+        absorb_ofi = float(absorb_cfg.get("ofi_sign", 0.0))
+        sweep_multiplier = float(sweep_cfg.get("ofi_multiplier", 2.0))
+        sweep_min_abs = float(sweep_cfg.get("min_abs_ofi", 0.0))
+
+        if cur.get("ofi", 0) > absorb_ofi and cur.get("obi5", 0) < buy_absorb_obi:
             events.append("buy_absorb")
-        if cur.get("ofi", 0) < 0 and cur.get("obi5", 0) > 0.6:
+        if cur.get("ofi", 0) < -absorb_ofi and cur.get("obi5", 0) > sell_absorb_obi:
             events.append("sell_absorb")
 
         prev_ofi = prev.get("ofi")
         if prev_ofi is not None:
-            if cur.get("ofi", 0) > 0 and prev_ofi > 0 and cur["ofi"] > 2 * prev_ofi:
+            if (
+                cur.get("ofi", 0) > 0
+                and prev_ofi > 0
+                and cur["ofi"] > sweep_multiplier * prev_ofi
+                and abs(cur["ofi"]) >= sweep_min_abs
+            ):
                 events.append("sweep_up")
-            if cur.get("ofi", 0) < 0 and prev_ofi < 0 and cur["ofi"] < 2 * prev_ofi:
+            if (
+                cur.get("ofi", 0) < 0
+                and prev_ofi < 0
+                and cur["ofi"] < sweep_multiplier * prev_ofi
+                and abs(cur["ofi"]) >= sweep_min_abs
+            ):
                 events.append("sweep_down")
         return events
 
     # ------------------------------------------------------------------
     @staticmethod
     def check_trade_signal(
-        features: Dict[str, float], price_structures: Optional[Dict[str, float]] = None
+        features: Dict[str, float],
+        thresholds: Optional[Dict[str, Dict[str, float]]] = None,
+        price_structures: Optional[Dict[str, float]] = None,
     ) -> Dict[str, bool]:
         """Return simple long/short trade signals."""
         signals = {"long": False, "short": False}
-        if features.get("obi5", 0) > 0.6 and features.get("ofi", 0) > 0:
+        params = thresholds or {}
+        long_cfg = params.get("long", {})
+        short_cfg = params.get("short", {})
+        long_obi = float(long_cfg.get("obi", 0.6))
+        long_ofi = float(long_cfg.get("ofi", 0.0))
+        short_obi = float(short_cfg.get("obi", 0.4))
+        short_ofi = float(short_cfg.get("ofi", 0.0))
+
+        if features.get("obi5", 0) >= long_obi and features.get("ofi", 0) >= long_ofi:
             signals["long"] = True
-        if features.get("obi5", 0) < 0.4 and features.get("ofi", 0) < 0:
+        if features.get("obi5", 0) <= short_obi and features.get("ofi", 0) <= short_ofi:
             signals["short"] = True
         return signals
 
@@ -221,9 +263,14 @@ class DOMProcessor:
         features["timestamp_ns"] = ts_ns
         features["timestamp"] = float(timestamp_ms)
         self.features_history.append(features)
+        # Detect events using previous thresholds so tuner can react
+        baseline_events = self.detect_events(self.features_history, self.thresholds)
+        self.thresholds = self.parameter_tuner.update(features, baseline_events)
+        features["thresholds"] = dict(self.thresholds)
+        features["session"] = self.thresholds.get("session", {}).get("active")
+        self.last_events = self.detect_events(self.features_history, self.thresholds)
+        self.last_signals = self.check_trade_signal(features, self.thresholds)
         self.last_metrics = features
-        self.last_events = self.detect_events(self.features_history)
-        self.last_signals = self.check_trade_signal(features)
 
 
 __all__ = ["DOMRingBuffer", "DOMProcessor"]

@@ -3,6 +3,20 @@ import pytest
 from src.dom_processor import DOMRingBuffer, DOMProcessor
 
 
+class _StaticTuner:
+    def __init__(self) -> None:
+        self.thresholds = {
+            "session": {"active": "RTH"},
+            "long": {"obi": 0.8, "ofi": 0.0},
+            "short": {"obi": 0.2, "ofi": 0.0},
+            "absorb": {"obi_buy": 0.4, "obi_sell": 0.6, "ofi_sign": 0.0},
+            "sweep": {"ofi_multiplier": 2.0, "min_abs_ofi": 0.0},
+        }
+
+    def update(self, metrics, events=()):
+        return self.thresholds
+
+
 def test_ring_buffer_wrap():
     buf = DOMRingBuffer(window=3, max_levels=2)
     # add 4 snapshots to force wrap
@@ -90,3 +104,20 @@ def test_trend_score_range():
     assert score is not None
     assert -1.0 <= score <= 1.0
     assert score > 0
+
+
+def test_dom_processor_respects_custom_thresholds():
+    tuner = _StaticTuner()
+    p = DOMProcessor(window=5, max_levels=1, parameter_tuner=tuner)
+    p.on_depth_update({
+        "bids": [(100, 10)],
+        "asks": [(101, 20)],
+        "ts_ns": 1_000_000_000,
+    })
+    assert not p.last_signals["long"]
+    p.on_depth_update({
+        "bids": [(100, 80)],
+        "asks": [(101, 10)],
+        "ts_ns": 2_000_000_000,
+    })
+    assert p.last_signals["long"]
