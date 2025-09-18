@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -6,7 +6,7 @@ from loguru import logger
 
 from core import notification_manager, telegram_notifier
 from .auth import get_current_user
-from src.database import get_db_manager
+from src.database import get_db_manager, DatabaseManager
 
 router = APIRouter()
 
@@ -41,10 +41,12 @@ async def send_notification(req: NotificationRequest, user: Optional[str] = Depe
 
 
 @router.get("/api/notifications/settings")
-async def get_notification_settings(user: Optional[str] = Depends(get_current_user)):
+async def get_notification_settings(
+    user: Optional[str] = Depends(get_current_user),
+    db: DatabaseManager = Depends(get_db_manager),
+):
     """获取通知设置"""
     try:
-        db = get_db_manager()
         settings = db.load_notification_config()
 
         # 前后端事件名映射：令牌<->标签
@@ -65,67 +67,93 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
             'general': 'General',
             'test': 'Test',
         }
-        label_to_token = {label: token for token, label in token_to_label.items()}
-        label_to_token['Risk Rule Triggered'] = 'risk_rule'
+        label_to_token = {label.lower(): token for token, label in token_to_label.items()}
+        label_to_token['risk rule triggered'] = 'risk_rule'
 
-        # 如果没有设置，返回默认配置（使用前端展示的事件标签）
-        if not settings:
-            default_events_labels = list(dict.fromkeys(token_to_label.values()))
-            settings = {
-                "chrome": {
-                    "enabled": True,
-                    "config": {},
-                    "events": default_events_labels
+        default_events_labels = list(dict.fromkeys(token_to_label.values()))
+
+        def events_to_labels(events: Optional[List[Any]]) -> List[str]:
+            if not isinstance(events, list) or not events:
+                return default_events_labels.copy()
+            labels: List[str] = []
+            for item in events:
+                if isinstance(item, str):
+                    key = item
+                    if key in token_to_label:
+                        labels.append(token_to_label[key])
+                        continue
+                    lowered = key.lower()
+                    if lowered in label_to_token:
+                        labels.append(token_to_label[label_to_token[lowered]])
+                        continue
+                labels.append(str(item))
+            return labels
+
+        sanitized_settings = {
+            "chrome": {
+                "enabled": True,
+                "config": {},
+                "events": default_events_labels.copy(),
+            },
+            "telegram": {
+                "enabled": False,
+                "config": {
+                    "bot_token": "",
+                    "chat_id": "",
                 },
-                "telegram": {
-                    "enabled": False,
-                    "config": {
-                        "bot_token": "",
-                        "chat_id": ""
-                    },
-                    "events": default_events_labels
-                },
-                "trading_reminder": {
-                    "enabled": False,
-                    "start_trading_time": "09:30",
-                    "end_trading_time": "16:00",
-                    "browser_notification_enabled": True,
-                    "telegram_reminder_enabled": False
-                },
-                # 前端需要的邮件配置默认字段（兼容旧版本）
-                "email_enabled": False,
-                "email_address": ""
+                "events": default_events_labels.copy(),
+            },
+            "trading_reminder": {
+                "enabled": False,
+                "start_trading_time": "09:30",
+                "end_trading_time": "16:00",
+                "browser_notification_enabled": True,
+                "telegram_reminder_enabled": False,
+            },
+            "email_enabled": False,
+            "email_address": "",
+        }
+
+        if settings:
+            chrome_cfg = settings.get("chrome") or {}
+            sanitized_settings["chrome"]["enabled"] = bool(chrome_cfg.get("enabled", True))
+            sanitized_settings["chrome"]["config"] = dict(chrome_cfg.get("config") or {})
+            sanitized_settings["chrome"]["events"] = events_to_labels(chrome_cfg.get("events"))
+
+            telegram_cfg = settings.get("telegram") or {}
+            sanitized_settings["telegram"]["enabled"] = bool(telegram_cfg.get("enabled", False))
+            original_tg_config = dict(telegram_cfg.get("config") or {})
+            bot_token = original_tg_config.get("bot_token", "")
+            chat_id = original_tg_config.get("chat_id", "")
+            sanitized_settings["telegram"]["config"] = {
+                "bot_token": "***" if bot_token else "",
+                "chat_id": "***" if chat_id else "",
             }
-        else:
-            # 兼容旧数据：补齐email字段
-            settings.setdefault("email_enabled", False)
-            settings.setdefault("email_address", "")
-            # 将存储的事件（可能为令牌）转换为前端标签
-            for ch in ("chrome", "telegram"):
-                ch_cfg = settings.get(ch) or {}
-                evs = ch_cfg.get("events")
-                # 如果缺失或为空则使用默认事件标签
-                if not isinstance(evs, list) or not evs:
-                    ch_cfg["events"] = default_events_labels.copy()
-                else:
-                    normalised_events = []
-                    for e in evs:
-                        if e in token_to_label:
-                            normalised_events.append(token_to_label[e])
-                        elif e == 'Risk Rule Triggered':
-                            normalised_events.append('Risk Rule')
-                        else:
-                            normalised_events.append(e)
-                    ch_cfg["events"] = normalised_events
-                settings[ch] = ch_cfg
-        
-        return {"success": True, "settings": settings}
+            sanitized_settings["telegram"]["events"] = events_to_labels(telegram_cfg.get("events"))
+
+            reminder_cfg = settings.get("trading_reminder") or {}
+            sanitized_settings["trading_reminder"].update({
+                "enabled": bool(reminder_cfg.get("enabled", False)),
+                "start_trading_time": reminder_cfg.get("start_trading_time", "09:30"),
+                "end_trading_time": reminder_cfg.get("end_trading_time", "16:00"),
+                "browser_notification_enabled": reminder_cfg.get("browser_notification_enabled", True),
+                "telegram_reminder_enabled": reminder_cfg.get("telegram_reminder_enabled", False),
+            })
+
+            sanitized_settings["email_enabled"] = bool(settings.get("email_enabled", False))
+            sanitized_settings["email_address"] = settings.get("email_address", "") or ""
+
+        return {"success": True, "settings": sanitized_settings}
     except Exception as e:
         logger.error(f"Get notification settings error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/api/notifications/settings")
-async def update_notification_settings(settings: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
+async def update_notification_settings(
+    settings: Dict[str, Any],
+    user: Optional[str] = Depends(get_current_user),
+    db: DatabaseManager = Depends(get_db_manager),
+):
     """更新通知设置"""
     try:
         # 前后端事件名映射：令牌<->标签
@@ -149,6 +177,11 @@ async def update_notification_settings(settings: Dict[str, Any], user: Optional[
         label_to_token = {label: token for token, label in token_to_label.items()}
         label_to_token['Risk Rule Triggered'] = 'risk_rule'
 
+        existing_settings = db.load_notification_config() or {}
+        existing_telegram_config = (
+            (existing_settings.get("telegram") or {}).get("config") or {}
+        )
+
         # 保存前，将事件标签转换为后端存储令牌
         for ch in ("chrome", "telegram"):
             ch_cfg = settings.get(ch) or {}
@@ -165,8 +198,17 @@ async def update_notification_settings(settings: Dict[str, Any], user: Optional[
                         converted.append(label_to_token.get(e, e))
                 ch_cfg["events"] = converted
             settings[ch] = ch_cfg
-        
-        db = get_db_manager()
+
+        placeholder = "***"
+        telegram_cfg = settings.get("telegram") or {}
+        tg_config = dict(telegram_cfg.get("config") or {})
+        if isinstance(tg_config.get("bot_token"), str) and tg_config["bot_token"].strip() == placeholder:
+            tg_config["bot_token"] = existing_telegram_config.get("bot_token", "")
+        if isinstance(tg_config.get("chat_id"), str) and tg_config["chat_id"].strip() == placeholder:
+            tg_config["chat_id"] = existing_telegram_config.get("chat_id", "")
+        telegram_cfg["config"] = tg_config
+        settings["telegram"] = telegram_cfg
+
         db.save_notification_config(settings)
         
         # 更新Telegram通知器配置（使用update_config以重建Bot实例）

@@ -206,7 +206,7 @@ body.side-panel-open {
     position: fixed;
     top: 0;
     bottom: 0;
-    width: min(420px, 92vw);
+    width: clamp(320px, 33.333vw, 540px);
     background: #ffffff;
     box-shadow: 0 20px 45px rgba(15, 23, 42, 0.18);
     transform: translate3d(0, 0, 0);
@@ -267,6 +267,30 @@ body.side-panel-open {
 .side-panel .card-header .config-card-toggle:hover,
 .side-panel .card-header .config-card-toggle:focus {
     color: #0d6efd !important;
+}
+
+#notificationsPanel .side-panel-body {
+    display: flex;
+    flex-direction: column;
+    overflow-y: hidden;
+}
+
+#notificationsPanel .side-panel-body > .mb-3 {
+    flex: 0 0 auto;
+}
+
+#notificationsPanel .notification-history-table {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    max-height: none;
+}
+
+#notificationsPanel .notification-history-table.table-responsive {
+    height: 100%;
+}
+
+#notificationsPanel .notification-history-table table {
+    margin-bottom: 0;
 }
 
 .config-card-toggle {
