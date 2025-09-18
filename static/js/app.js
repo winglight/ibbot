@@ -347,6 +347,26 @@ class TradingApp {
         return Number.isFinite(v) ? v.toFixed(digits) : String(v);
     }
 
+    formatRuntimeDuration(seconds) {
+        if (!Number.isFinite(seconds)) return '-';
+        const safeSeconds = Math.max(0, seconds);
+        let value = safeSeconds;
+        let unit = 's';
+        if (safeSeconds >= 86400) {
+            value = safeSeconds / 86400;
+            unit = 'd';
+        } else if (safeSeconds >= 3600) {
+            value = safeSeconds / 3600;
+            unit = 'h';
+        } else if (safeSeconds >= 60) {
+            value = safeSeconds / 60;
+            unit = 'min';
+        }
+        const decimals = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+        const formattedValue = parseFloat(value.toFixed(decimals));
+        return `${formattedValue} ${unit}`;
+    }
+
 
     // 仅在创建 chart 后、首轮配置时调用一次
     setupTrendLegendAndAnnotations(chart) {
@@ -5787,7 +5807,10 @@ class TradingApp {
             if (!res?.success) throw new Error('Failed to fetch status');
             const status = res.status || {};
             receivingEl.textContent = status.is_receiving_data ? 'Yes' : 'No';
-            runtimeEl && (runtimeEl.textContent = typeof status.runtime_seconds === 'number' ? status.runtime_seconds.toFixed(1) : '-');
+            runtimeEl && (runtimeEl.textContent =
+                typeof status.runtime_seconds === 'number'
+                    ? this.formatRuntimeDuration(status.runtime_seconds)
+                    : '-');
             processedEl && (processedEl.textContent = status.processed_count ?? '-');
             thresholdEl && (thresholdEl.textContent = status.threshold_hits ?? '-');
             buyEl && (buyEl.textContent = status.buy_signals ?? '-');
