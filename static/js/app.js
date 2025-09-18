@@ -4630,9 +4630,18 @@ class TradingApp {
                     const sourceOhlc = Array.isArray(dataset.data) ? dataset.data : [];
                     const ohlcData = sourceOhlc.map(bar => ({ ...bar }));
                     candlestickData = ohlcData;
-                    const volumeDataset = this.monitorChart.data.datasets[1];
-                    const sourceVolumes = Array.isArray(volumeDataset.data) ? volumeDataset.data : [];
-                    const vData = sourceVolumes.map(entry => ({ ...entry }));
+                    const volumeDataset = this.monitorChart.data.datasets?.[1];
+                    const sourceVolumes = Array.isArray(volumeDataset?.data) ? volumeDataset.data : [];
+                    const vData = sourceVolumes.map((entry) => {
+                        if (typeof entry === 'object' && entry !== null) {
+                            return { ...entry };
+                        }
+                        const numericVolume = Number(entry);
+                        return {
+                            x: timeValue,
+                            y: Number.isFinite(numericVolume) ? numericVolume : 0
+                        };
+                    });
                     const labelArray = Array.isArray(this.monitorChart.data.labels)
                         ? [...this.monitorChart.data.labels]
                         : [];
@@ -4719,25 +4728,68 @@ class TradingApp {
                         }
                     }
 
-                    if (this.currentMonitor) {
-                        this.currentMonitor.displayTimes = ohlcData.map(item => new Date(item.x));
-                        this.currentMonitor.displayLabels = labelArray.slice();
+                    const sanitizedOhlc = ohlcData.map((bar) => {
+                        const normalizedX = this.normalizeMonitorTime(bar?.x ?? bar?.t ?? bar?.time ?? timeValue);
+                        const openCandidate = Number(bar?.o ?? bar?.open ?? bar?.c ?? bar?.close ?? price);
+                        const closeCandidate = Number(bar?.c ?? bar?.close ?? bar?.o ?? bar?.open ?? price);
+                        const highCandidate = Number(bar?.h ?? bar?.high ?? closeCandidate ?? openCandidate ?? price);
+                        const lowCandidate = Number(bar?.l ?? bar?.low ?? closeCandidate ?? openCandidate ?? price);
+                        const volumeCandidate = Number(bar?.volume ?? bar?.v ?? 0);
+
+                        const resolvedX = Number.isFinite(normalizedX) ? normalizedX : timeValue;
+                        const resolvedClose = Number.isFinite(closeCandidate) ? closeCandidate : price;
+                        const resolvedOpen = Number.isFinite(openCandidate) ? openCandidate : resolvedClose;
+                        const resolvedHighBase = Number.isFinite(highCandidate) ? highCandidate : resolvedClose;
+                        const resolvedLowBase = Number.isFinite(lowCandidate) ? lowCandidate : resolvedClose;
+                        const resolvedVolume = Number.isFinite(volumeCandidate) ? volumeCandidate : 0;
+
+                        const resolvedHigh = Math.max(resolvedHighBase, resolvedOpen, resolvedClose);
+                        const resolvedLow = Math.min(resolvedLowBase, resolvedOpen, resolvedClose);
+
+                        return {
+                            x: resolvedX,
+                            t: resolvedX,
+                            o: resolvedOpen,
+                            h: resolvedHigh,
+                            l: resolvedLow,
+                            c: resolvedClose,
+                            volume: resolvedVolume,
+                            v: resolvedVolume
+                        };
+                    });
+                    dataset.data = sanitizedOhlc;
+                    if (this.monitorChart.config?.data?.datasets?.[0]) {
+                        this.monitorChart.config.data.datasets[0].data = sanitizedOhlc;
                     }
 
-                    dataset.data = ohlcData.map(bar => ({
-                        x: Number(bar.x),
-                        o: Number(bar.o ?? bar.open ?? price),
-                        h: Number(bar.h ?? bar.high ?? price),
-                        l: Number(bar.l ?? bar.low ?? price),
-                        c: Number(bar.c ?? bar.close ?? price),
-                        volume: Number(bar.volume ?? bar.v ?? 0)
-                    }));
-                    volumeDataset.data = vData.map(entry => ({
-                        x: Number(entry.x ?? timeValue),
-                        y: Number(entry.y ?? entry.volume ?? 0)
-                    }));
+                    const sanitizedVolumes = vData.map((entry) => {
+                        const rawX = entry?.x ?? entry?.t ?? entry?.time ?? entry;
+                        const normalizedX = this.normalizeMonitorTime(rawX ?? timeValue);
+                        const volumeCandidate = Number(entry?.y ?? entry?.volume ?? entry?.v ?? entry ?? 0);
+                        const resolvedX = Number.isFinite(normalizedX) ? normalizedX : timeValue;
+                        const resolvedVolume = Number.isFinite(volumeCandidate) ? volumeCandidate : 0;
+                        return {
+                            x: resolvedX,
+                            t: resolvedX,
+                            y: resolvedVolume,
+                            volume: resolvedVolume
+                        };
+                    });
+                    if (volumeDataset) {
+                        volumeDataset.data = sanitizedVolumes;
+                        if (this.monitorChart.config?.data?.datasets?.[1]) {
+                            this.monitorChart.config.data.datasets[1].data = sanitizedVolumes;
+                        }
+                    }
                     candlestickData = dataset.data;
-                    this.monitorChart.data.labels = labelArray;
+                    this.monitorChart.data.labels = labelArray.slice();
+                    if (this.monitorChart.config?.data) {
+                        this.monitorChart.config.data.labels = labelArray.slice();
+                    }
+                    if (this.currentMonitor) {
+                        this.currentMonitor.displayTimes = sanitizedOhlc.map(item => new Date(item.x));
+                        this.currentMonitor.displayLabels = labelArray.slice();
+                    }
 
                     const xOptions = this.monitorChart.options?.scales?.x;
                     if (xOptions) {
@@ -4911,18 +4963,23 @@ class TradingApp {
                     }
                 }
                 // 调整成交量轴的最大值，使柱状图高度不超过整体三分之一
-                const volDataset = this.monitorChart.data.datasets[1];
-                const volumes = volDataset.data
-                    .map(v => (typeof v === 'object' && v !== null) ? v.y : v)
-                    .filter(v => typeof v === 'number' && !isNaN(v));
+                const volDataset = this.monitorChart.data.datasets?.[1];
+                const volumes = Array.isArray(volDataset?.data)
+                    ? volDataset.data
+                        .map(v => (typeof v === 'object' && v !== null) ? v.y : v)
+                        .filter(v => typeof v === 'number' && !Number.isNaN(v))
+                    : [];
                 const maxVol = volumes.length ? Math.max(...volumes) : 0;
-                this.monitorChart.options.scales.y1.max = (maxVol * 3) || 1;
+                if (this.monitorChart.options?.scales?.y1) {
+                    this.monitorChart.options.scales.y1.max = (maxVol * 3) || 1;
+                }
 
-                console.log(`[图表更新] 准备更新图表，数据点数量: ${dataset.data.length}, 成交量数据点: ${volDataset.data.length}`);
+                const volumeSample = Array.isArray(volDataset?.data) ? volDataset.data : [];
+                console.log(`[图表更新] 准备更新图表，数据点数量: ${dataset.data.length}, 成交量数据点: ${volumeSample.length}`);
                 console.log(`[图表更新] 价格数据: ${JSON.stringify(dataset.data.slice(-3))}`);
-                console.log(`[图表更新] 成交量数据: ${JSON.stringify(volDataset.data.slice(-3))}`);
+                console.log(`[图表更新] 成交量数据: ${JSON.stringify(volumeSample.slice(-3))}`);
                 console.log(`[图表更新] 标签数据: ${JSON.stringify(this.monitorChart.data.labels.slice(-3))}`);
-                
+
                 this.monitorChart.update('none');
                 console.log(`[图表更新] 图表更新完成`);
 
