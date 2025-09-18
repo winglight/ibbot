@@ -180,7 +180,7 @@ class QueueManager:
                     import core
                     if task and task.status == "pending":
                         # 当任务需要IBKR连接但当前未连接时，延后处理，避免无意义的失败与重试
-                        if task.task_type in ("strategy_order",) and core.ibkr_client.is_connected():
+                        if task.task_type in ("strategy_order",) and not core.ibkr_client.is_connected():
                             # 重新放回队列尾部，并短暂休眠以避免紧密轮询
                             self.pending_queue.append(task_id)
                             queue_logger.debug(f"Deferring task {task_id} due to IBKR not connected")
