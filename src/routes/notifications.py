@@ -12,6 +12,7 @@ router = APIRouter()
 
 class NotificationRequest(BaseModel):
     message: str
+    event_type: Optional[str] = "general"
 
 
 class NotificationTestRequest(BaseModel):
@@ -22,9 +23,10 @@ class NotificationTestRequest(BaseModel):
 async def send_notification(req: NotificationRequest, user: Optional[str] = Depends(get_current_user)):
     """发送通知"""
     try:
+        event_type = (req.event_type or "general").strip() or "general"
         results = await notification_manager.send_notification(
             message=req.message,
-            event_type="test",
+            event_type=event_type,
             category="api"
         )
         success = any(results.values()) if isinstance(results, dict) else bool(results)
@@ -50,19 +52,25 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
             'order_filled': 'Order Filled',
             'position_opened': 'Position Opened',
             'position_closed': 'Position Closed',
-            'risk_triggered': 'Risk Rule Triggered',
+            'risk_triggered': 'Risk Rule',
+            'risk_rule': 'Risk Rule',
+            'risk_rule_deactivated': 'Risk Rule Deactivated',
             'take_profit': 'Take Profit Triggered',
             'stop_loss': 'Stop Loss Triggered',
             'strategy_started': 'Strategy Started',
             'strategy_stopped': 'Strategy Stopped',
             'dom_level_3': 'DOM Level 3',
             'dom_level_4': 'DOM Level 4',
+            'trading_reminder': 'Trading Reminder',
+            'general': 'General',
+            'test': 'Test',
         }
-        label_to_token = {v: k for k, v in token_to_label.items()}
+        label_to_token = {label: token for token, label in token_to_label.items()}
+        label_to_token['Risk Rule Triggered'] = 'risk_rule'
 
         # 如果没有设置，返回默认配置（使用前端展示的事件标签）
         if not settings:
-            default_events_labels = list(token_to_label.values())
+            default_events_labels = list(dict.fromkeys(token_to_label.values()))
             settings = {
                 "chrome": {
                     "enabled": True,
@@ -98,11 +106,17 @@ async def get_notification_settings(user: Optional[str] = Depends(get_current_us
                 evs = ch_cfg.get("events")
                 # 如果缺失或为空则使用默认事件标签
                 if not isinstance(evs, list) or not evs:
-                    ch_cfg["events"] = list(token_to_label.values())
+                    ch_cfg["events"] = default_events_labels.copy()
                 else:
-                    # 若存储的是令牌则转换为标签
-                    if all(e in token_to_label for e in evs):
-                        ch_cfg["events"] = [token_to_label.get(e, e) for e in evs]
+                    normalised_events = []
+                    for e in evs:
+                        if e in token_to_label:
+                            normalised_events.append(token_to_label[e])
+                        elif e == 'Risk Rule Triggered':
+                            normalised_events.append('Risk Rule')
+                        else:
+                            normalised_events.append(e)
+                    ch_cfg["events"] = normalised_events
                 settings[ch] = ch_cfg
         
         return {"success": True, "settings": settings}
@@ -119,15 +133,21 @@ async def update_notification_settings(settings: Dict[str, Any], user: Optional[
             'order_filled': 'Order Filled',
             'position_opened': 'Position Opened',
             'position_closed': 'Position Closed',
-            'risk_triggered': 'Risk Rule Triggered',
+            'risk_triggered': 'Risk Rule',
+            'risk_rule': 'Risk Rule',
+            'risk_rule_deactivated': 'Risk Rule Deactivated',
             'take_profit': 'Take Profit Triggered',
             'stop_loss': 'Stop Loss Triggered',
             'strategy_started': 'Strategy Started',
             'strategy_stopped': 'Strategy Stopped',
             'dom_level_3': 'DOM Level 3',
             'dom_level_4': 'DOM Level 4',
+            'trading_reminder': 'Trading Reminder',
+            'general': 'General',
+            'test': 'Test',
         }
-        label_to_token = {v: k for k, v in token_to_label.items()}
+        label_to_token = {label: token for token, label in token_to_label.items()}
+        label_to_token['Risk Rule Triggered'] = 'risk_rule'
 
         # 保存前，将事件标签转换为后端存储令牌
         for ch in ("chrome", "telegram"):
@@ -135,11 +155,15 @@ async def update_notification_settings(settings: Dict[str, Any], user: Optional[
             evs = ch_cfg.get("events")
             if not isinstance(evs, list) or not evs:
                 # 如果没有提供事件列表，默认保存所有事件（使用令牌）
-                ch_cfg["events"] = list(token_to_label.keys())
+                ch_cfg["events"] = list(dict.fromkeys(token_to_label.keys()))
             else:
-                # 将事件标签转换为存储令牌
-                if not all(e in token_to_label for e in evs):
-                    ch_cfg["events"] = [label_to_token.get(e, e) for e in evs]
+                converted = []
+                for e in evs:
+                    if e in token_to_label:
+                        converted.append(e)
+                    else:
+                        converted.append(label_to_token.get(e, e))
+                ch_cfg["events"] = converted
             settings[ch] = ch_cfg
         
         db = get_db_manager()

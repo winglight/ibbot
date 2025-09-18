@@ -780,6 +780,39 @@ class TradingApp {
         }
     }
 
+    getContractMultiplier(symbol) {
+        try {
+            if (!symbol) return 1;
+            const raw = String(symbol).trim().toUpperCase();
+            if (!raw) return 1;
+
+            const FUTURES_MULTIPLIERS = {
+                MNQ: 2,
+                NQ: 20,
+                MES: 5,
+                ES: 50,
+                MYM: 0.5,
+                YM: 5,
+                M2K: 5,
+                RTY: 50,
+                MCL: 100,
+                CL: 1000,
+                MGC: 10,
+                GC: 100,
+            };
+
+            if (FUTURES_MULTIPLIERS[raw] != null) {
+                return FUTURES_MULTIPLIERS[raw];
+            }
+
+            const futMatch = raw.match(/^([A-Z]{1,3})([FGHJKMNQUVXZ])([0-9]{1,2})$/);
+            const base = futMatch ? futMatch[1] : raw;
+            return FUTURES_MULTIPLIERS[base] != null ? FUTURES_MULTIPLIERS[base] : 1;
+        } catch (e) {
+            return 1;
+        }
+    }
+
     async init() {
         try {
             if (window.Chart && window.ChartAnnotation && window.Chart.register) {
@@ -1364,9 +1397,9 @@ class TradingApp {
         }
         
         // Telegram通知
-        this.apiCall('/notify', { 
-            method: 'POST', 
-            body: JSON.stringify({ message }) 
+        this.apiCall('/notify', {
+            method: 'POST',
+            body: JSON.stringify({ message, event_type: 'trading_reminder' })
         }).then(response => {
             console.log('Telegram通知发送成功:', response);
         }).catch(error => {
@@ -5007,7 +5040,7 @@ class TradingApp {
                         const msg = `${symbol} 持仓时间已达预设上限 (${Math.floor(elapsedMinutes)}分钟)`;
                         this.showAlert('warning', msg);
                         // 发送通知，即使失败也不影响标记已发送
-                        this.apiCall('/notify', { method: 'POST', body: JSON.stringify({ message: msg }) })
+                        this.apiCall('/notify', { method: 'POST', body: JSON.stringify({ message: msg, event_type: 'risk_rule' }) })
                             .then(result => {
                                 if (!result.success) {
                                     console.warn('Position expiry notification failed:', result.message || 'Unknown reason');
@@ -5029,13 +5062,15 @@ class TradingApp {
             const isMonitorMode = !!this.currentMonitor;
             
             let stopLossInput, takeProfitInput, positionQty, avgCost;
-            
+            let symbolForMultiplier = '';
+
             if (isMonitorMode) {
                 // 监控模式：使用监控面板的数据
                 stopLossInput = document.getElementById('monitorStopLoss');
                 takeProfitInput = document.getElementById('monitorTakeProfit');
                 positionQty = this.currentMonitor.positionQty || 0;
                 avgCost = this.currentMonitor.avgCost || 0;
+                symbolForMultiplier = this.currentMonitor.symbol || '';
             } else {
                 // 建议仓位模式：使用订单面板的数据
                 stopLossInput = document.getElementById('stopLossPrice');
@@ -5043,11 +5078,19 @@ class TradingApp {
                 const orderPrice = parseFloat(document.getElementById('orderPrice')?.value || 0);
                 const quantity = parseInt(document.getElementById('orderQuantity')?.value || 0);
                 const action = document.getElementById('orderAction')?.value;
-                
+
                 // 在建议仓位模式下，使用订单价格作为成本价，订单数量作为持仓
                 avgCost = orderPrice;
                 positionQty = action === 'SELL' ? -quantity : quantity;
+                symbolForMultiplier = (this.currentRiskRuleData?.symbol
+                    || document.getElementById('orderSymbol')?.value
+                    || document.getElementById('summaryPrimarySymbolInput')?.value
+                    || '')
+                    .toString();
             }
+
+            const normalizedSymbol = symbolForMultiplier ? symbolForMultiplier.trim().toUpperCase() : '';
+            const contractMultiplier = this.getContractMultiplier(normalizedSymbol);
             
             const expectedSection = document.getElementById('expectedPnLSection');
             const expectedStopLossPnL = document.getElementById('expectedStopLossPnL');
@@ -5081,11 +5124,11 @@ class TradingApp {
                     // 根据持仓方向计算预期盈亏
                     let stopLossPnL = 0;
                     if (positionQty > 0) {  // 多头
-                        // 多头盈亏 = (止损价格 - 成本价) * 持仓数量
-                        stopLossPnL = deltaSL * positionQty;
+                        // 多头盈亏 = (止损价格 - 成本价) * 持仓数量 * 合约乘数
+                        stopLossPnL = deltaSL * positionQty * contractMultiplier;
                     } else {  // 空头
-                        // 空头盈亏 = (成本价 - 止损价格) * 持仓数量的绝对值
-                        stopLossPnL = (avgCost - stopLossPrice) * Math.abs(positionQty);
+                        // 空头盈亏 = (成本价 - 止损价格) * 持仓数量的绝对值 * 合约乘数
+                        stopLossPnL = (avgCost - stopLossPrice) * Math.abs(positionQty) * contractMultiplier;
                     }
                     
                     // 仅显示金额
@@ -5119,11 +5162,11 @@ class TradingApp {
                     // 根据持仓方向计算预期盈亏
                     let takeProfitPnL = 0;
                     if (positionQty > 0) {  // 多头
-                        // 多头盈亏 = (止盈价格 - 成本价) * 持仓数量
-                        takeProfitPnL = deltaTP * positionQty;
+                        // 多头盈亏 = (止盈价格 - 成本价) * 持仓数量 * 合约乘数
+                        takeProfitPnL = deltaTP * positionQty * contractMultiplier;
                     } else {  // 空头
-                        // 空头盈亏 = (成本价 - 止盈价格) * 持仓数量的绝对值
-                        takeProfitPnL = (avgCost - takeProfitPrice) * Math.abs(positionQty);
+                        // 空头盈亏 = (成本价 - 止盈价格) * 持仓数量的绝对值 * 合约乘数
+                        takeProfitPnL = (avgCost - takeProfitPrice) * Math.abs(positionQty) * contractMultiplier;
                     }
                     
                     // 仅显示金额

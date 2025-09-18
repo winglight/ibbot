@@ -335,13 +335,16 @@
                 'Order Filled',
                 'Position Opened',
                 'Position Closed',
-                'Risk Rule Triggered',
+                'Risk Rule',
+                'Risk Rule Deactivated',
                 'Take Profit Triggered',
                 'Stop Loss Triggered',
                 'Strategy Started',
                 'Strategy Stopped',
                 'DOM Level 3',
-                'DOM Level 4'
+                'DOM Level 4',
+                'Trading Reminder',
+                'General'
             ];
         }
         
@@ -588,7 +591,7 @@
                 const statusBadge = this.getNotificationStatusBadge(notification.status);
                 const channelIcon = this.getChannelIcon(notification.channel);
                 const channelLabel = this.escapeHtml(notification.channel || '');
-                const eventLabel = this.escapeHtml(notification.event_type || 'N/A');
+                const eventLabel = this.escapeHtml(this.getEventLabel(notification.event_type));
                 const messageText = this.escapeHtml(notification.message || '');
                 const messageTitle = messageText || this.escapeHtml('(empty)');
                 const errorMessage = notification.error_message ? this.escapeHtml(notification.error_message) : '';
@@ -627,6 +630,30 @@
                 'email': '<i class="fas fa-envelope text-secondary"></i>'
             };
             return icons[channel] || '<i class="fas fa-bell"></i>';
+        }
+
+        getEventLabel(eventType) {
+            if (!eventType) return 'N/A';
+            const map = {
+                'order_filled': 'Order Filled',
+                'position_opened': 'Position Opened',
+                'position_closed': 'Position Closed',
+                'risk_triggered': 'Risk Rule',
+                'risk_rule': 'Risk Rule',
+                'risk_rule_deactivated': 'Risk Rule Deactivated',
+                'take_profit': 'Take Profit Triggered',
+                'stop_loss': 'Stop Loss Triggered',
+                'strategy_started': 'Strategy Started',
+                'strategy_stopped': 'Strategy Stopped',
+                'dom_level_3': 'DOM Level 3',
+                'dom_level_4': 'DOM Level 4',
+                'trading_reminder': 'Trading Reminder',
+                'general': 'General',
+                'test': 'Test'
+            };
+            const normalized = String(eventType).trim();
+            const lower = normalized.toLowerCase();
+            return map[lower] || normalized;
         }
         
         // 显示通知历史记录
