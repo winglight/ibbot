@@ -4,7 +4,7 @@ import re
 import time
 from datetime import datetime
 from threading import Lock
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .utils import parse_local_datetime
 
@@ -163,6 +163,54 @@ class DomCacheManager:
             if time.time() - last_save >= self.save_interval_seconds:
                 self._save_locked(key, container)
                 self._last_save_ts[key] = time.time()
+
+    # ------------------------------------------------------------------
+    def update_metric(
+        self,
+        symbol: str,
+        *,
+        signal_id: Optional[str] = None,
+        timestamp: Optional[float] = None,
+        updates: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Update a cached metric entry identified by signal id or timestamp."""
+
+        if not symbol or not updates:
+            return False
+
+        key = self._sanitize_symbol(symbol)
+        with self._lock:
+            container = self._load_locked(key)
+            metrics_list = container.get("metrics") or []
+            target: Optional[Dict[str, Any]] = None
+
+            if signal_id is not None:
+                for item in reversed(metrics_list):
+                    if str(item.get("signal_id")) == str(signal_id):
+                        target = item
+                        break
+
+            if target is None and timestamp is not None:
+                try:
+                    ts_target = float(timestamp)
+                except (TypeError, ValueError):
+                    ts_target = None
+                if ts_target is not None:
+                    for item in reversed(metrics_list):
+                        ts_value = self._timestamp_ms(item)
+                        if not ts_value:
+                            continue
+                        if abs(ts_value - ts_target) <= 0.5:
+                            target = item
+                            break
+
+            if target is None:
+                return False
+
+            target.update(dict(updates))
+            self._save_locked(key, container)
+            self._last_save_ts[key] = time.time()
+            return True
 
     # ------------------------------------------------------------------
     def get_history(self, symbol: str) -> Dict[str, List[Dict[str, Any]]]:

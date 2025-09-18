@@ -16,6 +16,7 @@ from src.dom_dependencies import (
 )
 from src.database import get_db_manager
 from src.dom_processor import DOMProcessor
+from src.dom_signal_tracker import SignalOutcomeTracker, resolve_outcome_config
 
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
 
@@ -41,6 +42,15 @@ class DOMService:
             getattr(dom_config, "trend_thresholds", DEFAULT_TREND_THRESHOLDS)
         ) or list(DEFAULT_TREND_THRESHOLDS)
         self._listeners: DefaultDict[str, List[Callable]] = defaultdict(list)
+        delay, threshold = resolve_outcome_config()
+        self._outcome_tracker = SignalOutcomeTracker(
+            self._cache,
+            evaluation_delay_seconds=delay,
+            price_move_threshold=threshold,
+        )
+        self._previous_signal_flags: DefaultDict[str, Dict[str, bool]] = defaultdict(
+            lambda: {"long": False, "short": False}
+        )
 
         persisted_config = self._load_persisted_config()
         if persisted_config:
@@ -76,9 +86,30 @@ class DOMService:
         if symbol_key:
             metrics["symbol"] = symbol_key
             self._last_metrics_by_symbol[symbol_key] = metrics
+        metrics["signal_long"] = bool(self.processor.last_signals.get("long"))
+        metrics["signal_short"] = bool(self.processor.last_signals.get("short"))
+        if symbol_key:
+            state = self._previous_signal_flags[symbol_key]
+            for direction in ("long", "short"):
+                current_flag = metrics["signal_long"] if direction == "long" else metrics["signal_short"]
+                previous_flag = state.get(direction, False)
+                if current_flag and not previous_flag:
+                    registration = self._outcome_tracker.register_signal(
+                        symbol_key,
+                        direction,
+                        metrics,
+                    )
+                    if registration:
+                        metrics.update(registration)
+                    break
+            state["long"] = metrics["signal_long"]
+            state["short"] = metrics["signal_short"]
         timestamp = metrics.get("timestamp") or (ts_ns / 1_000_000.0)
         snapshot.setdefault("timestamp", timestamp)
         self._cache.append(symbol_key, snapshot, metrics)
+
+        if symbol_key:
+            self._outcome_tracker.evaluate_on_metrics(symbol_key, metrics)
 
         ts = time.time()
         for evt in self.processor.last_events:
