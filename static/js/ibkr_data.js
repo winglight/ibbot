@@ -8,6 +8,7 @@ class IBKRDataManager {
         this.positions = [];
         this.priceCache = new Map();
         this.priceCacheTimeout = 30000; // 30秒缓存
+        this.dailySummaryLoading = false;
     }
 
     /**
@@ -25,6 +26,118 @@ class IBKRDataManager {
             this.updateAccountInfoUI(info);
         } catch (error) {
             console.error('Failed to load account info:', error);
+        }
+    }
+
+    async loadDailyAccountSummary(options = {}) {
+        const { days = 30, force = false, showLoading = false } = options || {};
+        const normalizedDays = Math.max(1, Math.min(365, parseInt(days, 10) || 30));
+        const tbody = document.querySelector('#dailyAccountSummaryTable tbody');
+        if (tbody && showLoading) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="5" class="text-center text-muted py-3">
+                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                        正在加载每日盈余数据...
+                    </td>
+                </tr>
+            `;
+        }
+
+        if (this.dailySummaryLoading && !force) {
+            return;
+        }
+        this.dailySummaryLoading = true;
+
+        try {
+            const response = await this.app.apiCall(`/account/daily-summary?days=${normalizedDays}`, {
+                allowReadOnly: true,
+                useCache: false,
+                skipReadOnlyCheck: false,
+            });
+
+            if (response && response.success) {
+                this.updateDailySummaryUI(response);
+            } else {
+                const message = response?.detail || '未能获取每日盈余数据';
+                this.showDailySummaryError(message);
+            }
+        } catch (error) {
+            this.showDailySummaryError(error.message || '加载每日盈余数据失败');
+        } finally {
+            this.dailySummaryLoading = false;
+        }
+    }
+
+    showDailySummaryError(message) {
+        const tbody = document.querySelector('#dailyAccountSummaryTable tbody');
+        if (tbody) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="5" class="text-center text-muted py-3">
+                        <i class="fas fa-exclamation-triangle me-2"></i>${message}
+                    </td>
+                </tr>
+            `;
+        }
+        const metaEl = document.getElementById('dailySummaryMeta');
+        if (metaEl) {
+            metaEl.textContent = '';
+        }
+    }
+
+    updateDailySummaryUI(data) {
+        const tbody = document.querySelector('#dailyAccountSummaryTable tbody');
+        if (!tbody) return;
+
+        const rows = (data.days || []).map(day => {
+            const dateText = day.date || '';
+            const orders = Number(day.orders || 0);
+            const pnlValue = Number(day.realized_pnl || 0);
+            const pnlClass = pnlValue >= 0 ? 'profit' : 'loss';
+            const startVal = day.starting_surplus;
+            const endVal = day.ending_surplus;
+            const formatCurrency = (value) => {
+                if (value === null || value === undefined) return '—';
+                return `$${this.app.formatNumber(Number(value))}`;
+            };
+            return `
+                <tr>
+                    <td>${dateText}</td>
+                    <td class="text-end">${orders}</td>
+                    <td class="text-end ${pnlClass}">$${this.app.formatNumber(pnlValue)}</td>
+                    <td class="text-end">${formatCurrency(startVal)}</td>
+                    <td class="text-end">${formatCurrency(endVal)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        if (rows) {
+            tbody.innerHTML = rows;
+        } else {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="5" class="text-center text-muted py-3">暂无数据</td>
+                </tr>
+            `;
+        }
+
+        const metaEl = document.getElementById('dailySummaryMeta');
+        if (metaEl) {
+            const sourceMap = {
+                ibkr: 'IBKR实时净值',
+                risk_manager: '风险控制缓存',
+                unknown: '估算'
+            };
+            const source = sourceMap[data.surplus_source] || sourceMap.unknown;
+            const netLiq = data.net_liquidation !== null && data.net_liquidation !== undefined
+                ? `$${this.app.formatNumber(Number(data.net_liquidation))}`
+                : '未提供';
+            const rangeText = data.range
+                ? `${data.range.start || ''} → ${data.range.end || ''}`
+                : '';
+            const tz = data.timezone || 'America/New_York';
+            metaEl.textContent = `参考净资产：${netLiq}，数据范围：${rangeText}，盈余来源：${source}，时区：${tz}`;
         }
     }
 
@@ -194,10 +307,11 @@ class IBKRDataManager {
         try {
             const response = await this.app.apiCall('/current_price', {
                 method: 'POST',
-                body: JSON.stringify({ 
+                body: JSON.stringify({
                     symbol: symbol,
                     exchange: 'SMART'
                 }),
+                allowReadOnly: true,
                 // 此接口为轻量级非关键查询：缩短超时并禁用重试，避免前端长时间等待
                 timeout: 6000,
                 maxRetries: 0

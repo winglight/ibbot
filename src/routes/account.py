@@ -1,15 +1,19 @@
 import asyncio
 from datetime import datetime
-from typing import Optional
+import asyncio
+from collections import defaultdict
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List
 
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from src.utils import now_local
+from src.utils import now_local, parse_local_datetime, NY_TZ
 
 import core
 from core import connection_manager
+from src.database import get_db_manager
 from .auth import get_current_user
 
 router = APIRouter()
@@ -157,3 +161,114 @@ async def get_positions(
             }
         logger.error(f"Get positions error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/account/daily-summary")
+async def get_account_daily_summary(
+    days: int = 30,
+    user: Optional[str] = Depends(get_current_user),
+):
+    """按照美东时间统计每日账户盈余与Realized PnL"""
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
+
+    try:
+        ny_now = datetime.now(NY_TZ)
+        end_date = ny_now.date()
+        start_date = end_date - timedelta(days=days - 1)
+
+        db = get_db_manager()
+        orders = db.fetch_orders_for_pnl()
+
+        daily_stats: Dict[datetime.date, Dict[str, float]] = defaultdict(lambda: {"pnl": 0.0, "orders": 0})
+
+        for order in orders:
+            pnl_value = float(order.get('pnl') or 0.0)
+            ts = parse_local_datetime(order.get('executed_at') or order.get('created_at'))
+            if ts is None:
+                continue
+            ts_ny = ts.astimezone(NY_TZ)
+            trade_date = ts_ny.date()
+            if trade_date < start_date or trade_date > end_date:
+                continue
+            entry = daily_stats[trade_date]
+            entry['pnl'] += pnl_value
+            entry['orders'] += 1
+
+        ordered_dates: List[datetime.date] = []
+        current = start_date
+        while current <= end_date:
+            ordered_dates.append(current)
+            current += timedelta(days=1)
+
+        # Determine reference net liquidation
+        net_liquidation = None
+        surplus_source = 'unknown'
+        if connection_manager.is_connected() and getattr(core, 'ibkr_client', None):
+            try:
+                account_info = await asyncio.wait_for(core.ibkr_client.get_account_info(), timeout=5.0)
+                if isinstance(account_info, dict):
+                    net_liq = account_info.get('net_liquidation')
+                    if net_liq is not None:
+                        net_liquidation = float(net_liq)
+                        surplus_source = 'ibkr'
+            except Exception as err:  # pragma: no cover - defensive logging
+                logger.debug(f"Failed to fetch net liquidation from IBKR: {err}")
+
+        if net_liquidation is None:
+            fallback_values = [
+                getattr(core.risk_manager, 'equity_last', None),
+                getattr(core.risk_manager, 'sod_equity', None),
+            ]
+            for candidate in fallback_values:
+                if candidate:
+                    net_liquidation = float(candidate)
+                    surplus_source = 'risk_manager'
+                    break
+
+        total_pnl = sum(daily_stats.get(day, {}).get('pnl', 0.0) for day in ordered_dates)
+        base_surplus = None
+        if net_liquidation is not None:
+            base_surplus = float(net_liquidation) - float(total_pnl)
+
+        summary: List[Dict[str, Optional[float]]] = []
+        running_surplus = base_surplus
+        for date_item in ordered_dates:
+            stats = daily_stats.get(date_item, {"pnl": 0.0, "orders": 0})
+            pnl_value = float(stats.get('pnl', 0.0) or 0.0)
+            orders_count = int(stats.get('orders', 0) or 0)
+
+            if running_surplus is None:
+                start_val = None
+                end_val = None
+            else:
+                start_val = running_surplus
+                end_val = running_surplus + pnl_value
+                running_surplus = end_val
+
+            summary.append(
+                {
+                    "date": date_item.isoformat(),
+                    "orders": orders_count,
+                    "has_orders": orders_count > 0,
+                    "realized_pnl": round(pnl_value, 2),
+                    "starting_surplus": round(start_val, 2) if start_val is not None else None,
+                    "ending_surplus": round(end_val, 2) if end_val is not None else None,
+                }
+            )
+
+        return {
+            "success": True,
+            "days": summary,
+            "range": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+            "net_liquidation": float(net_liquidation) if net_liquidation is not None else None,
+            "base_surplus": round(base_surplus, 2) if base_surplus is not None else None,
+            "surplus_source": surplus_source,
+            "timezone": "America/New_York",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to build daily account summary: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to load account summary")

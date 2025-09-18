@@ -160,6 +160,19 @@
     box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25) !important;
 }
 
+body.read-only-mode .requires-write {
+    pointer-events: none;
+    opacity: 0.6;
+}
+
+#readOnlyBanner {
+    border-left: 4px solid #f0ad4e;
+}
+
+#dailyAccountSummaryTable tbody tr td {
+    vertical-align: middle;
+}
+
 .card-header .btn:active,
 .modal-header .btn:not(.btn-close):active,
 .navbar .btn:active,

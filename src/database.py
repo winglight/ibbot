@@ -375,6 +375,32 @@ class DatabaseManager:
             database_logger.debug(f"Loaded {len(orders)} orders")
             return orders
 
+    def fetch_orders_for_pnl(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
+        """获取用于PnL统计的基础订单信息"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            query = (
+                "SELECT order_id, created_at, executed_at, pnl, is_deleted "
+                "FROM orders"
+            )
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            if not include_deleted and row['is_deleted']:
+                continue
+            results.append(
+                {
+                    'order_id': row['order_id'],
+                    'created_at': row['created_at'],
+                    'executed_at': row['executed_at'],
+                    'pnl': row['pnl'],
+                }
+            )
+        return results
+
     def load_risk_rules(self) -> List[RiskRule]:
         """加载所有风险规则"""
         with sqlite3.connect(self.db_path) as conn:

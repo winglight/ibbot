@@ -14,6 +14,9 @@ class LoginManager {
     init() {
         this.bindEventListeners();
         this.toggleAuthButtons(!!localStorage.getItem('access_token'));
+        const storedRole = localStorage.getItem('user_role') || 'admin';
+        const isReadOnly = localStorage.getItem('is_read_only') === '1';
+        this.app.updateReadOnlyMode(isReadOnly, storedRole, { persist: false });
     }
 
     /**
@@ -71,8 +74,19 @@ class LoginManager {
             
             if (res?.access_token) {
                 localStorage.setItem('access_token', res.access_token);
+                if (res.role) {
+                    localStorage.setItem('user_role', res.role);
+                } else {
+                    localStorage.removeItem('user_role');
+                }
+                if (res.is_read_only) {
+                    localStorage.setItem('is_read_only', '1');
+                } else {
+                    localStorage.removeItem('is_read_only');
+                }
                 this.toggleAuthButtons(true);
-                
+                this.app.updateReadOnlyMode(!!res.is_read_only, res.role || 'admin');
+
                 const modalEl = document.getElementById('loginModal');
                 const modal = bootstrap.Modal.getInstance(modalEl);
                 if (modal) modal.hide();
@@ -128,10 +142,21 @@ class LoginManager {
             
             if (res?.access_token) {
                 localStorage.setItem('access_token', res.access_token);
+                if (res.role) {
+                    localStorage.setItem('user_role', res.role);
+                } else {
+                    localStorage.removeItem('user_role');
+                }
+                if (res.is_read_only) {
+                    localStorage.setItem('is_read_only', '1');
+                } else {
+                    localStorage.removeItem('is_read_only');
+                }
                 this.toggleAuthButtons(true);
-                
+                this.app.updateReadOnlyMode(!!res.is_read_only, res.role || localStorage.getItem('user_role') || 'admin');
+
                 await this.app.ensureDefaultConnectionConfig();
-                
+
                 // 自动连接使用保存的连接设置
                 await this.tryAutoConnect(connectTimeout, connectRetries);
             }
@@ -194,7 +219,10 @@ class LoginManager {
      */
     logout() {
         localStorage.removeItem('access_token');
+        localStorage.removeItem('is_read_only');
+        localStorage.removeItem('user_role');
         this.toggleAuthButtons(false);
+        this.app.updateReadOnlyMode(false, 'admin');
         this.app.showAlert('info', '已退出登录');
     }
 
