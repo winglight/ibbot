@@ -96,6 +96,38 @@
     color: #dc3545 !important;
 }
 
+#monitorModal.monitor-fullscreen .modal-dialog {
+    max-width: 100%;
+    width: 100%;
+    height: 100vh;
+    margin: 0;
+    padding: 0;
+}
+
+#monitorModal.monitor-fullscreen .modal-content {
+    height: 100vh;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+#monitorModal.monitor-fullscreen .modal-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+}
+
+#monitorModal .modal-header .btn.monitor-fullscreen-active {
+    background-color: #198754 !important;
+    border-color: #198754 !important;
+    color: #ffffff !important;
+}
+
+#monitorModal .modal-header .btn.monitor-fullscreen-inactive {
+    background-color: #0d6efd !important;
+    border-color: #0d6efd !important;
+    color: #ffffff !important;
+}
+
 /* 统一面板标题栏按钮样式 - 蓝底白字 */
 .card-header .btn,
 .modal-header .btn:not(.btn-close),
