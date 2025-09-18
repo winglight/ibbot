@@ -70,6 +70,23 @@ def test_dom_api_flow(client, monkeypatch):
     history = history_resp.json()
     assert history["success"] is True
     assert len(history.get("metrics", [])) >= 1
+    assert history["total_metrics"] >= len(history["metrics"])
+
+    latest_metric = history["metrics"][-1]
+    latest_ts = latest_metric.get("timestamp")
+    assert latest_ts is not None
+
+    trimmed = test_client.get(
+        "/api/dom/history/TEST",
+        params={"limit": 1, "include_snapshots": False, "start": latest_ts, "end": latest_ts},
+        headers=headers,
+    )
+    assert trimmed.status_code == 200
+    trimmed_history = trimmed.json()
+    assert trimmed_history["metrics"]
+    assert trimmed_history["metrics"][0]["timestamp"] == latest_ts
+    assert trimmed_history["snapshots"] == []
+    assert trimmed_history["total_metrics"] == 1
 
     # alerts list and ack
     r = test_client.get("/api/alerts", headers=headers)

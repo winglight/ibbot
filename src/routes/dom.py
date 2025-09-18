@@ -1,7 +1,14 @@
 from typing import List, Optional
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import BaseModel, Field
 
 import core
@@ -103,7 +110,20 @@ async def dom_ws(websocket: WebSocket, symbol: str):
 
 
 @router.get("/api/dom/history/{symbol}")
-async def get_dom_history(symbol: str, user: Optional[str] = Depends(get_current_user)):
-    history = dom_service.get_history(symbol)
+async def get_dom_history(
+    symbol: str,
+    limit: int = Query(500, ge=0),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    include_snapshots: bool = Query(True),
+    user: Optional[str] = Depends(get_current_user),
+):
+    history = dom_service.get_history(
+        symbol,
+        limit=None if limit == 0 else limit,
+        start_time=start,
+        end_time=end,
+        include_snapshots=include_snapshots,
+    )
     return {"success": True, "symbol": symbol, **history}
 
