@@ -81,6 +81,9 @@
                     <span id="connectionStatus" class="status-indicator status-disconnected"></span>
                     <span id="connectionText">Disconnected</span>
                 </span>
+                <span id="authRoleBadge" class="badge bg-warning text-dark ms-3 d-none">
+                    <i class="fas fa-user-shield me-1"></i>Visitor
+                </span>
             </div>
         </div>
     </nav>
@@ -409,6 +412,9 @@
                 <i class="fas fa-bell me-2"></i> Notifications
             </button>
         </div>
+        <div id="readOnlyBanner" class="alert alert-warning d-none" role="alert">
+            <i class="fas fa-eye-slash me-2"></i>访客账号处于只读模式，无法执行交易或修改配置。
+        </div>
         <!-- Account Information Panel -->
         <div class="row mb-4">
             <div class="col-md-12">
@@ -418,6 +424,54 @@
                     </div>
                     <div class="card-body" id="accountInfo">
                         <p class="text-muted">Connect to view account information</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Daily Account Surplus & PnL -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card" id="dailyAccountSummaryCard">
+                    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-3">
+                        <div>
+                            <h5 class="mb-1"><i class="fas fa-calendar-day me-2"></i>Daily Account Surplus &amp; PnL</h5>
+                            <small class="text-muted">Times shown in America/New_York</small>
+                        </div>
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <select class="form-select form-select-sm" id="dailySummaryRange">
+                                <option value="7">Last 7 days</option>
+                                <option value="14">Last 14 days</option>
+                                <option value="30" selected>Last 30 days</option>
+                                <option value="60">Last 60 days</option>
+                            </select>
+                            <button class="btn btn-outline-secondary btn-sm" id="refreshDailySummaryBtn" title="Refresh">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped" id="dailyAccountSummaryTable">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Date (NY)</th>
+                                        <th class="text-end">Orders</th>
+                                        <th class="text-end">Realized PnL (USD)</th>
+                                        <th class="text-end">Starting Surplus</th>
+                                        <th class="text-end">Ending Surplus</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td colspan="5" class="text-center text-muted py-3">
+                                            <i class="fas fa-info-circle me-2"></i>登录后加载每日盈余数据
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="small text-muted mt-2" id="dailySummaryMeta"></div>
                     </div>
                 </div>
             </div>

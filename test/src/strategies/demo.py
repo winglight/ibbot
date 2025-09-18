@@ -1,9 +1,8 @@
 """
 Strategy: demo
-Created: 2025-09-17 21:44:46
+Created: 2025-09-18 16:34:44
 """
 
-from datetime import datetime
 from typing import Dict, Any, Optional
 
 from src.utils import now_local

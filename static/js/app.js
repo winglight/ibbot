@@ -214,6 +214,9 @@ class TradingApp {
         // 监控弹窗全屏状态
         this.monitorModalFullscreen = false;
         this._monitorFullscreenChangeHandler = null;
+        this.authRole = localStorage.getItem('user_role') || 'admin';
+        this.isReadOnly = localStorage.getItem('is_read_only') === '1';
+        this.lastReadOnlyWarningAt = 0;
 
         // 初始化登录管理器
         this.loginManager = new LoginManager(this);
@@ -897,6 +900,25 @@ class TradingApp {
 
         this.initSidePanels();
 
+        // DOM 已就绪时同步访客模式下的界面元素状态，避免初始渲染遗漏
+        this.updateReadOnlyMode(this.isReadOnly, this.authRole, { persist: false });
+
+        const summaryRange = document.getElementById('dailySummaryRange');
+        if (summaryRange) {
+            summaryRange.addEventListener('change', () => {
+                const days = parseInt(summaryRange.value, 10) || 30;
+                this.dataManager.loadDailyAccountSummary({ days, showLoading: true });
+            });
+        }
+        const refreshDailySummaryBtn = document.getElementById('refreshDailySummaryBtn');
+        if (refreshDailySummaryBtn) {
+            refreshDailySummaryBtn.addEventListener('click', () => {
+                const rangeInput = document.getElementById('dailySummaryRange');
+                const days = parseInt(rangeInput?.value || '30', 10) || 30;
+                this.dataManager.loadDailyAccountSummary({ days, force: true, showLoading: true });
+            });
+        }
+
         // Config Rules Settings buttons
         const gRulesSettingsBtn = document.getElementById('gRulesSettingsBtn');
         if (gRulesSettingsBtn) {
@@ -1502,8 +1524,34 @@ class TradingApp {
     async apiCall(endpoint, options = {}) {
         // 检查是否为GET请求且需要缓存
         const method = options.method || 'GET';
-        const useCache = options.useCache !== false && method === 'GET';
+        const normalizedMethod = method.toUpperCase();
+        const useCache = options.useCache !== false && normalizedMethod === 'GET';
         const cacheTime = options.cacheTime || 10000; // 默认缓存10秒
+        const endpointPath = (endpoint || '').split('?')[0];
+        const {
+            allowReadOnly = false,
+            skipReadOnlyCheck = false,
+            useCache: _ignoreCacheFlag,
+            cacheTime: _ignoreCacheTime,
+            maxRetries: _ignoreMaxRetries,
+            ...fetchOptions
+        } = options;
+
+        const safeReadOnlyMethods = ['GET', 'HEAD', 'OPTIONS'];
+        const readOnlyBypassEndpoints = ['/login'];
+        if (this.isReadOnly && !allowReadOnly && !skipReadOnlyCheck) {
+            if (!safeReadOnlyMethods.includes(normalizedMethod) && !readOnlyBypassEndpoints.includes(endpointPath)) {
+                const now = Date.now();
+                if (now - this.lastReadOnlyWarningAt > 1500) {
+                    this.showAlert('warning', '当前访客账号仅支持查看数据');
+                    this.lastReadOnlyWarningAt = now;
+                }
+                const readOnlyError = new Error('Read-only mode');
+                readOnlyError.code = 'READ_ONLY';
+                readOnlyError.isReadOnly = true;
+                throw readOnlyError;
+            }
+        }
         
         // 生成缓存键
         const cacheKey = useCache ? `${endpoint}_${JSON.stringify(options.body || '')}` : null;
@@ -1523,27 +1571,43 @@ class TradingApp {
         // 设置重试参数
         const maxRetries = options.maxRetries ?? 2;
         let retries = 0;
-        
+
         while (true) {
             try {
                 const headers = {
                     'Content-Type': 'application/json',
-                    ...options.headers
+                    ...fetchOptions.headers
                 };
-                
+
                 // 添加JWT令牌到Authorization头
                 const token = localStorage.getItem('access_token');
                 if (token) {
                     headers['Authorization'] = `Bearer ${token}`;
                 }
-                
+
                 // 使用带超时的fetch
                 const response = await this.fetchWithTimeout(`/api${endpoint}`, {
+                    ...fetchOptions,
                     headers,
-                    ...options,
-                    timeout: options.timeout ?? 15000 // 默认15秒超时
+                    method: normalizedMethod,
+                    timeout: fetchOptions.timeout ?? 15000 // 默认15秒超时
                 });
-                
+
+                const rawBody = await response.text();
+                let data = {};
+                if (rawBody) {
+                    try {
+                        data = JSON.parse(rawBody);
+                    } catch (parseErr) {
+                        data = { detail: rawBody };
+                    }
+                }
+
+                const reqId = response.headers.get('x-request-id');
+                if (reqId && data && typeof data === 'object') {
+                    data.request_id = reqId;
+                }
+
                 // 处理401未授权 - 重定向到登录
                 if (response.status === 401) {
                     localStorage.removeItem('access_token');
@@ -1551,11 +1615,26 @@ class TradingApp {
                     this.loginManager.showLoginModal();
                     throw new Error('Authentication required');
                 }
-                
-                const data = await response.json();
-                const reqId = response.headers.get('x-request-id');
-                if (reqId) data.request_id = reqId;
-                
+
+                if (response.status === 403) {
+                    const detail = (data && typeof data === 'object' && data.detail) ? data.detail : 'Forbidden';
+                    const lowered = String(detail).toLowerCase();
+                    if (lowered.includes('read-only')) {
+                        const now = Date.now();
+                        if (now - this.lastReadOnlyWarningAt > 1500) {
+                            this.showAlert('warning', detail);
+                            this.lastReadOnlyWarningAt = now;
+                        }
+                        const err = new Error(detail);
+                        err.isReadOnly = true;
+                        err.code = 'READ_ONLY';
+                        throw err;
+                    }
+                    const err = new Error(detail);
+                    err.status = 403;
+                    throw err;
+                }
+
                 // 特殊处理/api/notify接口，即使返回success:false也不抛出错误
                 if (endpoint === '/notify' && typeof data === 'object' && 'success' in data) {
                     if (!data.success) {
@@ -1565,9 +1644,12 @@ class TradingApp {
                 }
                 
                 if (!response.ok) {
-                    throw new Error(data.detail || 'API call failed');
+                    const detail = (data && typeof data === 'object' && data.detail)
+                        ? data.detail
+                        : 'API call failed';
+                    throw new Error(detail);
                 }
-                
+
                 // 更新缓存
                 if (useCache) {
                     this.apiCache[cacheKey] = {
@@ -1578,6 +1660,9 @@ class TradingApp {
                 
                 return data;
             } catch (error) {
+                if (error.isReadOnly || error.code === 'READ_ONLY') {
+                    throw error;
+                }
                 // 如果还有重试次数，则重试
                 if (retries < maxRetries && error.message !== 'Authentication required') {
                     retries++;
@@ -1609,6 +1694,46 @@ class TradingApp {
                     this.showAlert('danger', error.message);
                 }
                 throw error;
+            }
+        }
+    }
+
+    updateReadOnlyMode(isReadOnly, role = 'admin', options = {}) {
+        const persist = options.persist !== false;
+        this.isReadOnly = !!isReadOnly;
+        this.authRole = role || (this.isReadOnly ? 'visitor' : 'admin');
+
+        if (persist) {
+            if (this.isReadOnly) {
+                localStorage.setItem('is_read_only', '1');
+            } else {
+                localStorage.removeItem('is_read_only');
+            }
+            if (role) {
+                localStorage.setItem('user_role', role);
+            } else {
+                localStorage.removeItem('user_role');
+            }
+        }
+
+        if (typeof document !== 'undefined' && document.body) {
+            document.body.classList.toggle('read-only-mode', this.isReadOnly);
+            const badge = document.getElementById('authRoleBadge');
+            if (badge) {
+                if (this.isReadOnly) {
+                    badge.classList.remove('d-none');
+                    badge.innerHTML = '<i class="fas fa-user-shield me-1"></i>Visitor Read Only';
+                } else if (role && role.toLowerCase() !== 'admin') {
+                    badge.classList.remove('d-none');
+                    badge.innerHTML = `<i class="fas fa-user me-1"></i>${role}`;
+                } else {
+                    badge.classList.add('d-none');
+                    badge.textContent = '';
+                }
+            }
+            const banner = document.getElementById('readOnlyBanner');
+            if (banner) {
+                banner.classList.toggle('d-none', !this.isReadOnly);
             }
         }
     }
@@ -3124,6 +3249,7 @@ class TradingApp {
                             use_cache: useCache,
                             force_refresh: forceRefresh
                         }),
+                        allowReadOnly: true,
                         // 增加超时时间，略高于后端65秒
                         timeout: 6000
                     });
