@@ -11,6 +11,7 @@ services:
     env_file:
       - ./.env
     environment:
+      - USE_LEGACY=1
       # Server Configuration
       - WEB_HOST=0.0.0.0
       - WEB_PORT=8000
