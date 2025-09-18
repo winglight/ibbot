@@ -241,6 +241,7 @@ class TradingApp {
         this.summaryStatusLoading = false;
         this.summaryDataFeedCurrent = null;
         this.data_push_state = {};
+        this.sidePanelManagerInitialized = false;
 
         this.init();
     }
@@ -838,8 +839,10 @@ class TradingApp {
 
     bindEventListeners() {
         // Connection events are now handled by IBKRConnectionManager
-        
+
         // Login events are now handled by LoginManager
+
+        this.initSidePanels();
 
         // Config Rules Settings buttons
         const gRulesSettingsBtn = document.getElementById('gRulesSettingsBtn');
@@ -7336,7 +7339,7 @@ class TradingApp {
     clearPositionSuggestion() {
         const elements = [
             'suggestedQuantity', 'sizingMethod', 'estimatedInvestment', 'maxRisk',
-            'stopDistance', 'pointValue', 'scaleTotal', 'scaleVol', 'scaleDd', 
+            'stopDistance', 'pointValue', 'scaleTotal', 'scaleVol', 'scaleDd',
             'scaleSig', 'scaleExec', 'sizingExplanation'
         ];
         elements.forEach(id => {
@@ -7345,7 +7348,113 @@ class TradingApp {
         });
         this.lastSuggestedQuantity = null;
     }
-    
+
+    initSidePanels() {
+        if (this.sidePanelManagerInitialized) return;
+        const overlay = document.getElementById('panelOverlay');
+        const configurationPanel = document.getElementById('configurationPanel');
+        const notificationsPanel = document.getElementById('notificationsPanel');
+        const openConfigurationBtn = document.getElementById('openConfigurationBtn');
+        const openNotificationsBtn = document.getElementById('openNotificationsBtn');
+
+        if (!overlay || !configurationPanel || !notificationsPanel) {
+            return;
+        }
+
+        const updateButtonState = () => {
+            if (openConfigurationBtn) {
+                openConfigurationBtn.classList.toggle('active', configurationPanel.classList.contains('open'));
+            }
+            if (openNotificationsBtn) {
+                openNotificationsBtn.classList.toggle('active', notificationsPanel.classList.contains('open'));
+            }
+        };
+
+        const focusTarget = (focusOption) => {
+            if (!focusOption) return;
+            let target = focusOption;
+            if (typeof focusOption === 'string') {
+                target = configurationPanel.querySelector(focusOption);
+            }
+            if (!(target instanceof Element)) return;
+            const collapseParent = target.closest('.collapse');
+            if (collapseParent && collapseParent.classList.contains('collapse')) {
+                const collapseInstance = bootstrap?.Collapse?.getOrCreateInstance?.(collapseParent, { toggle: false })
+                    || (bootstrap?.Collapse ? new bootstrap.Collapse(collapseParent, { toggle: false }) : null);
+                collapseInstance?.show();
+            }
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            target.classList.add('panel-focus-highlight');
+            setTimeout(() => target.classList.remove('panel-focus-highlight'), 1400);
+        };
+
+        const closePanels = () => {
+            configurationPanel.classList.remove('open');
+            notificationsPanel.classList.remove('open');
+            configurationPanel.setAttribute('aria-hidden', 'true');
+            notificationsPanel.setAttribute('aria-hidden', 'true');
+            overlay.classList.remove('active');
+            document.body.classList.remove('side-panel-open');
+            updateButtonState();
+        };
+
+        const openPanel = (panel, options = {}) => {
+            if (!panel) return;
+            if (panel === configurationPanel) {
+                notificationsPanel.classList.remove('open');
+                notificationsPanel.setAttribute('aria-hidden', 'true');
+            } else {
+                configurationPanel.classList.remove('open');
+                configurationPanel.setAttribute('aria-hidden', 'true');
+            }
+            panel.classList.add('open');
+            panel.setAttribute('aria-hidden', 'false');
+            overlay.classList.add('active');
+            document.body.classList.add('side-panel-open');
+            updateButtonState();
+            if (panel === configurationPanel && options.focus) {
+                setTimeout(() => focusTarget(options.focus), 180);
+            }
+        };
+
+        const togglePanel = (panel) => {
+            if (!panel) return;
+            if (panel.classList.contains('open')) {
+                closePanels();
+            } else {
+                openPanel(panel);
+            }
+        };
+
+        const handleButtonClick = (panel) => (event) => {
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+            togglePanel(panel);
+        };
+
+        openConfigurationBtn?.addEventListener('click', handleButtonClick(configurationPanel));
+        openNotificationsBtn?.addEventListener('click', handleButtonClick(notificationsPanel));
+
+        overlay.addEventListener('click', () => closePanels());
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && overlay.classList.contains('active')) {
+                closePanels();
+            }
+        });
+
+        window.sidePanelManager = {
+            openConfiguration: (options = {}) => openPanel(configurationPanel, options),
+            openNotifications: () => openPanel(notificationsPanel),
+            close: closePanels,
+            isConfigurationOpen: () => configurationPanel.classList.contains('open'),
+            isNotificationsOpen: () => notificationsPanel.classList.contains('open'),
+        };
+
+        updateButtonState();
+        this.sidePanelManagerInitialized = true;
+    }
+
     applySuggestedQuantity() {
         if (this.lastSuggestedQuantity) {
             const quantityInput = document.getElementById('orderQuantity');
