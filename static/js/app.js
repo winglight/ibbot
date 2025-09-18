@@ -3189,9 +3189,14 @@ class TradingApp {
                 }
 
                 if (dt && dt.isValid) {
+                    const sourceTime = dt.setZone(MONITOR_SOURCE_TZ);
+                    const isEasternDst = sourceTime.isValid ? sourceTime.isInDST : false;
                     // 转换到本地时区而不是targetZone，确保显示本地时间
-                    const localTime = dt.setZone('local');
-                    console.log(`[时间转换] 原始: ${raw} -> 本地时间: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')}`);
+                    let localTime = dt.setZone('local');
+                    if (isEasternDst) {
+                        localTime = localTime.plus({ hours: 1 });
+                    }
+                    console.log(`[时间转换] 原始: ${raw} -> 本地时间: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')} (${isEasternDst ? 'DST +1h' : '标准'})`);
                     return localTime.toJSDate();
                 }
             }
@@ -5023,6 +5028,40 @@ class TradingApp {
                             return parsed instanceof Date ? parsed : new Date(value);
                         })
                         : [];
+
+                    const trimTrailingPlaceholders = () => {
+                        let trimmed = false;
+                        while (priceData.length > 0) {
+                            const lastIdx = priceData.length - 1;
+                            const lastPrice = priceData[lastIdx];
+                            if (lastPrice == null || Number.isNaN(lastPrice)) {
+                                priceData.pop();
+                                if (volumeData.length > lastIdx) {
+                                    volumeData.splice(lastIdx, 1);
+                                } else if (volumeData.length) {
+                                    volumeData.pop();
+                                }
+                                if (baseLabels.length > lastIdx) {
+                                    baseLabels.splice(lastIdx, 1);
+                                } else if (baseLabels.length) {
+                                    baseLabels.pop();
+                                }
+                                if (displayTimes.length > lastIdx) {
+                                    displayTimes.splice(lastIdx, 1);
+                                } else if (displayTimes.length) {
+                                    displayTimes.pop();
+                                }
+                                trimmed = true;
+                            } else {
+                                break;
+                            }
+                        }
+                        return trimmed;
+                    };
+
+                    if (trimTrailingPlaceholders()) {
+                        console.log('[实时更新] 移除尾部占位空值，准备连接实时数据点');
+                    }
 
                     const intervalMinutes = INTERVAL_MINUTES_MAP[interval] || 1;
                     const fallbackStep = Math.max(60000, intervalMinutes * 60 * 1000);
