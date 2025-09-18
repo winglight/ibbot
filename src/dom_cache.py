@@ -180,6 +180,7 @@ class DomCacheManager:
 
         # 保证 snapshots 长度不超过 500（保留最新的 500 条）
         snapshots = snapshots[-500:]
+        metrics = metrics[-500:]
 
         return {"snapshots": snapshots, "metrics": metrics}
 
