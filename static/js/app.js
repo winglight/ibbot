@@ -4486,12 +4486,17 @@ class TradingApp {
             if (!payload || (payload.symbol && payload.symbol !== symbol)) return;
 
             let price = null;
-            if (typeof payload.last === 'number') price = payload.last;
-            else if (typeof payload.price === 'number') price = payload.price;
-            else if (typeof payload.close === 'number') price = payload.close;
-            if (price == null) return;
+            const priceCandidates = [payload.last, payload.price, payload.close, payload.mark, payload.current];
+            for (const candidate of priceCandidates) {
+                const numeric = Number(candidate);
+                if (Number.isFinite(numeric)) {
+                    price = numeric;
+                    break;
+                }
+            }
+            if (!Number.isFinite(price)) return;
 
-            const volume = payload.volume || payload.vol || 0;
+            const volume = Number(payload.volume ?? payload.vol ?? payload.lastVolume ?? 0) || 0;
 
             const qty = Number(this.currentMonitor.positionQty || 0);
             const avgCost = Number(this.currentMonitor.avgCost || 0);
@@ -4619,10 +4624,12 @@ class TradingApp {
                 }
 
                 if (chartType === 'candlestick') {
-                    const ohlcData = Array.isArray(dataset.data) ? dataset.data : [];
+                    const sourceOhlc = Array.isArray(dataset.data) ? dataset.data : [];
+                    const ohlcData = sourceOhlc.map(bar => ({ ...bar }));
                     candlestickData = ohlcData;
                     const volumeDataset = this.monitorChart.data.datasets[1];
-                    const vData = Array.isArray(volumeDataset.data) ? volumeDataset.data : [];
+                    const sourceVolumes = Array.isArray(volumeDataset.data) ? volumeDataset.data : [];
+                    const vData = sourceVolumes.map(entry => ({ ...entry }));
                     const labelArray = Array.isArray(this.monitorChart.data.labels)
                         ? [...this.monitorChart.data.labels]
                         : [];
@@ -4655,19 +4662,30 @@ class TradingApp {
                     if (ohlcData.length > 0) {
                         const lastBar = ohlcData[ohlcData.length - 1];
                         if (Number.isFinite(lastBar?.x) && Math.abs(lastBar.x - timeValue) <= tolerance) {
-                            lastBar.c = price;
-                            lastBar.h = Math.max(lastBar.h || price, price);
-                            lastBar.l = Math.min(lastBar.l || price, price);
-                            lastBar.volume = volume;
+                            const updatedBar = {
+                                ...lastBar,
+                                x: Number.isFinite(lastBar.x) ? lastBar.x : timeValue,
+                                c: price,
+                                h: Math.max(Number(lastBar.h ?? price), price),
+                                l: Math.min(Number(lastBar.l ?? price), price),
+                                volume
+                            };
+                            ohlcData[ohlcData.length - 1] = updatedBar;
+
                             if (labelArray.length) {
                                 labelArray[labelArray.length - 1] = timeLabel;
                             } else {
                                 labelArray.push(timeLabel);
                             }
+
                             if (vData.length > 0) {
                                 const lastVolume = vData[vData.length - 1];
                                 if (Number.isFinite(lastVolume?.x) && Math.abs(lastVolume.x - timeValue) <= tolerance) {
-                                    lastVolume.y = volume;
+                                    vData[vData.length - 1] = {
+                                        ...lastVolume,
+                                        x: Number.isFinite(lastVolume.x) ? lastVolume.x : timeValue,
+                                        y: volume
+                                    };
                                 } else {
                                     vData.push({ x: timeValue, y: volume });
                                 }
@@ -4703,8 +4721,18 @@ class TradingApp {
                         this.currentMonitor.displayLabels = labelArray.slice();
                     }
 
-                    dataset.data = ohlcData.map(bar => ({ ...bar }));
-                    volumeDataset.data = vData.map(entry => ({ ...entry }));
+                    dataset.data = ohlcData.map(bar => ({
+                        x: Number(bar.x),
+                        o: Number(bar.o ?? bar.open ?? price),
+                        h: Number(bar.h ?? bar.high ?? price),
+                        l: Number(bar.l ?? bar.low ?? price),
+                        c: Number(bar.c ?? bar.close ?? price),
+                        volume: Number(bar.volume ?? bar.v ?? 0)
+                    }));
+                    volumeDataset.data = vData.map(entry => ({
+                        x: Number(entry.x ?? timeValue),
+                        y: Number(entry.y ?? entry.volume ?? 0)
+                    }));
                     candlestickData = dataset.data;
                     this.monitorChart.data.labels = labelArray;
 
