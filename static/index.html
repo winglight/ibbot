@@ -85,7 +85,330 @@
         </div>
     </nav>
 
+    <div id="panelOverlay" class="panel-overlay" tabindex="-1"></div>
+
+    <aside id="configurationPanel" class="side-panel side-panel-left" aria-hidden="true" tabindex="-1">
+        <div class="side-panel-header d-flex align-items-center justify-content-between">
+            <h5 class="mb-0"><i class="fas fa-sliders-h me-2"></i> Configuration</h5>
+        </div>
+        <div class="side-panel-body">
+            <div class="d-flex justify-content-end flex-wrap gap-2 mb-3">
+                <button class="btn btn-outline-primary btn-sm" id="gRulesSettingsBtn" title="G Rules Settings">
+                    <i class="fas fa-cog"></i> G
+                </button>
+                <button class="btn btn-outline-info btn-sm" id="sRulesSettingsBtn" title="S Rules Settings">
+                    <i class="fas fa-calculator"></i> S
+                </button>
+                <button class="btn btn-warning btn-sm" id="addRiskRuleBtn">
+                    <i class="fas fa-plus"></i>
+                </button>
+            </div>
+
+            <div class="card config-card mb-3" id="domSettingsCard">
+                <div class="card-header">
+                    <h6 class="mb-0"><i class="fas fa-sliders-h me-2"></i> Monitor Settings</h6>
+                </div>
+                <div class="card-body">
+                    <form id="domSettingsForm" class="row g-3">
+                        <div class="col-12 col-sm-6">
+                            <label class="form-label">Window</label>
+                            <input type="number" class="form-control form-control-sm" id="domWindow">
+                        </div>
+                        <div class="col-12 col-sm-6">
+                            <label class="form-label">Max Levels</label>
+                            <input type="number" class="form-control form-control-sm" id="domMaxLevels">
+                        </div>
+                        <div class="col-12 col-sm-6">
+                            <label class="form-label">Depth Rows</label>
+                            <input type="number" class="form-control form-control-sm" id="domNumRows" value="5">
+                            <div class="form-text">DOM 面板显示的深度层数。</div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">Trend Score Thresholds</label>
+                            <div class="row g-2">
+                                <div class="col-6 col-md-3">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">L1</span>
+                                        <input type="number" class="form-control" id="domTrendThreshold1" min="0" step="0.01" placeholder="0.50">
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">L2</span>
+                                        <input type="number" class="form-control" id="domTrendThreshold2" min="0" step="0.01" placeholder="0.70">
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">L3</span>
+                                        <input type="number" class="form-control" id="domTrendThreshold3" min="0" step="0.01" placeholder="0.85">
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">L4</span>
+                                        <input type="number" class="form-control" id="domTrendThreshold4" min="0" step="0.01" placeholder="0.95">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-text">仅需填写正向阈值，负向阈值会自动取相反数。</div>
+                        </div>
+                    </form>
+                    <div class="text-end mt-3">
+                        <button type="button" class="btn btn-primary btn-sm" id="saveDomSettingsBtn">
+                            <i class="fas fa-save"></i> Save
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="configurationCards" class="configuration-cards">
+                <div class="card config-card mb-3" id="gRulesCard">
+                    <div class="card-header p-0">
+                        <button class="config-card-toggle w-100 text-start" id="g-rules-tab" type="button"
+                            data-bs-toggle="collapse" data-bs-target="#gRulesCardBody" aria-expanded="true" aria-controls="gRulesCardBody">
+                            <span><i class="fas fa-gavel me-2"></i> G Rules</span>
+                            <i class="fas fa-chevron-down toggle-icon"></i>
+                        </button>
+                    </div>
+                    <div id="gRulesCardBody" class="collapse show">
+                        <div class="card-body">
+                            <!-- G Rules Configuration Form (Hidden by default) -->
+
+                            <hr>
+
+                            <!-- G Rules Status Display -->
+                            <div class="mb-3">
+                                <h6><i class="fas fa-list"></i> G Rules Status</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm" id="gRulesStatusTable">
+                                        <thead>
+                                            <tr>
+                                                <th>Rule</th>
+                                                <th>Description</th>
+                                                <th>Status</th>
+                                                <th>Current Value</th>
+                                                <th>Last Check</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <tr>
+                                                <td>G0</td>
+                                                <td>账户级断路器</td>
+                                                <td><span id="g0_status" class="badge bg-success">正常</span></td>
+                                                <td id="g0_message">-1.2%</td>
+                                                <td id="g0_last">刚刚</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G1</td>
+                                                <td>单笔最大风险</td>
+                                                <td><span id="g1_status" class="badge bg-success">正常</span></td>
+                                                <td id="g1_message">1.5%</td>
+                                                <td id="g1_last">刚刚</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G2</td>
+                                                <td>单标的最大仓位</td>
+                                                <td><span id="g2_status" class="badge bg-success">正常</span></td>
+                                                <td id="g2_message">8.3%</td>
+                                                <td id="g2_last">刚刚</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G3</td>
+                                                <td>相关性检查</td>
+                                                <td><span id="g3_status" class="badge bg-success">正常</span></td>
+                                                <td id="g3_message">0.65</td>
+                                                <td id="g3_last">刚刚</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G4</td>
+                                                <td>流动性检查</td>
+                                                <td><span id="g4_status" class="badge bg-success">正常</span></td>
+                                                <td id="g4_message">充足</td>
+                                                <td id="g4_last">刚刚</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G5</td>
+                                                <td>时间窗口限制</td>
+                                                <td><span id="g5_status" class="badge bg-success">正常</span></td>
+                                                <td id="g5_message">交易时间内</td>
+                                                <td id="g5_last">刚刚</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card config-card" id="sRulesCard">
+                    <div class="card-header p-0">
+                        <button class="config-card-toggle w-100 text-start collapsed" id="s-rules-tab" type="button"
+                            data-bs-toggle="collapse" data-bs-target="#sRulesCardBody" aria-expanded="false" aria-controls="sRulesCardBody">
+                            <span><i class="fas fa-calculator me-2"></i> S Rules</span>
+                            <i class="fas fa-chevron-down toggle-icon"></i>
+                        </button>
+                    </div>
+                    <div id="sRulesCardBody" class="collapse">
+                        <div class="card-body">
+                            <hr>
+
+                            <!-- S Rules Status Display -->
+                            <div class="mb-3">
+                                <h6><i class="fas fa-list"></i> S Rules Status</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm" id="sRulesStatusTable">
+                                        <thead>
+                                            <tr>
+                                                <th>Rule</th>
+                                                <th>Description</th>
+                                                <th>Status</th>
+                                                <th>Current Value</th>
+                                                <th>Last Check</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <tr>
+                                                <td>S0</td>
+                                                <td>仓位计算方法</td>
+                                                <td><span id="s0_status" class="badge bg-success">正常</span></td>
+                                                <td id="s0_message">百分比</td>
+                                                <td id="s0_last">刚刚</td>
+                                            </tr>
+                                            <tr>
+                                                <td>S1</td>
+                                                <td>仓位数值/百分比</td>
+                                                <td><span id="s1_status" class="badge bg-success">正常</span></td>
+                                                <td id="s1_message">1.0%</td>
+                                                <td id="s1_last">刚刚</td>
+                                            </tr>
+                                            <tr>
+                                                <td>S2</td>
+                                                <td>最大仓位数量</td>
+                                                <td><span id="s2_status" class="badge bg-success">正常</span></td>
+                                                <td id="s2_message">10</td>
+                                                <td id="s2_last">刚刚</td>
+                                            </tr>
+                                            <tr>
+                                                <td>S3</td>
+                                                <td>仓位重平衡</td>
+                                                <td><span id="s3_status" class="badge bg-success">正常</span></td>
+                                                <td id="s3_message">启用</td>
+                                                <td id="s3_last">刚刚</td>
+                                            </tr>
+                                            <tr>
+                                                <td>S4</td>
+                                                <td>波动率调整</td>
+                                                <td><span id="s4_status" class="badge bg-success">正常</span></td>
+                                                <td id="s4_message">启用</td>
+                                                <td id="s4_last">刚刚</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- Sizing History -->
+                            <div class="mb-3">
+                                <h6><i class="fas fa-history"></i> Sizing History</h6>
+                                <div class="table-responsive" style="max-height: 200px;">
+                                    <table class="table table-sm" id="sizingHistoryTable">
+                                        <thead>
+                                            <tr>
+                                                <th>Time</th>
+                                                <th>Symbol</th>
+                                                <th>Action</th>
+                                                <th>Suggested Qty</th>
+                                                <th>Method</th>
+                                                <th>Price</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <aside id="notificationsPanel" class="side-panel side-panel-right" aria-hidden="true" tabindex="-1">
+        <div class="side-panel-header d-flex align-items-center justify-content-between">
+            <h5 class="mb-0"><i class="fas fa-bell me-2"></i> Notifications</h5>
+            <div class="btn-group btn-group-sm">
+                <button class="btn btn-outline-primary" onclick="app.notificationsManager.showNotificationSettings()">
+                    <i class="fas fa-cog"></i> Settings
+                </button>
+                <button class="btn btn-outline-secondary" id="clearNotificationsBtn">
+                    <i class="fas fa-trash"></i> Clear All
+                </button>
+            </div>
+        </div>
+        <div class="side-panel-body">
+            <div class="mb-3">
+                <div class="row g-2">
+                    <div class="col-md-3">
+                        <select class="form-select form-select-sm" id="historyStatusFilter">
+                            <option value="">All Status</option>
+                            <option value="sent">Sent</option>
+                            <option value="failed">Failed</option>
+                            <option value="pending">Pending</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <select class="form-select form-select-sm" id="historyChannelFilter">
+                            <option value="">All Channels</option>
+                            <option value="telegram">Telegram</option>
+                            <option value="email">Email</option>
+                            <option value="websocket">WebSocket</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <input type="date" class="form-control form-control-sm" id="historySinceFilter" placeholder="Since date">
+                    </div>
+                    <div class="col-md-2">
+                        <button class="btn btn-sm btn-primary w-100" onclick="app.filterNotificationHistory()">Filter</button>
+                    </div>
+                </div>
+            </div>
+            <div class="table-responsive notification-history-table">
+                <table class="table table-sm" id="notificationHistoryTable">
+                    <thead class="table-light sticky-top">
+                        <tr>
+                            <th>Time</th>
+                            <th>Channel</th>
+                            <th>Event</th>
+                            <th>Message</th>
+                            <th>Status</th>
+                            <th>Error</th>
+                        </tr>
+                    </thead>
+                    <tbody id="notificationHistoryBody">
+                        <tr>
+                            <td colspan="6" class="text-center text-muted py-3">
+                                <i class="fas fa-history"></i>
+                                <p class="mb-0">Loading notification history...</p>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </aside>
+
     <div class="container-fluid mt-4">
+        <div class="page-header d-flex align-items-center justify-content-between mb-4">
+            <button class="btn btn-outline-primary side-panel-toggle" id="openConfigurationBtn">
+                <i class="fas fa-sliders-h me-2"></i> Configuration
+            </button>
+            <h2 class="page-title mb-0">Trading Dashboard</h2>
+            <button class="btn btn-outline-primary side-panel-toggle" id="openNotificationsBtn">
+                <i class="fas fa-bell me-2"></i> Notifications
+            </button>
+        </div>
         <!-- Account Information Panel -->
         <div class="row mb-4">
             <div class="col-md-12">
@@ -235,261 +558,7 @@
                   </div>
                 </div>
             </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-shield-alt"></i> Position & Risk Controls</h5>
-                        <div>
-                            <button class="btn btn-sm btn-outline-primary me-2" id="gRulesSettingsBtn" title="G Rules Settings">
-                                <i class="fas fa-cog"></i> G
-                            </button>
-                            <button class="btn btn-sm btn-outline-info me-2" id="sRulesSettingsBtn" title="S Rules Settings">
-                                <i class="fas fa-calculator"></i> S
-                            </button>
-                            <button class="btn btn-sm btn-warning" id="addRiskRuleBtn">
-                                <i class="fas fa-plus"></i>
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <!-- Tabs for G Rules and S Rules -->
-                        <ul class="nav nav-tabs" id="riskControlTabs" role="tablist">
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link active" id="g-rules-tab" data-bs-toggle="tab" data-bs-target="#g-rules" type="button" role="tab" aria-controls="g-rules" aria-selected="true">
-                                    <i class="fas fa-gavel"></i> G Rules
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link" id="s-rules-tab" data-bs-toggle="tab" data-bs-target="#s-rules" type="button" role="tab" aria-controls="s-rules" aria-selected="false">
-                                    <i class="fas fa-calculator"></i> S Rules
-                                </button>
-                            </li>
-                        </ul>
-                        
-                        <div class="tab-content mt-3" id="riskControlTabContent">
-                            <!-- G Rules Tab -->
-                            <div class="tab-pane fade show active" id="g-rules" role="tabpanel" aria-labelledby="g-rules-tab">
-                                <!-- G Rules Configuration Form (Hidden by default) -->
 
-                                
-                                <hr>
-                                
-                                <!-- G Rules Status Display -->
-                                <div class="mb-3">
-                                    <h6><i class="fas fa-list"></i> G Rules Status</h6>
-                                    <div class="table-responsive">
-                                        <table class="table table-sm" id="gRulesStatusTable">
-                                            <thead>
-                                                <tr>
-                                                    <th>Rule</th>
-                                                    <th>Description</th>
-                                                    <th>Status</th>
-                                                    <th>Current Value</th>
-                                                    <th>Last Check</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                <tr>
-                                                    <td>G0</td>
-                                                    <td>账户级断路器</td>
-                                                    <td><span id="g0_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g0_message">-1.2%</td>
-                                                    <td id="g0_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G1</td>
-                                                    <td>单笔最大风险</td>
-                                                    <td><span id="g1_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g1_message">1.5%</td>
-                                                    <td id="g1_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G2</td>
-                                                    <td>单标的最大仓位</td>
-                                                    <td><span id="g2_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g2_message">8.3%</td>
-                                                    <td id="g2_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G3</td>
-                                                    <td>相关性检查</td>
-                                                    <td><span id="g3_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g3_message">0.65</td>
-                                                    <td id="g3_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G4</td>
-                                                    <td>流动性检查</td>
-                                                    <td><span id="g4_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g4_message">充足</td>
-                                                    <td id="g4_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G5</td>
-                                                    <td>时间窗口限制</td>
-                                                    <td><span id="g5_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g5_message">交易时间内</td>
-                                                    <td id="g5_last">刚刚</td>
-                                                </tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <!-- S Rules Tab -->
-                            <div class="tab-pane fade" id="s-rules" role="tabpanel" aria-labelledby="s-rules-tab">
-                                <hr>
-                                
-                                <!-- S Rules Status Display -->
-                                <div class="mb-3">
-                                    <h6><i class="fas fa-list"></i> S Rules Status</h6>
-                                    <div class="table-responsive">
-                                        <table class="table table-sm" id="sRulesStatusTable">
-                                            <thead>
-                                                <tr>
-                                                    <th>Rule</th>
-                                                    <th>Description</th>
-                                                    <th>Status</th>
-                                                    <th>Current Value</th>
-                                                    <th>Last Check</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                <tr>
-                                                    <td>S0</td>
-                                                    <td>仓位计算方法</td>
-                                                    <td><span id="s0_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s0_message">百分比</td>
-                                                    <td id="s0_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>S1</td>
-                                                    <td>仓位数值/百分比</td>
-                                                    <td><span id="s1_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s1_message">1.0%</td>
-                                                    <td id="s1_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>S2</td>
-                                                    <td>最大仓位数量</td>
-                                                    <td><span id="s2_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s2_message">10</td>
-                                                    <td id="s2_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>S3</td>
-                                                    <td>仓位重平衡</td>
-                                                    <td><span id="s3_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s3_message">启用</td>
-                                                    <td id="s3_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>S4</td>
-                                                    <td>波动率调整</td>
-                                                    <td><span id="s4_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s4_message">启用</td>
-                                                    <td id="s4_last">刚刚</td>
-                                                </tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                                
-                                <!-- Sizing History -->
-                                <div class="mb-3">
-                                    <h6><i class="fas fa-history"></i> Sizing History</h6>
-                                    <div class="table-responsive" style="max-height: 200px;">
-                                        <table class="table table-sm" id="sizingHistoryTable">
-                                            <thead>
-                                                <tr>
-                                                    <th>Time</th>
-                                                    <th>Symbol</th>
-                                                    <th>Action</th>
-                                                    <th>Suggested Qty</th>
-                                                    <th>Method</th>
-                                                    <th>Price</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody></tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <!-- Notifications Panel -->
-                <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-bell"></i> Notifications</h5>
-                        <div class="btn-group">
-                            <button class="btn btn-sm btn-outline-primary" onclick="app.notificationsManager.showNotificationSettings()">
-                                <i class="fas fa-cog"></i> Settings
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" id="clearNotificationsBtn">
-                                <i class="fas fa-trash"></i> Clear All
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <!-- Notification History Filters -->
-                        <div class="mb-3">
-                            <div class="row g-2">
-                                <div class="col-md-3">
-                                    <select class="form-select form-select-sm" id="historyStatusFilter">
-                                        <option value="">All Status</option>
-                                        <option value="sent">Sent</option>
-                                        <option value="failed">Failed</option>
-                                        <option value="pending">Pending</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-3">
-                                    <select class="form-select form-select-sm" id="historyChannelFilter">
-                                        <option value="">All Channels</option>
-                                        <option value="telegram">Telegram</option>
-                                        <option value="email">Email</option>
-                                        <option value="websocket">WebSocket</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-4">
-                                    <input type="date" class="form-control form-control-sm" id="historySinceFilter" placeholder="Since date">
-                                </div>
-                                <div class="col-md-2">
-                                    <button class="btn btn-sm btn-primary" onclick="app.filterNotificationHistory()">Filter</button>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- Notification History Table -->
-                        <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
-                            <table class="table table-sm" id="notificationHistoryTable">
-                                <thead class="table-light sticky-top">
-                                    <tr>
-                                        <th>Time</th>
-                                        <th>Channel</th>
-                                        <th>Event</th>
-                                        <th>Message</th>
-                                        <th>Status</th>
-                                        <th>Error</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="notificationHistoryBody">
-                                    <tr>
-                                        <td colspan="6" class="text-center text-muted py-3">
-                                            <i class="fas fa-history"></i>
-                                            <p class="mb-0">Loading notification history...</p>
-                                        </td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </div>
         </div>
 
 
@@ -565,68 +634,6 @@
                 </div>
             </div>
         </div>
-    </div>
-
-    <!-- DOM Settings Modal -->
-    <div class="modal fade" id="domSettingsModal" tabindex="-1">
-      <div class="modal-dialog">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h5 class="modal-title">DOM Settings</h5>
-            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body">
-            <form id="domSettingsForm">
-              <div class="mb-3">
-                <label class="form-label">Window</label>
-                <input type="number" class="form-control" id="domWindow">
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Max Levels</label>
-                <input type="number" class="form-control" id="domMaxLevels">
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Depth Rows</label>
-                <input type="number" class="form-control" id="domNumRows" value="5">
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Trend Score Thresholds</label>
-                <div class="row g-2">
-                  <div class="col-6 col-md-3">
-                    <div class="input-group input-group-sm">
-                      <span class="input-group-text">L1</span>
-                      <input type="number" class="form-control" id="domTrendThreshold1" min="0" step="0.01" placeholder="0.50">
-                    </div>
-                  </div>
-                  <div class="col-6 col-md-3">
-                    <div class="input-group input-group-sm">
-                      <span class="input-group-text">L2</span>
-                      <input type="number" class="form-control" id="domTrendThreshold2" min="0" step="0.01" placeholder="0.70">
-                    </div>
-                  </div>
-                  <div class="col-6 col-md-3">
-                    <div class="input-group input-group-sm">
-                      <span class="input-group-text">L3</span>
-                      <input type="number" class="form-control" id="domTrendThreshold3" min="0" step="0.01" placeholder="0.85">
-                    </div>
-                  </div>
-                  <div class="col-6 col-md-3">
-                    <div class="input-group input-group-sm">
-                      <span class="input-group-text">L4</span>
-                      <input type="number" class="form-control" id="domTrendThreshold4" min="0" step="0.01" placeholder="0.95">
-                    </div>
-                  </div>
-                </div>
-                <div class="form-text">仅需填写正向阈值，负向阈值会自动取相反数。</div>
-              </div>
-            </form>
-          </div>
-          <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-            <button type="button" class="btn btn-primary" id="saveDomSettingsBtn">Save</button>
-          </div>
-        </div>
-      </div>
     </div>
 
     <!-- Strategy Settings Modal -->

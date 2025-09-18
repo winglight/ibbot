@@ -25,14 +25,17 @@ class DOMManager {
         const saveBtn = document.getElementById('saveDomSettingsBtn');
         if (settingsBtn) {
             settingsBtn.addEventListener('click', () => {
+                const manager = window.sidePanelManager;
+                if (manager?.openConfiguration) {
+                    manager.openConfiguration({ focus: '#domSettingsCard' });
+                    return;
+                }
+
                 const modalEl = document.getElementById('domSettingsModal');
                 if (!modalEl) return;
-
-                // 将设置弹窗节点移动到 <body> 末尾，确保它的层级高于监控弹窗
                 if (modalEl.parentElement) {
                     document.body.appendChild(modalEl);
                 }
-
                 const modal = (bootstrap?.Modal?.getOrCreateInstance)
                     ? bootstrap.Modal.getOrCreateInstance(modalEl)
                     : new bootstrap.Modal(modalEl);
@@ -247,8 +250,11 @@ class DOMManager {
                     trend_thresholds: thresholds
                 })
             });
-            const modalEl = document.getElementById('domSettingsModal');
-            if (modalEl) bootstrap.Modal.getInstance(modalEl)?.hide();
+            const card = document.getElementById('domSettingsCard');
+            if (card) {
+                card.classList.add('panel-focus-highlight');
+                setTimeout(() => card.classList.remove('panel-focus-highlight'), 1400);
+            }
             this.app.showAlert('success', 'DOM settings saved');
         } catch (e) {
             console.error('Failed to save DOM settings', e);
