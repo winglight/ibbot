@@ -1,5 +1,25 @@
 import types
-from ib_insync import Event
+
+try:  # Prefer the actual Event implementation from ib_insync/eventkit when available
+    from ib_insync import Event
+except Exception:  # pragma: no cover - compatibility fallback with lightweight stub
+    class Event:
+        def __init__(self):
+            self._handlers = []
+
+        def __iadd__(self, handler):
+            self._handlers.append(handler)
+            return self
+
+        def emit(self, *args, **kwargs):
+            for handler in list(self._handlers):
+                handler(*args, **kwargs)
+
+        def clear(self):
+            self._handlers.clear()
+
+        def __len__(self):  # Debug-friendly len(event)
+            return len(self._handlers)
 
 from src.depth_subscriber import DepthSubscriber
 

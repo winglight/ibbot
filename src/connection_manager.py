@@ -5,6 +5,7 @@ from ib_insync import IB, util, ExecutionFilter
 from loguru import logger
 
 from .utils import now_local
+from .restart_utils import restart_program
 
 # 为connection模块创建专用logger
 connection_logger = logger.bind(module="connection", request_id="-")
@@ -38,6 +39,21 @@ def _get_env_int(key: str, default: int) -> int:
         except Exception:
             pass
         return int(default)
+
+
+def _get_env_float(key: str, default: float) -> float:
+    val = os.getenv(key)
+    if val is None or val == "":
+        return float(default)
+    try:
+        cleaned = val.split('#', 1)[0].strip()
+        return float(cleaned)
+    except Exception:
+        try:
+            connection_logger.warning(f"Invalid float for {key}='{val}', falling back to {default}")
+        except Exception:
+            pass
+        return float(default)
 
 @dataclass
 class ConnectionConfig:
@@ -78,6 +94,11 @@ class ConnectionManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         # 最近一次连接错误（用于快速失败）
         self._last_connect_error: Optional[str] = None
+        self._failed_connect_attempts: int = 0
+        self._max_failed_connect_attempts: int = max(0, _get_env_int('IBKR_MAX_CONNECT_RETRIES', 0))
+        self._restart_delay_sec: float = max(0.0, _get_env_float('IBKR_RESTART_DELAY_SEC', 0.0))
+        self._restart_pending: bool = False
+        self._connect_attempt_lock = threading.Lock()
         
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
@@ -450,7 +471,65 @@ class ConnectionManager:
         
         connection_logger.error("IBKR connection timeout")
         return False
-    
+
+    def _record_connect_result(self, success: bool) -> None:
+        if success:
+            with self._connect_attempt_lock:
+                self._failed_connect_attempts = 0
+                self._restart_pending = False
+            return
+
+        if self._max_failed_connect_attempts <= 0:
+            return
+
+        with self._connect_attempt_lock:
+            self._failed_connect_attempts += 1
+            attempts = self._failed_connect_attempts
+            threshold = self._max_failed_connect_attempts
+
+        last_error = self._last_connect_error
+        if last_error:
+            connection_logger.warning(
+                f"IBKR connection attempt failed ({attempts}/{threshold}): {last_error}"
+            )
+        else:
+            connection_logger.warning(
+                f"IBKR connection attempt failed ({attempts}/{threshold})"
+            )
+
+        if attempts >= threshold:
+            self._trigger_restart(attempts, threshold)
+
+    def _trigger_restart(self, attempts: int, threshold: int) -> None:
+        with self._connect_attempt_lock:
+            if self._restart_pending:
+                return
+            self._restart_pending = True
+        last_error = self._last_connect_error
+        reason = f"IBKR connect failed {attempts} times (threshold={threshold})"
+        if last_error:
+            reason = f"{reason}: {last_error}"
+
+        connection_logger.critical(
+            f"Exceeded maximum IBKR connect retries ({threshold}). Restarting application..."
+        )
+        if self._restart_delay_sec > 0:
+            connection_logger.info(
+                f"Restart scheduled after {self._restart_delay_sec:.2f} seconds"
+            )
+
+        env_updates = {
+            "IBKR_FAILED_CONNECT_ATTEMPTS": str(attempts),
+        }
+        if last_error:
+            env_updates["IBKR_LAST_CONNECT_ERROR"] = last_error
+
+        restart_program(
+            reason=reason,
+            delay_sec=self._restart_delay_sec,
+            env_updates=env_updates,
+        )
+
     def connect(self) -> bool:
         """连接到IBKR服务器"""
         # 检查当前连接是否使用相同配置
@@ -461,13 +540,16 @@ class ConnectionManager:
             if (current_host == self.config.host and 
                 current_port == self.config.port):
                 connection_logger.info("Already connected to IBKR with same configuration")
+                self._record_connect_result(True)
                 return True
             else:
                 connection_logger.info("Configuration changed, reconnecting...")
                 self.disconnect()
-        
+
         connection_logger.info("Connecting to IBKR...")
-        return self._connect_in_thread()
+        success = self._connect_in_thread()
+        self._record_connect_result(success)
+        return success
     
     def disconnect(self) -> None:
         """断开与IBKR服务器的连接，并停止事件循环"""

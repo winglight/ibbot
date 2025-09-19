@@ -5,13 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
-from typing import Any, Callable, Dict, List
+from typing import TYPE_CHECKING, Any, Callable, Dict, List
 
-from ib_insync import Stock
 from loguru import logger
 
-from .connection_manager import ConnectionManager
 from .utils import now_local
+
+if TYPE_CHECKING:  # pragma: no cover - import only for type checking
+    from .connection_manager import ConnectionManager
 
 # Module-specific logger
 _depth_logger = logger.bind(module="depth_subscriber", request_id="-")
@@ -27,7 +28,7 @@ class _DepthStream:
 class DepthSubscriber:
     """Subscribe to IBKR market depth data and forward updates via callbacks."""
 
-    def __init__(self, connection_manager: ConnectionManager):
+    def __init__(self, connection_manager: 'ConnectionManager'):
         self.connection_manager = connection_manager
         self._streams: Dict[str, _DepthStream] = {}
         self._lock = Lock()
