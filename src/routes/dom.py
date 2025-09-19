@@ -1,13 +1,23 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Literal
 import asyncio
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import BaseModel, Field
 
 import core
 from .auth import get_current_user
 from src.dom_service import get_dom_service
+from src.dom_optimizer import get_dom_optimization_orchestrator
 from core import dom_config
+from loguru import logger
 
 router = APIRouter()
 dom_service = get_dom_service()
@@ -44,6 +54,43 @@ class DOMConfigModel(BaseModel):
     trend_thresholds: List[float] = Field(
         default_factory=lambda: list(getattr(dom_config, "trend_thresholds", []))
     )
+
+
+class DirectionThresholds(BaseModel):
+    obi_min: Optional[float] = None
+    obi_max: Optional[float] = None
+    ofi_min: Optional[float] = None
+    ofi_max: Optional[float] = None
+    trend_min: Optional[float] = None
+    trend_max: Optional[float] = None
+
+
+class SignalThresholds(BaseModel):
+    long: Optional[DirectionThresholds] = None
+    short: Optional[DirectionThresholds] = None
+    min_mid_price: Optional[float] = None
+    max_mid_price: Optional[float] = None
+    outcome: Optional[Literal["success", "failure", "pending"]] = None
+
+
+class SignalQueryRequest(BaseModel):
+    symbol: str
+    start: Optional[str] = None
+    end: Optional[str] = None
+    limit: Optional[int] = Field(default=None, ge=0)
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=500)
+    direction: Optional[Literal["long", "short"]] = None
+    thresholds: Optional[SignalThresholds] = None
+
+
+class SignalStatsRequest(BaseModel):
+    symbol: str
+    start: Optional[str] = None
+    end: Optional[str] = None
+    limit: Optional[int] = Field(default=None, ge=0)
+    direction: Optional[Literal["long", "short"]] = None
+    thresholds: Optional[SignalThresholds] = None
 
 
 @router.get("/api/config/dom")
@@ -103,7 +150,131 @@ async def dom_ws(websocket: WebSocket, symbol: str):
 
 
 @router.get("/api/dom/history/{symbol}")
-async def get_dom_history(symbol: str, user: Optional[str] = Depends(get_current_user)):
-    history = dom_service.get_history(symbol)
+async def get_dom_history(
+    symbol: str,
+    limit: int = Query(500, ge=0),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    include_snapshots: bool = Query(True),
+    user: Optional[str] = Depends(get_current_user),
+):
+    history = dom_service.get_history(
+        symbol,
+        limit=None if limit == 0 else limit,
+        start_time=start,
+        end_time=end,
+        include_snapshots=include_snapshots,
+    )
     return {"success": True, "symbol": symbol, **history}
+
+
+@router.post("/api/dom/signals/stats")
+async def get_dom_signal_stats(
+    req: SignalStatsRequest,
+    user: Optional[str] = Depends(get_current_user),
+):
+    orchestrator = get_dom_optimization_orchestrator()
+    orchestrator.ensure_data_stream(req.symbol)
+
+    thresholds = req.thresholds.model_dump(exclude_none=True) if req.thresholds else None
+    summary = dom_service.summarize_signals(
+        req.symbol,
+        start_time=req.start,
+        end_time=req.end,
+        limit=None if req.limit == 0 else req.limit,
+        direction=req.direction,
+        thresholds=thresholds,
+    )
+    return {"success": True, **summary}
+
+
+@router.post("/api/dom/signals/query")
+async def query_dom_signals(
+    req: SignalQueryRequest,
+    user: Optional[str] = Depends(get_current_user),
+):
+    orchestrator = get_dom_optimization_orchestrator()
+    orchestrator.ensure_data_stream(req.symbol)
+
+    thresholds = req.thresholds.model_dump(exclude_none=True) if req.thresholds else None
+    data = dom_service.query_signals(
+        req.symbol,
+        start_time=req.start,
+        end_time=req.end,
+        limit=None if req.limit == 0 else req.limit,
+        page=req.page,
+        page_size=req.page_size,
+        direction=req.direction,
+        thresholds=thresholds,
+    )
+    return {"success": True, **data}
+
+
+class OptimizeRequest(BaseModel):
+    symbol: str
+    start: Optional[str] = None
+    end: Optional[str] = None
+    limit: Optional[int] = Field(default=None, ge=0)
+    apply: bool = True
+    min_signals: int = Field(default=0, ge=0)
+    obi_candidates: Optional[List[float]] = None
+    ofi_candidates: Optional[List[float]] = None
+
+
+@router.post("/api/dom/optimize")
+async def optimize_dom_parameters(
+    req: OptimizeRequest,
+    user: Optional[str] = Depends(get_current_user),
+):
+    orchestrator = get_dom_optimization_orchestrator()
+    try:
+        result = orchestrator.run_optimization(
+            req.symbol,
+            start_time=req.start,
+            end_time=req.end,
+            limit=req.limit,
+            apply_updates=req.apply,
+            min_signals=req.min_signals,
+            obi_candidates=req.obi_candidates,
+            ofi_candidates=req.ofi_candidates,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("DOM optimisation request failed")
+        raise HTTPException(status_code=500, detail="DOM optimisation failed") from exc
+    return {"success": True, **result}
+
+
+class AutomationScheduleRequest(BaseModel):
+    enabled: bool = True
+    interval_minutes: Optional[int] = Field(default=None, ge=0)
+    start_at: Optional[datetime] = None
+
+
+@router.post("/api/dom/automation/schedule")
+async def configure_dom_automation(
+    req: AutomationScheduleRequest,
+    user: Optional[str] = Depends(get_current_user),
+):
+    orchestrator = get_dom_optimization_orchestrator()
+    try:
+        status = orchestrator.configure_schedule(
+            enabled=req.enabled,
+            interval_minutes=req.interval_minutes,
+            start_at=req.start_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, **status}
+
+
+@router.get("/api/dom/automation/status")
+async def get_dom_automation_status(
+    user: Optional[str] = Depends(get_current_user),
+):
+    orchestrator = get_dom_optimization_orchestrator()
+    return {"success": True, **orchestrator.get_status()}
 

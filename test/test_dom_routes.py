@@ -1,11 +1,13 @@
 import asyncio
 
 import pytest
+import time
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import core
 from src.dom_cache import DomCacheManager
+from src.dom_optimizer import DOMOptimizationOrchestrator
 from src.dom_service import get_dom_service
 from src.routes.auth import create_access_token
 from src.routes.dom import router as dom_router
@@ -40,6 +42,31 @@ def client(monkeypatch, tmp_path):
     dom_service._last_metrics_by_symbol.clear()
     dom_service._cache = DomCacheManager(base_dir=str(tmp_path))
 
+    class DummyDB:
+        def __init__(self):
+            self.storage = {}
+
+        def save_dom_config(self, payload):
+            self.storage["dom_config"] = payload
+
+        def load_dom_config(self):
+            return {}
+
+        def save_config(self, key, value, description=None):
+            self.storage[key] = value
+
+        def get_config(self, key, default=None):
+            return self.storage.get(key, default)
+
+    dummy_db = DummyDB()
+    dom_service.db_manager = dummy_db
+
+    optimizer = DOMOptimizationOrchestrator(
+        service=dom_service, cache=dom_service._cache, db_manager=dummy_db
+    )
+    optimizer.reset_state()
+    monkeypatch.setattr("src.dom_optimizer._optimizer_instance", optimizer)
+
     return TestClient(app), headers, callbacks, dom_service
 
 
@@ -70,6 +97,23 @@ def test_dom_api_flow(client, monkeypatch):
     history = history_resp.json()
     assert history["success"] is True
     assert len(history.get("metrics", [])) >= 1
+    assert history["total_metrics"] >= len(history["metrics"])
+
+    latest_metric = history["metrics"][-1]
+    latest_ts = latest_metric.get("timestamp")
+    assert latest_ts is not None
+
+    trimmed = test_client.get(
+        "/api/dom/history/TEST",
+        params={"limit": 1, "include_snapshots": False, "start": latest_ts, "end": latest_ts},
+        headers=headers,
+    )
+    assert trimmed.status_code == 200
+    trimmed_history = trimmed.json()
+    assert trimmed_history["metrics"]
+    assert trimmed_history["metrics"][0]["timestamp"] == latest_ts
+    assert trimmed_history["snapshots"] == []
+    assert trimmed_history["total_metrics"] == 1
 
     # alerts list and ack
     r = test_client.get("/api/alerts", headers=headers)
@@ -93,3 +137,130 @@ def test_dom_api_flow(client, monkeypatch):
     # stop stream
     r = test_client.post("/api/dom/stop", json={"symbol": "TEST"}, headers=headers)
     assert r.status_code == 200 and r.json()["success"]
+
+
+def test_dom_optimization_endpoints(client):
+    test_client, headers, _, dom_service = client
+
+    base_ts = time.time() * 1000.0
+    metrics = [
+        {
+            "timestamp": base_ts + 1,
+            "obi5": 0.72,
+            "ofi": 6.0,
+            "signal_type": "long",
+            "outcome": 1,
+        },
+        {
+            "timestamp": base_ts + 2,
+            "obi5": 0.68,
+            "ofi": 5.5,
+            "signal_type": "long",
+            "outcome": 0,
+        },
+    ]
+    for item in metrics:
+        dom_service._cache.append("TEST", {"timestamp": item["timestamp"]}, item)
+
+    resp = test_client.post(
+        "/api/dom/optimize",
+        json={"symbol": "TEST", "min_signals": 1},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["evaluated_records"] >= 1
+
+    status_resp = test_client.get("/api/dom/automation/status", headers=headers)
+    assert status_resp.status_code == 200
+    status_data = status_resp.json()
+    assert status_data["success"] is True
+    assert status_data["status"] in {"succeeded", "running", "failed"}
+
+    schedule_resp = test_client.post(
+        "/api/dom/automation/schedule",
+        json={"enabled": True, "interval_minutes": 30},
+        headers=headers,
+    )
+    assert schedule_resp.status_code == 200
+    schedule_data = schedule_resp.json()
+    assert schedule_data["success"] is True
+    assert schedule_data["schedule"]["enabled"] is True
+    assert schedule_data["schedule"]["interval_minutes"] == 30
+
+
+def test_dom_signal_query_and_stats_endpoints(client, monkeypatch):
+    test_client, headers, _, dom_service = client
+    base_ts = time.time() * 1000.0
+    entries = [
+        {
+            "timestamp": base_ts + 1,
+            "signal_type": "long",
+            "obi5": 0.72,
+            "ofi": 6.0,
+            "mid_price": 100.0,
+            "outcome": 1,
+        },
+        {
+            "timestamp": base_ts + 2,
+            "signal_type": "short",
+            "obi5": 0.5,
+            "ofi": -5.0,
+            "mid_price": 99.5,
+            "outcome": 0,
+        },
+        {
+            "timestamp": base_ts + 3,
+            "signal_type": "short",
+            "obi5": 0.48,
+            "ofi": -4.5,
+            "mid_price": 98.5,
+            "outcome": None,
+        },
+    ]
+    for item in entries:
+        dom_service._cache.append("TEST", {"timestamp": item["timestamp"]}, item)
+
+    monkeypatch.setenv("DOM_OPTIMIZER_STANDALONE", "1")
+    start_calls = []
+
+    def fake_start(symbol, num_rows=5):
+        start_calls.append((symbol, num_rows))
+        return True
+
+    monkeypatch.setattr(dom_service, "start", fake_start)
+
+    stats_resp = test_client.post(
+        "/api/dom/signals/stats",
+        json={
+            "symbol": "TEST",
+            "direction": "short",
+            "thresholds": {"short": {"obi_min": 0.45}},
+        },
+        headers=headers,
+    )
+    assert stats_resp.status_code == 200
+    stats_data = stats_resp.json()
+    assert stats_data["success"] is True
+    assert stats_data["short_signals"] == 2
+    assert stats_data["hits"] == 0
+    assert stats_data["pending"] == 1
+
+    query_resp = test_client.post(
+        "/api/dom/signals/query",
+        json={
+            "symbol": "TEST",
+            "direction": "short",
+            "page_size": 1,
+        },
+        headers=headers,
+    )
+    assert query_resp.status_code == 200
+    query_data = query_resp.json()
+    assert query_data["success"] is True
+    assert query_data["total"] == 2
+    assert query_data["total_pages"] == 2
+    assert query_data["items"][0]["signal_type"] == "short"
+
+    assert start_calls == [("TEST", 5)]
