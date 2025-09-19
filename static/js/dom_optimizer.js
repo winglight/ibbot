@@ -623,10 +623,10 @@
             try {
                 await this.apiCall('/dom/start', {
                     method: 'POST',
-                    body: {
+                    body: JSON.stringify({
                         symbol: targetSymbol,
                         num_rows: 10
-                    },
+                    }),
                     useCache: false
                 });
                 this.state.activeStreamSymbol = targetSymbol;
@@ -650,7 +650,7 @@
             try {
                 await this.apiCall('/dom/stop', {
                     method: 'POST',
-                    body: { symbol: targetSymbol },
+                    body: JSON.stringify({ symbol: targetSymbol }),
                     useCache: false
                 });
             } catch (error) {
