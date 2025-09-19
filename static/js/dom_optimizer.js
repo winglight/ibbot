@@ -165,6 +165,9 @@
                 filteredSignals: [],
                 currentPage: 1,
                 pageSize: 25,
+                historyMetrics: [],
+                liveEnabled: false,
+                lastStats: null,
                 loading: {
                     stats: false,
                     signals: false,
@@ -172,9 +175,14 @@
                     optimize: false
                 }
             };
+            this.charts = {
+                trend: null,
+                indicator: null,
+            };
             this._polling = {
                 status: null,
-                stats: null
+                stats: null,
+                history: null,
             };
             this._readOnlyWrapped = false;
             if (document.readyState === 'loading') {
@@ -215,12 +223,21 @@
                 statsBySide: document.getElementById('domOptimizerStatsBySide'),
                 statsSuccessRate: document.getElementById('domOptimizerStatsSuccessRate'),
                 statsPending: document.getElementById('domOptimizerStatsPending'),
+                summaryPrecision: document.getElementById('domOptimizerSummaryPrecision'),
+                summaryDelay: document.getElementById('domOptimizerSummaryDelay'),
+                summaryLatest: document.getElementById('domOptimizerSummaryLatest'),
+                summaryNotes: document.getElementById('domOptimizerSummaryNotes'),
                 statusText: document.getElementById('domOptimizerStatusText'),
                 lastRun: document.getElementById('domOptimizerLastRun'),
                 lastDuration: document.getElementById('domOptimizerLastDuration'),
                 nextRun: document.getElementById('domOptimizerNextRun'),
                 lastResultPanel: document.getElementById('domOptimizerLastResultPanel'),
                 lastResult: document.getElementById('domOptimizerLastResult'),
+                trendChart: document.getElementById('domOptimizerTrendChart'),
+                indicatorChart: document.getElementById('domOptimizerIndicatorChart'),
+                trendRefreshBtn: document.getElementById('domOptimizerTrendRefreshBtn'),
+                indicatorRefreshBtn: document.getElementById('domOptimizerIndicatorRefreshBtn'),
+                trendLiveToggle: document.getElementById('domOptimizerTrendLiveToggle'),
                 startInput: document.getElementById('domOptimizerStartInput'),
                 endInput: document.getElementById('domOptimizerEndInput'),
                 pageSizeInput: document.getElementById('domOptimizerPageSizeInput'),
@@ -251,6 +268,9 @@
                 lookbackInput,
                 statsLimitInput,
                 pageSizeInput,
+                trendRefreshBtn,
+                indicatorRefreshBtn,
+                trendLiveToggle,
                 symbolInput
             } = this.elements;
 
@@ -261,6 +281,24 @@
             querySignalsBtn?.addEventListener('click', () => this.querySignals());
             optimizeBtn?.addEventListener('click', () => this.handleOptimize());
             clearResultBtn?.addEventListener('click', () => this.resetOptimizeResult());
+            trendRefreshBtn?.addEventListener('click', () => {
+                if (this.state.historyMetrics.length) {
+                    this.updateTrendChart(this.state.historyMetrics);
+                } else {
+                    this.refreshStatistics({ silent: true });
+                }
+            });
+            indicatorRefreshBtn?.addEventListener('click', () => {
+                if (this.state.historyMetrics.length) {
+                    this.updateIndicatorChart(this.state.historyMetrics);
+                } else {
+                    this.refreshStatistics({ silent: true });
+                }
+            });
+            trendLiveToggle?.addEventListener('click', () => {
+                const current = trendLiveToggle.dataset.active === '1';
+                this.setLiveMode(!current);
+            });
 
             pagination?.addEventListener('click', (event) => {
                 const button = event.target instanceof Element ? event.target.closest('button[data-page]') : null;
@@ -346,6 +384,9 @@
             if (symbol) {
                 this.refreshStatistics().catch(() => {});
             }
+            this.ensureTrendChart();
+            this.ensureIndicatorChart();
+            this.updateLiveToggleButton();
             this.startPolling();
         }
 
@@ -360,6 +401,7 @@
                     this.refreshStatistics({ silent: true }).catch(() => {});
                 }
             }, 120_000);
+            this.scheduleHistoryPolling();
         }
 
         stopPolling() {
@@ -370,6 +412,10 @@
             if (this._polling.stats) {
                 clearInterval(this._polling.stats);
                 this._polling.stats = null;
+            }
+            if (this._polling.history) {
+                clearInterval(this._polling.history);
+                this._polling.history = null;
             }
         }
 
@@ -575,7 +621,10 @@
                 }
                 const metrics = Array.isArray(response.metrics) ? response.metrics : [];
                 const stats = computeStats(metrics);
+                this.state.lastStats = stats;
                 this.updateStatsIndicators(stats);
+                this.updateSummary(stats, metrics);
+                this.setHistoryMetrics(metrics);
             } catch (error) {
                 this.notify('error', `刷新统计失败: ${error?.message || error}`);
             } finally {
@@ -597,6 +646,511 @@
             if (this.elements.statsBySide) this.elements.statsBySide.textContent = `${totals.long ?? '-'} / ${totals.short ?? '-'}`;
             if (this.elements.statsSuccessRate) this.elements.statsSuccessRate.textContent = totals.precision != null ? formatPercent(totals.precision) : '-';
             if (this.elements.statsPending) this.elements.statsPending.textContent = totals.pending ?? '-';
+        }
+
+        updateSummary(stats, metrics) {
+            if (!this.elements.summaryPrecision) return;
+            const totals = stats || {};
+            this.elements.summaryPrecision.textContent = totals.precision != null
+                ? formatPercent(totals.precision)
+                : '-';
+
+            const delays = [];
+            let latestSignal = null;
+            for (const item of Array.isArray(metrics) ? metrics : []) {
+                if (!item || !SIGNAL_TYPES.has(item.signal_type)) continue;
+                if (!latestSignal) {
+                    latestSignal = item;
+                } else {
+                    const latestTs = resolveTimestampMs(latestSignal) || 0;
+                    const candidateTs = resolveTimestampMs(item) || 0;
+                    if (candidateTs >= latestTs) {
+                        latestSignal = item;
+                    }
+                }
+                const baseTs = Number(item.timestamp ?? item.timestamp_ms);
+                const outcomeTs = Number(item.outcome_timestamp ?? item.outcome_ts);
+                if (Number.isFinite(baseTs) && Number.isFinite(outcomeTs) && outcomeTs >= baseTs) {
+                    delays.push((outcomeTs - baseTs) / 1000);
+                }
+            }
+
+            const avgDelay = delays.length
+                ? delays.reduce((acc, value) => acc + value, 0) / delays.length
+                : null;
+            if (this.elements.summaryDelay) {
+                this.elements.summaryDelay.textContent = avgDelay != null
+                    ? `${avgDelay.toFixed(avgDelay >= 10 ? 0 : 1)} s`
+                    : '-';
+            }
+
+            if (this.elements.summaryLatest) {
+                if (latestSignal) {
+                    const ts = resolveTimestampMs(latestSignal);
+                    const level = this.resolveSignalLevel(latestSignal);
+                    const label = latestSignal.signal_type === 'long' ? '多头' : '空头';
+                    const outcomeLabel = latestSignal.outcome === 1
+                        ? '成功'
+                        : latestSignal.outcome === 0
+                            ? '失败'
+                            : '待评估';
+                    const timeLabel = ts ? formatIsoDatetime(ts) : '-';
+                    const trendScore = toNumber(latestSignal.trend_score);
+                    const trendLabel = Number.isFinite(trendScore) ? trendScore.toFixed(2) : '-';
+                    this.elements.summaryLatest.textContent = `${label} L${level || 0} · ${outcomeLabel} · Trend ${trendLabel} @ ${timeLabel}`;
+                } else {
+                    this.elements.summaryLatest.textContent = '-';
+                }
+            }
+
+            if (this.elements.summaryNotes) {
+                const evaluated = totals?.evaluated ?? 0;
+                const pending = totals?.pending ?? 0;
+                if (evaluated || pending) {
+                    this.elements.summaryNotes.textContent = `已评估 ${evaluated} 条信号，待评估 ${pending} 条。`;
+                } else {
+                    this.elements.summaryNotes.textContent = '暂无可用信号，请刷新统计或查询历史。';
+                }
+            }
+        }
+
+        setHistoryMetrics(metrics) {
+            if (!Array.isArray(metrics) || !metrics.length) {
+                this.state.historyMetrics = [];
+                this.updateTrendChart([]);
+                this.updateIndicatorChart([]);
+                return;
+            }
+            const ordered = metrics
+                .filter((item) => item && resolveTimestampMs(item))
+                .sort((a, b) => (resolveTimestampMs(a) || 0) - (resolveTimestampMs(b) || 0));
+            this.state.historyMetrics = ordered;
+            this.ensureTrendChart();
+            this.ensureIndicatorChart();
+            this.updateTrendChart(ordered);
+            this.updateIndicatorChart(ordered);
+        }
+
+        ensureTrendChart() {
+            if (this.charts.trend) return this.charts.trend;
+            const canvas = this.elements.trendChart;
+            if (!(canvas && canvas.getContext)) return null;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return null;
+
+            const chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
+                            label: 'Mid Price',
+                            data: [],
+                            yAxisID: 'priceAxis',
+                            borderColor: '#1d4ed8',
+                            backgroundColor: 'rgba(59,130,246,0.1)',
+                            borderWidth: 2,
+                            fill: false,
+                            tension: 0.2,
+                            spanGaps: true,
+                            pointRadius: 0,
+                        },
+                        {
+                            label: 'Trend Score',
+                            data: [],
+                            yAxisID: 'trendAxis',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.25,
+                            spanGaps: true,
+                            pointRadius: 0,
+                            segment: {
+                                borderColor: (ctx) => (ctx.p0.parsed.y >= 0 ? '#16a34a' : '#dc2626'),
+                                backgroundColor: (ctx) => (ctx.p0.parsed.y >= 0 ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)'),
+                            },
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: { tooltipFormat: 'HH:mm:ss' },
+                            grid: { color: 'rgba(148,163,184,0.1)' },
+                        },
+                        priceAxis: {
+                            position: 'left',
+                            title: { display: true, text: '价格' },
+                            ticks: {
+                                callback(value) {
+                                    return Number.isFinite(value) ? Number(value).toFixed(2) : value;
+                                },
+                            },
+                            grid: { drawOnChartArea: false },
+                        },
+                        trendAxis: {
+                            position: 'right',
+                            title: { display: true, text: 'Trend Score' },
+                            suggestedMin: -1,
+                            suggestedMax: 1,
+                            ticks: {
+                                callback: (value) => Number(value).toFixed(1),
+                            },
+                            grid: { color: 'rgba(148,163,184,0.1)' },
+                        },
+                    },
+                    plugins: {
+                        legend: { position: 'bottom' },
+                        tooltip: {
+                            callbacks: {
+                                label(context) {
+                                    const label = context.dataset.label || '';
+                                    const value = Number(context.parsed.y);
+                                    if (!Number.isFinite(value)) return label;
+                                    if (context.dataset.yAxisID === 'priceAxis') {
+                                        return `${label}: ${value.toFixed(2)}`;
+                                    }
+                                    return `${label}: ${value.toFixed(2)}`;
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+            chart._datasetMap = { price: 0, trend: 1 };
+            this.charts.trend = chart;
+            return chart;
+        }
+
+        ensureIndicatorChart() {
+            if (this.charts.indicator) return this.charts.indicator;
+            const canvas = this.elements.indicatorChart;
+            if (!(canvas && canvas.getContext)) return null;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return null;
+
+            const chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
+                            label: 'OBI5',
+                            data: [],
+                            yAxisID: 'obiAxis',
+                            borderColor: '#6366f1',
+                            borderWidth: 2,
+                            tension: 0.25,
+                            spanGaps: true,
+                            pointRadius: 0,
+                            fill: false,
+                        },
+                        {
+                            label: 'OFI',
+                            data: [],
+                            yAxisID: 'ofiAxis',
+                            borderColor: '#f97316',
+                            borderWidth: 2,
+                            tension: 0.25,
+                            spanGaps: true,
+                            pointRadius: 0,
+                            fill: false,
+                        },
+                        {
+                            label: 'Signals',
+                            data: [],
+                            type: 'scatter',
+                            parsing: false,
+                            yAxisID: 'obiAxis',
+                            showLine: false,
+                            pointRadius: (ctx) => {
+                                const level = ctx?.raw?.level || 0;
+                                return 4 + Math.min(level * 1.5, 6);
+                            },
+                            pointBackgroundColor: (ctx) => {
+                                const raw = ctx.raw || {};
+                                if (raw.outcome === 1) return '#16a34a';
+                                if (raw.outcome === 0) return '#dc2626';
+                                return '#64748b';
+                            },
+                            pointBorderColor: (ctx) => {
+                                const raw = ctx.raw || {};
+                                if (raw.outcome === 1) return '#15803d';
+                                if (raw.outcome === 0) return '#b91c1c';
+                                return '#475569';
+                            },
+                            pointStyle: (ctx) => (ctx?.raw?.signalType === 'short' ? 'rectRot' : 'triangle'),
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'nearest', intersect: false },
+                    spanGaps: true,
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: { tooltipFormat: 'HH:mm:ss' },
+                            grid: { color: 'rgba(148,163,184,0.1)' },
+                        },
+                        obiAxis: {
+                            position: 'left',
+                            suggestedMin: 0,
+                            suggestedMax: 1,
+                            ticks: {
+                                callback: (value) => Number(value).toFixed(2),
+                            },
+                            title: { display: true, text: 'OBI5' },
+                        },
+                        ofiAxis: {
+                            position: 'right',
+                            grid: { drawOnChartArea: false },
+                            title: { display: true, text: 'OFI' },
+                        },
+                    },
+                    plugins: {
+                        legend: { position: 'bottom' },
+                        annotation: { annotations: {} },
+                        tooltip: {
+                            callbacks: {
+                                label(context) {
+                                    const raw = context.raw || {};
+                                    if (context.dataset.type === 'scatter') {
+                                        const label = raw.signalType === 'short' ? '空头' : '多头';
+                                        const outcome = raw.outcome === 1 ? '成功'
+                                            : raw.outcome === 0 ? '失败' : '待评估';
+                                        const price = Number.isFinite(raw.price) ? raw.price.toFixed(2) : '-';
+                                        const trend = Number.isFinite(raw.trend) ? raw.trend.toFixed(2) : '-';
+                                        return `${label} (${outcome}) · Trend ${trend} · Price ${price}`;
+                                    }
+                                    const value = Number(context.parsed.y);
+                                    if (!Number.isFinite(value)) return context.dataset.label || '';
+                                    return `${context.dataset.label}: ${value.toFixed(2)}`;
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+            chart._datasetMap = { obi: 0, ofi: 1, signals: 2 };
+            this.charts.indicator = chart;
+            return chart;
+        }
+
+        updateTrendChart(metrics) {
+            const chart = this.ensureTrendChart();
+            if (!chart) return;
+            const priceData = [];
+            const trendData = [];
+            for (const item of metrics) {
+                const ts = resolveTimestampMs(item);
+                if (!ts) continue;
+                const price = toNumber(item?.mid_price ?? item?.price);
+                if (Number.isFinite(price)) {
+                    priceData.push({ x: ts, y: price });
+                }
+                const trend = toNumber(item?.trend_score);
+                if (Number.isFinite(trend)) {
+                    trendData.push({ x: ts, y: trend });
+                }
+            }
+            const priceDataset = chart.data.datasets[chart._datasetMap.price];
+            const trendDataset = chart.data.datasets[chart._datasetMap.trend];
+            priceDataset.data = priceData;
+            trendDataset.data = trendData;
+            chart.update('none');
+        }
+
+        updateIndicatorChart(metrics) {
+            const chart = this.ensureIndicatorChart();
+            if (!chart) return;
+            const obiData = [];
+            const ofiData = [];
+            const signalData = [];
+            let thresholds = null;
+
+            for (const item of metrics) {
+                const ts = resolveTimestampMs(item);
+                if (!ts) continue;
+                const obi = toNumber(item?.obi5 ?? item?.obi);
+                if (Number.isFinite(obi)) {
+                    obiData.push({ x: ts, y: obi });
+                }
+                const ofi = toNumber(item?.ofi);
+                if (Number.isFinite(ofi)) {
+                    ofiData.push({ x: ts, y: ofi });
+                }
+                if (SIGNAL_TYPES.has(item?.signal_type)) {
+                    const level = this.resolveSignalLevel(item);
+                    let yValue = Number.isFinite(obi) ? obi : null;
+                    if (!Number.isFinite(yValue)) {
+                        yValue = item.signal_type === 'long' ? 0.85 : 0.15;
+                    }
+                    signalData.push({
+                        x: ts,
+                        y: yValue,
+                        outcome: item?.outcome,
+                        level,
+                        signalType: item?.signal_type,
+                        price: resolvePrice(item),
+                        trend: toNumber(item?.trend_score),
+                    });
+                }
+                if (item?.thresholds) {
+                    thresholds = item.thresholds;
+                }
+            }
+
+            const obiDataset = chart.data.datasets[chart._datasetMap.obi];
+            const ofiDataset = chart.data.datasets[chart._datasetMap.ofi];
+            const signalDataset = chart.data.datasets[chart._datasetMap.signals];
+            obiDataset.data = obiData;
+            ofiDataset.data = ofiData;
+            signalDataset.data = signalData;
+            this.updateIndicatorAnnotations(chart, thresholds);
+            chart.update('none');
+        }
+
+        updateIndicatorAnnotations(chart, thresholds) {
+            if (!chart) return;
+            const annotations = {};
+            const longObi = toNumber(thresholds?.long?.obi);
+            const shortObi = toNumber(thresholds?.short?.obi);
+            const longOfi = toNumber(thresholds?.long?.ofi);
+            const shortOfi = toNumber(thresholds?.short?.ofi);
+            if (Number.isFinite(longObi)) {
+                annotations.longObi = {
+                    type: 'line',
+                    yMin: longObi,
+                    yMax: longObi,
+                    borderColor: 'rgba(34,197,94,0.45)',
+                    borderDash: [6, 6],
+                    borderWidth: 1.5,
+                    yScaleID: 'obiAxis',
+                    label: {
+                        enabled: true,
+                        position: 'start',
+                        content: `Long OBI ${longObi.toFixed(2)}`,
+                    },
+                };
+            }
+            if (Number.isFinite(shortObi)) {
+                annotations.shortObi = {
+                    type: 'line',
+                    yMin: shortObi,
+                    yMax: shortObi,
+                    borderColor: 'rgba(239,68,68,0.45)',
+                    borderDash: [6, 6],
+                    borderWidth: 1.5,
+                    yScaleID: 'obiAxis',
+                    label: {
+                        enabled: true,
+                        position: 'end',
+                        content: `Short OBI ${shortObi.toFixed(2)}`,
+                    },
+                };
+            }
+            if (Number.isFinite(longOfi)) {
+                annotations.longOfi = {
+                    type: 'line',
+                    yMin: longOfi,
+                    yMax: longOfi,
+                    borderColor: 'rgba(34,197,94,0.35)',
+                    borderDash: [4, 4],
+                    borderWidth: 1,
+                    yScaleID: 'ofiAxis',
+                    label: {
+                        enabled: true,
+                        position: 'start',
+                        content: `Long OFI ${longOfi.toFixed(1)}`,
+                    },
+                };
+            }
+            if (Number.isFinite(shortOfi)) {
+                annotations.shortOfi = {
+                    type: 'line',
+                    yMin: shortOfi,
+                    yMax: shortOfi,
+                    borderColor: 'rgba(239,68,68,0.35)',
+                    borderDash: [4, 4],
+                    borderWidth: 1,
+                    yScaleID: 'ofiAxis',
+                    label: {
+                        enabled: true,
+                        position: 'end',
+                        content: `Short OFI ${shortOfi.toFixed(1)}`,
+                    },
+                };
+            }
+            if (!chart.options.plugins) chart.options.plugins = {};
+            if (!chart.options.plugins.annotation) chart.options.plugins.annotation = {};
+            chart.options.plugins.annotation.annotations = annotations;
+        }
+
+        resolveSignalLevel(item) {
+            const score = toNumber(item?.trend_score);
+            if (!Number.isFinite(score)) return 0;
+            const abs = Math.abs(score);
+            if (abs >= 0.95) return 4;
+            if (abs >= 0.85) return 3;
+            if (abs >= 0.7) return 2;
+            if (abs >= 0.5) return 1;
+            return 0;
+        }
+
+        scheduleHistoryPolling() {
+            if (!this.state.liveEnabled) {
+                if (this._polling.history) {
+                    clearInterval(this._polling.history);
+                    this._polling.history = null;
+                }
+                return;
+            }
+            if (this._polling.history) return;
+            this._polling.history = window.setInterval(() => {
+                const symbol = this.elements.symbolInput?.value?.trim();
+                if (symbol) {
+                    this.refreshStatistics({ silent: true }).catch(() => {});
+                }
+            }, 30_000);
+        }
+
+        setLiveMode(enabled) {
+            const target = Boolean(enabled);
+            if (this.state.liveEnabled === target) {
+                this.updateLiveToggleButton();
+                return;
+            }
+            this.state.liveEnabled = target;
+            this.updateLiveToggleButton();
+            this.scheduleHistoryPolling();
+            if (target) {
+                const symbol = this.elements.symbolInput?.value?.trim();
+                if (symbol) {
+                    this.refreshStatistics({ silent: true }).catch(() => {});
+                }
+                this.notify('info', '已开启 DOM Optimizer 实时刷新（30 秒频率）。');
+            } else {
+                this.notify('info', '已关闭 DOM Optimizer 实时刷新。');
+            }
+        }
+
+        updateLiveToggleButton() {
+            const button = this.elements.trendLiveToggle;
+            if (!button) return;
+            if (this.state.liveEnabled) {
+                button.dataset.active = '1';
+                button.classList.remove('btn-outline-secondary');
+                button.classList.add('btn-outline-success');
+                button.setAttribute('title', '实时刷新已开启');
+            } else {
+                button.dataset.active = '0';
+                button.classList.add('btn-outline-secondary');
+                button.classList.remove('btn-outline-success');
+                button.setAttribute('title', '实时刷新已关闭');
+            }
         }
 
         async querySignals() {
@@ -646,6 +1200,11 @@
                     const tsB = resolveTimestampMs(b) || 0;
                     return tsB - tsA;
                 });
+                const stats = computeStats(metrics);
+                this.state.lastStats = stats;
+                this.updateStatsIndicators(stats);
+                this.updateSummary(stats, metrics);
+                this.setHistoryMetrics(metrics);
                 this.state.signals = signals;
                 this.applySignalFilter();
                 this.renderSignalsSummary();
