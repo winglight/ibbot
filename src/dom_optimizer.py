@@ -381,7 +381,6 @@ class DOMOptimizationOrchestrator:
             scheduled=scheduled,
             scheduled_time=self._serialise_datetime(scheduled_time) if scheduled_time else None,
         )
-
         duration_ms: Optional[float] = None
         result: Dict[str, Any] = {}
 
