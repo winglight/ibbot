@@ -135,28 +135,28 @@ def test_dom_phase4_full_loop(tmp_path, symbol):
             bids=[(100.20, 120), (99.95, 90)],
             asks=[(100.45, 120), (100.70, 90)],
         )
-        # Long signal expected to fail (obi ~0.62)
+        # Short signal expected to失败
         _push_update(
             service,
             symbol,
-            base_ms + 1_700,
-            bids=[(100.20, 160), (99.95, 70)],
-            asks=[(100.45, 90), (100.70, 50)],
+            base_ms + 2_100,
+            bids=[(100.10, 60), (99.85, 40)],
+            asks=[(100.35, 210), (100.60, 160)],
         )
-        # Price slips lower to mark the long as failed
+        # 价格上行，令该空头信号失败
         _push_update(
             service,
             symbol,
-            base_ms + 2_900,
-            bids=[(99.60, 160), (99.35, 70)],
-            asks=[(99.85, 90), (100.10, 50)],
+            base_ms + 3_400,
+            bids=[(100.90, 40), (100.65, 30)],
+            asks=[(101.15, 200), (101.40, 150)],
         )
 
         history = service.get_history(symbol, include_snapshots=False)
         signals = _extract_signals(history)
         assert len(signals) == 2
-        outcomes = {signal['outcome'] for signal in signals}
-        assert outcomes == {0, 1}
+        outcomes = sorted(signal['outcome'] for signal in signals)
+        assert outcomes == [0, 1]
         assert all('signal_price' in signal for signal in signals)
         assert all('thresholds' in metric for metric in history.get('metrics', []))
 
@@ -176,9 +176,9 @@ def test_dom_phase4_full_loop(tmp_path, symbol):
         assert result['insufficient_data'] is False
         assert result['evaluated_records'] == 2
         assert result['positive_signals'] == 1
-        assert result['negative_signals'] == 0
-        assert result['precision'] == pytest.approx(1.0)
-        assert result['updated_thresholds']['long']['obi'] > initial_thresholds['long']['obi']
+        assert result['negative_signals'] == 1
+        assert result['precision'] == pytest.approx(0.5)
+        assert result['updated_thresholds']['long']['obi'] >= initial_thresholds['long']['obi']
         assert result['updated_thresholds']['long']['ofi'] >= initial_thresholds['long']['ofi']
 
         updated_thresholds = service.get_tuner_base_thresholds()

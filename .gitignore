@@ -4,3 +4,7 @@ logs
 __pycache__
 .DS_Store
 strategy
+test/src
+test/data
+test/strategy
+test/.*
