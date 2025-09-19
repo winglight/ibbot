@@ -103,14 +103,10 @@ def test_connect_fail_and_update_account_type(token: str):
     assert data.get('account_type') == 'Live', f"期望account_type=Live, 实际: {data}"
 
 
+@pytest.mark.skip(reason="断开连接测试会干扰真实 IBKR 会话，已禁用")
 def test_disconnect_ok(token: str):
-    """测试: /api/disconnect 应返回成功，即使当前未连接"""
-    logger.info("测试: /api/disconnect 应返回成功，即使当前未连接")
-    resp = api_post('/api/disconnect', token, json={})
-    assert resp.status_code == 200, f"期望200, 实际{resp.status_code}, body={resp.text}"
-    
-    data = resp.json()
-    assert data.get('success') is True, f"期望success=True, 实际: {data}"
+    """已跳过: /api/disconnect 测试当前被禁用，避免中断真实连接"""
+    pytest.skip("跳过 /api/disconnect 测试，避免干扰真实连接")
 
 
 def main():
@@ -124,7 +120,6 @@ def main():
     tests = [
         ("连接状态查询", lambda: test_connection_status(token)),
         ("连接失败并更新为Live", lambda: test_connect_fail_and_update_account_type(token)),
-        ("断开连接", lambda: test_disconnect_ok(token)),
     ]
 
     all_passed = True
