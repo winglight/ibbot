@@ -20,6 +20,7 @@ from src.database import get_db_manager
 from src.dom_processor import DOMProcessor
 from src.dom_parameter_tuner import DOMParameterTuner, DEFAULT_BASE_THRESHOLDS
 from src.dom_signal_tracker import SignalOutcomeTracker, resolve_outcome_config
+from src.dom_stats import DomStatsAggregator
 
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
 
@@ -57,6 +58,7 @@ class DOMService:
         self._last_metrics_by_symbol: Dict[str, Dict[str, Any]] = {}
         self._active_symbol: Optional[str] = None
         self._cache = DomCacheManager()
+        self._stats = DomStatsAggregator(self._cache)
         self.db_manager = get_db_manager()
         self.trend_thresholds: List[float] = list(
             getattr(dom_config, "trend_thresholds", DEFAULT_TREND_THRESHOLDS)
@@ -139,9 +141,13 @@ class DOMService:
         timestamp = metrics.get("timestamp") or (ts_ns / 1_000_000.0)
         snapshot.setdefault("timestamp", timestamp)
         self._cache.append(symbol_key, snapshot, metrics)
+        if symbol_key:
+            self._stats.mark_dirty(symbol_key)
 
         if symbol_key:
-            self._outcome_tracker.evaluate_on_metrics(symbol_key, metrics)
+            updates = self._outcome_tracker.evaluate_on_metrics(symbol_key, metrics)
+            if updates:
+                self._stats.mark_dirty(symbol_key)
 
         ts = time.time()
         for evt in self.processor.last_events:
@@ -149,6 +155,56 @@ class DOMService:
             self._next_alert_id += 1
         self._perform_cleanup()
         self._dispatch_event("metrics", symbol_key, metrics, snapshot)
+
+    # --------------------------------------------------------------
+    def get_stats(
+        self,
+        symbol: str,
+        *,
+        lookback_seconds: Optional[int] = None,
+        start_time: Optional[Any] = None,
+        end_time: Optional[Any] = None,
+        max_points: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if not symbol:
+            return {
+                "success": True,
+                "symbol": symbol,
+                "stats": {
+                    "total": 0,
+                    "long": 0,
+                    "short": 0,
+                    "evaluated": 0,
+                    "success": 0,
+                    "failure": 0,
+                    "pending": 0,
+                    "precision": None,
+                    "avg_delay_seconds": None,
+                },
+                "latest_signal": None,
+                "chart_metrics": [],
+                "window": {
+                    "start": None,
+                    "end": None,
+                    "lookback_seconds": lookback_seconds,
+                },
+                "metadata": {
+                    "version": DomStatsAggregator.VERSION,
+                    "rebuilt_at": None,
+                    "source_records": 0,
+                    "cached_metrics": 0,
+                    "metrics_offset": 0,
+                    "max_timestamp": None,
+                },
+            }
+
+        return self._stats.get_stats(
+            symbol,
+            lookback_seconds=lookback_seconds,
+            start=start_time,
+            end=end_time,
+            max_points=max_points,
+        )
 
     def _dispatch_event(self, event: str, *args, **kwargs) -> None:
         listeners = list(self._listeners.get(event, []))

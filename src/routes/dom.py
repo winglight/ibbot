@@ -157,6 +157,26 @@ async def get_dom_history(
     return {"success": True, "symbol": symbol, **history}
 
 
+@router.get("/api/dom/stats/{symbol}")
+async def get_dom_stats(
+    symbol: str,
+    lookback_seconds: Optional[int] = Query(None, ge=60),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    max_points: Optional[int] = Query(None, ge=100, le=5000),
+    user: Optional[str] = Depends(get_current_user),
+):
+    response = dom_service.get_stats(
+        symbol,
+        lookback_seconds=lookback_seconds,
+        start_time=start,
+        end_time=end,
+        max_points=max_points,
+    )
+    response["success"] = True
+    return response
+
+
 class OptimizeRequest(BaseModel):
     symbol: str
     start: Optional[str] = None

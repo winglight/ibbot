@@ -7,6 +7,9 @@
         pageSize: 'domOptimizer.pageSize'
     };
 
+    const LOOKBACK_MINUTES_PRESETS = [10, 30, 60, 120, 180, 240, 360, 720, 1440, 2880, 10080, -1];
+    const DOM_STATS_MAX_POINTS = 3000;
+
     const SIGNAL_TYPES = new Set(['long', 'short']);
 
     const STATUS_BADGE_MAP = {
@@ -30,6 +33,92 @@
     function formatNumber(value, digits = 2) {
         if (!Number.isFinite(value)) return '-';
         return value.toFixed(digits);
+    }
+
+    function formatLookbackPreset(minutes) {
+        if (minutes === -1 || minutes === null || minutes === undefined) {
+            return '全量历史';
+        }
+        const value = Number(minutes);
+        if (!Number.isFinite(value) || value <= 0) {
+            return '全量历史';
+        }
+        if (value < 60) {
+            return `${Math.round(value)} 分钟`;
+        }
+        if (value % 1440 === 0) {
+            const days = value / 1440;
+            return `${days >= 10 ? days.toFixed(0) : days.toFixed(days >= 3 ? 1 : 2)} 天`;
+        }
+        if (value % 60 === 0) {
+            const hours = value / 60;
+            return `${hours >= 10 ? hours.toFixed(0) : hours.toFixed(1)} 小时`;
+        }
+        const hours = value / 60;
+        return `${hours.toFixed(hours >= 10 ? 0 : 1)} 小时`;
+    }
+
+    function sliderIndexToMinutes(index) {
+        const i = Number.parseInt(index, 10);
+        if (!Number.isFinite(i) || i < 0 || i >= LOOKBACK_MINUTES_PRESETS.length) {
+            return LOOKBACK_MINUTES_PRESETS[LOOKBACK_MINUTES_PRESETS.length - 1];
+        }
+        return LOOKBACK_MINUTES_PRESETS[i];
+    }
+
+    function minutesToSliderIndex(minutes) {
+        if (minutes === null || minutes === undefined) {
+            return LOOKBACK_MINUTES_PRESETS.length - 1;
+        }
+        const value = Number(minutes);
+        if (!Number.isFinite(value) || value <= 0) {
+            return LOOKBACK_MINUTES_PRESETS.length - 1;
+        }
+        let bestIndex = 0;
+        let smallestDiff = Number.POSITIVE_INFINITY;
+        LOOKBACK_MINUTES_PRESETS.forEach((preset, idx) => {
+            if (preset === -1) return;
+            const diff = Math.abs(preset - value);
+            if (diff < smallestDiff) {
+                smallestDiff = diff;
+                bestIndex = idx;
+            }
+        });
+        return bestIndex;
+    }
+
+    function isFullLookback(minutes) {
+        if (minutes === -1) return true;
+        if (minutes === null || minutes === undefined) return true;
+        const value = Number(minutes);
+        return !Number.isFinite(value) || value <= 0;
+    }
+
+    function coerceMinutesFromStorage(value) {
+        if (!value) return null;
+        if (value === 'full') return -1;
+        const parsed = Number.parseInt(value, 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return parsed;
+        }
+        return null;
+    }
+
+    function formatSecondsBrief(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) return '-';
+        if (seconds < 60) {
+            return `${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(1)} 秒`;
+        }
+        if (seconds < 3600) {
+            if (seconds % 60 === 0) {
+                return `${(seconds / 60).toFixed(0)} 分钟`;
+            }
+            return `${(seconds / 60).toFixed(1)} 分钟`;
+        }
+        if (seconds % 3600 === 0) {
+            return `${(seconds / 3600).toFixed(0)} 小时`;
+        }
+        return `${(seconds / 3600).toFixed(1)} 小时`;
     }
 
     function escapeHtml(value) {
@@ -178,6 +267,9 @@
                 historyMetrics: [],
                 liveEnabled: false,
                 lastStats: null,
+                statsWindow: null,
+                statsMetadata: null,
+                latestSignal: null,
                 trendThresholds: [0.5, 0.7, 0.85, 0.95],
                 orderCache: {
                     symbol: null,
@@ -236,6 +328,8 @@
                 symbolInput: document.getElementById('domOptimizerSymbolInput'),
                 useMonitorBtn: document.getElementById('domOptimizerUseMonitorBtn'),
                 lookbackInput: document.getElementById('domOptimizerLookbackInput'),
+                lookbackSlider: document.getElementById('domOptimizerLookbackSlider'),
+                lookbackDisplay: document.getElementById('domOptimizerLookbackDisplay'),
                 statsLimitInput: document.getElementById('domOptimizerStatsLimitInput'),
                 minSignalsInput: document.getElementById('domOptimizerMinSignalsInput'),
                 obiCandidatesInput: document.getElementById('domOptimizerObiCandidatesInput'),
@@ -300,6 +394,7 @@
                 optimizeBtn,
                 clearResultBtn,
                 lookbackInput,
+                lookbackSlider,
                 statsLimitInput,
                 pageSizeInput,
                 trendRefreshBtn,
@@ -351,7 +446,14 @@
                     this.state.streamEnsuredAt = 0;
                 }
             });
-            lookbackInput?.addEventListener('change', () => this.persistPreference(STORAGE_KEYS.lookback, lookbackInput.value));
+            lookbackInput?.addEventListener('change', () => this.handleLookbackInputChange());
+            if (lookbackSlider) {
+                lookbackSlider.addEventListener('input', () => {
+                    const minutes = sliderIndexToMinutes(lookbackSlider.value);
+                    this.syncLookbackControls({ minutes, persist: false });
+                });
+                lookbackSlider.addEventListener('change', () => this.handleLookbackSliderCommit());
+            }
             statsLimitInput?.addEventListener('change', () => this.persistPreference(STORAGE_KEYS.limit, statsLimitInput.value));
             if (pageSizeInput) {
                 pageSizeInput.addEventListener('change', () => {
@@ -397,12 +499,12 @@
             if (!this.elements.section) return;
             const { symbolInput, lookbackInput, statsLimitInput, pageSizeInput } = this.elements;
             const storedSymbol = localStorage.getItem(STORAGE_KEYS.symbol);
-            const storedLookback = localStorage.getItem(STORAGE_KEYS.lookback);
+            const storedLookbackRaw = localStorage.getItem(STORAGE_KEYS.lookback);
+            const storedLookbackMinutes = coerceMinutesFromStorage(storedLookbackRaw);
             const storedLimit = localStorage.getItem(STORAGE_KEYS.limit);
             const storedPageSize = localStorage.getItem(STORAGE_KEYS.pageSize);
 
             if (storedSymbol && symbolInput) symbolInput.value = storedSymbol;
-            if (storedLookback && lookbackInput) lookbackInput.value = storedLookback;
             if (storedLimit && statsLimitInput) statsLimitInput.value = storedLimit;
             if (storedPageSize && pageSizeInput) pageSizeInput.value = storedPageSize;
 
@@ -412,6 +514,101 @@
                     this.state.pageSize = parsed;
                 }
             }
+
+            const fallbackMinutes = Number.parseInt(lookbackInput?.value || '', 10) || 240;
+            const preferredMinutes = storedLookbackMinutes !== null && storedLookbackMinutes !== undefined
+                ? storedLookbackMinutes
+                : fallbackMinutes;
+            this.syncLookbackControls({ minutes: preferredMinutes, persist: false });
+        }
+
+        handleLookbackInputChange() {
+            const { lookbackInput } = this.elements;
+            if (!lookbackInput) return;
+            const parsed = Number.parseInt(lookbackInput.value || '', 10);
+            const minutes = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+            this.syncLookbackControls({ minutes, persist: true });
+        }
+
+        handleLookbackSliderCommit() {
+            const { lookbackSlider } = this.elements;
+            if (!lookbackSlider) return;
+            const minutes = sliderIndexToMinutes(lookbackSlider.value);
+            this.syncLookbackControls({ minutes, persist: true });
+        }
+
+        syncLookbackControls({ minutes, persist = false } = {}) {
+            const { lookbackInput, lookbackSlider, lookbackDisplay } = this.elements;
+            let resolved = minutes;
+            if (resolved === undefined) {
+                const parsed = Number.parseInt(lookbackInput?.value || '', 10);
+                resolved = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+            }
+
+            if (lookbackInput) {
+                if (isFullLookback(resolved)) {
+                    lookbackInput.value = '';
+                } else {
+                    const rounded = Math.max(1, Math.round(Number(resolved)));
+                    lookbackInput.value = String(rounded);
+                    resolved = rounded;
+                }
+            }
+
+            if (lookbackSlider) {
+                const index = minutesToSliderIndex(isFullLookback(resolved) ? null : resolved);
+                lookbackSlider.value = String(index);
+            }
+
+            if (lookbackDisplay) {
+                lookbackDisplay.textContent = formatLookbackPreset(isFullLookback(resolved) ? -1 : resolved);
+            }
+
+            if (persist) {
+                if (isFullLookback(resolved)) {
+                    this.persistPreference(STORAGE_KEYS.lookback, 'full');
+                } else {
+                    this.persistPreference(STORAGE_KEYS.lookback, Math.max(1, Math.round(Number(resolved))));
+                }
+            }
+        }
+
+        resolveLookbackMinutes({ allowFull = true, defaultMinutes = 240 } = {}) {
+            const { lookbackSlider, lookbackInput } = this.elements;
+            let minutes = null;
+            if (lookbackSlider) {
+                minutes = sliderIndexToMinutes(lookbackSlider.value);
+            }
+            if (minutes === null || minutes === undefined) {
+                const parsed = Number.parseInt(lookbackInput?.value || '', 10);
+                if (Number.isFinite(parsed) && parsed > 0) {
+                    minutes = parsed;
+                }
+            }
+            if (!allowFull && isFullLookback(minutes)) {
+                return defaultMinutes;
+            }
+            if (isFullLookback(minutes)) {
+                return null;
+            }
+            return Math.max(1, Math.round(Number(minutes)));
+        }
+
+        resolveLookbackSeconds() {
+            const minutes = this.resolveLookbackMinutes({ allowFull: true });
+            if (minutes === null) return null;
+            return Math.max(1, Math.round(Number(minutes))) * 60;
+        }
+
+        resolveLatestSignal(metrics) {
+            if (!Array.isArray(metrics) || !metrics.length) return null;
+            for (let i = metrics.length - 1; i >= 0; i -= 1) {
+                const item = metrics[i];
+                if (item && SIGNAL_TYPES.has(item.signal_type)) {
+                    return item;
+                }
+            }
+            return null;
         }
 
         attachAppWhenReady() {
@@ -817,28 +1014,35 @@
                 this.setLoading('stats', true);
                 if (!silent) this.setButtonLoading(this.elements.refreshStatsBtn, true, '刷新中');
                 await this.ensureDomStream(symbol);
-                const lookbackMinutes = parseInt(this.elements.lookbackInput?.value || '0', 10) || 240;
-                const limit = parseInt(this.elements.statsLimitInput?.value || '0', 10) || 500;
-                const now = new Date();
-                const start = new Date(now.getTime() - lookbackMinutes * 60_000);
-                const query = new URLSearchParams();
-                query.set('start', start.toISOString());
-                query.set('end', now.toISOString());
-                query.set('include_snapshots', 'false');
-                if (limit > 0) query.set('limit', String(limit));
-                const endpoint = `/dom/history/${encodeURIComponent(symbol)}?${query.toString()}`;
+                const lookbackSeconds = this.resolveLookbackSeconds();
+                const params = new URLSearchParams();
+                if (Number.isFinite(lookbackSeconds) && lookbackSeconds > 0) {
+                    params.set('lookback_seconds', String(Math.round(lookbackSeconds)));
+                }
+                params.set('max_points', String(DOM_STATS_MAX_POINTS));
+                const query = params.toString();
+                const endpoint = query
+                    ? `/dom/stats/${encodeURIComponent(symbol)}?${query}`
+                    : `/dom/stats/${encodeURIComponent(symbol)}`;
                 const response = await this.apiCall(endpoint, {
                     allowReadOnly: true,
                     useCache: false
                 });
                 if (!response || response.success === false) {
-                    throw new Error(response?.detail || '获取历史数据失败');
+                    throw new Error(response?.detail || '获取统计数据失败');
                 }
-                const metrics = Array.isArray(response.metrics) ? response.metrics : [];
-                const stats = computeStats(metrics);
+                const stats = response.stats || {};
+                const metrics = Array.isArray(response.chart_metrics) ? response.chart_metrics : [];
                 this.state.lastStats = stats;
+                this.state.statsWindow = response.window || null;
+                this.state.statsMetadata = response.metadata || null;
+                this.state.latestSignal = response.latest_signal || null;
                 this.updateStatsIndicators(stats);
-                this.updateSummary(stats, metrics);
+                this.updateSummary(stats, metrics, {
+                    latestSignal: response.latest_signal,
+                    avgDelaySeconds: stats?.avg_delay_seconds ?? null,
+                    window: response.window || null,
+                });
                 this.setHistoryMetrics(metrics);
             } catch (error) {
                 this.notify('error', `刷新统计失败: ${error?.message || error}`);
@@ -857,48 +1061,31 @@
                 pending: '-',
                 precision: null
             };
-            if (this.elements.statsTotal) this.elements.statsTotal.textContent = totals.total ?? '-';
-            if (this.elements.statsBySide) this.elements.statsBySide.textContent = `${totals.long ?? '-'} / ${totals.short ?? '-'}`;
+            const totalCount = Number.isFinite(totals.total) ? Math.round(totals.total) : '-';
+            const longCount = Number.isFinite(totals.long) ? Math.round(totals.long) : '-';
+            const shortCount = Number.isFinite(totals.short) ? Math.round(totals.short) : '-';
+            const pendingCount = Number.isFinite(totals.pending) ? Math.round(totals.pending) : '-';
+
+            if (this.elements.statsTotal) this.elements.statsTotal.textContent = totalCount;
+            if (this.elements.statsBySide) this.elements.statsBySide.textContent = `${longCount} / ${shortCount}`;
             if (this.elements.statsSuccessRate) this.elements.statsSuccessRate.textContent = totals.precision != null ? formatPercent(totals.precision) : '-';
-            if (this.elements.statsPending) this.elements.statsPending.textContent = totals.pending ?? '-';
+            if (this.elements.statsPending) this.elements.statsPending.textContent = pendingCount;
         }
 
-        updateSummary(stats, metrics) {
+        updateSummary(stats, metrics, extras = {}) {
             if (!this.elements.summaryPrecision) return;
             const totals = stats || {};
             this.elements.summaryPrecision.textContent = totals.precision != null
                 ? formatPercent(totals.precision)
                 : '-';
-
-            const delays = [];
-            let latestSignal = null;
-            for (const item of Array.isArray(metrics) ? metrics : []) {
-                if (!item || !SIGNAL_TYPES.has(item.signal_type)) continue;
-                if (!latestSignal) {
-                    latestSignal = item;
-                } else {
-                    const latestTs = resolveTimestampMs(latestSignal) || 0;
-                    const candidateTs = resolveTimestampMs(item) || 0;
-                    if (candidateTs >= latestTs) {
-                        latestSignal = item;
-                    }
-                }
-                const baseTs = Number(item.timestamp ?? item.timestamp_ms);
-                const outcomeTs = Number(item.outcome_timestamp ?? item.outcome_ts);
-                if (Number.isFinite(baseTs) && Number.isFinite(outcomeTs) && outcomeTs >= baseTs) {
-                    delays.push((outcomeTs - baseTs) / 1000);
-                }
-            }
-
-            const avgDelay = delays.length
-                ? delays.reduce((acc, value) => acc + value, 0) / delays.length
-                : null;
+            const avgDelaySeconds = Number.isFinite(extras?.avgDelaySeconds)
+                ? extras.avgDelaySeconds
+                : totals.avg_delay_seconds;
             if (this.elements.summaryDelay) {
-                this.elements.summaryDelay.textContent = avgDelay != null
-                    ? `${avgDelay.toFixed(avgDelay >= 10 ? 0 : 1)} s`
-                    : '-';
+                this.elements.summaryDelay.textContent = formatSecondsBrief(avgDelaySeconds);
             }
 
+            const latestSignal = extras?.latestSignal || this.resolveLatestSignal(metrics);
             if (this.elements.summaryLatest) {
                 if (latestSignal) {
                     const ts = resolveTimestampMs(latestSignal);
@@ -919,12 +1106,19 @@
             }
 
             if (this.elements.summaryNotes) {
-                const evaluated = totals?.evaluated ?? 0;
-                const pending = totals?.pending ?? 0;
+                const evaluated = Number.isFinite(totals?.evaluated) ? Math.round(totals.evaluated) : 0;
+                const pending = Number.isFinite(totals?.pending) ? Math.round(totals.pending) : 0;
                 if (evaluated || pending) {
                     this.elements.summaryNotes.textContent = `已评估 ${evaluated} 条信号，待评估 ${pending} 条。`;
                 } else {
                     this.elements.summaryNotes.textContent = '暂无可用信号，请刷新统计或查询历史。';
+                }
+                if (extras?.window?.start && extras?.window?.end) {
+                    const startLabel = formatIsoDatetime(extras.window.start);
+                    const endLabel = formatIsoDatetime(extras.window.end);
+                    this.elements.summaryNotes.title = `统计窗口：${startLabel} → ${endLabel}`;
+                } else {
+                    this.elements.summaryNotes.title = '';
                 }
             }
         }
@@ -1390,7 +1584,7 @@
                 this.setLoading('signals', true);
                 this.setButtonLoading(this.elements.querySignalsBtn, true, '查询中');
                 await this.ensureDomStream(symbol);
-                const lookbackMinutes = parseInt(this.elements.lookbackInput?.value || '0', 10) || 240;
+                const lookbackMinutes = this.resolveLookbackMinutes({ allowFull: false, defaultMinutes: 240 }) || 240;
                 const limit = parseInt(this.elements.statsLimitInput?.value || '0', 10) || 500;
                 const pageSize = parseInt(this.elements.pageSizeInput?.value || '0', 10) || 25;
                 this.state.pageSize = pageSize;
@@ -2201,7 +2395,7 @@
             try {
                 this.setLoading('optimize', true);
                 this.setButtonLoading(this.elements.optimizeBtn, true, '优化中');
-                const lookbackMinutes = parseInt(this.elements.lookbackInput?.value || '0', 10) || 240;
+                const lookbackMinutes = this.resolveLookbackMinutes({ allowFull: false, defaultMinutes: 240 }) || 240;
                 const limit = parseInt(this.elements.statsLimitInput?.value || '0', 10) || 0;
                 const minSignals = parseInt(this.elements.minSignalsInput?.value || '0', 10) || 0;
                 const applyUpdates = this.elements.applySwitch?.checked !== false;

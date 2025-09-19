@@ -8,6 +8,7 @@ from src.dom_cache import DomCacheManager
 from src.dom_optimizer import DOMOptimizationOrchestrator, _now
 from src.dom_parameter_tuner import DOMParameterTuner
 from src.dom_service import DOMService
+from src.dom_stats import DomStatsAggregator
 
 
 class DummyDB:
@@ -35,9 +36,15 @@ def orchestrator(monkeypatch, tmp_path):
 
     service = DOMService()
     service.db_manager = dummy_db
+    if hasattr(service, "_stats") and service._stats:
+        try:
+            service._stats.shutdown()
+        except Exception:
+            pass
     service._cache = DomCacheManager(
         base_dir=str(tmp_path), retention_seconds=3600, save_interval_seconds=1
     )
+    service._stats = DomStatsAggregator(service._cache, base_dir=str(tmp_path))
 
     orchestrator = DOMOptimizationOrchestrator(
         service=service, cache=service._cache, db_manager=dummy_db
@@ -46,6 +53,10 @@ def orchestrator(monkeypatch, tmp_path):
     try:
         yield orchestrator, service, dummy_db
     finally:
+        try:
+            service._stats.shutdown()
+        except Exception:
+            pass
         orchestrator.shutdown()
 
 

@@ -9,6 +9,7 @@ import core
 from src.dom_cache import DomCacheManager
 from src.dom_optimizer import DOMOptimizationOrchestrator
 from src.dom_service import get_dom_service
+from src.dom_stats import DomStatsAggregator
 from src.routes.auth import create_access_token
 from src.routes.dom import router as dom_router
 
@@ -40,7 +41,13 @@ def client(monkeypatch, tmp_path):
     dom_service._alerts.clear()
     dom_service._last_depth_by_symbol.clear()
     dom_service._last_metrics_by_symbol.clear()
+    if hasattr(dom_service, "_stats") and dom_service._stats:
+        try:
+            dom_service._stats.shutdown()
+        except Exception:
+            pass
     dom_service._cache = DomCacheManager(base_dir=str(tmp_path))
+    dom_service._stats = DomStatsAggregator(dom_service._cache, base_dir=str(tmp_path))
 
     class DummyDB:
         def __init__(self):
@@ -70,6 +77,10 @@ def client(monkeypatch, tmp_path):
     try:
         yield TestClient(app), headers, callbacks, dom_service
     finally:
+        try:
+            dom_service._stats.shutdown()
+        except Exception:
+            pass
         optimizer.shutdown()
 
 
@@ -117,6 +128,24 @@ def test_dom_api_flow(client, monkeypatch):
     assert trimmed_history["metrics"][0]["timestamp"] == latest_ts
     assert trimmed_history["snapshots"] == []
     assert trimmed_history["total_metrics"] == 1
+
+    stats_resp = test_client.get("/api/dom/stats/TEST", headers=headers)
+    assert stats_resp.status_code == 200
+    stats_payload = stats_resp.json()
+    assert stats_payload["success"] is True
+    assert "stats" in stats_payload and "chart_metrics" in stats_payload
+    assert isinstance(stats_payload["chart_metrics"], list)
+    assert stats_payload["stats"].get("total") >= 0
+
+    lookback_resp = test_client.get(
+        "/api/dom/stats/TEST",
+        params={"lookback_seconds": 1200, "max_points": 50},
+        headers=headers,
+    )
+    assert lookback_resp.status_code == 200
+    lookback_payload = lookback_resp.json()
+    assert lookback_payload["success"] is True
+    assert lookback_payload["metadata"]["version"] == DomStatsAggregator.VERSION
 
     # alerts list and ack
     r = test_client.get("/api/alerts", headers=headers)
