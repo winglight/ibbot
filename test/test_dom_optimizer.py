@@ -300,3 +300,35 @@ def test_state_restored_from_persistence(monkeypatch, tmp_path):
         assert status["plan"]["apply_updates"] is False
     finally:
         orchestrator_two.shutdown()
+
+
+def test_automation_defaults_loaded_from_env(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.dom_service.get_db_manager", lambda: None)
+    monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_INTERVAL_MINUTES", "120")
+    monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_LOOKBACK_MINUTES", "30")
+    monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_MIN_SIGNALS", "5")
+    monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_APPLY_UPDATES", "0")
+    monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_SYMBOL", "es")
+    monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_LIMIT", "200")
+
+    service = DOMService()
+    service._cache = DomCacheManager(
+        base_dir=str(tmp_path / "automation"), retention_seconds=3600, save_interval_seconds=1
+    )
+
+    orchestrator = DOMOptimizationOrchestrator(
+        service=service,
+        cache=service._cache,
+        db_manager=None,
+    )
+    try:
+        orchestrator.reset_state()
+        status = orchestrator.get_status()
+        assert status["schedule"]["interval_minutes"] == 120
+        assert status["plan"]["lookback_minutes"] == 30
+        assert status["plan"]["min_signals"] == 5
+        assert status["plan"]["apply_updates"] is False
+        assert status["plan"]["symbol"] == "ES"
+        assert status["plan"]["limit"] == 200
+    finally:
+        orchestrator.shutdown()

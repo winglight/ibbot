@@ -206,3 +206,29 @@ def test_dom_optimization_endpoints(client):
     assert schedule_data["plan"]["symbol"] == "TEST"
     assert schedule_data["plan"]["lookback_minutes"] == 15
     assert schedule_data["plan"]["apply_updates"] is False
+
+
+def test_dom_automation_requires_write_access(client):
+    test_client, _, _, _ = client
+    token, _ = create_access_token(
+        {"sub": "readonly", "role": "visitor", "read_only": True}
+    )
+    ro_headers = {"Authorization": f"Bearer {token}"}
+
+    resp_optimize = test_client.post(
+        "/api/dom/optimize",
+        json={"symbol": "TEST"},
+        headers=ro_headers,
+    )
+    assert resp_optimize.status_code == 403
+
+    resp_schedule = test_client.post(
+        "/api/dom/automation/schedule",
+        json={
+            "enabled": True,
+            "interval_minutes": 30,
+            "symbol": "TEST",
+        },
+        headers=ro_headers,
+    )
+    assert resp_schedule.status_code == 403

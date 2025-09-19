@@ -7,6 +7,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -23,13 +24,23 @@ router = APIRouter()
 dom_service = get_dom_service()
 
 
+def _ensure_not_read_only(request: Request) -> None:
+    if getattr(request.state, "is_read_only", False):
+        raise HTTPException(status_code=403, detail="Read-only access")
+
+
 class StartRequest(BaseModel):
     symbol: str
     num_rows: int = 5
 
 
 @router.post("/api/dom/start")
-async def dom_start(req: StartRequest, user: Optional[str] = Depends(get_current_user)):
+async def dom_start(
+    req: StartRequest,
+    request: Request,
+    user: Optional[str] = Depends(get_current_user),
+):
+    _ensure_not_read_only(request)
     ok = dom_service.start(req.symbol, num_rows=req.num_rows)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to start depth stream")
@@ -41,7 +52,12 @@ class StopRequest(BaseModel):
 
 
 @router.post("/api/dom/stop")
-async def dom_stop(req: StopRequest, user: Optional[str] = Depends(get_current_user)):
+async def dom_stop(
+    req: StopRequest,
+    request: Request,
+    user: Optional[str] = Depends(get_current_user),
+):
+    _ensure_not_read_only(request)
     ok = dom_service.stop(req.symbol)
     if not ok:
         raise HTTPException(status_code=400, detail="No active depth stream for symbol")
@@ -62,7 +78,12 @@ async def get_dom_config(user: Optional[str] = Depends(get_current_user)):
 
 
 @router.put("/api/config/dom")
-async def update_dom_config(cfg: DOMConfigModel, user: Optional[str] = Depends(get_current_user)):
+async def update_dom_config(
+    cfg: DOMConfigModel,
+    request: Request,
+    user: Optional[str] = Depends(get_current_user),
+):
+    _ensure_not_read_only(request)
     dom_service.update_config(cfg.window, cfg.max_levels, cfg.trend_thresholds)
     return {
         "success": True,
@@ -88,7 +109,12 @@ async def get_alerts(user: Optional[str] = Depends(get_current_user)):
 
 
 @router.post("/api/alerts/{alert_id}/ack")
-async def ack_alert(alert_id: int, user: Optional[str] = Depends(get_current_user)):
+async def ack_alert(
+    alert_id: int,
+    request: Request,
+    user: Optional[str] = Depends(get_current_user),
+):
+    _ensure_not_read_only(request)
     ok = dom_service.ack_alert(alert_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -145,8 +171,10 @@ class OptimizeRequest(BaseModel):
 @router.post("/api/dom/optimize")
 async def optimize_dom_parameters(
     req: OptimizeRequest,
+    request: Request,
     user: Optional[str] = Depends(get_current_user),
 ):
+    _ensure_not_read_only(request)
     orchestrator = get_dom_optimization_orchestrator()
     try:
         result = orchestrator.run_optimization(
@@ -185,8 +213,10 @@ class AutomationScheduleRequest(BaseModel):
 @router.post("/api/dom/automation/schedule")
 async def configure_dom_automation(
     req: AutomationScheduleRequest,
+    request: Request,
     user: Optional[str] = Depends(get_current_user),
 ):
+    _ensure_not_read_only(request)
     orchestrator = get_dom_optimization_orchestrator()
     try:
         status = orchestrator.configure_schedule(
