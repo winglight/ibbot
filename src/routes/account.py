@@ -203,17 +203,45 @@ async def get_account_daily_summary(
 
         # Determine reference net liquidation
         net_liquidation = None
+        net_liquidation_timestamp = None
         surplus_source = 'unknown'
-        if connection_manager.is_connected() and getattr(core, 'ibkr_client', None):
+
+        ib_client = getattr(core, 'ibkr_client', None)
+        cached_snapshot = {}
+        cached_snapshot_ts = None
+        if ib_client is not None:
+            cached_snapshot = getattr(ib_client, '_cached_account_info', {}) or {}
+            cached_snapshot_ts = getattr(ib_client, '_cached_account_info_timestamp', None)
+
+        def resolve_net(snapshot: Optional[Dict[str, float]]) -> Optional[float]:
+            if not isinstance(snapshot, dict):
+                return None
             try:
-                account_info = await asyncio.wait_for(core.ibkr_client.get_account_info(), timeout=5.0)
-                if isinstance(account_info, dict):
-                    net_liq = account_info.get('net_liquidation')
-                    if net_liq is not None:
-                        net_liquidation = float(net_liq)
-                        surplus_source = 'ibkr'
+                value = snapshot.get('net_liquidation')
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        if connection_manager.is_connected() and ib_client is not None:
+            try:
+                account_info = await asyncio.wait_for(ib_client.get_account_info(), timeout=5.0)
+                resolved = resolve_net(account_info)
+                if resolved is not None:
+                    net_liquidation = resolved
+                    net_liquidation_timestamp = now_local()
+                    surplus_source = 'ibkr'
             except Exception as err:  # pragma: no cover - defensive logging
                 logger.debug(f"Failed to fetch net liquidation from IBKR: {err}")
+
+        if net_liquidation is None:
+            resolved_cache = resolve_net(cached_snapshot)
+            if resolved_cache is not None:
+                net_liquidation = resolved_cache
+                surplus_source = 'ibkr_cached'
+                if cached_snapshot_ts:
+                    net_liquidation_timestamp = cached_snapshot_ts
 
         if net_liquidation is None:
             fallback_values = [
@@ -221,10 +249,13 @@ async def get_account_daily_summary(
                 getattr(core.risk_manager, 'sod_equity', None),
             ]
             for candidate in fallback_values:
-                if candidate:
-                    net_liquidation = float(candidate)
-                    surplus_source = 'risk_manager'
-                    break
+                if candidate is not None:
+                    try:
+                        net_liquidation = float(candidate)
+                        surplus_source = 'risk_manager'
+                        break
+                    except (TypeError, ValueError):
+                        continue
 
         total_pnl = sum(daily_stats.get(day, {}).get('pnl', 0.0) for day in ordered_dates)
         base_surplus = None
@@ -262,6 +293,7 @@ async def get_account_daily_summary(
             "days": summary,
             "range": {"start": start_date.isoformat(), "end": end_date.isoformat()},
             "net_liquidation": float(net_liquidation) if net_liquidation is not None else None,
+            "net_liquidation_timestamp": net_liquidation_timestamp.isoformat() if net_liquidation_timestamp else None,
             "base_surplus": round(base_surplus, 2) if base_surplus is not None else None,
             "surplus_source": surplus_source,
             "timezone": "America/New_York",

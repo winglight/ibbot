@@ -39,12 +39,16 @@ class IBKRClient:
         self.price_cache_ttl_seconds = 5  # 减少到5秒，确保实时按钮能获取最新价格
         # 映射reqId到订单ID，用于错误处理
         self.req_id_to_order_id = {}
-        
+
         # Positions cache to smooth transient portfolio emptiness (e.g., after reconnect)
         # 防止IBKR偶发返回空portfolio快照导致前端仓位闪烁或误判
         self.positions_cache = []
         self.positions_cache_timestamp = None
         self.positions_cache_ttl_seconds = 15
+
+        # Cache the last successful account snapshot for downstream fallbacks
+        self._cached_account_info: Dict[str, Any] = {}
+        self._cached_account_info_timestamp: Optional[datetime] = None
     
     def _sanitize_float(self, value):
         """清理无效的浮点数值，将NaN和Infinity转换为None"""
@@ -69,15 +73,21 @@ class IBKRClient:
     def disconnect(self):
         """断开连接"""
         self.connection_manager.disconnect()
-    
+
     def is_connected(self) -> bool:
         """检查连接状态"""
         return self.connection_manager.is_connected()
-    
+
     @property
     def ib(self) -> Optional[IB]:
         """获取IB实例"""
         return self.connection_manager.get_ib_instance()
+
+    def _return_cached_account_info(self) -> Dict[str, Any]:
+        """Return the most recent account snapshot if we have one cached."""
+        if getattr(self, "_cached_account_info", None):
+            return dict(self._cached_account_info)
+        return {}
     
     def _place_order_in_thread(self, ib, symbol: str, quantity: int, action: str, 
                               exchange: str, sec_type: str, order_type: str, price: float = None):
@@ -1350,17 +1360,17 @@ class IBKRClient:
             if not self.is_connected():
                 if not self.connect():
                     ibkr_logger.error(f"Cannot connect to IBKR for get account info")
-                    return {}
-            
+                    return self._return_cached_account_info()
+
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
                 ibkr_logger.error(f"IBKR connection lost for get account info")
-                return {}
-            
+                return self._return_cached_account_info()
+
             # Use synchronous methods in async context
             account_values = ib.accountValues()
-            
+
             info = {
                 'account_id': None,
                 'account_type': 'Paper' if connection_manager.config.paper_trading else 'Live',
@@ -1388,11 +1398,18 @@ class IBKRClient:
                     info['unrealized_pnl'] = float(item.value)
                 elif item.tag == 'RealizedPnL' and item.currency == 'USD':
                     info['realized_pnl'] = float(item.value)
-            
+
+            # Persist snapshot for downstream consumers (risk manager, summaries)
+            try:
+                self._cached_account_info = dict(info)
+                self._cached_account_info_timestamp = now_local()
+            except Exception:
+                pass
+
             return info
         except Exception as e:
             ibkr_logger.error(f"Failed to get account info: {e}")
-            return {}
+            return self._return_cached_account_info()
     
     async def get_account_summary(self) -> List[Dict]:
         """兼容方法：返回与 ib.accountSummary() 类似的结构，用于资金充足性校验等逻辑。

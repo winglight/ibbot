@@ -135,6 +135,7 @@ class IBKRDataManager {
         if (metaEl) {
             const sourceMap = {
                 ibkr: 'IBKR实时净值',
+                ibkr_cached: 'IBKR缓存净值',
                 risk_manager: '风险控制缓存',
                 unknown: '估算'
             };
@@ -142,11 +143,12 @@ class IBKRDataManager {
             const netLiq = data.net_liquidation !== null && data.net_liquidation !== undefined
                 ? `$${this.app.formatNumber(Number(data.net_liquidation))}`
                 : '未提供';
+            const netLiqTime = data.net_liquidation_timestamp ? `（更新于 ${this.app.formatDateTime?.(data.net_liquidation_timestamp) || data.net_liquidation_timestamp}）` : '';
             const rangeText = data.range
                 ? `${data.range.start || ''} → ${data.range.end || ''}`
                 : '';
             const tz = data.timezone || 'America/New_York';
-            metaEl.textContent = `参考净资产：${netLiq}，数据范围：${rangeText}，盈余来源：${source}，时区：${tz}`;
+            metaEl.textContent = `参考净资产：${netLiq}${netLiqTime}，数据范围：${rangeText}，盈余来源：${source}，时区：${tz}`;
         }
 
         this.renderDailySummaryChart(summaryDays);
