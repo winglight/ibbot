@@ -201,13 +201,40 @@ body.side-panel-open {
 #domOptimizerSection .card-header h5,
 #domOptimizerSection .card-header h6,
 #domOptimizerSection .card-header span,
+#domOptimizerSection .card-header label,
 #domOptimizerSection .card-header small,
-#domOptimizerSection .card-header label {
-    color: rgba(248, 250, 252, 0.96) !important;
+#domOptimizerSection .card-header strong,
+#domOutcomeModal .modal-header h5,
+#domOutcomeModal .modal-header small {
+    color: rgba(255, 255, 255, 0.95) !important;
 }
 
-#domOptimizerSection .card-header .text-muted {
-    color: rgba(226, 232, 240, 0.95) !important;
+#domOptimizerSection .card-header .text-muted,
+#domOutcomeModal .modal-header .text-muted {
+    color: rgba(255, 255, 255, 0.7) !important;
+}
+
+#domOptimizerSection .card-header .btn-outline-secondary,
+#domOutcomeModal .modal-header .btn-outline-secondary {
+    color: rgba(255, 255, 255, 0.92) !important;
+    border-color: rgba(255, 255, 255, 0.5) !important;
+}
+
+#domOptimizerSection .card-header .btn-outline-secondary:hover,
+#domOutcomeModal .modal-header .btn-outline-secondary:hover {
+    color: #ffffff !important;
+    border-color: rgba(255, 255, 255, 0.65) !important;
+    background-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+#domOptimizerSection .card-header .badge {
+    border: 1px solid rgba(255, 255, 255, 0.32);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+#domOptimizerSection [data-role="dom-outcome-badge"] {
+    cursor: pointer;
+    text-decoration: underline;
 }
 
 #domOptimizerSection .card-header .badge {
