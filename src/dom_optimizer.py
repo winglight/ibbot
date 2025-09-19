@@ -418,7 +418,6 @@ class DOMOptimizationOrchestrator:
 
             finished_at = _now()
             duration_ms = (finished_at - started_at).total_seconds() * 1000.0
-
             precision = positives / evaluated if evaluated else None
 
             window_start = metrics[0].get("timestamp") if metrics else None

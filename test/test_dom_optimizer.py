@@ -181,7 +181,6 @@ def test_schedule_plan_configuration(orchestrator):
     assert disabled["status"] == "idle"
     assert disabled["scheduled_at"] is None
 
-
 def test_run_scheduled_once(orchestrator):
     orchestrator_inst, service, _ = orchestrator
     base_ts = time.time() * 1000.0
