@@ -275,6 +275,9 @@ class DOMOptimizationOrchestrator:
                     }
                 )
                 self._state["next_run_at"] = None
+                self._state["scheduled_at"] = None
+                if not self._state.get("is_running"):
+                    self._state["status"] = "idle"
                 self._persist_state_locked()
                 status = self._status_snapshot_locked()
             else:
@@ -287,6 +290,9 @@ class DOMOptimizationOrchestrator:
                 schedule["interval_minutes"] = int(interval_minutes)
                 schedule["start_at"] = self._serialise_datetime(start_at)
 
+                if not self._state.get("is_running"):
+                    self._state["status"] = "idle"
+                self._state["scheduled_at"] = None
                 self._update_next_run_locked(reference=start_at)
                 self._persist_state_locked()
                 status = self._status_snapshot_locked()
@@ -408,7 +414,7 @@ class DOMOptimizationOrchestrator:
                 updated_thresholds = copy.deepcopy(base_thresholds)
                 applied = False
 
-            duration_ms = ( _now() - started_at ).total_seconds() * 1000.0
+            duration_ms = (_now() - started_at).total_seconds() * 1000.0
 
             precision = positives / evaluated if evaluated else None
 
@@ -441,6 +447,7 @@ class DOMOptimizationOrchestrator:
             return result
 
         except Exception as exc:
+            duration_ms = (_now() - started_at).total_seconds() * 1000.0
             with self._lock:
                 self._state["status"] = "failed"
                 self._state["is_running"] = False

@@ -6,6 +6,7 @@ import pytest
 
 from src.dom_cache import DomCacheManager
 from src.dom_optimizer import DOMOptimizationOrchestrator, _now
+from src.dom_parameter_tuner import DOMParameterTuner
 from src.dom_service import DOMService
 
 
@@ -167,10 +168,12 @@ def test_schedule_plan_configuration(orchestrator):
     assert status["plan"]["min_signals"] == 2
     assert status["plan"]["obi_candidates"] == [0.6, 0.7]
     assert status["plan"]["ofi_candidates"] == [0.0, 5.5]
+    assert status["status"] == "idle"
 
     disabled = orchestrator_inst.configure_schedule(enabled=False, interval_minutes=None)
     assert disabled["schedule"]["enabled"] is False
-
+    assert disabled["status"] == "idle"
+    assert disabled["scheduled_at"] is None
 
 def test_run_scheduled_once(orchestrator):
     orchestrator_inst, service, _ = orchestrator
@@ -211,3 +214,32 @@ def test_run_scheduled_once(orchestrator):
     assert status["scheduled_at"] is not None
     assert status["plan"]["symbol"] == "ES"
     assert status["schedule"]["next_run_at"] is not None
+
+
+def test_run_optimization_failure_updates_state(orchestrator, monkeypatch):
+    orchestrator_inst, service, _ = orchestrator
+    base_ts = time.time() * 1000.0
+    metrics = [
+        {
+            "timestamp": base_ts + 1,
+            "obi5": 0.7,
+            "ofi": 6.0,
+            "signal_type": "long",
+            "outcome": 1,
+        }
+    ]
+    _append_metrics(service._cache, "ES", metrics)
+
+    def raise_error(self, *args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(DOMParameterTuner, "optimize_with_history", raise_error)
+
+    with pytest.raises(RuntimeError):
+        orchestrator_inst.run_optimization("ES")
+
+    status = orchestrator_inst.get_status()
+    assert status["status"] == "failed"
+    assert status["is_running"] is False
+    assert status["last_error"] == "boom"
+    assert status["last_duration_ms"] is not None
