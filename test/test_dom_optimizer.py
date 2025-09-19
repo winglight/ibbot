@@ -1,10 +1,11 @@
 import copy
 import time
+from datetime import timedelta
 
 import pytest
 
 from src.dom_cache import DomCacheManager
-from src.dom_optimizer import DOMOptimizationOrchestrator
+from src.dom_optimizer import DOMOptimizationOrchestrator, _now
 from src.dom_service import DOMService
 
 
@@ -41,7 +42,10 @@ def orchestrator(monkeypatch, tmp_path):
         service=service, cache=service._cache, db_manager=dummy_db
     )
     orchestrator.reset_state()
-    return orchestrator, service, dummy_db
+    try:
+        yield orchestrator, service, dummy_db
+    finally:
+        orchestrator.shutdown()
 
 
 def _append_metrics(cache, symbol, entries):
@@ -135,3 +139,75 @@ def test_optimizer_reports_insufficient_data(orchestrator):
     assert result["applied"] is False
     assert result["insufficient_data"] is True
     assert result["evaluated_records"] == 0
+
+
+def test_schedule_plan_configuration(orchestrator):
+    orchestrator_inst, _, _ = orchestrator
+
+    start_at = _now() - timedelta(minutes=5)
+    status = orchestrator_inst.configure_schedule(
+        enabled=True,
+        interval_minutes=30,
+        start_at=start_at,
+        symbol="es",
+        lookback_minutes=120,
+        limit=200,
+        apply_updates=False,
+        min_signals=2,
+        obi_candidates=[0.6, "0.7", None],
+        ofi_candidates=[0, 5.5],
+    )
+
+    assert status["schedule"]["enabled"] is True
+    assert status["schedule"]["interval_minutes"] == 30
+    assert status["plan"]["symbol"] == "ES"
+    assert status["plan"]["lookback_minutes"] == 120
+    assert status["plan"]["limit"] == 200
+    assert status["plan"]["apply_updates"] is False
+    assert status["plan"]["min_signals"] == 2
+    assert status["plan"]["obi_candidates"] == [0.6, 0.7]
+    assert status["plan"]["ofi_candidates"] == [0.0, 5.5]
+
+    disabled = orchestrator_inst.configure_schedule(enabled=False, interval_minutes=None)
+    assert disabled["schedule"]["enabled"] is False
+
+
+def test_run_scheduled_once(orchestrator):
+    orchestrator_inst, service, _ = orchestrator
+    base_ts = time.time() * 1000.0
+    metrics = [
+        {
+            "timestamp": base_ts + 1,
+            "obi5": 0.72,
+            "ofi": 6.0,
+            "signal_type": "long",
+            "outcome": 1,
+        },
+        {
+            "timestamp": base_ts + 2,
+            "obi5": 0.64,
+            "ofi": 5.2,
+            "signal_type": "long",
+            "outcome": 0,
+        },
+    ]
+    _append_metrics(service._cache, "ES", metrics)
+
+    orchestrator_inst.configure_schedule(
+        enabled=True,
+        interval_minutes=5,
+        start_at=_now() - timedelta(minutes=1),
+        symbol="ES",
+        lookback_minutes=60,
+        apply_updates=False,
+        min_signals=1,
+    )
+
+    result = orchestrator_inst.run_scheduled_once(reference_time=_now())
+    assert result is not None
+    assert result["symbol"] == "ES"
+    status = orchestrator_inst.get_status()
+    assert status["status"] == "succeeded"
+    assert status["scheduled_at"] is not None
+    assert status["plan"]["symbol"] == "ES"
+    assert status["schedule"]["next_run_at"] is not None

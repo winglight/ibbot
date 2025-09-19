@@ -67,7 +67,10 @@ def client(monkeypatch, tmp_path):
     optimizer.reset_state()
     monkeypatch.setattr("src.dom_optimizer._optimizer_instance", optimizer)
 
-    return TestClient(app), headers, callbacks, dom_service
+    try:
+        yield TestClient(app), headers, callbacks, dom_service
+    finally:
+        optimizer.shutdown()
 
 
 def _feed(callback):
@@ -177,10 +180,17 @@ def test_dom_optimization_endpoints(client):
     status_data = status_resp.json()
     assert status_data["success"] is True
     assert status_data["status"] in {"succeeded", "running", "failed"}
+    assert "plan" in status_data
 
     schedule_resp = test_client.post(
         "/api/dom/automation/schedule",
-        json={"enabled": True, "interval_minutes": 30},
+        json={
+            "enabled": True,
+            "interval_minutes": 30,
+            "symbol": "TEST",
+            "lookback_minutes": 15,
+            "apply_updates": False,
+        },
         headers=headers,
     )
     assert schedule_resp.status_code == 200
@@ -188,3 +198,6 @@ def test_dom_optimization_endpoints(client):
     assert schedule_data["success"] is True
     assert schedule_data["schedule"]["enabled"] is True
     assert schedule_data["schedule"]["interval_minutes"] == 30
+    assert schedule_data["plan"]["symbol"] == "TEST"
+    assert schedule_data["plan"]["lookback_minutes"] == 15
+    assert schedule_data["plan"]["apply_updates"] is False
