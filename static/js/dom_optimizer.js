@@ -501,10 +501,21 @@
             try {
                 this.setLoading('status', true);
                 this.setButtonLoading(this.elements.refreshStatusBtn, true, '刷新中');
-                const response = await this.apiCall('/dom/automation/status', {
-                    allowReadOnly: true,
-                    useCache: false
-                });
+                let response = null;
+                try {
+                    response = await this.apiCall('/dom/automation/status', {
+                        allowReadOnly: true,
+                        useCache: false
+                    });
+                } catch (error) {
+                    const message = String(error?.message || '').toLowerCase();
+                    if (message.includes('not found')) {
+                        this.renderAutomationStatus(null);
+                        return;
+                    }
+                    throw error;
+                }
+
                 if (response && response.success === false) {
                     throw new Error(response.detail || '获取自动化状态失败');
                 }
@@ -521,6 +532,27 @@
         }
 
         renderAutomationStatus(statusPayload) {
+            if (!statusPayload) {
+                if (this.elements.statusBadge) {
+                    this.elements.statusBadge.className = 'badge bg-secondary text-uppercase';
+                    this.elements.statusBadge.textContent = 'N/A';
+                }
+                if (this.elements.statusText) {
+                    this.elements.statusText.textContent = '未启用';
+                }
+                if (this.elements.lastRun) {
+                    this.elements.lastRun.textContent = '-';
+                }
+                if (this.elements.lastDuration) {
+                    this.elements.lastDuration.textContent = '-';
+                }
+                if (this.elements.nextRun) {
+                    this.elements.nextRun.textContent = '-';
+                }
+                this.renderLastResult(null);
+                return;
+            }
+
             const status = statusPayload?.status || 'idle';
             const badgeClass = STATUS_BADGE_MAP[status] || STATUS_BADGE_MAP.idle;
             if (this.elements.statusBadge) {

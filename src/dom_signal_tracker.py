@@ -145,6 +145,7 @@ class SignalOutcomeTracker:
             updated = self.cache_manager.update_metric(
                 symbol,
                 signal_id=pending.signal_id,
+                timestamp=pending.timestamp_ms,
                 updates=payload,
             )
             if updated:

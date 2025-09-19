@@ -2727,7 +2727,26 @@ class TradingApp {
 
                 // 初次载入图表
                 this.loadMonitorChart(symbol, chartLoadOptions);
-                
+
+                const bindMonitorControl = (element) => {
+                    if (!element || element.dataset.monitorBound === '1') return;
+                    element.addEventListener('change', () => {
+                        const activeSymbol = (this.currentMonitor?.symbol || symbol || '').trim();
+                        if (!activeSymbol) return;
+                        const barSize = document.getElementById('monitorInterval')?.value || '1 min';
+                        const durationValue = document.getElementById('monitorDuration')?.value || '1 D';
+                        if (this.chartDataCache) {
+                            const cacheKey = `${activeSymbol}_${barSize}_${durationValue}`;
+                            delete this.chartDataCache[cacheKey];
+                        }
+                        this.loadMonitorChart(activeSymbol, { useCache: false, forceRefresh: true });
+                    });
+                    element.dataset.monitorBound = '1';
+                };
+
+                bindMonitorControl(document.getElementById('monitorInterval'));
+                bindMonitorControl(document.getElementById('monitorDuration'));
+
                 // 初始化预期PnL显示
                 this.updateExpectedPnL();
                 
@@ -3100,7 +3119,8 @@ class TradingApp {
         return this.monitorChartTimezone;
     }
 
-    parseMonitorChartTime(raw) {
+    parseMonitorChartTime(raw, options = {}) {
+        const { skipDstAdjustment = false } = options || {};
         const buildFallbackDate = () => {
             if (raw == null || raw === '') {
                 return new Date();
@@ -3191,12 +3211,12 @@ class TradingApp {
                 if (dt && dt.isValid) {
                     const sourceTime = dt.setZone(MONITOR_SOURCE_TZ);
                     const isEasternDst = sourceTime.isValid ? sourceTime.isInDST : false;
-                    // 转换到本地时区而不是targetZone，确保显示本地时间
                     let localTime = dt.setZone('local');
-                    if (isEasternDst) {
+                    if (!skipDstAdjustment && isEasternDst) {
                         localTime = localTime.plus({ hours: 1 });
                     }
-                    console.log(`[时间转换] 原始: ${raw} -> 本地时间: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')} (${isEasternDst ? 'DST +1h' : '标准'})`);
+                    const dstLabel = isEasternDst ? (skipDstAdjustment ? 'DST' : 'DST +1h') : '标准';
+                    console.log(`[时间转换] 原始: ${raw} -> 本地时间: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')} (${dstLabel})`);
                     return localTime.toJSDate();
                 }
             }
@@ -4780,7 +4800,7 @@ class TradingApp {
                 const duration = durationSelect?.value || '1 D';
 
                 const rawTimestamp = payload.timestamp ?? payload.lastTimestamp ?? payload.lastTime ?? payload.time ?? payload.last_time ?? payload.updateTime ?? payload.datetime ?? null;
-                let baseTime = this.parseMonitorChartTime(rawTimestamp);
+                let baseTime = this.parseMonitorChartTime(rawTimestamp, { skipDstAdjustment: true });
                 if (!(baseTime instanceof Date) || Number.isNaN(baseTime.getTime())) {
                     baseTime = new Date();
                 }

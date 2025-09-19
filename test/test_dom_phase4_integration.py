@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import types
+import shutil
 from collections import defaultdict
 
 import pytest
@@ -39,6 +40,7 @@ if 'ib_insync' not in sys.modules:  # provide minimal stub so DOMService can imp
 from src.dom_cache import DomCacheManager
 from src.dom_optimizer import DOMOptimizationOrchestrator
 from src.dom_service import DOMService
+from src.dom_signal_tracker import SignalOutcomeTracker, resolve_outcome_config
 
 
 class DummyDB:
@@ -66,6 +68,12 @@ def _build_service(tmp_path):
     service._cache = cache
     service.db_manager = DummyDB()
     service._previous_signal_flags = defaultdict(lambda: {"long": False, "short": False})
+    delay, threshold = resolve_outcome_config()
+    service._outcome_tracker = SignalOutcomeTracker(
+        cache,
+        evaluation_delay_seconds=delay,
+        price_move_threshold=threshold,
+    )
     return service
 
 
@@ -203,5 +211,6 @@ def test_dom_phase4_full_loop(tmp_path, symbol):
         assert status['last_result']['symbol'] == symbol
     finally:
         orchestrator.shutdown()
+        shutil.rmtree(service._cache.base_dir, ignore_errors=True)
         os.environ.pop('DOM_SIGNAL_OUTCOME_DELAY_SECONDS', None)
         os.environ.pop('DOM_SIGNAL_OUTCOME_THRESHOLD', None)
