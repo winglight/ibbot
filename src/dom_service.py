@@ -1,6 +1,7 @@
 import time
 import asyncio
 import inspect
+import copy
 from typing import Dict, List, Optional, Any, Callable, DefaultDict
 from collections import defaultdict
 
@@ -16,6 +17,7 @@ from src.dom_dependencies import (
 )
 from src.database import get_db_manager
 from src.dom_processor import DOMProcessor
+from src.dom_parameter_tuner import DOMParameterTuner, DEFAULT_BASE_THRESHOLDS
 from src.dom_signal_tracker import SignalOutcomeTracker, resolve_outcome_config
 
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
@@ -58,6 +60,7 @@ class DOMService:
                 window=persisted_config.get("window", dom_config.window),
                 max_levels=persisted_config.get("max_levels", dom_config.max_levels),
                 trend_thresholds=persisted_config.get("trend_thresholds"),
+                tuner_base_thresholds=persisted_config.get("tuner_base_thresholds"),
                 persist=False,
             )
 
@@ -169,6 +172,7 @@ class DOMService:
         window: Any,
         max_levels: Any,
         trend_thresholds: Optional[List[float]] = None,
+        tuner_base_thresholds: Optional[Dict[str, Any]] = None,
         *,
         persist: bool,
     ) -> None:
@@ -194,7 +198,17 @@ class DOMService:
         dom_config.trend_thresholds = sanitized
         self.trend_thresholds = list(sanitized)
 
-        self.processor = DOMProcessor(window=target_window, max_levels=target_levels)
+        base_thresholds = self._sanitize_base_thresholds(
+            tuner_base_thresholds if tuner_base_thresholds is not None else self._get_current_base_thresholds()
+        )
+
+        parameter_tuner = DOMParameterTuner(base_thresholds=base_thresholds)
+
+        self.processor = DOMProcessor(
+            window=target_window,
+            max_levels=target_levels,
+            parameter_tuner=parameter_tuner,
+        )
         set_dom_processor(self.processor)
 
         try:
@@ -210,6 +224,7 @@ class DOMService:
                 "window": dom_config.window,
                 "max_levels": dom_config.max_levels,
                 "trend_thresholds": list(self.trend_thresholds),
+                "tuner_base_thresholds": copy.deepcopy(base_thresholds),
             }
             try:
                 self.db_manager.save_dom_config(payload)
@@ -297,10 +312,13 @@ class DOMService:
         max_levels: int,
         trend_thresholds: Optional[List[float]] = None,
     ) -> None:
+        base_thresholds = self._get_current_base_thresholds()
+
         self._apply_config(
             window=window,
             max_levels=max_levels,
             trend_thresholds=trend_thresholds,
+            tuner_base_thresholds=base_thresholds,
             persist=True,
         )
 
@@ -362,7 +380,62 @@ class DOMService:
             "trend_thresholds": list(getattr(dom_config, "trend_thresholds", self.trend_thresholds))
             or list(self.trend_thresholds)
             or list(DEFAULT_TREND_THRESHOLDS),
+            "tuner_base_thresholds": self._get_current_base_thresholds(),
         }
+
+    # --------------------------------------------------------------
+    def apply_tuner_base_thresholds(
+        self,
+        base_thresholds: Dict[str, Any],
+        *,
+        persist: bool = True,
+    ) -> Dict[str, Dict[str, float]]:
+        sanitized = self._sanitize_base_thresholds(base_thresholds)
+        current_config = self.get_config()
+        self._apply_config(
+            window=current_config["window"],
+            max_levels=current_config["max_levels"],
+            trend_thresholds=current_config.get("trend_thresholds"),
+            tuner_base_thresholds=sanitized,
+            persist=persist,
+        )
+        return sanitized
+
+    # --------------------------------------------------------------
+    def get_tuner_base_thresholds(self) -> Dict[str, Dict[str, float]]:
+        return self._get_current_base_thresholds()
+
+    # --------------------------------------------------------------
+    def _get_current_base_thresholds(self) -> Dict[str, Dict[str, float]]:
+        tuner = getattr(self.processor, "parameter_tuner", None)
+        if tuner and getattr(tuner, "base_thresholds", None):
+            return copy.deepcopy(tuner.base_thresholds)
+        return copy.deepcopy(DEFAULT_BASE_THRESHOLDS)
+
+    def _sanitize_base_thresholds(
+        self, values: Optional[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, float]]:
+        sanitized = copy.deepcopy(DEFAULT_BASE_THRESHOLDS)
+        if not isinstance(values, dict):
+            return sanitized
+
+        def _coerce(value: Any, fallback: float) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float(fallback)
+
+        for section, defaults in DEFAULT_BASE_THRESHOLDS.items():
+            target = sanitized.setdefault(section, {})
+            incoming = values.get(section) if isinstance(values.get(section), dict) else {}
+            if not isinstance(target, dict):
+                continue
+            for key, default_value in defaults.items():
+                source_value = None
+                if isinstance(incoming, dict):
+                    source_value = incoming.get(key)
+                target[key] = _coerce(source_value, float(default_value))
+        return sanitized
 
 
 # Global service instance

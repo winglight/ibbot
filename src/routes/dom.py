@@ -1,5 +1,6 @@
 from typing import List, Optional
 import asyncio
+from datetime import datetime
 
 from fastapi import (
     APIRouter,
@@ -14,7 +15,9 @@ from pydantic import BaseModel, Field
 import core
 from .auth import get_current_user
 from src.dom_service import get_dom_service
+from src.dom_optimizer import get_dom_optimization_orchestrator
 from core import dom_config
+from loguru import logger
 
 router = APIRouter()
 dom_service = get_dom_service()
@@ -126,4 +129,73 @@ async def get_dom_history(
         include_snapshots=include_snapshots,
     )
     return {"success": True, "symbol": symbol, **history}
+
+
+class OptimizeRequest(BaseModel):
+    symbol: str
+    start: Optional[str] = None
+    end: Optional[str] = None
+    limit: Optional[int] = Field(default=None, ge=0)
+    apply: bool = True
+    min_signals: int = Field(default=0, ge=0)
+    obi_candidates: Optional[List[float]] = None
+    ofi_candidates: Optional[List[float]] = None
+
+
+@router.post("/api/dom/optimize")
+async def optimize_dom_parameters(
+    req: OptimizeRequest,
+    user: Optional[str] = Depends(get_current_user),
+):
+    orchestrator = get_dom_optimization_orchestrator()
+    try:
+        result = orchestrator.run_optimization(
+            req.symbol,
+            start_time=req.start,
+            end_time=req.end,
+            limit=req.limit,
+            apply_updates=req.apply,
+            min_signals=req.min_signals,
+            obi_candidates=req.obi_candidates,
+            ofi_candidates=req.ofi_candidates,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("DOM optimisation request failed")
+        raise HTTPException(status_code=500, detail="DOM optimisation failed") from exc
+    return {"success": True, **result}
+
+
+class AutomationScheduleRequest(BaseModel):
+    enabled: bool = True
+    interval_minutes: Optional[int] = Field(default=None, ge=0)
+    start_at: Optional[datetime] = None
+
+
+@router.post("/api/dom/automation/schedule")
+async def configure_dom_automation(
+    req: AutomationScheduleRequest,
+    user: Optional[str] = Depends(get_current_user),
+):
+    orchestrator = get_dom_optimization_orchestrator()
+    try:
+        status = orchestrator.configure_schedule(
+            enabled=req.enabled,
+            interval_minutes=req.interval_minutes,
+            start_at=req.start_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, **status}
+
+
+@router.get("/api/dom/automation/status")
+async def get_dom_automation_status(
+    user: Optional[str] = Depends(get_current_user),
+):
+    orchestrator = get_dom_optimization_orchestrator()
+    return {"success": True, **orchestrator.get_status()}
 
