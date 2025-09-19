@@ -173,6 +173,13 @@ class AutomationScheduleRequest(BaseModel):
     enabled: bool = True
     interval_minutes: Optional[int] = Field(default=None, ge=0)
     start_at: Optional[datetime] = None
+    symbol: Optional[str] = None
+    lookback_minutes: Optional[int] = Field(default=None, ge=0)
+    limit: Optional[int] = Field(default=None, ge=0)
+    apply_updates: Optional[bool] = None
+    min_signals: Optional[int] = Field(default=None, ge=0)
+    obi_candidates: Optional[List[float]] = None
+    ofi_candidates: Optional[List[float]] = None
 
 
 @router.post("/api/dom/automation/schedule")
@@ -186,6 +193,13 @@ async def configure_dom_automation(
             enabled=req.enabled,
             interval_minutes=req.interval_minutes,
             start_at=req.start_at,
+            symbol=req.symbol,
+            lookback_minutes=req.lookback_minutes,
+            limit=req.limit,
+            apply_updates=req.apply_updates,
+            min_signals=req.min_signals,
+            obi_candidates=req.obi_candidates,
+            ofi_candidates=req.ofi_candidates,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
