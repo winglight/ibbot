@@ -108,7 +108,7 @@ async def set_strategy_data_push_api(
 ):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    result = strategy_manager.set_data_push(
+    result = await strategy_manager.set_data_push(
         name,
         enabled=payload.enabled,
         subscription=payload.subscription,
@@ -138,7 +138,7 @@ async def set_strategy_data_push_api(
 async def update_strategy_api(name: str, updates: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    success = strategy_manager.update_strategy(name, updates)
+    success = await strategy_manager.update_strategy(name, updates)
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update strategy")
     return {"success": True}
@@ -165,7 +165,7 @@ async def delete_strategy_api(name: str, user: Optional[str] = Depends(get_curre
 async def toggle_strategy_api(name: str, enabled: bool, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    success = strategy_manager.update_strategy(name, {"enabled": enabled})
+    success = await strategy_manager.update_strategy(name, {"enabled": enabled})
     if not success:
         raise HTTPException(status_code=400, detail="Failed to toggle strategy")
     return {"success": True}

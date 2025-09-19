@@ -9,7 +9,7 @@ class FailingStrategyManager:
     def __init__(self):
         self.state = {}
 
-    def set_data_push(self, name, enabled, subscription=None, symbol=None):  # noqa: D401 - signature mirrors real method
+    async def set_data_push(self, name, enabled, subscription=None, symbol=None):  # noqa: D401 - signature mirrors real method
         payload = {
             "enabled": bool(enabled),
             "active": False,
@@ -29,7 +29,7 @@ class SuccessfulStrategyManager:
     def __init__(self):
         self.state = {}
 
-    def set_data_push(self, name, enabled, subscription=None, symbol=None):  # noqa: D401 - signature mirrors real method
+    async def set_data_push(self, name, enabled, subscription=None, symbol=None):  # noqa: D401 - signature mirrors real method
         payload = {
             "success": True,
             "active": bool(enabled),

@@ -470,12 +470,7 @@ async def get_realtime_data(
     try:
         loop = asyncio.get_event_loop()
         try:
-            data = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None, lambda: core.ibkr_client.get_real_time_data(symbol, exchange)
-                ),
-                timeout=10.0,
-            )
+            data = await core.ibkr_client.get_real_time_data(symbol, exchange)
         except asyncio.TimeoutError:
             logger.warning(
                 f"Real-time data request for {symbol} timed out, checking cache"
@@ -573,15 +568,9 @@ async def get_current_price(
 
         loop = asyncio.get_event_loop()
         try:
-            data = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: core.ibkr_client.get_real_time_data(
+            data = await core.ibkr_client.get_real_time_data(
                         request.symbol, request.exchange
-                    ),
-                ),
-                timeout=2.0,
-            )
+                    )
 
             if data and "last" in data:
                 price = data["last"]

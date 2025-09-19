@@ -660,7 +660,7 @@ class RiskManager:
         try:
             import core  # 延迟导入避免循环导入
             # 尝试在后台线程获取最新实时价格，避免阻塞事件循环
-            real_time_data = core.ibkr_client.get_real_time_data(symbol)
+            real_time_data = await core.ibkr_client.get_real_time_data(symbol)
             price = None
             if real_time_data:
                 # get_real_time_data 返回的键为 'last'

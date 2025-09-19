@@ -11,6 +11,8 @@ const INTERVAL_MINUTES_MAP = {
 
 const MONITOR_SOURCE_TZ = 'America/New_York';
 const MONITOR_FALLBACK_TZ = 'Asia/Shanghai';
+const MONITOR_CHART_MAX_MINUTES = 30;
+const MONITOR_CHART_MAX_POINTS = 3000;
 
 const TREND_LEVEL_STYLES = {
     0: {
@@ -206,6 +208,8 @@ class TradingApp {
         this.monitorTrendChart = null;
         this.monitorTrendData = [];
         this.candlestickSupported = false;
+        this.candlestickLoader = null;
+        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0';
         // 渲染监控图表时使用的定时器句柄，防止重复渲染导致死循环
         this.monitorChartRenderTimeout = null;
         // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制
@@ -847,33 +851,11 @@ class TradingApp {
                     window.Chart.register(window.zoomPlugin);
                 }
 
-                const financialCandidates = [
-                    window.ChartFinancial,
-                    window["chartjs-chart-financial"],
-                    window.chartFinancial,
-                    window.chartjsChartFinancial,
-                    window.financialChart
-                ].filter(Boolean);
-
-                for (const fin of financialCandidates) {
-                    const components = [
-                        fin.CandlestickController,
-                        fin.OhlcController,
-                        fin.CandlestickElement,
-                        fin.OhlcElement,
-                        fin.FinancialController,
-                        fin.FinancialElement
-                    ].filter(Boolean);
-
-                    if (components.length) {
-                        window.Chart.register(...components);
-                        this.candlestickSupported = true;
-                        break;
-                    }
-                }
-
+                this.registerCandlestickControllers();
                 if (!this.candlestickSupported) {
-                    console.warn('[Monitor] chartjs-chart-financial plugin not detected; candlestick view will be unavailable until it loads.');
+                    this.ensureCandlestickPlugin().catch((err) => {
+                        console.warn('[Monitor] candlestick plugin load deferred:', err?.message || err);
+                    });
                 }
             }
         } catch (e) {
@@ -1729,6 +1711,111 @@ class TradingApp {
         }
     }
 
+    registerCandlestickControllers() {
+        try {
+            if (!window.Chart || !window.Chart.register) {
+                return false;
+            }
+            const financialCandidates = [
+                window.ChartFinancial,
+                window['chartjs-chart-financial'],
+                window.chartFinancial,
+                window.chartjsChartFinancial,
+                window.financialChart
+            ].filter(Boolean);
+
+            for (const fin of financialCandidates) {
+                const components = [
+                    fin?.CandlestickController,
+                    fin?.OhlcController,
+                    fin?.CandlestickElement,
+                    fin?.OhlcElement,
+                    fin?.FinancialController,
+                    fin?.FinancialElement
+                ].filter(Boolean);
+                if (components.length) {
+                    window.Chart.register(...components);
+                    this.candlestickSupported = true;
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.error('Failed to register candlestick controllers', error);
+        }
+        return this.candlestickSupported;
+    }
+
+    loadExternalScript(url) {
+        return new Promise((resolve, reject) => {
+            const normalizedUrl = (url || '').trim();
+            if (!normalizedUrl) {
+                resolve(true);
+                return;
+            }
+
+            const scripts = Array.from(document.getElementsByTagName('script'));
+            const existing = scripts.find((script) => script.src && script.src.includes('chartjs-chart-financial'));
+
+            if (existing) {
+                if (existing.dataset.loaded === 'true' || existing.readyState === 'complete') {
+                    resolve(true);
+                    return;
+                }
+                existing.addEventListener('load', () => {
+                    existing.dataset.loaded = 'true';
+                    resolve(true);
+                }, { once: true });
+                existing.addEventListener('error', (err) => reject(err || new Error(`Failed to load ${normalizedUrl}`)), { once: true });
+                return;
+            }
+
+            const script = document.createElement('script');
+            script.src = normalizedUrl;
+            script.async = true;
+            script.defer = true;
+            script.crossOrigin = 'anonymous';
+            script.dataset.dynamic = 'chartjs-financial';
+            script.addEventListener('load', () => {
+                script.dataset.loaded = 'true';
+                resolve(true);
+            }, { once: true });
+            script.addEventListener('error', (err) => {
+                reject(err || new Error(`Failed to load ${normalizedUrl}`));
+            }, { once: true });
+            document.head.appendChild(script);
+        });
+    }
+
+    async ensureCandlestickPlugin() {
+        if (this.candlestickSupported) {
+            return true;
+        }
+        if (this.registerCandlestickControllers()) {
+            return true;
+        }
+        if (this.candlestickLoader) {
+            return this.candlestickLoader;
+        }
+
+        this.candlestickLoader = this.loadExternalScript(this.financialScriptUrl)
+            .then(() => {
+                const registered = this.registerCandlestickControllers();
+                if (!registered) {
+                    throw new Error('chartjs-chart-financial loaded but controllers unavailable');
+                }
+                return true;
+            })
+            .catch((error) => {
+                console.error('Failed to load chartjs-chart-financial plugin', error);
+                return false;
+            })
+            .finally(() => {
+                this.candlestickLoader = null;
+            });
+
+        return this.candlestickLoader;
+    }
+
     updateReadOnlyMode(isReadOnly, role = 'admin', options = {}) {
         const persist = options.persist !== false;
         this.isReadOnly = !!isReadOnly;
@@ -2308,6 +2395,13 @@ class TradingApp {
             const previousSymbol = this.currentMonitor?.symbol;
 
             // 保存当前监控上下文
+            const configuredSpan = (this.riskRules && this.riskRules[symbol] && this.riskRules[symbol].max_time_span)
+                || MONITOR_CHART_MAX_MINUTES;
+            const numericSpan = Number(configuredSpan);
+            const initialSpan = Number.isFinite(numericSpan)
+                ? Math.max(1, Math.min(numericSpan, MONITOR_CHART_MAX_MINUTES))
+                : MONITOR_CHART_MAX_MINUTES;
+
             this.currentMonitor = {
                 symbol,
                 positionQty: Number(positionQty) || 0,
@@ -2316,7 +2410,7 @@ class TradingApp {
                 pnl: Number(pnl) || 0,
                 pnlPercent: Number(pnlPercent) || 0,
                 contractMultiplier: Number(contractMultiplier) || 1,
-                maxTimeSpan: (this.riskRules && this.riskRules[symbol] && this.riskRules[symbol].max_time_span) || 30,
+                maxTimeSpan: initialSpan,
                 entryTime,
                 lastOrderTime, // 添加最近订单时间
                 timeAlertSent: false,
@@ -2383,7 +2477,11 @@ class TradingApp {
                     if (slInputRef) slInputRef.value = rule.stop_loss_price ?? '';
                     if (tpInputRef) tpInputRef.value = rule.take_profit_price ?? '';
                     if (this.currentMonitor) {
-                        this.currentMonitor.maxTimeSpan = rule.max_time_span || this.currentMonitor.maxTimeSpan;
+                        const requestedSpan = Number(rule.max_time_span);
+                        const clampedSpan = Number.isFinite(requestedSpan)
+                            ? Math.max(1, Math.min(requestedSpan, MONITOR_CHART_MAX_MINUTES))
+                            : this.currentMonitor.maxTimeSpan;
+                        this.currentMonitor.maxTimeSpan = clampedSpan;
                     }
 
                     // 显示激活的风险规则信息
@@ -2765,7 +2863,7 @@ class TradingApp {
                         const activeSymbol = (this.currentMonitor?.symbol || symbol || '').trim();
                         if (!activeSymbol) return;
                         const barSize = document.getElementById('monitorInterval')?.value || '1 min';
-                        const durationValue = document.getElementById('monitorDuration')?.value || '1 D';
+                        const durationValue = document.getElementById('monitorDuration')?.value || '30 M';
                         if (this.chartDataCache) {
                             const cacheKey = `${activeSymbol}_${barSize}_${durationValue}`;
                             delete this.chartDataCache[cacheKey];
@@ -3275,7 +3373,7 @@ class TradingApp {
             const intervalSelect = document.getElementById('monitorInterval');
             const durationSelect = document.getElementById('monitorDuration');
             const barSize = intervalSelect?.value || '1 min';
-            const duration = durationSelect?.value || '1 D';
+            const duration = durationSelect?.value || '30 M';
             
             // 生成缓存键
             const cacheKey = `${symbol}_${barSize}_${duration}`;
@@ -3334,8 +3432,36 @@ class TradingApp {
                 return;
             }
 
+            const normalizedBars = response.data.map((bar, index) => {
+                const raw = bar.time !== undefined && bar.time !== null ? bar.time : bar.date;
+                const parsedTime = this.parseMonitorChartTime(raw);
+                return {
+                    bar,
+                    index,
+                    parsedTime: parsedTime instanceof Date && !Number.isNaN(parsedTime.getTime())
+                        ? parsedTime
+                        : null,
+                };
+            });
+
+            const validBars = normalizedBars.filter(item => item.parsedTime);
+            if (validBars.length) {
+                const lastTimeMs = validBars[validBars.length - 1].parsedTime.getTime();
+                const minAllowedTime = lastTimeMs - MONITOR_CHART_MAX_MINUTES * 60 * 1000;
+                let trimmed = validBars.filter(item => item.parsedTime.getTime() >= minAllowedTime);
+                if (!trimmed.length) {
+                    trimmed = validBars.slice(-1);
+                }
+                if (trimmed.length > MONITOR_CHART_MAX_POINTS) {
+                    trimmed = trimmed.slice(trimmed.length - MONITOR_CHART_MAX_POINTS);
+                }
+                response.data = trimmed.map(item => item.bar);
+            } else if (response.data.length > MONITOR_CHART_MAX_POINTS) {
+                response.data = response.data.slice(response.data.length - MONITOR_CHART_MAX_POINTS);
+            }
+
             // Wait a bit for DOM to update
-            this.pendingMonitorChartRender = () => {
+            this.pendingMonitorChartRender = async () => {
                 const ctx = document.getElementById('monitorChart')?.getContext('2d');
                 if (!ctx) {
                     return;
@@ -3389,7 +3515,10 @@ class TradingApp {
                 const intervalValueRaw = intervalSelect?.value || '1 min';
                 const intervalKey = intervalValueRaw.replace(/\s+/g, '');
                 const padIntervalMinutes = INTERVAL_MINUTES_MAP[intervalKey] || 1;
-                const padSpanMinutes = this.currentMonitor?.maxTimeSpan || 30;
+                const padSpanMinutes = Math.min(
+                    this.currentMonitor?.maxTimeSpan || MONITOR_CHART_MAX_MINUTES,
+                    MONITOR_CHART_MAX_MINUTES
+                );
                 const padBars = Math.ceil(padSpanMinutes / padIntervalMinutes);
                 const lastBar = response.data[response.data.length - 1];
                 // 打印chart数据数组中的最后一个对象
@@ -3499,16 +3628,25 @@ class TradingApp {
                     : 'line';
                 const isCandlestick = chartType === 'candlestick';
 
-                if (isCandlestick && !this.candlestickSupported) {
-                    chartContainer.innerHTML = '<div class="alert alert-warning mb-0">蜡烛图插件尚未加载，已暂时禁用蜡烛图视图。</div>';
-                    return;
+                if (isCandlestick) {
+                    const ready = await this.ensureCandlestickPlugin();
+                    if (!ready) {
+                        chartContainer.innerHTML = '<div class="alert alert-warning mb-0">蜡烛图插件加载中，请稍后重试。</div>';
+                        return;
+                    }
                 }
 
                 // 计算时间跨度相关参数
                 const intervalValue = intervalSelect ? intervalSelect.value : '1min';
                 const chartIntervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
-                const chartSpanMinutes = this.currentMonitor?.maxTimeSpan || 30;
-                const spanBars = Math.max(1, Math.round(chartSpanMinutes / chartIntervalMinutes));
+                const chartSpanMinutes = Math.min(
+                    this.currentMonitor?.maxTimeSpan || MONITOR_CHART_MAX_MINUTES,
+                    MONITOR_CHART_MAX_MINUTES
+                );
+                const spanBars = Math.min(
+                    MONITOR_CHART_MAX_POINTS,
+                    Math.max(1, Math.round(chartSpanMinutes / chartIntervalMinutes))
+                );
 
                 // 根据图表类型选择对应的标签和时间数组
                 const displayLabels = isCandlestick ? labels : validLabels;
@@ -4422,7 +4560,11 @@ class TradingApp {
                                 if (annotations.profitBox) annotations.profitBox.xMax = axisDate;
                                 if (annotations.lossBox) annotations.lossBox.xMax = axisDate;
                             }
-                            this.currentMonitor.maxTimeSpan = (nearestIndex - (this.currentMonitor?.riskStartIndex ?? 0)) * intervalMinutes;
+                            const computedSpan = (nearestIndex - (this.currentMonitor?.riskStartIndex ?? 0)) * intervalMinutes;
+                            this.currentMonitor.maxTimeSpan = Math.max(
+                                1,
+                                Math.min(computedSpan, MONITOR_CHART_MAX_MINUTES)
+                            );
                         } else {
                             const labels = this.monitorChart.data.labels || [];
                             let index = Math.round(dataX);
@@ -4436,7 +4578,10 @@ class TradingApp {
                             const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
                             const intervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
                             const newSpan = (index - this.currentMonitor.riskStartIndex) * intervalMinutes;
-                            this.currentMonitor.maxTimeSpan = newSpan;
+                            this.currentMonitor.maxTimeSpan = Math.max(
+                                1,
+                                Math.min(newSpan, MONITOR_CHART_MAX_MINUTES)
+                            );
                         }
                     } else {
                         const dataY = this.monitorChart.scales.y.getValueForPixel(canvasPosition.y);
@@ -4507,7 +4652,12 @@ class TradingApp {
                     this.monitorChartRenderTimeout = null;
                     if (typeof renderFn === 'function') {
                         try {
-                            renderFn();
+                            const result = renderFn();
+                            if (result && typeof result.then === 'function') {
+                                result.catch((renderErr) => {
+                                    console.error('Failed to render monitor chart:', renderErr);
+                                });
+                            }
                         } catch (renderErr) {
                             console.error('Failed to render monitor chart:', renderErr);
                         }
@@ -4839,7 +4989,7 @@ class TradingApp {
                 const intervalRaw = intervalSelect ? intervalSelect.value : '1 min';
                 const interval = intervalRaw.replace(/\s+/g, '');
                 const durationSelect = document.getElementById('monitorDuration');
-                const duration = durationSelect?.value || '1 D';
+                const duration = durationSelect?.value || '30 M';
 
                 const rawTimestamp = payload.timestamp ?? payload.lastTimestamp ?? payload.lastTime ?? payload.time ?? payload.last_time ?? payload.updateTime ?? payload.datetime ?? null;
                 let baseTime = this.parseMonitorChartTime(rawTimestamp, { skipDstAdjustment: true });

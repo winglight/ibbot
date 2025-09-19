@@ -500,7 +500,7 @@ class StrategyManager:
     def get_data_push_state(self, strategy_name: str) -> Dict[str, Any]:
         return dict(self.data_push_state.get(strategy_name, {}))
 
-    def set_data_push(
+    async def set_data_push(
         self,
         strategy_name: str,
         enabled: bool,
@@ -551,7 +551,7 @@ class StrategyManager:
                         else:
                             if core.ibkr_client is None:
                                 core.ibkr_client = core.IBKRClient()
-                            data = core.ibkr_client.get_real_time_data(target_symbol)
+                            data = await core.ibkr_client.get_real_time_data(target_symbol)
                             ok = bool(data)
                     except Exception as exc:  # pragma: no cover - defensive guard
                         error = str(exc)
@@ -1048,7 +1048,7 @@ class StrategyManager:
 
         return status
 
-    def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
+    async def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
         """Update a strategy"""
         try:
             if name not in self.strategies:
@@ -1127,7 +1127,7 @@ class StrategyManager:
 
             if restart_data_push and self.data_push_state.get(name, {}).get('enabled'):
                 try:
-                    self.set_data_push(name, True)
+                    await self.set_data_push(name, True)
                 except Exception as exc:  # pragma: no cover - defensive guard
                     strategy_logger.warning(f"Failed to restart data push for {name}: {exc}")
 

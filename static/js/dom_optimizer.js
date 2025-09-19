@@ -7,8 +7,6 @@
         pageSize: 'domOptimizer.pageSize'
     };
 
-    const DEFAULT_OUTCOME_WINDOW_MINUTES = 10;
-
     const SIGNAL_TYPES = new Set(['long', 'short']);
 
     const STATUS_BADGE_MAP = {
@@ -240,7 +238,6 @@
                 lookbackInput: document.getElementById('domOptimizerLookbackInput'),
                 statsLimitInput: document.getElementById('domOptimizerStatsLimitInput'),
                 minSignalsInput: document.getElementById('domOptimizerMinSignalsInput'),
-                outcomeWindowInput: document.getElementById('domOptimizerOutcomeWindowInput'),
                 obiCandidatesInput: document.getElementById('domOptimizerObiCandidatesInput'),
                 ofiCandidatesInput: document.getElementById('domOptimizerOfiCandidatesInput'),
                 trendCandidatesInput: document.getElementById('domOptimizerTrendCandidatesInput'),
@@ -455,6 +452,7 @@
             if (symbol) {
                 this.refreshStatistics().catch(() => {});
             }
+            this.loadCurrentConfig({ auto: true }).catch(() => {});
             this.ensureTrendChart();
             this.ensureIndicatorChart();
             this.updateLiveToggleButton();
@@ -518,15 +516,6 @@
             } else {
                 console.log(message);
             }
-        }
-
-        getOutcomeWindowMinutes() {
-            const raw = this.elements.outcomeWindowInput?.value;
-            const parsed = Number.parseInt(raw ?? '', 10);
-            if (Number.isFinite(parsed) && parsed > 0) {
-                return parsed;
-            }
-            return DEFAULT_OUTCOME_WINDOW_MINUTES;
         }
 
         setTrendThresholds(values) {
@@ -1723,6 +1712,20 @@
                 const delaySeconds = Number.isFinite(ts) && Number.isFinite(outcomeTs)
                     ? (outcomeTs - ts) / 1000
                     : null;
+                const outcomeThresholdPct = toNumber(signal?.outcome_threshold_pct);
+                const outcomeTargetCurrency = toNumber(signal?.outcome_target_currency);
+                const outcomePnlCurrency = toNumber(signal?.outcome_pnl_currency ?? signal?.outcome_pnl);
+                const outcomeTierRaw = signal?.outcome_tier;
+                const tierLabelMap = {
+                    small_win: '小赢',
+                    medium_win: '中赢',
+                    big_win: '大赢',
+                    loss: '亏损',
+                    flat: '持平'
+                };
+                const outcomeTierLabel = outcomeTierRaw && tierLabelMap[outcomeTierRaw]
+                    ? tierLabelMap[outcomeTierRaw]
+                    : outcomeTierRaw;
 
                 const entries = [
                     { label: '信号时间', value: timeLabel },
@@ -1738,6 +1741,18 @@
                     { label: '变化幅度', value: Number.isFinite(pctDelta) ? formatPercent(pctDelta) : '-' },
                     { label: '评估耗时', value: Number.isFinite(delaySeconds) ? `${delaySeconds.toFixed(delaySeconds >= 10 ? 0 : 1)} s` : '-' }
                 ];
+                if (Number.isFinite(outcomeThresholdPct)) {
+                    entries.push({ label: '成功阈值', value: formatPercent(outcomeThresholdPct) });
+                }
+                if (Number.isFinite(outcomeTargetCurrency)) {
+                    entries.push({ label: '目标收益($)', value: `${outcomeTargetCurrency >= 0 ? '+' : ''}${formatNumber(outcomeTargetCurrency, 2)}` });
+                }
+                if (Number.isFinite(outcomePnlCurrency)) {
+                    entries.push({ label: '实际收益($)', value: `${outcomePnlCurrency >= 0 ? '+' : ''}${formatNumber(outcomePnlCurrency, 2)}` });
+                }
+                if (outcomeTierLabel) {
+                    entries.push({ label: 'Outcome 分类', value: outcomeTierLabel });
+                }
 
                 for (const entry of entries) {
                     const dt = document.createElement('dt');
@@ -1859,8 +1874,9 @@
             const baseTs = reference?.timestamp;
             if (!Number.isFinite(baseTs)) return [];
 
-            const windowMinutes = this.getOutcomeWindowMinutes();
-            const offsetMs = Math.max(windowMinutes, 1) * 60_000;
+            const offsets = [0, 300, 600, 1800, 3600, 7200, 14400];
+            const maxOffset = Math.max(...offsets);
+            const offsetMs = Math.max(maxOffset, 1) * 1000;
             const start = new Date(baseTs - offsetMs);
             const end = new Date(baseTs + offsetMs);
             const params = new URLSearchParams();
@@ -1872,7 +1888,7 @@
             if (!this.state.priceHistoryCache) {
                 this.state.priceHistoryCache = {};
             }
-            const cacheKey = `${symbol}:${Math.floor(baseTs / 1000)}:${windowMinutes}`;
+            const cacheKey = `${symbol}:${Math.floor(baseTs / 1000)}:${maxOffset}`;
             const cached = this.state.priceHistoryCache[cacheKey];
             const now = Date.now();
             if (cached && now - (cached.fetchedAt || 0) < 30_000) {
@@ -2033,11 +2049,7 @@
                 if (sample) basePrice = sample.price;
             }
 
-            const offsets = [0, 30, 60, 180, 300, 600];
-            const windowMinutes = this.getOutcomeWindowMinutes();
-            if (windowMinutes >= 15 && !offsets.includes(900)) offsets.push(900);
-            if (windowMinutes >= 30 && !offsets.includes(1800)) offsets.push(1800);
-            offsets.sort((a, b) => a - b);
+            const offsets = [0, 300, 600, 1800, 3600, 7200, 14400];
 
             const rows = [];
             let anchorPrice = Number.isFinite(basePrice) ? basePrice : null;
@@ -2139,6 +2151,10 @@
             if (!Number.isFinite(seconds)) return '-';
             if (seconds === 0) return '成交时刻';
             if (seconds < 60) return `+${seconds} 秒`;
+            if (seconds % 3600 === 0) {
+                const hours = seconds / 3600;
+                return `+${hours} 小时`;
+            }
             if (seconds % 60 === 0) return `+${seconds / 60} 分钟`;
             return `+${(seconds / 60).toFixed(1)} 分钟`;
         }
@@ -2207,7 +2223,7 @@
                 if (trendCandidates) payload.trend_candidates = trendCandidates;
                 const response = await this.apiCall('/dom/optimize', {
                     method: 'POST',
-                    body: payload,
+                    body: JSON.stringify(payload),
                     useCache: false
                 });
                 if (!response || response.success === false) {
@@ -2261,9 +2277,12 @@
             this.elements.optimizeResult.innerHTML = rows.join('');
         }
 
-        async loadCurrentConfig() {
+        async loadCurrentConfig(options = {}) {
+            const { auto = false } = options || {};
             try {
-                this.setButtonLoading(this.elements.loadConfigBtn, true, '载入中');
+                if (!auto) {
+                    this.setButtonLoading(this.elements.loadConfigBtn, true, '载入中');
+                }
                 const response = await this.apiCall('/config/dom', {
                     allowReadOnly: true,
                     useCache: false
@@ -2299,9 +2318,15 @@
                     }
                 }
             } catch (error) {
-                this.notify('error', `加载配置失败: ${error?.message || error}`);
+                if (!auto) {
+                    this.notify('error', `加载配置失败: ${error?.message || error}`);
+                } else {
+                    console.warn('自动加载 DOM 配置失败:', error);
+                }
             } finally {
-                this.setButtonLoading(this.elements.loadConfigBtn, false);
+                if (!auto) {
+                    this.setButtonLoading(this.elements.loadConfigBtn, false);
+                }
             }
         }
 
@@ -2310,15 +2335,22 @@
                 || this.app?.monitorRealtimeSymbol
                 || this.app?.domManager?.symbol
                 || '';
-            if (!monitorSymbol) {
-                this.notify('warning', '当前没有可用的监控标的');
+            const inputSymbol = this.elements.symbolInput?.value || '';
+            const storedSymbol = localStorage.getItem(STORAGE_KEYS.symbol) || '';
+
+            const candidate = (monitorSymbol || inputSymbol || storedSymbol || '').toString().trim().toUpperCase();
+
+            if (!candidate) {
+                this.notify('warning', '请输入交易标的后再点击“监控”。');
+                this.elements.symbolInput?.focus?.();
                 return;
             }
+
             if (this.elements.symbolInput) {
-                this.elements.symbolInput.value = monitorSymbol;
-                this.persistPreference(STORAGE_KEYS.symbol, monitorSymbol);
+                this.elements.symbolInput.value = candidate;
+                this.persistPreference(STORAGE_KEYS.symbol, candidate);
                 this.state.streamEnsuredAt = 0;
-                this.ensureDomStream(monitorSymbol).catch(() => {});
+                this.ensureDomStream(candidate).catch(() => {});
             }
         }
     }

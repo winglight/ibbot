@@ -18,10 +18,7 @@ async def _realtime_price_sender(ws: WebSocket, symbol: str, interval: float = 2
                 await asyncio.sleep(interval)
                 continue
             try:
-                data = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: core.ibkr_client.get_real_time_data(symbol, "SMART")),
-                    timeout=10.0
-                )
+                data = await core.ibkr_client.get_real_time_data(symbol, "SMART")
                 # 只有当数据有效时才发送
                 if data is not None:
                     await ws.send_text(json.dumps({

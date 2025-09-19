@@ -608,8 +608,9 @@
                                             <div class="form-text">可直接从当前监控或手动输入符号。</div>
                                         </div>
                                         <div class="col-6">
-                                            <label for="domOptimizerLookbackInput" class="form-label">统计回溯 (分钟)</label>
+                                            <label for="domOptimizerLookbackInput" class="form-label">统计窗口 (分钟)</label>
                                             <input type="number" class="form-control form-control-sm" id="domOptimizerLookbackInput" min="15" step="15" value="240">
+                                            <div class="form-text">影响统计面板与信号列表，Outcome 窗口与此保持一致。</div>
                                         </div>
                                         <div class="col-6">
                                             <label for="domOptimizerStatsLimitInput" class="form-label">最大记录数</label>
@@ -618,10 +619,6 @@
                                         <div class="col-6">
                                             <label for="domOptimizerMinSignalsInput" class="form-label">最少信号数</label>
                                             <input type="number" class="form-control form-control-sm" id="domOptimizerMinSignalsInput" min="0" value="0">
-                                        </div>
-                                        <div class="col-6">
-                                            <label for="domOptimizerOutcomeWindowInput" class="form-label">Outcome 窗口 (分钟)</label>
-                                            <input type="number" class="form-control form-control-sm" id="domOptimizerOutcomeWindowInput" min="1" value="10">
                                         </div>
                                         <div class="col-12">
                                             <label class="form-label">候选阈值 (OBI / OFI / Trend)</label>
@@ -1797,14 +1794,8 @@
                         </div>
                         <div class="col-md-3">
                             <label class="form-label">Duration</label>
-                            <select class="form-select" id="monitorDuration">
-                                <option value="1 D" selected>1 Day</option>
-                                <option value="2 D">2 Days</option>
-                                <option value="5 D">5 Days</option>
-                                <option value="1 W">1 Week</option>
-                                <option value="1 M">1 Month</option>
-                                <option value="3 M">3 Months</option>
-                                <option value="1 Y">1 Year</option>
+                            <select class="form-select" id="monitorDuration" disabled>
+                                <option value="30 M" selected>30 分钟（固定）</option>
                             </select>
                         </div>
                         <div class="col-md-3">

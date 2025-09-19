@@ -429,7 +429,7 @@ class IBKRClient:
             df.to_csv(filename, index=False)
             ibkr_logger.info(f"Historical data saved to {filename} (fallback)")
     
-    def get_real_time_data(self, symbol: str, exchange: str = 'SMART'):
+    async def get_real_time_data(self, symbol: str, exchange: str = 'SMART'):
         """获取实时数据 - 优化版本避免阻塞"""
         import threading
         current_thread = threading.current_thread()
@@ -1503,7 +1503,7 @@ class IBKRClient:
                         
                         # 只在主线程或非ThreadPoolExecutor线程中获取实时价格
                         if not is_in_thread_pool:
-                            data = self.get_real_time_data(sym)
+                            data = await self.get_real_time_data(sym)
                             if data and data.get('last'):
                                 current_price = data['last']
                                 price_source = "realtime"

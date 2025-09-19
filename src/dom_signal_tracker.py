@@ -136,12 +136,29 @@ class SignalOutcomeTracker:
             if timestamp_ms < pending.target_timestamp_ms:
                 continue
 
-            outcome = self._compute_outcome(pending, price)
-            payload = {
-                "outcome": outcome,
+            outcome_details = self._compute_outcome(pending, price)
+            outcome_value = outcome_details.get("outcome")
+            payload: Dict[str, Any] = {
+                "outcome": outcome_value,
                 "outcome_price": price,
                 "outcome_timestamp": timestamp_ms,
             }
+
+            if outcome_details.get("threshold_pct") is not None:
+                payload["outcome_threshold_pct"] = outcome_details["threshold_pct"]
+            if outcome_details.get("price_delta") is not None:
+                payload["outcome_price_delta"] = outcome_details["price_delta"]
+            if outcome_details.get("pct_change") is not None:
+                payload["outcome_pct_change"] = outcome_details["pct_change"]
+            if outcome_details.get("pnl_currency") is not None:
+                payload["outcome_pnl_currency"] = outcome_details["pnl_currency"]
+            if outcome_details.get("target_amount") is not None:
+                payload["outcome_target_currency"] = outcome_details["target_amount"]
+            if outcome_details.get("point_value") is not None:
+                payload["outcome_point_value"] = outcome_details["point_value"]
+            if outcome_details.get("outcome_tier"):
+                payload["outcome_tier"] = outcome_details["outcome_tier"]
+
             updated = self.cache_manager.update_metric(
                 symbol,
                 signal_id=pending.signal_id,
@@ -154,7 +171,7 @@ class SignalOutcomeTracker:
                     signal_id=pending.signal_id,
                     symbol=symbol,
                     signal_type=pending.signal_type,
-                    outcome=outcome,
+                    outcome=outcome_value,
                     price=price,
                 )
                 updates.append({"signal_id": pending.signal_id, **payload})
@@ -172,18 +189,158 @@ class SignalOutcomeTracker:
         return updates
 
     # ------------------------------------------------------------------
-    def _compute_outcome(self, pending: PendingSignal, price: float) -> Optional[int]:
-        if pending.reference_price <= 0 or price <= 0:
-            return None
+    def _fetch_risk_context(self, symbol: str) -> Tuple[Optional[Any], float]:
+        try:
+            import core  # type: ignore
+            risk_manager = getattr(core, 'risk_manager', None)
+        except Exception:
+            risk_manager = None
 
-        pct_change = (price - pending.reference_price) / pending.reference_price
-        threshold = self.price_move_threshold
+        if not risk_manager:
+            return None, 1.0
 
-        if pending.signal_type == "long":
-            return int(pct_change >= threshold)
-        if pending.signal_type == "short":
-            return int(pct_change <= -threshold)
-        return None
+        rule = None
+        sym = (symbol or '').upper()
+        try:
+            rules = getattr(risk_manager, 'risk_rules', {}) or {}
+            if isinstance(rules, dict) and rules:
+                rule = rules.get(sym) or rules.get(symbol) or rules.get(sym.replace('.', ''))
+        except Exception:
+            rule = None
+
+        point_value = 1.0
+        try:
+            pv_map = getattr(risk_manager, 'point_value_map', {}) or {}
+            if isinstance(pv_map, dict) and pv_map:
+                pv = pv_map.get(sym)
+                if pv is None:
+                    pv = pv_map.get(symbol)
+                if pv is None:
+                    pv = pv_map.get(sym.replace('.', ''))
+                if pv is not None:
+                    point_value = float(pv)
+        except Exception:
+            point_value = 1.0
+
+        return rule, max(point_value, 1e-9)
+
+    def _derive_threshold_from_rule(
+        self,
+        pending: PendingSignal,
+        rule: Any,
+        reference_price: float,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        if not rule or reference_price <= 0:
+            return None, None
+
+        def _coerce(value: Any) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        diffs: List[float] = []
+        tp_price = _coerce(getattr(rule, 'take_profit_price', None))
+        sl_price = _coerce(getattr(rule, 'stop_loss_price', None))
+        max_loss_pct = _coerce(getattr(rule, 'max_loss_percent', None))
+
+        if pending.signal_type == 'long':
+            if tp_price is not None:
+                diff = tp_price - reference_price
+                if diff > 0:
+                    diffs.append(diff)
+            if max_loss_pct is not None and max_loss_pct > 0:
+                diffs.append(reference_price * max_loss_pct)
+            if sl_price is not None:
+                diff = reference_price - sl_price
+                if diff > 0:
+                    diffs.append(diff)
+        else:
+            if tp_price is not None:
+                diff = reference_price - tp_price
+                if diff > 0:
+                    diffs.append(diff)
+            if max_loss_pct is not None and max_loss_pct > 0:
+                diffs.append(reference_price * max_loss_pct)
+            if sl_price is not None:
+                diff = sl_price - reference_price
+                if diff > 0:
+                    diffs.append(diff)
+
+        if not diffs:
+            return None, None
+
+        diff_price = max(diffs)
+        threshold_pct = diff_price / reference_price if reference_price else None
+        return (max(threshold_pct, 0.0) if threshold_pct is not None else None, abs(diff_price))
+
+    @staticmethod
+    def _price_change(pending: PendingSignal, price: float) -> float:
+        diff = price - pending.reference_price
+        if pending.signal_type == 'short':
+            diff = -diff
+        return diff
+
+    @staticmethod
+    def _price_to_currency(price_diff: float, point_value: float) -> float:
+        try:
+            return abs(float(price_diff)) * max(float(point_value), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _compute_outcome(self, pending: PendingSignal, price: float) -> Dict[str, Any]:
+        reference_price = pending.reference_price
+        if reference_price <= 0 or price <= 0:
+            return {"outcome": None}
+
+        rule, point_value = self._fetch_risk_context(pending.symbol)
+        threshold_pct = self.price_move_threshold
+        target_currency = None
+
+        if rule:
+            derived_pct, diff_price = self._derive_threshold_from_rule(pending, rule, reference_price)
+            if derived_pct is not None:
+                threshold_pct = max(derived_pct, 0.0)
+            if diff_price is not None:
+                target_currency = self._price_to_currency(diff_price, point_value)
+
+        if target_currency is None:
+            target_currency = self._price_to_currency(reference_price * threshold_pct, point_value)
+
+        price_delta = self._price_change(pending, price)
+        pct_change = price_delta / reference_price if reference_price else 0.0
+        pnl_currency = price_delta * point_value
+
+        outcome = None
+        if pending.signal_type in {'long', 'short'}:
+            outcome = int(pct_change >= threshold_pct)
+
+        outcome_tier = None
+        if pnl_currency > 0 and target_currency > 0:
+            ratio = pnl_currency / target_currency
+            if ratio < 0.5:
+                outcome_tier = 'small_win'
+            elif ratio > 1.5:
+                outcome_tier = 'big_win'
+            else:
+                outcome_tier = 'medium_win'
+        elif pnl_currency < 0:
+            outcome_tier = 'loss'
+        elif pnl_currency == 0:
+            outcome_tier = 'flat'
+
+        return {
+            "outcome": outcome,
+            "threshold_pct": threshold_pct,
+            "price_delta": price_delta,
+            "pct_change": pct_change,
+            "pnl_currency": pnl_currency,
+            "target_amount": target_currency,
+            "point_value": point_value,
+            "outcome_tier": outcome_tier,
+        }
 
     # ------------------------------------------------------------------
     @staticmethod
