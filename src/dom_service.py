@@ -524,6 +524,7 @@ class DOMService:
         base_thresholds: Dict[str, Any],
         *,
         persist: bool = True,
+        trend_thresholds: Optional[List[float]] = None,
     ) -> Dict[str, Dict[str, float]]:
         sanitized = self._sanitize_base_thresholds(base_thresholds)
         current_config = self.get_config()
@@ -534,7 +535,7 @@ class DOMService:
         self._apply_config(
             window=current_config["window"],
             max_levels=current_config["max_levels"],
-            trend_thresholds=current_config.get("trend_thresholds"),
+            trend_thresholds=trend_thresholds or current_config.get("trend_thresholds"),
             tuner_base_thresholds=sanitized,
             tuner_parameters=self._tuner_parameters,
             persist=persist,

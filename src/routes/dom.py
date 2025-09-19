@@ -166,6 +166,7 @@ class OptimizeRequest(BaseModel):
     min_signals: int = Field(default=0, ge=0)
     obi_candidates: Optional[List[float]] = None
     ofi_candidates: Optional[List[float]] = None
+    trend_candidates: Optional[List[float]] = None
 
 
 @router.post("/api/dom/optimize")
@@ -186,6 +187,7 @@ async def optimize_dom_parameters(
             min_signals=req.min_signals,
             obi_candidates=req.obi_candidates,
             ofi_candidates=req.ofi_candidates,
+            trend_candidates=req.trend_candidates,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -242,4 +244,3 @@ async def get_dom_automation_status(
 ):
     orchestrator = get_dom_optimization_orchestrator()
     return {"success": True, **orchestrator.get_status()}
-

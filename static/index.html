@@ -624,14 +624,18 @@
                                             <input type="number" class="form-control form-control-sm" id="domOptimizerOutcomeWindowInput" min="1" value="10">
                                         </div>
                                         <div class="col-12">
-                                            <label class="form-label">候选阈值 (OBI / OFI)</label>
+                                            <label class="form-label">候选阈值 (OBI / OFI / Trend)</label>
                                             <div class="input-group input-group-sm mb-2">
                                                 <span class="input-group-text">OBI</span>
                                                 <input type="text" class="form-control" id="domOptimizerObiCandidatesInput" placeholder="0.55,0.6,0.65,0.7">
                                             </div>
-                                            <div class="input-group input-group-sm">
+                                            <div class="input-group input-group-sm mb-2">
                                                 <span class="input-group-text">OFI</span>
                                                 <input type="text" class="form-control" id="domOptimizerOfiCandidatesInput" placeholder="0,5,10,15">
+                                            </div>
+                                            <div class="input-group input-group-sm">
+                                                <span class="input-group-text">Trend</span>
+                                                <input type="text" class="form-control" id="domOptimizerTrendCandidatesInput" placeholder="0.5,0.7,0.85,0.95">
                                             </div>
                                             <div class="form-text">仅在手动优化时使用，留空则使用默认组合。</div>
                                         </div>
@@ -804,7 +808,8 @@
                                         </table>
                                     </div>
                                 </div>
-                                <div class="card-footer d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                <div class="card-footer d-flex flex-column flex-lg-row gap-2 justify-content-between align-items-lg-center">
+                                    <small class="text-muted" id="domOptimizerSignalsRange">实际时间范围：-</small>
                                     <small class="text-muted" id="domOptimizerSignalsSummary">0 条记录</small>
                                     <div class="btn-group btn-group-sm" role="group" aria-label="DOM signals pagination" id="domOptimizerPagination">
                                         <button type="button" class="btn btn-outline-secondary" data-page="prev" disabled>
@@ -2360,8 +2365,8 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js" defer></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/luxon" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4" defer></script>
     <!-- Config Rules Modal -->
     <div class="modal fade" id="configRulesModal" tabindex="-1" aria-labelledby="configRulesModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-lg">
@@ -2764,10 +2769,10 @@
         </div>
     </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1" defer></script>
     <script src="/static/js/login.js" defer></script>
 <script src="/static/js/ibkr.js" defer></script>
 <script src="/static/js/ibkr_data.js" defer></script>

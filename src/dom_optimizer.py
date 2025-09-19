@@ -378,6 +378,7 @@ class DOMOptimizationOrchestrator:
         min_signals: int = 0,
         obi_candidates: Optional[List[Any]] = None,
         ofi_candidates: Optional[List[Any]] = None,
+        trend_candidates: Optional[List[Any]] = None,
         scheduled: bool = False,
         scheduled_time: Optional[datetime] = None,
     ) -> Dict[str, Any]:
@@ -385,6 +386,12 @@ class DOMOptimizationOrchestrator:
             raise ValueError("symbol is required for optimisation")
 
         started_at = _now()
+        trend_thresholds: Optional[List[float]] = None
+        if trend_candidates:
+            try:
+                trend_thresholds = self.service._sanitize_thresholds(list(trend_candidates))  # type: ignore[attr-defined]
+            except Exception:
+                trend_thresholds = None
         with self._lock:
             if self._state.get("is_running"):
                 raise RuntimeError("An optimisation run is already in progress")
@@ -449,7 +456,11 @@ class DOMOptimizationOrchestrator:
                 )
                 applied = bool(apply_updates)
                 if applied:
-                    self.service.apply_tuner_base_thresholds(updated_thresholds, persist=True)
+                    self.service.apply_tuner_base_thresholds(
+                        updated_thresholds,
+                        persist=True,
+                        trend_thresholds=trend_thresholds,
+                    )
                 else:
                     updated_thresholds = copy.deepcopy(updated_thresholds)
             else:
@@ -487,6 +498,8 @@ class DOMOptimizationOrchestrator:
                 "history_window": {"start": window_start, "end": window_end},
                 "insufficient_data": not should_optimize,
             }
+            if trend_thresholds:
+                result["trend_thresholds"] = list(trend_thresholds)
 
             logger.info(
                 "DOM optimisation run completed",

@@ -205,6 +205,7 @@ class TradingApp {
         this.domSignals = [];
         this.monitorTrendChart = null;
         this.monitorTrendData = [];
+        this.candlestickSupported = false;
         // 渲染监控图表时使用的定时器句柄，防止重复渲染导致死循环
         this.monitorChartRenderTimeout = null;
         // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制
@@ -838,24 +839,46 @@ class TradingApp {
 
     async init() {
         try {
-            if (window.Chart && window.ChartAnnotation && window.Chart.register) {
-                window.Chart.register(window.ChartAnnotation);
-            }
-            if (window.Chart && window.zoomPlugin && window.Chart.register) {
-                window.Chart.register(window.zoomPlugin);
-            }
             if (window.Chart && window.Chart.register) {
-                const fin = window.ChartFinancial || window["chartjs-chart-financial"]; 
-                if (fin && fin.CandlestickController && fin.OhlcElement) {
-                    window.Chart.register(
+                if (window.ChartAnnotation) {
+                    window.Chart.register(window.ChartAnnotation);
+                }
+                if (window.zoomPlugin) {
+                    window.Chart.register(window.zoomPlugin);
+                }
+
+                const financialCandidates = [
+                    window.ChartFinancial,
+                    window["chartjs-chart-financial"],
+                    window.chartFinancial,
+                    window.chartjsChartFinancial,
+                    window.financialChart
+                ].filter(Boolean);
+
+                for (const fin of financialCandidates) {
+                    const components = [
                         fin.CandlestickController,
                         fin.OhlcController,
                         fin.CandlestickElement,
-                        fin.OhlcElement
-                    );
+                        fin.OhlcElement,
+                        fin.FinancialController,
+                        fin.FinancialElement
+                    ].filter(Boolean);
+
+                    if (components.length) {
+                        window.Chart.register(...components);
+                        this.candlestickSupported = true;
+                        break;
+                    }
+                }
+
+                if (!this.candlestickSupported) {
+                    console.warn('[Monitor] chartjs-chart-financial plugin not detected; candlestick view will be unavailable until it loads.');
                 }
             }
-        } catch (e) {}
+        } catch (e) {
+            console.error('Failed to register Chart.js plugins', e);
+        }
         this.setupEventListeners();
         this.initSymbolCombobox();
         this.ibkrManager.connectWebSocket();
@@ -3475,6 +3498,11 @@ class TradingApp {
                     ? rawChartType.trim().toLowerCase()
                     : 'line';
                 const isCandlestick = chartType === 'candlestick';
+
+                if (isCandlestick && !this.candlestickSupported) {
+                    chartContainer.innerHTML = '<div class="alert alert-warning mb-0">蜡烛图插件尚未加载，已暂时禁用蜡烛图视图。</div>';
+                    return;
+                }
 
                 // 计算时间跨度相关参数
                 const intervalValue = intervalSelect ? intervalSelect.value : '1min';

@@ -186,10 +186,13 @@
                     fetchedAt: 0,
                     items: []
                 },
+                activeStreamSymbol: null,
+                streamEnsuredAt: 0,
                 priceHistoryCache: {},
                 activePriceHistory: [],
                 lowTrendFilteredCount: 0,
                 activeSignal: null,
+                lastQueryRange: null,
                 loading: {
                     stats: false,
                     signals: false,
@@ -240,6 +243,7 @@
                 outcomeWindowInput: document.getElementById('domOptimizerOutcomeWindowInput'),
                 obiCandidatesInput: document.getElementById('domOptimizerObiCandidatesInput'),
                 ofiCandidatesInput: document.getElementById('domOptimizerOfiCandidatesInput'),
+                trendCandidatesInput: document.getElementById('domOptimizerTrendCandidatesInput'),
                 refreshStatsBtn: document.getElementById('domOptimizerRefreshStatsBtn'),
                 statsTotal: document.getElementById('domOptimizerStatsTotal'),
                 statsBySide: document.getElementById('domOptimizerStatsBySide'),
@@ -267,6 +271,7 @@
                 querySignalsBtn: document.getElementById('domOptimizerQuerySignalsBtn'),
                 signalsTable: document.getElementById('domOptimizerSignalsTable'),
                 signalsSummary: document.getElementById('domOptimizerSignalsSummary'),
+                signalsRange: document.getElementById('domOptimizerSignalsRange'),
                 pagination: document.getElementById('domOptimizerPagination'),
                 currentPage: document.getElementById('domOptimizerCurrentPage'),
                 totalPages: document.getElementById('domOptimizerTotalPages'),
@@ -340,7 +345,15 @@
                 this.turnPage(direction);
             });
 
-            symbolInput?.addEventListener('change', () => this.persistPreference(STORAGE_KEYS.symbol, symbolInput.value.trim()));
+            symbolInput?.addEventListener('change', () => {
+                const value = symbolInput.value.trim();
+                this.persistPreference(STORAGE_KEYS.symbol, value);
+                if (!value) {
+                    this.stopDomStream().catch(() => {});
+                } else if (value.toUpperCase() !== this.state.activeStreamSymbol) {
+                    this.state.streamEnsuredAt = 0;
+                }
+            });
             lookbackInput?.addEventListener('change', () => this.persistPreference(STORAGE_KEYS.lookback, lookbackInput.value));
             statsLimitInput?.addEventListener('change', () => this.persistPreference(STORAGE_KEYS.limit, statsLimitInput.value));
             if (pageSizeInput) {
@@ -369,6 +382,18 @@
                 event.preventDefault();
                 this.openOutcomeDetail(signal);
             });
+
+            if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && navigator.sendBeacon) {
+                window.addEventListener('beforeunload', () => {
+                    if (!this.state.activeStreamSymbol) return;
+                    try {
+                        const payload = JSON.stringify({ symbol: this.state.activeStreamSymbol });
+                        navigator.sendBeacon('/api/dom/stop', new Blob([payload], { type: 'application/json' }));
+                    } catch (error) {
+                        // ignore transport errors during unload
+                    }
+                });
+            }
         }
 
         restorePreferences() {
@@ -578,6 +603,70 @@
             return raw ? JSON.parse(raw) : {};
         }
 
+        async ensureDomStream(symbol) {
+            const targetSymbol = (symbol || '').toString().trim().toUpperCase();
+            if (!targetSymbol) return;
+            if (this.app?.isReadOnly) return;
+            const now = Date.now();
+            if (
+                this.state.activeStreamSymbol === targetSymbol
+                && now - (this.state.streamEnsuredAt || 0) < 60_000
+            ) {
+                return;
+            }
+            if (
+                this.state.activeStreamSymbol
+                && this.state.activeStreamSymbol !== targetSymbol
+            ) {
+                await this.stopDomStream(this.state.activeStreamSymbol).catch(() => {});
+            }
+            try {
+                await this.apiCall('/dom/start', {
+                    method: 'POST',
+                    body: {
+                        symbol: targetSymbol,
+                        num_rows: 10
+                    },
+                    useCache: false
+                });
+                this.state.activeStreamSymbol = targetSymbol;
+                this.state.streamEnsuredAt = now;
+            } catch (error) {
+                this.notify('warning', `无法启动 ${targetSymbol} DOM 订阅: ${error?.message || error}`);
+            }
+        }
+
+        async stopDomStream(symbol = null) {
+            const currentSymbol = symbol
+                ? symbol
+                : this.state.activeStreamSymbol;
+            const targetSymbol = (currentSymbol || '').toString().trim().toUpperCase();
+            if (!targetSymbol) return;
+            if (this.app?.isReadOnly) {
+                this.state.activeStreamSymbol = null;
+                this.state.streamEnsuredAt = 0;
+                return;
+            }
+            try {
+                await this.apiCall('/dom/stop', {
+                    method: 'POST',
+                    body: { symbol: targetSymbol },
+                    useCache: false
+                });
+            } catch (error) {
+                if (String(error?.message || '').toLowerCase().includes('no active')) {
+                    // Ignore "No active depth stream" noise
+                } else {
+                    this.notify('warning', `停止 ${targetSymbol} DOM 订阅失败: ${error?.message || error}`);
+                }
+            } finally {
+                if (!symbol || symbol === this.state.activeStreamSymbol) {
+                    this.state.activeStreamSymbol = null;
+                    this.state.streamEnsuredAt = 0;
+                }
+            }
+        }
+
         setLoading(key, isLoading) {
             if (!this.state.loading[key]) this.state.loading[key] = false;
             this.state.loading[key] = Boolean(isLoading);
@@ -738,6 +827,7 @@
             try {
                 this.setLoading('stats', true);
                 if (!silent) this.setButtonLoading(this.elements.refreshStatsBtn, true, '刷新中');
+                await this.ensureDomStream(symbol);
                 const lookbackMinutes = parseInt(this.elements.lookbackInput?.value || '0', 10) || 240;
                 const limit = parseInt(this.elements.statsLimitInput?.value || '0', 10) || 500;
                 const now = new Date();
@@ -1310,6 +1400,7 @@
             try {
                 this.setLoading('signals', true);
                 this.setButtonLoading(this.elements.querySignalsBtn, true, '查询中');
+                await this.ensureDomStream(symbol);
                 const lookbackMinutes = parseInt(this.elements.lookbackInput?.value || '0', 10) || 240;
                 const limit = parseInt(this.elements.statsLimitInput?.value || '0', 10) || 500;
                 const pageSize = parseInt(this.elements.pageSizeInput?.value || '0', 10) || 25;
@@ -1352,6 +1443,12 @@
                 this.updateSummary(stats, metrics);
                 this.setHistoryMetrics(metrics);
                 this.state.signals = signals;
+                const startDerived = !startValue || Number.isNaN(new Date(startValue).getTime());
+                this.state.lastQueryRange = {
+                    start: start.toISOString(),
+                    end: end.toISOString(),
+                    derived: startDerived,
+                };
                 this.applySignalFilter();
                 this.renderSignalsSummary();
             } catch (error) {
@@ -1359,6 +1456,7 @@
                 this.state.signals = [];
                 this.state.filteredSignals = [];
                 this.state.lowTrendFilteredCount = 0;
+                this.state.lastQueryRange = null;
                 this.renderSignalsTable();
                 this.renderSignalsSummary();
             } finally {
@@ -1442,6 +1540,7 @@
             }
             this.updatePaginationControls(totalPages);
             this.renderSignalsSummary();
+            this.renderSignalsRange();
         }
 
         renderSignalType(type) {
@@ -1491,6 +1590,19 @@
                 ? ` · 已过滤低置信度 ${this.state.lowTrendFilteredCount} 条`
                 : '';
             this.elements.signalsSummary.textContent = `${total} 条记录${trendNote} · 成功 ${successes} / 失败 ${failures} / 待评估 ${pending}${filteredNote}`;
+        }
+
+        renderSignalsRange() {
+            if (!this.elements.signalsRange) return;
+            const range = this.state.lastQueryRange;
+            if (!range || !range.start || !range.end) {
+                this.elements.signalsRange.textContent = '实际时间范围：-';
+                return;
+            }
+            const startLabel = formatIsoDatetime(range.start);
+            const endLabel = formatIsoDatetime(range.end);
+            const suffix = range.derived ? '（自动回溯）' : '';
+            this.elements.signalsRange.textContent = `实际时间范围：${startLabel} → ${endLabel}${suffix}`;
         }
 
         ensureOutcomeModal() {
@@ -2091,6 +2203,8 @@
                 if (obiCandidates) payload.obi_candidates = obiCandidates;
                 const ofiCandidates = parseCandidates(this.elements.ofiCandidatesInput?.value);
                 if (ofiCandidates) payload.ofi_candidates = ofiCandidates;
+                const trendCandidates = parseCandidates(this.elements.trendCandidatesInput?.value);
+                if (trendCandidates) payload.trend_candidates = trendCandidates;
                 const response = await this.apiCall('/dom/optimize', {
                     method: 'POST',
                     body: payload,
@@ -2122,11 +2236,28 @@
             const applied = result?.applied ? '<span class="badge bg-success">已应用</span>' : '<span class="badge bg-warning text-dark">未应用</span>';
             const outcome = result?.insufficient_data ? '<span class="badge bg-warning text-dark">数据不足</span>' : applied;
             const completedAt = formatIsoDatetime(result?.completed_at);
+            const trendList = Array.isArray(result?.trend_thresholds)
+                ? result.trend_thresholds
+                : null;
+            if (trendList && result?.applied) {
+                this.setTrendThresholds(trendList);
+                if (this.elements.trendCandidatesInput && !this.elements.trendCandidatesInput.value) {
+                    this.elements.trendCandidatesInput.value = trendList.join(', ');
+                }
+            }
             const rows = [
                 `<div class="mb-2">状态: ${outcome} · 完成时间 ${completedAt}</div>`,
                 `<div>精度: <strong>${precision}</strong> · 评估 ${evaluated} 次 (成功 ${positives} / 失败 ${negatives} / 待评估 ${pending})</div>`
             ];
             if (thresholds) rows.push(`<div class="text-muted">阈值: ${thresholds}</div>`);
+            const trendLabel = trendList
+                ? trendList.map((value) => formatNumber(Number(value), 2)).join(', ')
+                : Array.isArray(this.state.trendThresholds)
+                    ? this.state.trendThresholds.map((value) => formatNumber(Number(value), 2)).join(', ')
+                    : null;
+            if (trendLabel) {
+                rows.push(`<div class="text-muted">Trend 阈值: ${trendLabel}</div>`);
+            }
             this.elements.optimizeResult.innerHTML = rows.join('');
         }
 
@@ -2150,6 +2281,11 @@
                     `<div class="text-muted">Trend 阈值: ${trendThresholds}</div>`
                 ].join('');
                 this.elements.optimizeResult.innerHTML = html;
+                if (this.elements.trendCandidatesInput && !this.elements.trendCandidatesInput.value) {
+                    this.elements.trendCandidatesInput.value = Array.isArray(this.state.trendThresholds)
+                        ? this.state.trendThresholds.join(', ')
+                        : '';
+                }
                 if (!this.elements.obiCandidatesInput?.value) {
                     const longObi = toNumber(response?.tuner_base_thresholds?.long?.obi5);
                     if (Number.isFinite(longObi)) {
@@ -2181,6 +2317,8 @@
             if (this.elements.symbolInput) {
                 this.elements.symbolInput.value = monitorSymbol;
                 this.persistPreference(STORAGE_KEYS.symbol, monitorSymbol);
+                this.state.streamEnsuredAt = 0;
+                this.ensureDomStream(monitorSymbol).catch(() => {});
             }
         }
     }
