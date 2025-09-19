@@ -1,105 +1,133 @@
-#!/usr/bin/env python3
-"""
-测试API连接和基本功能
-"""
-
-import json
-from typing import Any, Dict
+import os
+from types import SimpleNamespace
 
 import pytest
-import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-# API配置
-BASE_URL = "http://127.0.0.1:8000"
-USERNAME = "chy"
-PASSWORD = "X9$K^nNI4"
+os.environ.setdefault("IBBOT_SKIP_SERVER", "1")
 
-
-def _request_json(method: str, url: str, *, token: str | None = None, timeout: int = 10) -> Dict[str, Any]:
-    """执行JSON请求并返回响应内容."""
-
-    headers = {"Authorization": f"Bearer {token}"} if token else None
-    try:
-        response = requests.request(method, url, headers=headers, timeout=timeout)
-    except requests.RequestException as exc:
-        pytest.skip(f"无法连接到API服务器: {exc}")
-
-    if response.status_code != 200:
-        pytest.fail(f"请求失败: {response.status_code} - {response.text}")
-
-    try:
-        return response.json()
-    except ValueError as exc:
-        pytest.fail(f"响应不是有效的JSON: {exc}")
+import core  # noqa: E402
+from src.routes import auth as auth_routes  # noqa: E402
+from src.routes import connection as connection_routes  # noqa: E402
+from src.routes import account as account_routes  # noqa: E402
+from src.routes.auth import create_access_token, ADMIN_USERNAME, ADMIN_PASSWORD  # noqa: E402
 
 
-def test_api_connection():
-    """测试API连接"""
-    print("🔍 测试API连接...")
+class StubConnectionManager:
+    def __init__(self):
+        self.config = SimpleNamespace(paper_trading=True)
+        self._connected = True
+        self._last_error = None
 
-    # 1. 测试登录
-    print("\n1. 测试登录...")
-    try:
-        response = requests.post(
-            f"{BASE_URL}/api/login",
-            json={"username": USERNAME, "password": PASSWORD},
-            timeout=10,
-        )
-    except requests.RequestException as exc:
-        pytest.skip(f"无法连接到API服务器: {exc}")
+    def is_connected(self):
+        return self._connected
 
-    if response.status_code != 200:
-        pytest.skip(f"登录失败: {response.status_code} - {response.text}")
+    def set_connected(self, value: bool):
+        self._connected = value
 
-    try:
-        token = response.json()["access_token"]
-    except (ValueError, KeyError) as exc:
-        pytest.fail(f"登录响应解析失败: {exc}")
-
-    # 2. 测试连接状态
-    print("\n2. 测试连接状态...")
-    status = _request_json("GET", f"{BASE_URL}/api/connection_status", token=token)
-    print(f"✅ 连接状态: {json.dumps(status, indent=2)}")
-
-    # 3. 测试持仓获取
-    print("\n3. 测试持仓获取...")
-    positions = _request_json("GET", f"{BASE_URL}/api/positions", token=token)
-    print(f"✅ 持仓获取成功，数量: {len(positions)}")
-    for pos in positions[:3]:  # 只显示前3个
-        print(f"   {pos['symbol']}: {pos['position']} 股")
-
-    # 4. 测试风险规则获取
-    print("\n4. 测试风险规则获取...")
-    rules = _request_json("GET", f"{BASE_URL}/api/risk_rules", token=token)
-    print(f"✅ 风险规则获取成功，数量: {len(rules)}")
-    for rule in rules[:3]:  # 只显示前3个
-        status_text = "激活" if rule['enabled'] else "禁用"
-        print(f"   {rule['symbol']}: {status_text}")
-
-    print("\n✅ 所有API测试通过！")
+    def get_last_connect_error(self):
+        return self._last_error
 
 
-if __name__ == "__main__":
-    print("=" * 50)
-    print("🧪 API连接测试")
-    print("=" * 50)
+class StubIBKRClient:
+    def __init__(self):
+        self.account_info = {
+            "account_id": "DU123456",
+            "account_type": "Paper",
+            "net_liquidation": 100000.0,
+            "available_funds": 80000.0,
+            "buying_power": 200000.0,
+            "unrealized_pnl": 123.45,
+            "realized_pnl": 456.78,
+        }
+        self.positions = [
+            {
+                "symbol": "AAPL",
+                "position": 10,
+                "avg_cost": 150.0,
+                "marketPrice": 155.0,
+            }
+        ]
 
-    try:
-        test_api_connection()
-    except pytest.SkipTest as exc:  # pragma: no cover - 手动运行时的提示
-        print(f"⚠️ 测试被跳过: {exc}")
-        success = False
-    except AssertionError as exc:  # pragma: no cover - 手动运行时的提示
-        print(f"❌ API连接测试失败: {exc}")
-        success = False
-    else:
-        success = True
+    async def get_account_info(self):
+        return self.account_info
 
-    print("\n" + "=" * 50)
-    if success:
-        print("🎉 API连接测试通过！")
-        print("✅ 系统运行正常，可以进行风险规则测试")
-    else:
-        print("❌ API连接测试失败")
-        print("⚠️ 需要检查系统状态")
-    print("=" * 50)
+    async def get_positions(self, fast=True):
+        return self.positions
+
+
+@pytest.fixture()
+def api_client(monkeypatch):
+    app = FastAPI()
+    app.include_router(auth_routes.router)
+    app.include_router(connection_routes.router)
+    app.include_router(account_routes.router)
+
+    connection_manager = StubConnectionManager()
+    ibkr_client = StubIBKRClient()
+
+    monkeypatch.setattr(core, "connection_manager", connection_manager)
+    monkeypatch.setattr(core, "ibkr_client", ibkr_client)
+    monkeypatch.setattr(connection_routes, "connection_manager", connection_manager)
+    monkeypatch.setattr(account_routes, "connection_manager", connection_manager)
+    monkeypatch.setattr(account_routes, "core", SimpleNamespace(ibkr_client=ibkr_client))
+
+    token, _ = create_access_token({"sub": "tester"})
+    headers = {"Authorization": f"Bearer {token}"}
+    client = TestClient(app)
+    return client, headers, connection_manager, ibkr_client
+
+
+def test_login_and_connection_status(api_client):
+    client, headers, connection_manager, _ = api_client
+
+    # Login with default credentials
+    resp = client.post("/api/login", json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["access_token"]
+    assert data["role"] == "admin"
+
+    # Use existing token to query connection status
+    resp = client.get("/api/connection_status", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"connected": True, "account_type": "Paper"}
+
+    # Simulate disconnected state
+    connection_manager.set_connected(False)
+    resp = client.get("/api/connection_status", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["connected"] is False
+
+
+def test_account_info_and_positions(api_client):
+    client, headers, connection_manager, ibkr_client = api_client
+
+    # account info when connected
+    resp = client.get("/api/account_info", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["account_info"]["account_id"] == ibkr_client.account_info["account_id"]
+
+    # positions when connected
+    resp = client.get("/api/positions", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert len(data["positions"]) == 1
+    assert data["positions"][0]["symbol"] == "AAPL"
+
+    # when disconnected expect graceful response
+    connection_manager.set_connected(False)
+    resp = client.get("/api/account_info", headers=headers)
+    assert resp.status_code == 400
+    resp = client.get("/api/positions", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["positions"] == []
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__])

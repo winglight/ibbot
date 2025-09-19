@@ -9,6 +9,7 @@ class IBKRDataManager {
         this.priceCache = new Map();
         this.priceCacheTimeout = 30000; // 30秒缓存
         this.dailySummaryLoading = false;
+        this.dailySummaryChart = null;
     }
 
     /**
@@ -84,13 +85,21 @@ class IBKRDataManager {
         if (metaEl) {
             metaEl.textContent = '';
         }
+        this.renderDailySummaryChart([]);
     }
 
     updateDailySummaryUI(data) {
         const tbody = document.querySelector('#dailyAccountSummaryTable tbody');
         if (!tbody) return;
 
-        const rows = (data.days || []).map(day => {
+        const summaryDays = Array.isArray(data.days) ? [...data.days] : [];
+        summaryDays.sort((a, b) => {
+            const da = new Date(a?.date || a?.day || 0);
+            const db = new Date(b?.date || b?.day || 0);
+            return db - da;
+        });
+
+        const rows = summaryDays.map(day => {
             const dateText = day.date || '';
             const orders = Number(day.orders || 0);
             const pnlValue = Number(day.realized_pnl || 0);
@@ -138,6 +147,108 @@ class IBKRDataManager {
                 : '';
             const tz = data.timezone || 'America/New_York';
             metaEl.textContent = `参考净资产：${netLiq}，数据范围：${rangeText}，盈余来源：${source}，时区：${tz}`;
+        }
+
+        this.renderDailySummaryChart(summaryDays);
+    }
+
+    renderDailySummaryChart(summaryDays) {
+        const canvas = document.getElementById('dailySummaryChart');
+        if (!canvas) return;
+        if (typeof Chart === 'undefined') return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const chartSeries = Array.isArray(summaryDays) ? [...summaryDays].reverse() : [];
+        if (!chartSeries.length) {
+            if (this.dailySummaryChart) {
+                this.dailySummaryChart.data.labels = [];
+                this.dailySummaryChart.data.datasets.forEach(ds => { ds.data = []; });
+                this.dailySummaryChart.update('none');
+            }
+            return;
+        }
+        const labels = chartSeries.map(item => item?.date || item?.day || '');
+        const pnlData = chartSeries.map(item => {
+            const value = Number(item?.realized_pnl);
+            return Number.isFinite(value) ? value : 0;
+        });
+        const surplusData = chartSeries.map(item => {
+            const endValue = item?.ending_surplus;
+            const startValue = item?.starting_surplus;
+            const resolved = endValue !== null && endValue !== undefined ? Number(endValue)
+                : (startValue !== null && startValue !== undefined ? Number(startValue) : null);
+            return Number.isFinite(resolved) ? resolved : null;
+        });
+
+        const datasets = [
+            {
+                label: 'Realized PnL',
+                data: pnlData,
+                borderColor: '#38bdf8',
+                backgroundColor: 'rgba(56,189,248,0.15)',
+                tension: 0.25,
+                fill: true,
+                yAxisID: 'pnlAxis',
+            },
+            {
+                label: 'Ending Surplus',
+                data: surplusData,
+                borderColor: '#22c55e',
+                backgroundColor: 'rgba(34,197,94,0.15)',
+                tension: 0.25,
+                fill: false,
+                yAxisID: 'surplusAxis',
+            }
+        ];
+
+        if (!this.dailySummaryChart) {
+            this.dailySummaryChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets,
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    scales: {
+                        x: {
+                            ticks: { maxRotation: 0, autoSkip: true },
+                            grid: { color: 'rgba(148,163,184,0.15)' },
+                        },
+                        pnlAxis: {
+                            position: 'left',
+                            title: { display: true, text: 'PnL (USD)' },
+                            grid: { color: 'rgba(148,163,184,0.1)' },
+                        },
+                        surplusAxis: {
+                            position: 'right',
+                            title: { display: true, text: 'Surplus (USD)' },
+                            grid: { drawOnChartArea: false },
+                        },
+                    },
+                    plugins: {
+                        legend: { position: 'bottom' },
+                        tooltip: {
+                            callbacks: {
+                                label(context) {
+                                    const label = context.dataset.label || '';
+                                    const value = Number(context.parsed.y);
+                                    if (!Number.isFinite(value)) return `${label}: N/A`;
+                                    return `${label}: $${value.toFixed(2)}`;
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+        } else {
+            this.dailySummaryChart.data.labels = labels;
+            this.dailySummaryChart.data.datasets[0].data = pnlData;
+            this.dailySummaryChart.data.datasets[1].data = surplusData;
+            this.dailySummaryChart.update('none');
         }
     }
 

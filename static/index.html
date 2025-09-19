@@ -419,59 +419,14 @@
         <div class="row mb-4">
             <div class="col-md-12">
                 <div class="card">
-                    <div class="card-header">
-                        <h5><i class="fas fa-user"></i> Account Information</h5>
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-user"></i> Account Information</h5>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="openDailySummaryBtn" data-bs-toggle="modal" data-bs-target="#dailyAccountSummaryModal">
+                            <i class="fas fa-chart-line me-1"></i>统计
+                        </button>
                     </div>
                     <div class="card-body" id="accountInfo">
                         <p class="text-muted">Connect to view account information</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Daily Account Surplus & PnL -->
-        <div class="row mb-4">
-            <div class="col-md-12">
-                <div class="card" id="dailyAccountSummaryCard">
-                    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-3">
-                        <div>
-                            <h5 class="mb-1"><i class="fas fa-calendar-day me-2"></i>Daily Account Surplus &amp; PnL</h5>
-                            <small class="text-muted">Times shown in America/New_York</small>
-                        </div>
-                        <div class="d-flex flex-wrap align-items-center gap-2">
-                            <select class="form-select form-select-sm" id="dailySummaryRange">
-                                <option value="7">Last 7 days</option>
-                                <option value="14">Last 14 days</option>
-                                <option value="30" selected>Last 30 days</option>
-                                <option value="60">Last 60 days</option>
-                            </select>
-                            <button class="btn btn-outline-secondary btn-sm" id="refreshDailySummaryBtn" title="Refresh">
-                                <i class="fas fa-sync-alt"></i>
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-sm table-striped" id="dailyAccountSummaryTable">
-                                <thead class="table-light">
-                                    <tr>
-                                        <th>Date (NY)</th>
-                                        <th class="text-end">Orders</th>
-                                        <th class="text-end">Realized PnL (USD)</th>
-                                        <th class="text-end">Starting Surplus</th>
-                                        <th class="text-end">Ending Surplus</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr>
-                                        <td colspan="5" class="text-center text-muted py-3">
-                                            <i class="fas fa-info-circle me-2"></i>登录后加载每日盈余数据
-                                        </td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                        <div class="small text-muted mt-2" id="dailySummaryMeta"></div>
                     </div>
                 </div>
             </div>
@@ -964,6 +919,64 @@
                         </button>
                     </div>
                     <button type="button" class="btn btn-primary" id="saveConnectionSettings">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Daily Account Summary Modal -->
+    <div class="modal fade" id="dailyAccountSummaryModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-calendar-day me-2"></i>Daily Account Surplus &amp; PnL</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <label for="dailySummaryRange" class="form-label mb-0 me-2">时间范围</label>
+                            <select class="form-select form-select-sm" id="dailySummaryRange">
+                                <option value="7">Last 7 days</option>
+                                <option value="14">Last 14 days</option>
+                                <option value="30" selected>Last 30 days</option>
+                                <option value="60">Last 60 days</option>
+                            </select>
+                            <button class="btn btn-outline-secondary btn-sm" id="refreshDailySummaryBtn" title="Refresh">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                        </div>
+                        <small class="text-muted">Times shown in America/New_York</small>
+                    </div>
+                    <div class="mb-4">
+                        <div class="ratio ratio-16x9">
+                            <canvas id="dailySummaryChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped" id="dailyAccountSummaryTable">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Date (NY)</th>
+                                    <th class="text-end">Orders</th>
+                                    <th class="text-end">Realized PnL (USD)</th>
+                                    <th class="text-end">Starting Surplus</th>
+                                    <th class="text-end">Ending Surplus</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td colspan="5" class="text-center text-muted py-3">
+                                        <i class="fas fa-info-circle me-2"></i>登录后加载每日盈余数据
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="small text-muted mt-2" id="dailySummaryMeta"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
                 </div>
             </div>
         </div>

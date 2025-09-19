@@ -1,164 +1,205 @@
-#!/usr/bin/env python3
-"""
-测试手动下单功能修复 - 使用独立的IB Gateway连接
-"""
-
-import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from types import SimpleNamespace
 
-try:
-    from ibapi.client import EClient
-    from ibapi.wrapper import EWrapper
-    from ibapi.contract import Contract
-    from ibapi.order import Order
-except ModuleNotFoundError:
-    import pytest
-    pytest.skip("ibapi 未安装，跳过 test_order_fix 模块", allow_module_level=True)
-import threading
-import time
-from loguru import logger
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+os.environ.setdefault("IBBOT_SKIP_SERVER", "1")
+
+import core  # noqa: E402
+from src.routes import auth as auth_routes  # noqa: E402
+from src.routes import orders as orders_routes  # noqa: E402
+from src.routes.auth import create_access_token  # noqa: E402
 
 
-class IBApp(EWrapper, EClient):
+class StubConnectionManager:
+    def __init__(self, connected=True):
+        self._connected = connected
+        self.config = SimpleNamespace(paper_trading=True)
+
+    def is_connected(self):
+        return self._connected
+
+    def set_connected(self, value: bool) -> None:
+        self._connected = value
+
+
+class StubIBKRClient:
     def __init__(self):
-        EClient.__init__(self, self)
-        self.connected = False
-        self.next_order_id = None
-        self.order_placed = False
-        self.order_id = None
-        self.error_occurred = False
-        
-    def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
-        logger.info(f"ERROR {reqId} {errorCode} {errorString}")
-        if errorCode in [502, 504]:  # Connection errors
-            self.error_occurred = True
-            
-    def nextValidId(self, orderId):
-        logger.info(f"Connected. Next valid order ID: {orderId}")
-        self.connected = True
-        self.next_order_id = orderId
-        
-    def orderStatus(self, orderId, status, filled, remaining, avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice):
-        logger.info(f"Order {orderId} status: {status}, filled: {filled}, remaining: {remaining}")
-        
-    def openOrder(self, orderId, contract, order, orderState):
-        logger.info(f"Open order {orderId}: {contract.symbol} {order.action} {order.totalQuantity} @ {order.lmtPrice}")
-        
-    def execDetails(self, reqId, contract, execution):
-        logger.info(f"Execution: {execution.execId} {contract.symbol} {execution.side} {execution.shares} @ {execution.price}")
-        
-    def create_stock_contract(self, symbol):
-        """创建股票合约"""
-        contract = Contract()
-        contract.symbol = symbol
-        contract.secType = "STK"
-        contract.exchange = "SMART"
-        contract.currency = "USD"
-        return contract
-        
-    def create_limit_order(self, action, quantity, price):
-        """创建限价单"""
-        order = Order()
-        order.action = action
-        order.totalQuantity = quantity
-        order.orderType = "LMT"
-        order.lmtPrice = price
-        return order
-        
-    def place_test_order(self):
-        """下测试订单"""
-        assert self.connected and self.next_order_id is not None, "未连接或没有有效的订单ID"
-            
-        try:
-            # 创建AAPL股票合约
-            contract = self.create_stock_contract("AAPL")
-            
-            # 创建限价买单，价格设置得很低，不会成交
-            order = self.create_limit_order("BUY", 1, 100.0)
-            
-            # 下单
-            self.order_id = self.next_order_id
-            logger.info(f"下单: {contract.symbol} {order.action} {order.totalQuantity} @ {order.lmtPrice}")
-            self.placeOrder(self.order_id, contract, order)
-            self.order_placed = True
-            
-        except Exception as e:
-            logger.error(f"下单时发生错误: {e}")
-            raise
-            
-    def cancel_test_order(self):
-        """取消测试订单"""
-        if self.order_id is not None:
-            logger.info(f"取消订单: {self.order_id}")
-            self.cancelOrder(self.order_id)
-        else:
-            logger.warning("没有可取消的订单")
+        self.market_orders = []
+        self.limit_orders = []
+        self.cancelled_orders = []
+
+    async def place_market_order(self, *, symbol, quantity, action, exchange, sec_type):
+        self.market_orders.append(
+            {
+                "symbol": symbol,
+                "quantity": quantity,
+                "action": action,
+                "exchange": exchange,
+                "sec_type": sec_type,
+            }
+        )
+        return SimpleNamespace(order=SimpleNamespace(orderId=1001))
+
+    def place_limit_order(self, *, symbol, quantity, price, action, exchange, sec_type):
+        self.limit_orders.append(
+            {
+                "symbol": symbol,
+                "quantity": quantity,
+                "price": price,
+                "action": action,
+                "exchange": exchange,
+                "sec_type": sec_type,
+            }
+        )
+        return SimpleNamespace(order=SimpleNamespace(orderId=2002))
+
+    def cancel_order(self, order_id):
+        self.cancelled_orders.append(order_id)
+        return True, "Cancelled"
 
 
-def run_test():
-    """运行测试"""
-    logger.info("=== 独立下单功能测试 ===")
-    
-    # 创建应用实例
-    app = IBApp()
-    
-    try:
-        # 连接到IB Gateway (使用模拟交易端口)
-        logger.info("连接到IB Gateway...")
-        app.connect("127.0.0.1", 4002, clientId=3)  # 使用模拟交易端口4002
-        
-        # 启动API线程
-        api_thread = threading.Thread(target=app.run, daemon=True)
-        api_thread.start()
-        
-        # 等待连接建立
-        timeout = 10
-        start_time = time.time()
-        while not app.connected and not app.error_occurred and (time.time() - start_time) < timeout:
-            time.sleep(0.1)
-            
-        assert not app.error_occurred, "连接时发生错误"
-        assert app.connected, "连接超时"
-        
-        logger.info("✅ 连接成功")
-        
-        # 等待一下确保连接稳定
-        time.sleep(1)
-        
-        # 测试下单
-        logger.info("测试下单功能...")
-        app.place_test_order()
-        logger.info("✅ 下单成功")
-        
-        # 等待一下然后取消订单
-        time.sleep(3)
-        app.cancel_test_order()
-        logger.info("✅ 取消订单请求已发送")
-        
-        # 等待一下让取消操作完成
-        time.sleep(2)
-        
-    except Exception as e:
-        logger.error(f"测试过程中发生错误: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-        
-    finally:
-        # 断开连接
-        if app.isConnected():
-            logger.info("断开连接...")
-            app.disconnect()
-            time.sleep(1)
+class StubOrderManager:
+    def __init__(self):
+        self.created = []
+        self.cancelled = []
+
+    def create_order(self, **kwargs):
+        self.created.append(kwargs)
+
+    def cancel_order(self, order_id, reason=""):
+        self.cancelled.append((order_id, reason))
+        return True
 
 
-if __name__ == "__main__":
-    try:
-        run_test()
-        logger.info("✅ 独立下单功能测试通过")
-    except Exception:
-        logger.error("❌ 独立下单功能测试失败")
-        raise
-    finally:
-        logger.info("测试完成")
+class StubWebsocketManager:
+    def __init__(self):
+        self.messages = []
+
+    async def broadcast(self, payload):
+        self.messages.append(payload)
+
+
+@pytest.fixture()
+def orders_client(monkeypatch):
+    app = FastAPI()
+    app.include_router(auth_routes.router)
+    app.include_router(orders_routes.router)
+
+    connection = StubConnectionManager()
+    ibkr_client = StubIBKRClient()
+    order_manager = StubOrderManager()
+    websocket_manager = StubWebsocketManager()
+
+    monkeypatch.setattr(core, "connection_manager", connection)
+    monkeypatch.setattr(core, "ibkr_client", ibkr_client)
+    monkeypatch.setattr(core, "order_manager", order_manager)
+    monkeypatch.setattr(core, "websocket_manager", websocket_manager)
+    monkeypatch.setattr(
+        orders_routes, "connection_manager", connection
+    )
+    monkeypatch.setattr(orders_routes, "order_manager", order_manager)
+    monkeypatch.setattr(orders_routes, "websocket_manager", websocket_manager)
+
+    token, _ = create_access_token({"sub": "tester"})
+    headers = {"Authorization": f"Bearer {token}"}
+    client = TestClient(app)
+    return client, headers, connection, ibkr_client, order_manager, websocket_manager
+
+
+def test_place_market_order_success(orders_client):
+    client, headers, connection, ibkr_client, order_manager, websocket_manager = orders_client
+
+    payload = {
+        "symbol": "AAPL",
+        "quantity": 5,
+        "action": "BUY",
+        "order_type": "MARKET",
+        "exchange": "SMART",
+        "sec_type": "STK",
+    }
+
+    resp = client.post("/api/place_order", json=payload, headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["order_id"] == 1001
+
+    assert len(ibkr_client.market_orders) == 1
+    assert ibkr_client.market_orders[0]["symbol"] == "AAPL"
+    assert len(order_manager.created) == 1
+    created = order_manager.created[0]
+    assert created["symbol"] == "AAPL"
+    assert created["order_type"] == "MKT"
+    assert created["order_source"] == "manual"
+
+    # two websocket broadcasts (order_placed + order_update)
+    assert len(websocket_manager.messages) == 2
+    assert websocket_manager.messages[0]["type"] == "order_placed"
+
+
+def test_place_limit_order_with_risk_rule(orders_client):
+    client, headers, connection, ibkr_client, order_manager, websocket_manager = orders_client
+
+    payload = {
+        "symbol": "MSFT",
+        "quantity": 2,
+        "action": "SELL",
+        "order_type": "LIMIT",
+        "price": 310.5,
+        "exchange": "SMART",
+        "sec_type": "STK",
+        "risk_rule": {
+            "symbol": "MSFT",
+            "stop_loss_price": 305.0,
+            "take_profit_price": 315.0,
+        },
+    }
+
+    resp = client.post("/api/place_order", json=payload, headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["order_id"] == 2002
+
+    assert len(ibkr_client.limit_orders) == 1
+    limit_call = ibkr_client.limit_orders[0]
+    assert limit_call["symbol"] == "MSFT"
+    assert limit_call["price"] == 310.5
+
+    created = order_manager.created[-1]
+    assert "pending_risk_rule" in created.get("notes", "")
+    assert "SL=305.0" in created["notes"]
+    assert "TP=315.0" in created["notes"]
+
+
+def test_place_order_requires_connection(orders_client):
+    client, headers, connection, *_ = orders_client
+    connection.set_connected(False)
+
+    payload = {
+        "symbol": "AAPL",
+        "quantity": 1,
+        "action": "BUY",
+        "order_type": "MARKET",
+    }
+
+    resp = client.post("/api/place_order", json=payload, headers=headers)
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Not connected to IBKR"
+
+
+def test_cancel_order_success(orders_client):
+    client, headers, connection, ibkr_client, order_manager, _ = orders_client
+    resp = client.delete("/api/cancel_order/12345", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert ibkr_client.cancelled_orders == [12345]
+    assert order_manager.cancelled == [("12345", "Cancelled via API")]
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__])

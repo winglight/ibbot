@@ -110,6 +110,7 @@ def test_dom_phase4_full_loop(tmp_path, symbol):
     orchestrator.reset_state()
 
     try:
+        initial_thresholds = service.get_tuner_base_thresholds()
         base_ms = time.time() * 1000.0
         # Baseline snapshot
         _push_update(
@@ -168,7 +169,6 @@ def test_dom_phase4_full_loop(tmp_path, symbol):
         assert all('signal_price' in signal for signal in signals)
         assert all('thresholds' in metric for metric in history.get('metrics', []))
 
-        initial_thresholds = service.get_tuner_base_thresholds()
         assert initial_thresholds['long']['obi'] == pytest.approx(0.6, rel=1e-3)
         assert initial_thresholds['long']['ofi'] == pytest.approx(0.0, abs=1e-6)
 

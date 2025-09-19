@@ -918,6 +918,14 @@ class TradingApp {
                 this.dataManager.loadDailyAccountSummary({ days, force: true, showLoading: true });
             });
         }
+        const dailySummaryModal = document.getElementById('dailyAccountSummaryModal');
+        if (dailySummaryModal) {
+            dailySummaryModal.addEventListener('shown.bs.modal', () => {
+                const rangeInput = document.getElementById('dailySummaryRange');
+                const days = parseInt(rangeInput?.value || '30', 10) || 30;
+                this.dataManager.loadDailyAccountSummary({ days, force: true, showLoading: true });
+            });
+        }
 
         // Config Rules Settings buttons
         const gRulesSettingsBtn = document.getElementById('gRulesSettingsBtn');
