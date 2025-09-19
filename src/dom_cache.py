@@ -153,10 +153,21 @@ class DomCacheManager:
         metrics_copy = dict(metrics)
         snapshot_copy.setdefault("timestamp", now_ms)
         metrics_copy.setdefault("timestamp", now_ms)
+
         with self._lock:
             container = self._load_locked(key)
-            container.setdefault("snapshots", []).append(snapshot_copy)
-            container.setdefault("metrics", []).append(metrics_copy)
+            metrics_list = container.setdefault("metrics", [])
+            current_ts = self._timestamp_ms(metrics_copy)
+            if metrics_list:
+                last_ts = self._timestamp_ms(metrics_list[-1])
+                if last_ts and current_ts and current_ts <= last_ts:
+                    current_ts = last_ts + 0.001
+                    metrics_copy["timestamp"] = current_ts
+                    snapshot_copy["timestamp"] = current_ts
+            metrics_list.append(metrics_copy)
+            snapshots_list = container.setdefault("snapshots", [])
+            snapshots_list.append(snapshot_copy)
+            now_ms = current_ts or now_ms
             self._prune_locked(key, container, now_ms=now_ms)
             last_save = self._last_save_ts.get(key, 0.0)
             if time.time() - last_save >= self.save_interval_seconds:
