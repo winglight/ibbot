@@ -4131,13 +4131,16 @@ class TradingApp {
                                 data: {
                                     datasets: [{
                                         label: 'Trend Score',
-                                        data: this.getFormattedTrendChartData(),
-                                        borderColor: 'rgba(255,165,0,0.9)',
-                                        backgroundColor: 'rgba(255,165,0,0.1)',
-                                        pointRadius: (ctx) => {
-                                            const level = ctx.raw?.level ?? 0;
-                                            return getTrendLevelStyle(level).pointRadius ?? 3;
-                                        },
+                                    data: this.getFormattedTrendChartData(),
+                                    borderColor: 'rgba(255,165,0,0.9)',
+                                    backgroundColor: 'rgba(255,165,0,0.1)',
+                                    showLine: false,
+                                    borderWidth: 0,
+                                    fill: false,
+                                    pointRadius: (ctx) => {
+                                        const level = ctx.raw?.level ?? 0;
+                                        return getTrendLevelStyle(level).pointRadius ?? 3;
+                                    },
                                         pointHoverRadius: (ctx) => {
                                             const level = ctx.raw?.level ?? 0;
                                             return getTrendLevelStyle(level).hoverRadius ?? 5;
@@ -4241,6 +4244,9 @@ class TradingApp {
                             console.log('[loadMonitorChart] Updating existing monitorTrendChart');
                             console.log('[loadMonitorChart] Current chart data length:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
                             this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
+                            this.monitorTrendChart.data.datasets[0].showLine = false;
+                            this.monitorTrendChart.data.datasets[0].borderWidth = 0;
+                            this.monitorTrendChart.data.datasets[0].fill = false;
                             const trendYScale = this.monitorTrendChart.options?.scales?.y;
                             if (trendYScale) {
                                 trendYScale.min = -1;
