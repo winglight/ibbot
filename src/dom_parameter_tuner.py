@@ -23,6 +23,8 @@ from statistics import mean, pstdev
 from typing import Deque, Dict, Iterable, List, MutableMapping, Optional
 from collections import deque
 
+from loguru import logger
+
 try:  # Python 3.9+
     from zoneinfo import ZoneInfo
 except Exception:  # pragma: no cover - fall back to UTC only
@@ -140,13 +142,31 @@ class DOMParameterTuner:
 
     # ------------------------------------------------------------------
     def _register_false_long(self, profile: SessionProfile) -> None:
+        prev_long = profile.long_penalty
+        prev_ofi = profile.ofi_long_penalty
         profile.long_penalty = min(profile.long_penalty + self.penalty_step, self.max_penalty)
         profile.ofi_long_penalty = min(profile.ofi_long_penalty + self.penalty_step, self.max_penalty)
+        logger.debug(
+            "Registered false long signal penalty",
+            previous_long_penalty=prev_long,
+            previous_ofi_penalty=prev_ofi,
+            long_penalty=profile.long_penalty,
+            ofi_penalty=profile.ofi_long_penalty,
+        )
 
     # ------------------------------------------------------------------
     def _register_false_short(self, profile: SessionProfile) -> None:
+        prev_short = profile.short_penalty
+        prev_ofi = profile.ofi_short_penalty
         profile.short_penalty = min(profile.short_penalty + self.penalty_step, self.max_penalty)
         profile.ofi_short_penalty = min(profile.ofi_short_penalty + self.penalty_step, self.max_penalty)
+        logger.debug(
+            "Registered false short signal penalty",
+            previous_short_penalty=prev_short,
+            previous_ofi_penalty=prev_ofi,
+            short_penalty=profile.short_penalty,
+            ofi_penalty=profile.ofi_short_penalty,
+        )
 
     # ------------------------------------------------------------------
     def _update_pending_sweeps(
@@ -287,6 +307,8 @@ class DOMParameterTuner:
         orig_long_ofi = self.base_thresholds["long"]["ofi"]
         best_score = -1.0
         best_combo = (orig_long_obi, orig_long_ofi)
+        best_positives = 0
+        best_negatives = 0
 
         for obi_thr in obi_candidates:
             for ofi_thr in ofi_candidates:
@@ -308,6 +330,8 @@ class DOMParameterTuner:
                 if score > best_score:
                     best_score = score
                     best_combo = (obi_thr, ofi_thr)
+                    best_positives = positives
+                    best_negatives = negatives
 
         best_obi = max(best_combo[0], orig_long_obi)
         best_ofi = max(best_combo[1], orig_long_ofi)
@@ -317,6 +341,14 @@ class DOMParameterTuner:
         # Mirror the adjustment for shorts to keep symmetry
         self.base_thresholds["short"]["obi"] = 1.0 - best_obi
         self.base_thresholds["short"]["ofi"] = -best_ofi
+        logger.info(
+            "Optimised DOM thresholds from history",
+            long_obi=best_obi,
+            long_ofi=best_ofi,
+            positives=best_positives,
+            negatives=best_negatives,
+            score=best_score,
+        )
         return self.base_thresholds
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -277,8 +278,8 @@ class DOMOptimizationOrchestrator:
                 )
                 self._state["next_run_at"] = None
                 self._state["scheduled_at"] = None
-                if not self._state.get("is_running"):
-                    self._state["status"] = "idle"
+                self._state["is_running"] = False
+                self._state["status"] = "idle"
                 self._persist_state_locked()
                 status = self._status_snapshot_locked()
             else:
@@ -299,6 +300,17 @@ class DOMOptimizationOrchestrator:
                 status = self._status_snapshot_locked()
 
         self._wake_event.set()
+        if status.get("schedule", {}).get("enabled"):
+            logger.info(
+                "DOM automation schedule configured",
+                plan=status.get("plan"),
+                next_run=status.get("next_run_at"),
+            )
+        else:
+            logger.info(
+                "DOM automation schedule disabled",
+                plan=status.get("plan"),
+            )
         return status
 
     # ------------------------------------------------------------------
@@ -363,6 +375,12 @@ class DOMOptimizationOrchestrator:
             self._state["last_started_at"] = self._serialise_datetime(started_at)
             self._persist_state_locked()
 
+        logger.info(
+            "Starting DOM optimisation run",
+            symbol=symbol,
+            scheduled=scheduled,
+            scheduled_time=self._serialise_datetime(scheduled_time) if scheduled_time else None,
+        )
         duration_ms: Optional[float] = None
         result: Dict[str, Any] = {}
 
@@ -418,6 +436,7 @@ class DOMOptimizationOrchestrator:
 
             finished_at = _now()
             duration_ms = (finished_at - started_at).total_seconds() * 1000.0
+
             precision = positives / evaluated if evaluated else None
 
             window_start = metrics[0].get("timestamp") if metrics else None
@@ -439,6 +458,16 @@ class DOMOptimizationOrchestrator:
                 "history_window": {"start": window_start, "end": window_end},
                 "insufficient_data": not should_optimize,
             }
+
+            logger.info(
+                "DOM optimisation run completed",
+                symbol=symbol,
+                evaluated=evaluated,
+                applied=applied,
+                precision=precision,
+                duration_ms=duration_ms,
+                pending=pending_count,
+            )
 
             with self._lock:
                 self._state["status"] = "succeeded"
@@ -567,9 +596,35 @@ class DOMOptimizationOrchestrator:
         scheduled_time = next_run or now
         try:
             result = self._execute_plan(plan, scheduled_time=scheduled_time)
+        except RuntimeError as exc:
+            logger.info(
+                "Scheduled DOM optimisation already running",
+                error=str(exc),
+            )
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                status = self.get_status()
+                if not status.get("is_running"):
+                    last_result = status.get("last_result")
+                    if last_result:
+                        logger.info(
+                            "Returning last automation result after concurrent run",
+                            symbol=last_result.get("symbol"),
+                        )
+                        return copy.deepcopy(last_result)
+                    break
+                time.sleep(0.05)
+            return None
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("Scheduled DOM optimisation execution failed")
             raise
+        if result:
+            logger.info(
+                "Executed scheduled DOM optimisation",
+                symbol=result.get("symbol"),
+                scheduled_time=self._serialise_datetime(scheduled_time) if scheduled_time else None,
+                next_run=self.get_status().get("next_run_at"),
+            )
         return result
 
     # ------------------------------------------------------------------
