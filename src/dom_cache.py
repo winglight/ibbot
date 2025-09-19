@@ -2,9 +2,8 @@ import os
 import pickle
 import re
 import time
-from datetime import datetime
 from threading import Lock
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .utils import parse_local_datetime
 
@@ -12,7 +11,7 @@ from .utils import parse_local_datetime
 DOM_RETENTION_ENV = "DOM_CACHE_RETENTION_DAYS"
 
 
-def _resolve_retention_seconds(default_days: float = 1.0) -> int:
+def _resolve_retention_seconds(default_days: float = 7.0) -> int:
     """Resolve DOM cache retention in seconds using an environment variable."""
 
     env_value = os.getenv(DOM_RETENTION_ENV)
@@ -165,9 +164,94 @@ class DomCacheManager:
                 self._last_save_ts[key] = time.time()
 
     # ------------------------------------------------------------------
-    def get_history(self, symbol: str) -> Dict[str, List[Dict[str, Any]]]:
+    def update_metric(
+        self,
+        symbol: str,
+        *,
+        signal_id: Optional[str] = None,
+        timestamp: Optional[float] = None,
+        updates: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Update a cached metric entry identified by signal id or timestamp."""
+
+        if not symbol or not updates:
+            return False
+
+        key = self._sanitize_symbol(symbol)
+        with self._lock:
+            container = self._load_locked(key)
+            metrics_list = container.get("metrics") or []
+            target: Optional[Dict[str, Any]] = None
+
+            if signal_id is not None:
+                for item in reversed(metrics_list):
+                    if str(item.get("signal_id")) == str(signal_id):
+                        target = item
+                        break
+
+            if target is None and timestamp is not None:
+                try:
+                    ts_target = float(timestamp)
+                except (TypeError, ValueError):
+                    ts_target = None
+                if ts_target is not None:
+                    for item in reversed(metrics_list):
+                        ts_value = self._timestamp_ms(item)
+                        if not ts_value:
+                            continue
+                        if abs(ts_value - ts_target) <= 0.5:
+                            target = item
+                            break
+
+            if target is None:
+                return False
+
+            target.update(dict(updates))
+            self._save_locked(key, container)
+            self._last_save_ts[key] = time.time()
+            return True
+
+    # ------------------------------------------------------------------
+    def _coerce_timestamp_ms(self, value: Any) -> Optional[float]:
+        """Coerce timestamps provided as strings or numbers into milliseconds."""
+
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return float(text)
+            except (TypeError, ValueError):
+                dt = parse_local_datetime(text)
+                if dt is None:
+                    return None
+                return dt.timestamp() * 1000.0
+        return None
+
+    def get_history(
+        self,
+        symbol: str,
+        *,
+        limit: Optional[int] = 500,
+        start_time: Optional[Any] = None,
+        end_time: Optional[Any] = None,
+        include_snapshots: bool = True,
+    ) -> Dict[str, Any]:
         if not symbol:
-            return {"snapshots": [], "metrics": []}
+            return {
+                "snapshots": [] if include_snapshots else [],
+                "metrics": [],
+                "total_snapshots": 0,
+                "total_metrics": 0,
+            }
+
         key = self._sanitize_symbol(symbol)
         now_ms = time.time() * 1000.0
         with self._lock:
@@ -175,14 +259,48 @@ class DomCacheManager:
             self._prune_locked(key, container, now_ms=now_ms)
             snapshots = [dict(item) for item in container.get("snapshots", [])]
             metrics = [dict(item) for item in container.get("metrics", [])]
-        metrics.sort(key=lambda item: self._timestamp_ms(item))
-        snapshots.sort(key=lambda item: self._timestamp_ms(item))
 
-        # 保证 snapshots 长度不超过 500（保留最新的 500 条）
-        snapshots = snapshots[-500:]
-        metrics = metrics[-500:]
+        start_ms = self._coerce_timestamp_ms(start_time)
+        end_ms = self._coerce_timestamp_ms(end_time)
 
-        return {"snapshots": snapshots, "metrics": metrics}
+        def _filter_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            filtered: List[Dict[str, Any]] = []
+            for item in items:
+                ts = self._timestamp_ms(item)
+                if start_ms is not None and ts < start_ms:
+                    continue
+                if end_ms is not None and ts > end_ms:
+                    continue
+                filtered.append(item)
+            filtered.sort(key=lambda payload: self._timestamp_ms(payload))
+            return filtered
+
+        snapshots = _filter_items(snapshots)
+        metrics = _filter_items(metrics)
+
+        total_snapshots = len(snapshots)
+        total_metrics = len(metrics)
+
+        limit_value: Optional[int] = None
+        if limit is not None:
+            try:
+                limit_candidate = int(limit)
+            except (TypeError, ValueError):
+                limit_candidate = 0
+            if limit_candidate > 0:
+                limit_value = limit_candidate
+
+        if limit_value is not None:
+            snapshots = snapshots[-limit_value:]
+            metrics = metrics[-limit_value:]
+
+        result: Dict[str, Any] = {
+            "snapshots": snapshots if include_snapshots else [],
+            "metrics": metrics,
+            "total_snapshots": total_snapshots,
+            "total_metrics": total_metrics,
+        }
+        return result
 
     # ------------------------------------------------------------------
     def get_latest_metrics(self, symbol: str) -> Dict[str, Any]:
