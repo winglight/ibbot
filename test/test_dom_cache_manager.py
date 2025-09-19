@@ -1,6 +1,5 @@
 import time
 from datetime import datetime, timedelta
-
 from zoneinfo import ZoneInfo
 
 from src.dom_cache import DomCacheManager
@@ -63,3 +62,19 @@ def test_get_history_filters_by_range_and_can_skip_snapshots(tmp_path) -> None:
     assert history["total_snapshots"] == 3
     assert history["snapshots"] == []
     assert [entry["value"] for entry in history["metrics"]] == [1, 2, 3]
+
+
+def test_dom_cache_retention_respects_env(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("DOM_CACHE_RETENTION_DAYS", "0.0007")  # ~60 seconds
+    cache = DomCacheManager(base_dir=str(tmp_path), save_interval_seconds=1)
+    assert cache.retention_seconds <= 70
+
+    symbol = "RETENTION"
+    base_ms = int(time.time() * 1000)
+    _append_sample(cache, symbol, base_ms - 120_000, 1)
+    _append_sample(cache, symbol, base_ms - 10_000, 2)
+
+    history = cache.get_history(symbol, limit=0)
+    values = [entry["value"] for entry in history["metrics"]]
+    assert values == [2]
+    assert history["total_metrics"] == 1

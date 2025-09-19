@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,31 +9,20 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from src.dom_cache import DomCacheManager
-
-
-DEFAULT_OUTCOME_DELAY_SECONDS = 600.0
-DEFAULT_OUTCOME_THRESHOLD = 0.005
-OUTCOME_DELAY_ENV = "DOM_SIGNAL_OUTCOME_DELAY_SECONDS"
-OUTCOME_THRESHOLD_ENV = "DOM_SIGNAL_OUTCOME_THRESHOLD"
-
-
-def _resolve_float(value: Optional[str], fallback: float) -> float:
-    if value is None:
-        return fallback
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return fallback
-    return parsed
+from src.dom_settings import (
+    DEFAULT_OUTCOME_DELAY_SECONDS,
+    DEFAULT_OUTCOME_THRESHOLD,
+    DOMOutcomeSettings,
+    get_outcome_settings,
+)
 
 
 def resolve_outcome_config() -> Tuple[float, float]:
     """Return the evaluation delay (seconds) and price move threshold."""
 
-    delay = _resolve_float(os.getenv(OUTCOME_DELAY_ENV), DEFAULT_OUTCOME_DELAY_SECONDS)
-    threshold = _resolve_float(os.getenv(OUTCOME_THRESHOLD_ENV), DEFAULT_OUTCOME_THRESHOLD)
-    delay = max(delay, 1.0)
-    threshold = max(threshold, 0.0)
+    settings: DOMOutcomeSettings = get_outcome_settings()
+    delay = max(settings.evaluation_delay_seconds, 1.0)
+    threshold = max(settings.price_move_threshold, 0.0)
     return delay, threshold
 
 

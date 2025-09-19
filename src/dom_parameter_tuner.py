@@ -25,6 +25,8 @@ from collections import deque
 
 from loguru import logger
 
+from src.dom_settings import get_logging_settings
+
 try:  # Python 3.9+
     from zoneinfo import ZoneInfo
 except Exception:  # pragma: no cover - fall back to UTC only
@@ -76,6 +78,18 @@ class SessionProfile:
     ofi_long_penalty: float = 0.0
     ofi_short_penalty: float = 0.0
     last_timestamp_ns: Optional[int] = None
+
+
+def _log_penalty_event(event: str, **kwargs: float) -> None:
+    """Emit structured logs for penalty adjustments respecting verbosity flags."""
+
+    settings = get_logging_settings()
+    level = "INFO" if settings.verbose_penalty_logs else "DEBUG"
+    logger.bind(dom_event="penalty_adjustment", configured_level=settings.log_level).log(
+        level,
+        event,
+        **kwargs,
+    )
 
 
 class DOMParameterTuner:
@@ -146,7 +160,7 @@ class DOMParameterTuner:
         prev_ofi = profile.ofi_long_penalty
         profile.long_penalty = min(profile.long_penalty + self.penalty_step, self.max_penalty)
         profile.ofi_long_penalty = min(profile.ofi_long_penalty + self.penalty_step, self.max_penalty)
-        logger.debug(
+        _log_penalty_event(
             "Registered false long signal penalty",
             previous_long_penalty=prev_long,
             previous_ofi_penalty=prev_ofi,
@@ -160,7 +174,7 @@ class DOMParameterTuner:
         prev_ofi = profile.ofi_short_penalty
         profile.short_penalty = min(profile.short_penalty + self.penalty_step, self.max_penalty)
         profile.ofi_short_penalty = min(profile.ofi_short_penalty + self.penalty_step, self.max_penalty)
-        logger.debug(
+        _log_penalty_event(
             "Registered false short signal penalty",
             previous_short_penalty=prev_short,
             previous_ofi_penalty=prev_ofi,

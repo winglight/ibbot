@@ -2,6 +2,7 @@ import math
 from datetime import datetime
 
 import pytest
+from loguru import logger
 from zoneinfo import ZoneInfo
 
 from src.dom_parameter_tuner import (
@@ -73,3 +74,28 @@ def test_optimize_with_history_adjusts_base_thresholds():
     )
     assert result["long"]["obi"] in {0.6, 0.65}
     assert result["short"]["ofi"] == -result["long"]["ofi"]
+
+
+def test_penalty_logging_level_toggle(monkeypatch):
+    records = []
+
+    def _sink(message):
+        records.append(message)
+
+    sink_id = logger.add(_sink, level="DEBUG")
+    try:
+        monkeypatch.delenv("DOM_VERBOSE_LOGGING", raising=False)
+        records.clear()
+        tuner = DOMParameterTuner()
+        tuner._register_false_long(tuner.profiles["RTH"])
+        assert records, "expected a penalty log entry"
+        assert records[-1].record["level"].name == "DEBUG"
+
+        records.clear()
+        monkeypatch.setenv("DOM_VERBOSE_LOGGING", "1")
+        tuner_verbose = DOMParameterTuner()
+        tuner_verbose._register_false_short(tuner_verbose.profiles["RTH"])
+        assert records, "expected a verbose penalty log entry"
+        assert records[-1].record["level"].name == "INFO"
+    finally:
+        logger.remove(sink_id)

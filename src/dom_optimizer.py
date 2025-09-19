@@ -13,6 +13,7 @@ from loguru import logger
 from src.dom_cache import DomCacheManager
 from src.dom_parameter_tuner import DOMParameterTuner
 from src.dom_service import DOMService, get_dom_service
+from src.dom_settings import get_automation_defaults
 
 
 def _now() -> datetime:
@@ -49,9 +50,15 @@ class DOMOptimizationOrchestrator:
         self._state: Dict[str, Any] = self._initial_state()
         self._load_state()
         self._start_scheduler()
+        logger.info(
+            "DOM optimisation orchestrator initialised",
+            schedule=self._state.get("schedule"),
+            plan=self._state.get("plan"),
+        )
 
     # ------------------------------------------------------------------
     def _initial_state(self) -> Dict[str, Any]:
+        defaults = get_automation_defaults()
         return {
             "status": "idle",
             "is_running": False,
@@ -64,16 +71,16 @@ class DOMOptimizationOrchestrator:
             "next_run_at": None,
             "schedule": {
                 "enabled": False,
-                "interval_minutes": None,
+                "interval_minutes": defaults.interval_minutes,
                 "start_at": None,
                 "next_run_at": None,
             },
             "plan": {
-                "symbol": None,
-                "lookback_minutes": 1440,
-                "limit": None,
-                "apply_updates": True,
-                "min_signals": 0,
+                "symbol": defaults.symbol,
+                "lookback_minutes": defaults.lookback_minutes,
+                "limit": defaults.limit,
+                "apply_updates": defaults.apply_updates,
+                "min_signals": defaults.min_signals,
                 "obi_candidates": None,
                 "ofi_candidates": None,
             },
@@ -142,6 +149,11 @@ class DOMOptimizationOrchestrator:
             with self._lock:
                 self._state.update(payload)
                 self._ensure_state_defaults_locked()
+            logger.info(
+                "Loaded persisted DOM automation state",
+                schedule=payload.get("schedule"),
+                plan=payload.get("plan"),
+            )
 
     # ------------------------------------------------------------------
     def _ensure_state_defaults_locked(self) -> None:
@@ -167,6 +179,11 @@ class DOMOptimizationOrchestrator:
                 self._state,
                 "DOM optimisation automation state",
             )
+            logger.debug(
+                "Persisted DOM automation state",
+                schedule=self._state.get("schedule"),
+                next_run=self._state.get("next_run_at"),
+            )
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.warning("Failed to persist DOM automation state: {}", exc)
 
@@ -181,6 +198,11 @@ class DOMOptimizationOrchestrator:
             self._state = self._initial_state()
             self._persist_state_locked()
         self._wake_event.set()
+        logger.info(
+            "DOM automation state reset",
+            schedule=self._state.get("schedule"),
+            plan=self._state.get("plan"),
+        )
 
     # ------------------------------------------------------------------
     def _update_next_run_locked(self, reference: Optional[datetime] = None) -> None:
@@ -433,6 +455,13 @@ class DOMOptimizationOrchestrator:
             else:
                 updated_thresholds = copy.deepcopy(base_thresholds)
                 applied = False
+                logger.info(
+                    "Skipping DOM optimisation due to insufficient evaluated signals",
+                    symbol=symbol,
+                    evaluated=evaluated,
+                    min_required=min_required,
+                    pending=pending_count,
+                )
 
             finished_at = _now()
             duration_ms = (finished_at - started_at).total_seconds() * 1000.0
