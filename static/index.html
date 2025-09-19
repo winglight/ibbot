@@ -2683,6 +2683,87 @@
         </div>
     </div>
 
+    <!-- DOM Outcome Detail Modal -->
+    <div class="modal fade" id="domOutcomeModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header dom-optimizer-header">
+                    <h5 class="modal-title" id="domOutcomeModalTitle"><i class="fas fa-clipboard-list me-2"></i>信号评估详情</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info d-none" id="domOutcomeModalAlert"></div>
+
+                    <div class="mb-4">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="mb-0">信号概览</h6>
+                            <span class="badge bg-secondary d-none" id="domOutcomeSignalLevel"></span>
+                        </div>
+                        <dl class="row row-cols-1 row-cols-md-2 g-3 small mb-0" id="domOutcomeSignalMetrics"></dl>
+                    </div>
+
+                    <div class="mb-4">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="mb-0">关联订单</h6>
+                            <div class="spinner-border spinner-border-sm text-primary d-none" id="domOutcomeOrdersLoading" role="status">
+                                <span class="visually-hidden">加载中…</span>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>订单ID</th>
+                                        <th>方向</th>
+                                        <th>数量</th>
+                                        <th>均价</th>
+                                        <th>状态</th>
+                                        <th>提交时间</th>
+                                        <th>执行时间</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="domOutcomeOrdersTbody">
+                                    <tr>
+                                        <td colspan="7" class="text-center text-muted py-3">暂无关联订单</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="mb-0">价格变化</h6>
+                            <small class="text-muted" id="domOutcomePriceMeta"></small>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>时间偏移</th>
+                                        <th>价格</th>
+                                        <th>价格变化</th>
+                                        <th>变化幅度</th>
+                                        <th>采样时间</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="domOutcomePriceTbody">
+                                    <tr>
+                                        <td colspan="5" class="text-center text-muted py-3">暂无可用价格数据</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <small class="text-muted me-auto" id="domOutcomeModalMeta"></small>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3" defer></script>

@@ -32,6 +32,16 @@
         return value.toFixed(digits);
     }
 
+    function escapeHtml(value) {
+        if (value === null || value === undefined) return '';
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     function parseCandidates(input) {
         if (!input) return null;
         const parts = String(input)
@@ -168,6 +178,12 @@
                 historyMetrics: [],
                 liveEnabled: false,
                 lastStats: null,
+                orderCache: {
+                    symbol: null,
+                    fetchedAt: 0,
+                    items: []
+                },
+                activeSignal: null,
                 loading: {
                     stats: false,
                     signals: false,
@@ -251,7 +267,17 @@
                 optimizeBtn: document.getElementById('domOptimizerOptimizeBtn'),
                 clearResultBtn: document.getElementById('domOptimizerClearResultBtn'),
                 applySwitch: document.getElementById('domOptimizerApplySwitch'),
-                optimizeResult: document.getElementById('domOptimizerOptimizeResult')
+                optimizeResult: document.getElementById('domOptimizerOptimizeResult'),
+                outcomeModal: document.getElementById('domOutcomeModal'),
+                outcomeModalTitle: document.getElementById('domOutcomeModalTitle'),
+                outcomeModalAlert: document.getElementById('domOutcomeModalAlert'),
+                outcomeSignalMetrics: document.getElementById('domOutcomeSignalMetrics'),
+                outcomeSignalLevel: document.getElementById('domOutcomeSignalLevel'),
+                outcomeModalMeta: document.getElementById('domOutcomeModalMeta'),
+                outcomeOrdersTbody: document.getElementById('domOutcomeOrdersTbody'),
+                outcomeOrdersLoading: document.getElementById('domOutcomeOrdersLoading'),
+                outcomePriceTbody: document.getElementById('domOutcomePriceTbody'),
+                outcomePriceMeta: document.getElementById('domOutcomePriceMeta')
             };
         }
 
@@ -271,7 +297,8 @@
                 trendRefreshBtn,
                 indicatorRefreshBtn,
                 trendLiveToggle,
-                symbolInput
+                symbolInput,
+                signalsTable
             } = this.elements;
 
             refreshStatusBtn?.addEventListener('click', () => this.refreshAutomationStatus({ force: true }));
@@ -323,6 +350,19 @@
                 });
             }
             this.elements.outcomeFilter?.addEventListener('change', () => this.applySignalFilter());
+
+            signalsTable?.addEventListener('click', (event) => {
+                const target = event.target instanceof Element ? event.target : null;
+                if (!target) return;
+                const badge = target.closest('[data-role="dom-outcome-badge"]');
+                if (!badge) return;
+                const index = parseInt(badge.getAttribute('data-index') || '', 10);
+                if (!Number.isFinite(index)) return;
+                const signal = this.state.filteredSignals[index];
+                if (!signal) return;
+                event.preventDefault();
+                this.openOutcomeDetail(signal);
+            });
         }
 
         restorePreferences() {
@@ -1288,7 +1328,8 @@
                 row.appendChild(cell);
                 tbody.appendChild(row);
             } else {
-                for (const item of pageItems) {
+                pageItems.forEach((item, offset) => {
+                    const absoluteIndex = startIndex + offset;
                     const row = document.createElement('tr');
                     const ts = resolveTimestampMs(item);
                     const dateLabel = ts ? formatIsoDatetime(ts) : '-';
@@ -1296,7 +1337,8 @@
                     const obi = toNumber(item?.obi5);
                     const ofi = toNumber(item?.ofi);
                     const trend = toNumber(item?.trend_score);
-                    const outcomeBadge = this.renderOutcomeBadge(item?.outcome);
+                    const outcomeBadge = this.renderOutcomeBadge(item, absoluteIndex);
+                    row.dataset.signalIndex = String(absoluteIndex);
                     row.innerHTML = `
                         <td class="text-nowrap">${dateLabel}</td>
                         <td>${this.renderSignalType(item?.signal_type)}</td>
@@ -1307,7 +1349,7 @@
                         <td>${outcomeBadge}</td>
                     `;
                     tbody.appendChild(row);
-                }
+                });
             }
             this.updatePaginationControls(totalPages);
             this.renderSignalsSummary();
@@ -1323,14 +1365,26 @@
             return '<span class="badge bg-secondary">N/A</span>';
         }
 
-        renderOutcomeBadge(outcome) {
+        renderOutcomeBadge(item, index) {
+            const outcome = item?.outcome;
+            let label = '待评估';
+            let cls = 'bg-secondary';
             if (outcome === 1) {
-                return '<span class="badge bg-success">成功</span>';
+                label = '成功';
+                cls = 'bg-success';
+            } else if (outcome === 0) {
+                label = '失败';
+                cls = 'bg-danger';
             }
-            if (outcome === 0) {
-                return '<span class="badge bg-danger">失败</span>';
+            const attributes = [
+                `class="badge ${cls}"`,
+                'data-role="dom-outcome-badge"',
+                `data-index="${Number.isFinite(index) ? index : ''}"`
+            ];
+            if (item?.signal_id) {
+                attributes.push(`data-signal-id="${escapeHtml(item.signal_id)}"`);
             }
-            return '<span class="badge bg-secondary">待评估</span>';
+            return `<span ${attributes.join(' ')}>${label}</span>`;
         }
 
         renderSignalsSummary() {
@@ -1340,6 +1394,408 @@
             const failures = this.state.filteredSignals.filter((item) => item?.outcome === 0).length;
             const pending = total - successes - failures;
             this.elements.signalsSummary.textContent = `${total} 条记录 · 成功 ${successes} / 失败 ${failures} / 待评估 ${pending}`;
+        }
+
+        ensureOutcomeModal() {
+            if (this._outcomeModalInstance) return this._outcomeModalInstance;
+            const modalEl = this.elements.outcomeModal;
+            if (!modalEl || typeof bootstrap === 'undefined' || typeof bootstrap.Modal !== 'function') {
+                return null;
+            }
+            this._outcomeModalInstance = new bootstrap.Modal(modalEl, {
+                backdrop: 'static',
+                keyboard: true
+            });
+            return this._outcomeModalInstance;
+        }
+
+        async openOutcomeDetail(signal) {
+            if (!signal) return;
+            this.state.activeSignal = signal;
+            const modal = this.ensureOutcomeModal();
+            this.renderOutcomeSignal(signal);
+            this.renderOutcomeOrders(signal, []);
+            this.renderOutcomePriceTrajectory(signal, []);
+            if (modal) {
+                modal.show();
+            }
+            try {
+                const orders = await this.fetchOrdersForSignal(signal);
+                this.renderOutcomeOrders(signal, orders);
+                this.renderOutcomePriceTrajectory(signal, orders);
+            } catch (error) {
+                this.renderOutcomeOrders(signal, []);
+                this.renderOutcomePriceTrajectory(signal, []);
+                this.showOutcomeAlert('danger', `加载关联订单失败：${error?.message || error}`);
+            }
+        }
+
+        showOutcomeAlert(level, message) {
+            const el = this.elements.outcomeModalAlert;
+            if (!el) return;
+            if (!message) {
+                el.classList.add('d-none');
+                return;
+            }
+            el.textContent = message;
+            el.classList.remove('d-none', 'alert-info', 'alert-warning', 'alert-danger', 'alert-success');
+            if (level === 'success') el.classList.add('alert-success');
+            else if (level === 'danger' || level === 'error') el.classList.add('alert-danger');
+            else if (level === 'warning') el.classList.add('alert-warning');
+            else el.classList.add('alert-info');
+        }
+
+        renderOutcomeSignal(signal) {
+            const {
+                outcomeModalTitle,
+                outcomeSignalMetrics,
+                outcomeSignalLevel,
+                outcomeModalMeta
+            } = this.elements;
+            const symbol = (signal?.symbol || this.elements.symbolInput?.value || '').toString().trim().toUpperCase();
+            const ts = resolveTimestampMs(signal);
+            const timeLabel = ts ? formatIsoDatetime(ts) : '-';
+            const direction = signal?.signal_type === 'short' ? '空头' : signal?.signal_type === 'long' ? '多头' : '—';
+            const outcome = signal?.outcome;
+            let statusLabel = '待评估';
+            let alertLevel = null;
+            if (outcome === 1) {
+                statusLabel = '成功';
+                alertLevel = null;
+            } else if (outcome === 0) {
+                statusLabel = '失败';
+                alertLevel = null;
+            } else {
+                alertLevel = 'warning';
+            }
+
+            if (outcomeModalTitle) {
+                const title = `${symbol || '-'} · ${direction} · ${statusLabel}`;
+                outcomeModalTitle.innerHTML = `<i class="fas fa-clipboard-list me-2"></i>${escapeHtml(title)}`;
+            }
+
+            if (alertLevel) {
+                this.showOutcomeAlert(alertLevel, '该信号仍在评估窗口内，Outcome 暂不可用。');
+            } else {
+                this.showOutcomeAlert(null, '');
+            }
+
+            if (outcomeSignalMetrics) {
+                outcomeSignalMetrics.innerHTML = '';
+                const trendScore = toNumber(signal?.trend_score);
+                const signalPrice = this.coercePriceValue(signal?.signal_price ?? resolvePrice(signal));
+                const obi = toNumber(signal?.obi5);
+                const ofi = toNumber(signal?.ofi);
+                const outcomePrice = this.coercePriceValue(signal?.outcome_price);
+                const outcomeTs = toNumber(signal?.outcome_timestamp ?? signal?.outcome_ts);
+                const priceDelta = Number.isFinite(signalPrice) && Number.isFinite(outcomePrice)
+                    ? outcomePrice - signalPrice
+                    : null;
+                const pctDelta = Number.isFinite(signalPrice) && signalPrice !== 0 && Number.isFinite(priceDelta)
+                    ? priceDelta / signalPrice
+                    : null;
+                const delaySeconds = Number.isFinite(ts) && Number.isFinite(outcomeTs)
+                    ? (outcomeTs - ts) / 1000
+                    : null;
+
+                const entries = [
+                    { label: '信号时间', value: timeLabel },
+                    { label: '信号方向', value: direction },
+                    { label: 'Trend Score', value: Number.isFinite(trendScore) ? trendScore.toFixed(2) : '-' },
+                    { label: 'Signal Price', value: Number.isFinite(signalPrice) ? formatNumber(signalPrice, 2) : '-' },
+                    { label: 'OBI', value: Number.isFinite(obi) ? formatNumber(obi, 2) : '-' },
+                    { label: 'OFI', value: Number.isFinite(ofi) ? formatNumber(ofi, 0) : '-' },
+                    { label: 'Outcome 状态', value: statusLabel },
+                    { label: 'Outcome 价格', value: Number.isFinite(outcomePrice) ? formatNumber(outcomePrice, 2) : '-' },
+                    { label: 'Outcome 时间', value: Number.isFinite(outcomeTs) ? formatIsoDatetime(outcomeTs) : '-' },
+                    { label: '价格变化', value: Number.isFinite(priceDelta) ? `${priceDelta >= 0 ? '+' : ''}${formatNumber(priceDelta, 2)}` : '-' },
+                    { label: '变化幅度', value: Number.isFinite(pctDelta) ? formatPercent(pctDelta) : '-' },
+                    { label: '评估耗时', value: Number.isFinite(delaySeconds) ? `${delaySeconds.toFixed(delaySeconds >= 10 ? 0 : 1)} s` : '-' }
+                ];
+
+                for (const entry of entries) {
+                    const dt = document.createElement('dt');
+                    dt.className = 'col-md-4 text-muted mb-0';
+                    dt.textContent = entry.label;
+                    const dd = document.createElement('dd');
+                    dd.className = 'col-md-8 mb-0';
+                    dd.textContent = entry.value;
+                    outcomeSignalMetrics.appendChild(dt);
+                    outcomeSignalMetrics.appendChild(dd);
+                }
+            }
+
+            if (outcomeSignalLevel) {
+                const level = this.resolveSignalLevel(signal);
+                if (level > 0) {
+                    outcomeSignalLevel.textContent = `Level ${level}`;
+                    outcomeSignalLevel.classList.remove('d-none');
+                } else {
+                    outcomeSignalLevel.classList.add('d-none');
+                }
+            }
+
+            if (outcomeModalMeta) {
+                const segments = [];
+                if (signal?.signal_id) {
+                    segments.push(`Signal ID ${signal.signal_id}`);
+                }
+                const outcomeTs = toNumber(signal?.outcome_timestamp ?? signal?.outcome_ts);
+                if (Number.isFinite(ts) && Number.isFinite(outcomeTs)) {
+                    const elapsed = (outcomeTs - ts) / 1000;
+                    segments.push(`评估耗时 ${elapsed.toFixed(elapsed >= 10 ? 0 : 1)} s`);
+                }
+                outcomeModalMeta.textContent = segments.join(' · ');
+            }
+        }
+
+        toggleOrdersLoading(isLoading) {
+            const spinner = this.elements.outcomeOrdersLoading;
+            if (!spinner) return;
+            spinner.classList.toggle('d-none', !isLoading);
+        }
+
+        async fetchOrdersForSignal(signal) {
+            const symbol = (signal?.symbol || this.elements.symbolInput?.value || '').toString().trim().toUpperCase();
+            const timestamp = resolveTimestampMs(signal);
+            const now = Date.now();
+            const cache = this.state.orderCache;
+            if (
+                cache
+                && cache.symbol === symbol
+                && Array.isArray(cache.items)
+                && now - (cache.fetchedAt || 0) < 30_000
+            ) {
+                return this.filterOrdersForSignal(signal, cache.items);
+            }
+
+            const params = new URLSearchParams();
+            params.set('limit', '200');
+            if (Number.isFinite(timestamp)) {
+                const start = new Date(timestamp - 60 * 60 * 1000);
+                params.set('start_date', start.toISOString());
+            }
+
+            this.toggleOrdersLoading(true);
+            try {
+                const response = await this.apiCall(`/orders?${params.toString()}`, {
+                    method: 'GET',
+                    allowReadOnly: true
+                });
+                const orders = Array.isArray(response?.orders) ? response.orders : [];
+                this.state.orderCache = {
+                    symbol,
+                    fetchedAt: now,
+                    items: orders
+                };
+                return this.filterOrdersForSignal(signal, orders);
+            } finally {
+                this.toggleOrdersLoading(false);
+            }
+        }
+
+        filterOrdersForSignal(signal, orders) {
+            if (!Array.isArray(orders) || !orders.length) {
+                return [];
+            }
+            const symbol = (signal?.symbol || this.elements.symbolInput?.value || '').toString().trim().toUpperCase();
+            const signalId = signal?.order_id || signal?.signal_id;
+            const timestamp = resolveTimestampMs(signal);
+            const windowMs = 15 * 60 * 1000;
+
+            let matches = [];
+            if (signalId) {
+                const idText = String(signalId);
+                matches = orders.filter((order) => {
+                    const orderId = order?.order_id != null ? String(order.order_id) : '';
+                    const parentId = order?.parent_order_id != null ? String(order.parent_order_id) : '';
+                    return orderId === idText || parentId === idText;
+                });
+            }
+            if (!matches.length) {
+                matches = orders.filter((order) => {
+                    if (symbol && String(order?.symbol || '').toUpperCase() !== symbol) return false;
+                    const submitTs = this.parseOrderTimestamp(order?.submit_time);
+                    const executedTs = this.parseOrderTimestamp(order?.executed_at);
+                    const reference = Number.isFinite(executedTs) ? executedTs : submitTs;
+                    if (!Number.isFinite(reference)) return false;
+                    if (!Number.isFinite(timestamp)) return true;
+                    return Math.abs(reference - timestamp) <= windowMs;
+                });
+            }
+            return matches.slice(0, 10);
+        }
+
+        parseOrderTimestamp(value) {
+            if (!value) return null;
+            const date = value instanceof Date ? value : new Date(value);
+            const time = date.getTime();
+            return Number.isNaN(time) ? null : time;
+        }
+
+        renderOutcomeOrders(signal, orders) {
+            const tbody = this.elements.outcomeOrdersTbody;
+            if (!tbody) return;
+            tbody.innerHTML = '';
+            if (!orders || !orders.length) {
+                const row = document.createElement('tr');
+                row.innerHTML = '<td colspan="7" class="text-center text-muted py-3">暂无关联订单</td>';
+                tbody.appendChild(row);
+                return;
+            }
+            for (const order of orders) {
+                const row = document.createElement('tr');
+                const qty = Number.isFinite(Number(order?.quantity)) ? Number(order.quantity) : null;
+                const avgPrice = this.coercePriceValue(order?.avg_fill_price);
+                const submitLabel = order?.submit_time ? formatIsoDatetime(order.submit_time) : '-';
+                const execLabel = order?.executed_at ? formatIsoDatetime(order.executed_at) : '-';
+                const statusBadge = this.renderOrderStatus(order?.status);
+                row.innerHTML = `
+                    <td class="text-nowrap">${escapeHtml(order?.order_id || '-')}</td>
+                    <td>${escapeHtml(order?.action || '-')}</td>
+                    <td>${qty != null ? qty : '-'}</td>
+                    <td>${Number.isFinite(avgPrice) ? formatNumber(avgPrice, 2) : '-'}</td>
+                    <td>${statusBadge}</td>
+                    <td class="text-nowrap">${submitLabel}</td>
+                    <td class="text-nowrap">${execLabel}</td>
+                `;
+                tbody.appendChild(row);
+            }
+        }
+
+        renderOrderStatus(status) {
+            const text = status ? String(status) : '-';
+            const normalized = text.toLowerCase();
+            let cls = 'bg-secondary';
+            if (normalized.includes('filled')) cls = 'bg-success';
+            else if (normalized.includes('cancel')) cls = 'bg-warning text-dark';
+            else if (normalized.includes('reject')) cls = 'bg-danger';
+            else if (normalized.includes('submit') || normalized.includes('pre')) cls = 'bg-info';
+            return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
+        }
+
+        renderOutcomePriceTrajectory(signal, orders) {
+            const tbody = this.elements.outcomePriceTbody;
+            if (!tbody) return;
+            tbody.innerHTML = '';
+            const history = Array.isArray(this.state.historyMetrics) ? this.state.historyMetrics : [];
+            if (!history.length) {
+                const row = document.createElement('tr');
+                row.innerHTML = '<td colspan="5" class="text-center text-muted py-3">暂无可用价格数据</td>';
+                tbody.appendChild(row);
+                if (this.elements.outcomePriceMeta) this.elements.outcomePriceMeta.textContent = '';
+                return;
+            }
+
+            const filledOrder = Array.isArray(orders)
+                ? orders.find((order) => String(order?.status || '').toLowerCase().includes('filled'))
+                : null;
+            const baseTs = this.parseOrderTimestamp(filledOrder?.executed_at)
+                ?? this.parseOrderTimestamp(filledOrder?.submit_time)
+                ?? resolveTimestampMs(signal);
+
+            if (!Number.isFinite(baseTs)) {
+                const row = document.createElement('tr');
+                row.innerHTML = '<td colspan="5" class="text-center text-muted py-3">缺少参考时间，无法计算价格变化</td>';
+                tbody.appendChild(row);
+                if (this.elements.outcomePriceMeta) this.elements.outcomePriceMeta.textContent = '';
+                return;
+            }
+
+            let basePrice = this.coercePriceValue(filledOrder?.avg_fill_price);
+            if (!Number.isFinite(basePrice)) basePrice = this.coercePriceValue(filledOrder?.limit_price);
+            if (!Number.isFinite(basePrice)) basePrice = this.coercePriceValue(signal?.signal_price ?? resolvePrice(signal));
+            if (!Number.isFinite(basePrice)) {
+                const sample = this.findNearestPrice(baseTs);
+                if (sample) basePrice = sample.price;
+            }
+
+            const offsets = [0, 30, 60, 180, 300, 600];
+            const rows = [];
+            let anchorPrice = Number.isFinite(basePrice) ? basePrice : null;
+            for (const offset of offsets) {
+                const sample = this.findNearestPrice(baseTs + offset * 1000);
+                if (!sample) continue;
+                if (!Number.isFinite(anchorPrice)) {
+                    anchorPrice = sample.price;
+                }
+                const delta = Number.isFinite(anchorPrice) ? sample.price - anchorPrice : null;
+                const pct = Number.isFinite(anchorPrice) && anchorPrice !== 0 && Number.isFinite(delta)
+                    ? delta / anchorPrice
+                    : null;
+                rows.push({
+                    offset,
+                    price: sample.price,
+                    delta,
+                    pct,
+                    timestamp: sample.timestamp
+                });
+            }
+
+            if (!rows.length) {
+                const row = document.createElement('tr');
+                row.innerHTML = '<td colspan="5" class="text-center text-muted py-3">未找到相邻时间段的价格数据</td>';
+                tbody.appendChild(row);
+            } else {
+                for (const rowData of rows) {
+                    const tr = document.createElement('tr');
+                    const offsetLabel = this.formatOffsetLabel(rowData.offset);
+                    const deltaClass = rowData.delta == null ? 'text-muted' : rowData.delta > 0 ? 'text-success' : rowData.delta < 0 ? 'text-danger' : 'text-muted';
+                    const deltaLabel = rowData.delta == null ? '-' : `${rowData.delta > 0 ? '+' : ''}${formatNumber(rowData.delta, 2)}`;
+                    const pctLabel = rowData.pct == null ? '-' : `${rowData.pct > 0 ? '+' : ''}${formatPercent(rowData.pct)}`;
+                    tr.innerHTML = `
+                        <td>${offsetLabel}</td>
+                        <td>${formatNumber(rowData.price, 2)}</td>
+                        <td class="${deltaClass}">${deltaLabel}</td>
+                        <td class="${deltaClass}">${pctLabel}</td>
+                        <td class="text-nowrap">${formatIsoDatetime(rowData.timestamp)}</td>
+                    `;
+                    tbody.appendChild(tr);
+                }
+            }
+
+            if (this.elements.outcomePriceMeta) {
+                const baseSource = filledOrder?.order_id
+                    ? `订单 ${filledOrder.order_id}`
+                    : '信号';
+                const basePriceLabel = Number.isFinite(anchorPrice)
+                    ? ` · 价格 ${formatNumber(anchorPrice, 2)}`
+                    : '';
+                this.elements.outcomePriceMeta.textContent = `基准：${baseSource} @ ${formatIsoDatetime(baseTs)}${basePriceLabel}`;
+            }
+        }
+
+        findNearestPrice(targetTs) {
+            if (!Number.isFinite(targetTs)) return null;
+            const history = Array.isArray(this.state.historyMetrics) ? this.state.historyMetrics : [];
+            let closest = null;
+            let minDiff = Infinity;
+            for (const item of history) {
+                const ts = resolveTimestampMs(item);
+                if (!Number.isFinite(ts)) continue;
+                const diff = Math.abs(ts - targetTs);
+                if (diff < minDiff) {
+                    const price = this.coercePriceValue(resolvePrice(item));
+                    if (!Number.isFinite(price)) continue;
+                    minDiff = diff;
+                    closest = { price, timestamp: ts };
+                }
+            }
+            return closest;
+        }
+
+        coercePriceValue(value) {
+            if (value === null || value === undefined) return null;
+            const num = Number(value);
+            return Number.isFinite(num) ? num : null;
+        }
+
+        formatOffsetLabel(seconds) {
+            if (!Number.isFinite(seconds)) return '-';
+            if (seconds === 0) return '成交时刻';
+            if (seconds < 60) return `+${seconds} 秒`;
+            if (seconds % 60 === 0) return `+${seconds / 60} 分钟`;
+            return `+${(seconds / 60).toFixed(1)} 分钟`;
         }
 
         updatePaginationControls(totalPages) {
