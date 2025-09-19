@@ -98,6 +98,9 @@ def test_optimizer_applies_thresholds_and_updates_state(orchestrator):
     )
 
     assert result["applied"] is True
+    assert result["duration_ms"] > 0
+    assert result["started_at"] is not None
+    assert result["completed_at"] is not None
     assert result["positive_signals"] == 2
     assert result["negative_signals"] == 2
     assert result["insufficient_data"] is False
@@ -109,6 +112,9 @@ def test_optimizer_applies_thresholds_and_updates_state(orchestrator):
     status = orchestrator_inst.get_status()
     assert status["status"] == "succeeded"
     assert status["is_running"] is False
+    assert status["last_started_at"] == result["started_at"]
+    assert status["last_run_at"] == result["completed_at"]
+    assert status["last_result"]["duration_ms"] == pytest.approx(result["duration_ms"])
     assert status["last_result"]["symbol"] == "ES"
 
     schedule_status = orchestrator_inst.configure_schedule(enabled=True, interval_minutes=60)
@@ -243,3 +249,53 @@ def test_run_optimization_failure_updates_state(orchestrator, monkeypatch):
     assert status["is_running"] is False
     assert status["last_error"] == "boom"
     assert status["last_duration_ms"] is not None
+    assert status["last_started_at"] is not None
+
+
+def test_schedule_requires_positive_interval(orchestrator):
+    orchestrator_inst, _, _ = orchestrator
+
+    with pytest.raises(ValueError):
+        orchestrator_inst.configure_schedule(enabled=True, interval_minutes=0)
+
+    with pytest.raises(ValueError):
+        orchestrator_inst.configure_schedule(enabled=True, interval_minutes=-5)
+
+
+def test_state_restored_from_persistence(monkeypatch, tmp_path):
+    dummy_db = DummyDB()
+    monkeypatch.setattr("src.dom_service.get_db_manager", lambda: dummy_db)
+
+    service = DOMService()
+    service.db_manager = dummy_db
+    service._cache = DomCacheManager(
+        base_dir=str(tmp_path / "persist"), retention_seconds=3600, save_interval_seconds=1
+    )
+
+    orchestrator_one = DOMOptimizationOrchestrator(
+        service=service, cache=service._cache, db_manager=dummy_db
+    )
+    try:
+        orchestrator_one.reset_state()
+        orchestrator_one.configure_schedule(
+            enabled=True,
+            interval_minutes=45,
+            symbol="ES",
+            lookback_minutes=90,
+            apply_updates=False,
+        )
+    finally:
+        orchestrator_one.shutdown()
+
+    orchestrator_two = DOMOptimizationOrchestrator(
+        service=service, cache=service._cache, db_manager=dummy_db
+    )
+    try:
+        status = orchestrator_two.get_status()
+        assert status["schedule"]["enabled"] is True
+        assert status["schedule"]["interval_minutes"] == 45
+        assert status["plan"]["symbol"] == "ES"
+        assert status["plan"]["lookback_minutes"] == 90
+        assert status["plan"]["apply_updates"] is False
+    finally:
+        orchestrator_two.shutdown()

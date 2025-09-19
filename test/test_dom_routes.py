@@ -174,6 +174,9 @@ def test_dom_optimization_endpoints(client):
     data = resp.json()
     assert data["success"] is True
     assert data["evaluated_records"] >= 1
+    assert data["duration_ms"] > 0
+    assert data["started_at"]
+    assert data["completed_at"]
 
     status_resp = test_client.get("/api/dom/automation/status", headers=headers)
     assert status_resp.status_code == 200
@@ -181,6 +184,8 @@ def test_dom_optimization_endpoints(client):
     assert status_data["success"] is True
     assert status_data["status"] in {"succeeded", "running", "failed"}
     assert "plan" in status_data
+    assert status_data["last_started_at"]
+    assert status_data["last_run_at"]
 
     schedule_resp = test_client.post(
         "/api/dom/automation/schedule",

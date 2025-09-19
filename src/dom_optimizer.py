@@ -54,6 +54,7 @@ class DOMOptimizationOrchestrator:
         return {
             "status": "idle",
             "is_running": False,
+            "last_started_at": None,
             "last_run_at": None,
             "last_duration_ms": None,
             "last_error": None,
@@ -349,6 +350,7 @@ class DOMOptimizationOrchestrator:
         if not symbol:
             raise ValueError("symbol is required for optimisation")
 
+        started_at = _now()
         with self._lock:
             if self._state.get("is_running"):
                 raise RuntimeError("An optimisation run is already in progress")
@@ -358,9 +360,9 @@ class DOMOptimizationOrchestrator:
             self._state["scheduled_at"] = (
                 self._serialise_datetime(scheduled_time) if scheduled else None
             )
+            self._state["last_started_at"] = self._serialise_datetime(started_at)
             self._persist_state_locked()
 
-        started_at = _now()
         duration_ms: Optional[float] = None
         result: Dict[str, Any] = {}
 
@@ -414,8 +416,8 @@ class DOMOptimizationOrchestrator:
                 updated_thresholds = copy.deepcopy(base_thresholds)
                 applied = False
 
-            duration_ms = (_now() - started_at).total_seconds() * 1000.0
-
+            finished_at = _now()
+            duration_ms = (finished_at - started_at).total_seconds() * 1000.0
             precision = positives / evaluated if evaluated else None
 
             window_start = metrics[0].get("timestamp") if metrics else None
@@ -424,6 +426,9 @@ class DOMOptimizationOrchestrator:
             result = {
                 "symbol": symbol,
                 "applied": applied,
+                "started_at": self._serialise_datetime(started_at),
+                "completed_at": self._serialise_datetime(finished_at),
+                "duration_ms": duration_ms,
                 "evaluated_records": evaluated,
                 "positive_signals": positives,
                 "negative_signals": negatives,
@@ -438,7 +443,7 @@ class DOMOptimizationOrchestrator:
             with self._lock:
                 self._state["status"] = "succeeded"
                 self._state["is_running"] = False
-                self._state["last_run_at"] = self._serialise_datetime(started_at)
+                self._state["last_run_at"] = self._serialise_datetime(finished_at)
                 self._state["last_duration_ms"] = duration_ms
                 self._state["last_error"] = None
                 self._state["last_result"] = result
@@ -447,11 +452,13 @@ class DOMOptimizationOrchestrator:
             return result
 
         except Exception as exc:
-            duration_ms = (_now() - started_at).total_seconds() * 1000.0
+            finished_at = _now()
+            duration_ms = (finished_at - started_at).total_seconds() * 1000.0
             with self._lock:
                 self._state["status"] = "failed"
                 self._state["is_running"] = False
-                self._state["last_run_at"] = self._serialise_datetime(started_at)
+                self._state["last_run_at"] = self._serialise_datetime(finished_at)
+                self._state["last_started_at"] = self._serialise_datetime(started_at)
                 self._state["last_duration_ms"] = duration_ms
                 self._state["last_error"] = str(exc)
                 self._update_next_run_locked(reference=_now())
