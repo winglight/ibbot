@@ -1,3 +1,4 @@
+import os
 import time
 import asyncio
 import inspect
@@ -23,6 +24,23 @@ from src.dom_signal_tracker import SignalOutcomeTracker, resolve_outcome_config
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
 
 
+TUNER_STATS_WINDOW_ENV = "DOM_TUNER_STATS_WINDOW"
+TUNER_PENALTY_DECAY_ENV = "DOM_TUNER_PENALTY_DECAY"
+TUNER_PENALTY_STEP_ENV = "DOM_TUNER_PENALTY_STEP"
+TUNER_MAX_PENALTY_ENV = "DOM_TUNER_MAX_PENALTY"
+TUNER_REVERSAL_WINDOW_ENV = "DOM_TUNER_REVERSAL_WINDOW_SEC"
+TUNER_SESSION_TZ_ENV = "DOM_TUNER_SESSION_TZ"
+
+DEFAULT_TUNER_PARAMETERS = {
+    "stats_window": 900,
+    "penalty_decay": 0.98,
+    "penalty_step": 0.02,
+    "max_penalty": 0.15,
+    "reversal_window_sec": 60,
+    "session_timezone": "America/New_York",
+}
+
+
 class DOMService:
     """Service layer wrapping DOM processing and alerts."""
 
@@ -44,6 +62,7 @@ class DOMService:
             getattr(dom_config, "trend_thresholds", DEFAULT_TREND_THRESHOLDS)
         ) or list(DEFAULT_TREND_THRESHOLDS)
         self._listeners: DefaultDict[str, List[Callable]] = defaultdict(list)
+        self._tuner_parameters: Dict[str, Any] = copy.deepcopy(DEFAULT_TUNER_PARAMETERS)
         delay, threshold = resolve_outcome_config()
         self._outcome_tracker = SignalOutcomeTracker(
             self._cache,
@@ -61,6 +80,16 @@ class DOMService:
                 max_levels=persisted_config.get("max_levels", dom_config.max_levels),
                 trend_thresholds=persisted_config.get("trend_thresholds"),
                 tuner_base_thresholds=persisted_config.get("tuner_base_thresholds"),
+                tuner_parameters=persisted_config.get("tuner_parameters"),
+                persist=False,
+            )
+        else:
+            self._apply_config(
+                window=getattr(dom_config, "window", 10000),
+                max_levels=getattr(dom_config, "max_levels", 30),
+                trend_thresholds=list(self.trend_thresholds),
+                tuner_base_thresholds=None,
+                tuner_parameters=None,
                 persist=False,
             )
 
@@ -167,12 +196,84 @@ class DOMService:
             return None
         return config
 
+    def _resolve_tuner_parameters(
+        self, overrides: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        params = copy.deepcopy(DEFAULT_TUNER_PARAMETERS)
+
+        def _coerce_int(value: Any, minimum: int, fallback: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return fallback
+            return parsed if parsed >= minimum else fallback
+
+        def _coerce_float(value: Any, minimum: float, fallback: float, maximum: Optional[float] = None) -> float:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return fallback
+            if maximum is not None:
+                parsed = min(parsed, maximum)
+            return parsed if parsed >= minimum else fallback
+
+        env_values = {
+            "stats_window": os.getenv(TUNER_STATS_WINDOW_ENV),
+            "penalty_decay": os.getenv(TUNER_PENALTY_DECAY_ENV),
+            "penalty_step": os.getenv(TUNER_PENALTY_STEP_ENV),
+            "max_penalty": os.getenv(TUNER_MAX_PENALTY_ENV),
+            "reversal_window_sec": os.getenv(TUNER_REVERSAL_WINDOW_ENV),
+            "session_timezone": os.getenv(TUNER_SESSION_TZ_ENV),
+        }
+
+        if env_values["stats_window"] is not None:
+            params["stats_window"] = _coerce_int(env_values["stats_window"], 1, params["stats_window"])
+        if env_values["penalty_decay"] is not None:
+            params["penalty_decay"] = _coerce_float(
+                env_values["penalty_decay"], 0.0, params["penalty_decay"], maximum=1.0
+            )
+        if env_values["penalty_step"] is not None:
+            params["penalty_step"] = _coerce_float(env_values["penalty_step"], 0.0, params["penalty_step"])
+        if env_values["max_penalty"] is not None:
+            params["max_penalty"] = _coerce_float(env_values["max_penalty"], 0.0, params["max_penalty"])
+        if env_values["reversal_window_sec"] is not None:
+            params["reversal_window_sec"] = _coerce_int(
+                env_values["reversal_window_sec"], 1, params["reversal_window_sec"]
+            )
+        if env_values["session_timezone"]:
+            params["session_timezone"] = str(env_values["session_timezone"])
+
+        source = overrides
+        if isinstance(source, dict):
+            if "stats_window" in source:
+                params["stats_window"] = _coerce_int(source.get("stats_window"), 1, params["stats_window"])
+            if "penalty_decay" in source:
+                params["penalty_decay"] = _coerce_float(
+                    source.get("penalty_decay"), 0.0, params["penalty_decay"], maximum=1.0
+                )
+            if "penalty_step" in source:
+                params["penalty_step"] = _coerce_float(
+                    source.get("penalty_step"), 0.0, params["penalty_step"]
+                )
+            if "max_penalty" in source:
+                params["max_penalty"] = _coerce_float(source.get("max_penalty"), 0.0, params["max_penalty"])
+            if "reversal_window_sec" in source:
+                params["reversal_window_sec"] = _coerce_int(
+                    source.get("reversal_window_sec"), 1, params["reversal_window_sec"]
+                )
+            if "session_timezone" in source and source.get("session_timezone"):
+                params["session_timezone"] = str(source.get("session_timezone"))
+
+        self._tuner_parameters = copy.deepcopy(params)
+        return copy.deepcopy(params)
+
     def _apply_config(
         self,
         window: Any,
         max_levels: Any,
         trend_thresholds: Optional[List[float]] = None,
         tuner_base_thresholds: Optional[Dict[str, Any]] = None,
+        tuner_parameters: Optional[Dict[str, Any]] = None,
         *,
         persist: bool,
     ) -> None:
@@ -202,7 +303,17 @@ class DOMService:
             tuner_base_thresholds if tuner_base_thresholds is not None else self._get_current_base_thresholds()
         )
 
-        parameter_tuner = DOMParameterTuner(base_thresholds=base_thresholds)
+        tuner_params = self._resolve_tuner_parameters(overrides=tuner_parameters)
+
+        parameter_tuner = DOMParameterTuner(
+            base_thresholds=base_thresholds,
+            stats_window=int(tuner_params["stats_window"]),
+            penalty_decay=float(tuner_params["penalty_decay"]),
+            penalty_step=float(tuner_params["penalty_step"]),
+            max_penalty=float(tuner_params["max_penalty"]),
+            reversal_window_sec=int(tuner_params["reversal_window_sec"]),
+            session_timezone=str(tuner_params["session_timezone"]),
+        )
 
         self.processor = DOMProcessor(
             window=target_window,
@@ -210,6 +321,13 @@ class DOMService:
             parameter_tuner=parameter_tuner,
         )
         set_dom_processor(self.processor)
+
+        logger.info(
+            "DOM configuration applied | window={} max_levels={} tuner_params={}",
+            target_window,
+            target_levels,
+            tuner_params,
+        )
 
         try:
             import core as core_module
@@ -225,6 +343,7 @@ class DOMService:
                 "max_levels": dom_config.max_levels,
                 "trend_thresholds": list(self.trend_thresholds),
                 "tuner_base_thresholds": copy.deepcopy(base_thresholds),
+                "tuner_parameters": copy.deepcopy(self._tuner_parameters),
             }
             try:
                 self.db_manager.save_dom_config(payload)
@@ -250,23 +369,37 @@ class DOMService:
 
     # --------------------------------------------------------------
     def start(self, symbol: str, num_rows: int = 5) -> bool:
+        symbol_key = (symbol or "").upper()
         if not connection_manager.is_connected():
+            logger.warning("DOM depth stream start rejected - not connected", symbol=symbol_key)
             return False
-        self._active_symbol = (symbol or "").upper()
+        self._active_symbol = symbol_key
+        logger.info("Starting DOM depth stream", symbol=symbol_key, num_rows=num_rows)
         if self._cleanup_task is None or self._cleanup_task.done():
             try:
                 self._cleanup_task = asyncio.create_task(self._cleanup_loop())
             except RuntimeError:
                 self._cleanup_task = None
-        return depth_subscriber.start_depth_stream(
+        result = depth_subscriber.start_depth_stream(
             symbol, lambda data, sym=symbol: self._on_depth_update(sym, data), num_rows=num_rows
         )
+        if result:
+            logger.info("DOM depth stream started", symbol=symbol_key)
+        else:
+            logger.warning("Failed to start DOM depth stream", symbol=symbol_key)
+        return result
 
     # --------------------------------------------------------------
     def stop(self, symbol: str) -> bool:
-        if self._active_symbol and symbol and symbol.upper() == self._active_symbol:
+        symbol_key = (symbol or "").upper()
+        if self._active_symbol and symbol_key == self._active_symbol:
             self._active_symbol = None
-        return depth_subscriber.stop_depth_stream(symbol)
+        result = depth_subscriber.stop_depth_stream(symbol)
+        if result:
+            logger.info("Stopped DOM depth stream", symbol=symbol_key)
+        else:
+            logger.warning("No active DOM depth stream to stop", symbol=symbol_key)
+        return result
 
     # --------------------------------------------------------------
     def get_metrics(self, symbol: Optional[str] = None) -> Dict[str, Any]:
@@ -319,6 +452,7 @@ class DOMService:
             max_levels=max_levels,
             trend_thresholds=trend_thresholds,
             tuner_base_thresholds=base_thresholds,
+            tuner_parameters=self._tuner_parameters,
             persist=True,
         )
 
@@ -381,6 +515,7 @@ class DOMService:
             or list(self.trend_thresholds)
             or list(DEFAULT_TREND_THRESHOLDS),
             "tuner_base_thresholds": self._get_current_base_thresholds(),
+            "tuner_parameters": copy.deepcopy(self._tuner_parameters),
         }
 
     # --------------------------------------------------------------
@@ -392,11 +527,16 @@ class DOMService:
     ) -> Dict[str, Dict[str, float]]:
         sanitized = self._sanitize_base_thresholds(base_thresholds)
         current_config = self.get_config()
+        logger.info(
+            "Applying tuner base thresholds | new_thresholds={}",
+            sanitized,
+        )
         self._apply_config(
             window=current_config["window"],
             max_levels=current_config["max_levels"],
             trend_thresholds=current_config.get("trend_thresholds"),
             tuner_base_thresholds=sanitized,
+            tuner_parameters=self._tuner_parameters,
             persist=persist,
         )
         return sanitized
