@@ -530,7 +530,7 @@ class IBKRClient:
             else:
                 # 如果立即没有数据，进行短暂的非阻塞等待
                 while waited < max_wait and not result_payload:
-                    await asyncio.sleep(wait_interval)
+                    time.sleep(wait_interval)
                     waited += wait_interval
                     last = getattr(ticker, 'last', 0) or 0
                     bid = getattr(ticker, 'bid', 0) or 0
@@ -590,7 +590,7 @@ class IBKRClient:
                     'bid': 0,
                     'ask': 0,
                     'volume': 0,
-                    'timestamp': to_local_time(datetime.now(NY_TZ)),
+                    'timestamp': datetime.now(NY_TZ),
                     'is_cached': True
                 }
             
