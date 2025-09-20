@@ -209,7 +209,7 @@ class TradingApp {
         this.monitorTrendData = [];
         this.candlestickSupported = false;
         this.candlestickLoader = null;
-        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0';
+        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
         // 渲染监控图表时使用的定时器句柄，防止重复渲染导致死循环
         this.monitorChartRenderTimeout = null;
         // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制

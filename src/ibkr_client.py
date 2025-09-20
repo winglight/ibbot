@@ -487,7 +487,6 @@ class IBKRClient:
                 return None
             
             # 6. 非阻塞方式检查数据，避免阻塞主线程
-            import time
             # 对于期货合约（如MNQ），增加等待时间
             max_wait = 3.0 if symbol == 'MNQ' else 1.0  # 减少最大等待时间
             wait_interval = 0.1  # 减少检查间隔
@@ -530,7 +529,7 @@ class IBKRClient:
             else:
                 # 如果立即没有数据，进行短暂的非阻塞等待
                 while waited < max_wait and not result_payload:
-                    time.sleep(wait_interval)
+                    await asyncio.sleep(wait_interval)
                     waited += wait_interval
                     last = getattr(ticker, 'last', 0) or 0
                     bid = getattr(ticker, 'bid', 0) or 0

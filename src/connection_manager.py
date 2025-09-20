@@ -16,6 +16,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 import types
+import subprocess
+from pathlib import Path
 
 
 load_dotenv()
@@ -99,6 +101,9 @@ class ConnectionManager:
         self._restart_delay_sec: float = max(0.0, _get_env_float('IBKR_RESTART_DELAY_SEC', 0.0))
         self._restart_pending: bool = False
         self._connect_attempt_lock = threading.Lock()
+        self._project_root = Path(__file__).resolve().parents[1]
+        self._pre_restart_script = self._project_root / "vps-setup" / "quick-start.sh"
+        self._pre_restart_attempted = False
         
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
@@ -477,6 +482,7 @@ class ConnectionManager:
             with self._connect_attempt_lock:
                 self._failed_connect_attempts = 0
                 self._restart_pending = False
+                self._pre_restart_attempted = False
             return
 
         if self._max_failed_connect_attempts <= 0:
@@ -510,6 +516,8 @@ class ConnectionManager:
         if last_error:
             reason = f"{reason}: {last_error}"
 
+        self._run_pre_restart_script()
+
         connection_logger.critical(
             f"Exceeded maximum IBKR connect retries ({threshold}). Restarting application..."
         )
@@ -529,6 +537,50 @@ class ConnectionManager:
             delay_sec=self._restart_delay_sec,
             env_updates=env_updates,
         )
+
+    def _run_pre_restart_script(self) -> None:
+        with self._connect_attempt_lock:
+            if self._pre_restart_attempted:
+                return
+            self._pre_restart_attempted = True
+
+        script_path = self._pre_restart_script
+        if not script_path.exists():
+            connection_logger.warning(
+                f"Pre-restart script not found at {script_path}"
+            )
+            return
+
+        connection_logger.info(
+            f"Running pre-restart script prior to restart: {script_path}"
+        )
+        try:
+            result = subprocess.run(
+                ["/bin/bash", str(script_path)],
+                cwd=str(self._project_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=max(30, int(self._restart_delay_sec) + 30),
+                check=False,
+            )
+        except Exception as exc:
+            connection_logger.error(
+                f"Pre-restart script execution failed: {exc}"
+            )
+            return
+
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if stdout:
+            connection_logger.info(f"Pre-restart script stdout: {stdout[:500]}")
+        if stderr:
+            connection_logger.warning(f"Pre-restart script stderr: {stderr[:500]}")
+
+        if result.returncode != 0:
+            connection_logger.error(
+                f"Pre-restart script exited with code {result.returncode}"
+            )
 
     def connect(self) -> bool:
         """连接到IBKR服务器"""
