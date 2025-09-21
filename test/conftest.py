@@ -1,12 +1,15 @@
 import os
-import os
 import sys
 import time
 import subprocess
 from typing import Optional
 
 import pytest
-import requests
+
+try:
+    from . import http_client as requests
+except ImportError:
+    import http_client as requests
 
 
 def _base_url() -> str:

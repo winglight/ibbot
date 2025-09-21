@@ -17,7 +17,10 @@ import os
 import time
 from datetime import datetime, timedelta
 
-import requests
+try:
+    from . import http_client as requests
+except ImportError:
+    import http_client as requests
 from dotenv import load_dotenv
 from loguru import logger
 from jose import jwt

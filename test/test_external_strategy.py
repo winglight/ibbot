@@ -4,7 +4,10 @@ External Strategy API Tests
 """
 
 import pytest
-import requests
+try:
+    from . import http_client as requests
+except ImportError:
+    import http_client as requests
 import json
 import time
 import uuid

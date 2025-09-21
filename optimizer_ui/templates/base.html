@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}Optimizer Console{% endblock %}</title>
+    <link rel="stylesheet" href="/optimizer-static/css/reset.css" />
+    <link rel="stylesheet" href="/optimizer-static/css/main.css" />
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <header class="opt-header">
+        <h1>DOM Optimizer</h1>
+        {% block header_actions %}{% endblock %}
+    </header>
+    <main class="opt-main">
+        {% block content %}{% endblock %}
+    </main>
+    <div id="modal-root"></div>
+    <script src="/optimizer-static/js/vendor.js"></script>
+    <script src="/optimizer-static/js/main.js" type="module"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
