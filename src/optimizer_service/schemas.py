@@ -205,8 +205,9 @@ class OptimizationPlanUpdate(BaseModel):
         def validate_metrics(cls, v: Optional[List[str]]):
             if v is None:
                 return v
+            # For update operations, allow empty metrics list
             if not v:
-                raise ValueError("metrics must not be empty")
+                return v
             return [value.strip() for value in v if value.strip()]
 
         @field_validator("end_date")
@@ -222,8 +223,9 @@ class OptimizationPlanUpdate(BaseModel):
         def validate_metrics(cls, v: Optional[List[str]]):
             if v is None:
                 return v
+            # For update operations, allow empty metrics list
             if not v:
-                raise ValueError("metrics must not be empty")
+                return v
             return [value.strip() for value in v if value.strip()]
 
         @validator("end_date")  # type: ignore[misc]
