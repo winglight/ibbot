@@ -32,10 +32,20 @@ def _json_load(payload: Optional[str]) -> Any:
 class OptimizerDatabase:
     """Thin wrapper around sqlite3 for storing plans and tasks."""
 
-    def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
-        self._db_path = db_path
+    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+        if isinstance(db_path, Path):
+            path_obj = db_path
+            db_path_str = str(db_path)
+        else:
+            db_path_str = db_path
+            path_obj = Path(db_path)
+
+        if db_path_str not in {":memory:", ""} and not db_path_str.startswith("file:"):
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+        self._db_path = path_obj
         self._lock = Lock()
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn = sqlite3.connect(db_path_str, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._initialize()
 
