@@ -188,16 +188,16 @@ class OptimizationPlanCreate(OptimizationPlanBase):
 
 
 class OptimizationPlanUpdate(BaseModel):
-    name: Optional[str]
-    strategy: Optional[str]
-    symbol: Optional[str]
-    metrics: Optional[List[str]]
-    parameters: Optional[Dict[str, List[Any]]]
-    algorithm: Optional[OptimizationAlgorithm]
-    start_date: Optional[date]
-    end_date: Optional[date]
-    frequency_minutes: Optional[int]
-    iterations: Optional[int]
+    name: Optional[str] = None
+    strategy: Optional[str] = None
+    symbol: Optional[str] = None
+    metrics: Optional[List[str]] = None
+    parameters: Optional[Dict[str, List[Any]]] = None
+    algorithm: Optional[OptimizationAlgorithm] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    frequency_minutes: Optional[int] = None
+    iterations: Optional[int] = None
 
     if PYDANTIC_V2:  # pragma: no branch
 
