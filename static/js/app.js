@@ -4142,22 +4142,28 @@ class TradingApp {
                 const getOptimalDisplayRange = (dataLength, chartType) => {
                     // 获取图表容器宽度
                     const chartContainer = document.getElementById('monitorChart')?.parentElement;
-                    const containerWidth = chartContainer ? chartContainer.offsetWidth : 800;
-                    
+                    const containerWidthRaw = chartContainer ? chartContainer.offsetWidth : 0;
+                    // 当容器尚未渲染完成或被隐藏时 offsetWidth 可能为 0，导致后续计算仅展示极少数据点
+                    const fallbackWidth = chartContainer?.parentElement?.offsetWidth || window.innerWidth || 800;
+                    const containerWidth = containerWidthRaw > 0 ? containerWidthRaw : fallbackWidth;
+
                     // 根据图表宽度计算合适的显示数据量
                     // 蜡烛图和折线图使用相同的像素间距，保持一致的显示数据量
                     const pixelsPerDataPoint = 10; // 统一像素间距
-                    const optimalDataCount = Math.floor(containerWidth / pixelsPerDataPoint);
+                    const optimalDataCount = Math.max(1, Math.floor(containerWidth / pixelsPerDataPoint));
                     // 减少显示数据量，为右边数据点留出空间
-                    const maxDisplayCount = Math.min(Math.floor(optimalDataCount * 0.9), Math.max(15, Math.min(80, dataLength)));
-                    
+                    const maxDisplayCount = Math.min(
+                        Math.max(1, Math.floor(optimalDataCount * 0.9)),
+                        Math.max(15, Math.min(80, dataLength))
+                    );
+
                     // 始终计算显示范围，确保蜡烛图和折线图使用相同的数据量
-                    const actualDisplayCount = Math.min(maxDisplayCount, dataLength);
+                    const actualDisplayCount = Math.max(1, Math.min(maxDisplayCount, dataLength));
                     const startIndex = Math.max(0, dataLength - actualDisplayCount);
-                    
-                    return chartType === 'candlestick' ? 
+
+                    return chartType === 'candlestick' ?
                         { minIndex: startIndex, maxIndex: dataLength - 1 } :
-                        { 
+                        {
                             min: labels[startIndex], 
                             max: labels[dataLength - 1] 
                         };
