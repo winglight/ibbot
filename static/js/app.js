@@ -6,13 +6,109 @@ const INTERVAL_MINUTES_MAP = {
     '15min': 15,
     '15mins': 15,
     '30mins': 30,
-    '1hour': 60
+    '1hour': 60,
+    '1day': 1440
 };
 
 const MONITOR_SOURCE_TZ = 'America/New_York';
 const MONITOR_FALLBACK_TZ = 'Asia/Shanghai';
 const MONITOR_CHART_MAX_MINUTES = 30;
 const MONITOR_CHART_MAX_POINTS = 3000;
+
+const MONITOR_DURATION_MINUTES_MAP = {
+    '30M': 30,
+    '1H': 60,
+    '4H': 240,
+    '1D': 1440,
+    '2D': 2880,
+    '5D': 7200,
+    '1W': 10080,
+    '1M': 43200,
+    '3M': 129600,
+    '1Y': 525600
+};
+
+function normalizeIntervalKey(value) {
+    if (typeof value === 'string') {
+        return value.replace(/\s+/g, '').toLowerCase();
+    }
+    if (typeof value === 'number') {
+        return String(value);
+    }
+    return '';
+}
+
+function normalizeDurationKey(value) {
+    if (typeof value === 'string') {
+        return value.replace(/\s+/g, '').toUpperCase();
+    }
+    if (typeof value === 'number') {
+        return String(value);
+    }
+    return '';
+}
+
+function getMonitorDurationMinutes(durationValue) {
+    const normalized = normalizeDurationKey(durationValue);
+    if (!normalized) return null;
+
+    if (Object.prototype.hasOwnProperty.call(MONITOR_DURATION_MINUTES_MAP, normalized)) {
+        return MONITOR_DURATION_MINUTES_MAP[normalized];
+    }
+
+    const match = normalized.match(/^(\d+)([A-Z]+)$/);
+    if (!match) {
+        const numericValue = Number(normalized);
+        return Number.isFinite(numericValue) && numericValue > 0 ? numericValue : null;
+    }
+
+    const value = Number(match[1]);
+    const unit = match[2];
+    if (!Number.isFinite(value) || value <= 0) {
+        return null;
+    }
+
+    switch (unit) {
+        case 'MIN':
+        case 'MINS':
+        case 'MINUTE':
+        case 'MINUTES':
+            return value;
+        case 'M':
+            return value <= 10 ? value * 43200 : value;
+        case 'H':
+        case 'HR':
+        case 'HRS':
+        case 'HOUR':
+        case 'HOURS':
+            return value * 60;
+        case 'D':
+        case 'DAY':
+        case 'DAYS':
+            return value * 1440;
+        case 'W':
+        case 'WK':
+        case 'WKS':
+        case 'WEEK':
+        case 'WEEKS':
+            return value * 10080;
+        case 'MO':
+        case 'MOS':
+        case 'MON':
+        case 'MONS':
+        case 'MONTH':
+        case 'MONTHS':
+            return value * 43200;
+        case 'Y':
+        case 'YR':
+        case 'YRS':
+        case 'YEAR':
+        case 'YEARS':
+            return value * 525600;
+        default:
+            return null;
+    }
+}
 
 const MONITOR_DURATION_OPTIONS = {
     '1 min': [
@@ -2482,12 +2578,15 @@ class TradingApp {
             const previousSymbol = this.currentMonitor?.symbol;
 
             // 保存当前监控上下文
-            const configuredSpan = (this.riskRules && this.riskRules[symbol] && this.riskRules[symbol].max_time_span)
-                || MONITOR_CHART_MAX_MINUTES;
-            const numericSpan = Number(configuredSpan);
-            const initialSpan = Number.isFinite(numericSpan)
-                ? Math.max(1, Math.min(numericSpan, MONITOR_CHART_MAX_MINUTES))
-                : MONITOR_CHART_MAX_MINUTES;
+            const durationSelectEl = document.getElementById('monitorDuration');
+            const selectedDurationMinutes = getMonitorDurationMinutes(durationSelectEl?.value);
+            const configuredSpanRaw = (this.riskRules && this.riskRules[symbol] && this.riskRules[symbol].max_time_span) || null;
+            const configuredSpanMinutes = getMonitorDurationMinutes(configuredSpanRaw);
+            const initialSpan = Number.isFinite(configuredSpanMinutes) && configuredSpanMinutes > 0
+                ? configuredSpanMinutes
+                : (Number.isFinite(selectedDurationMinutes) && selectedDurationMinutes > 0
+                    ? selectedDurationMinutes
+                    : MONITOR_CHART_MAX_MINUTES);
 
             this.currentMonitor = {
                 symbol,
@@ -2564,11 +2663,15 @@ class TradingApp {
                     if (slInputRef) slInputRef.value = rule.stop_loss_price ?? '';
                     if (tpInputRef) tpInputRef.value = rule.take_profit_price ?? '';
                     if (this.currentMonitor) {
-                        const requestedSpan = Number(rule.max_time_span);
-                        const clampedSpan = Number.isFinite(requestedSpan)
-                            ? Math.max(1, Math.min(requestedSpan, MONITOR_CHART_MAX_MINUTES))
+                        const requestedSpan = getMonitorDurationMinutes(rule.max_time_span);
+                        const durationLimit = getMonitorDurationMinutes(durationSelectEl?.value);
+                        const baseSpan = Number.isFinite(requestedSpan) && requestedSpan > 0
+                            ? requestedSpan
                             : this.currentMonitor.maxTimeSpan;
-                        this.currentMonitor.maxTimeSpan = clampedSpan;
+                        const effectiveSpan = Number.isFinite(durationLimit) && durationLimit > 0
+                            ? Math.min(baseSpan, durationLimit)
+                            : baseSpan;
+                        this.currentMonitor.maxTimeSpan = Math.max(1, effectiveSpan);
                     }
 
                     // 显示激活的风险规则信息
@@ -3532,6 +3635,22 @@ class TradingApp {
                 return;
             }
 
+            const intervalKey = normalizeIntervalKey(barSize) || '1min';
+            const chartIntervalMinutes = INTERVAL_MINUTES_MAP[intervalKey] || 1;
+            const durationMinutes = getMonitorDurationMinutes(duration);
+            const fallbackSpanMinutes = this.currentMonitor?.maxTimeSpan || MONITOR_CHART_MAX_MINUTES;
+            const spanLimitMinutes = Number.isFinite(durationMinutes) && durationMinutes > 0
+                ? durationMinutes
+                : fallbackSpanMinutes;
+            const maxSpanByPoints = MONITOR_CHART_MAX_POINTS * chartIntervalMinutes;
+            const effectiveSpanMinutes = Math.max(
+                1,
+                Math.min(
+                    (Number.isFinite(spanLimitMinutes) && spanLimitMinutes > 0) ? spanLimitMinutes : MONITOR_CHART_MAX_MINUTES,
+                    maxSpanByPoints
+                )
+            );
+
             const normalizedBars = response.data.map((bar, index) => {
                 const raw = bar.time !== undefined && bar.time !== null ? bar.time : bar.date;
                 const parsedTime = this.parseMonitorChartTime(raw);
@@ -3547,7 +3666,7 @@ class TradingApp {
             const validBars = normalizedBars.filter(item => item.parsedTime);
             if (validBars.length) {
                 const lastTimeMs = validBars[validBars.length - 1].parsedTime.getTime();
-                const minAllowedTime = lastTimeMs - MONITOR_CHART_MAX_MINUTES * 60 * 1000;
+                const minAllowedTime = lastTimeMs - effectiveSpanMinutes * 60 * 1000;
                 let trimmed = validBars.filter(item => item.parsedTime.getTime() >= minAllowedTime);
                 if (!trimmed.length) {
                     trimmed = validBars.slice(-1);
@@ -3613,12 +3732,9 @@ class TradingApp {
 
                 // 为了在建仓后显示盈亏方框，右侧额外添加时间空间
                 const intervalValueRaw = intervalSelect?.value || '1 min';
-                const intervalKey = intervalValueRaw.replace(/\s+/g, '');
-                const padIntervalMinutes = INTERVAL_MINUTES_MAP[intervalKey] || 1;
-                const padSpanMinutes = Math.min(
-                    this.currentMonitor?.maxTimeSpan || MONITOR_CHART_MAX_MINUTES,
-                    MONITOR_CHART_MAX_MINUTES
-                );
+                const intervalKeyForPadding = normalizeIntervalKey(intervalValueRaw) || '1min';
+                const padIntervalMinutes = INTERVAL_MINUTES_MAP[intervalKeyForPadding] || chartIntervalMinutes;
+                const padSpanMinutes = Math.min(chartSpanMinutes, MONITOR_CHART_MAX_MINUTES);
                 const padBars = Math.ceil(padSpanMinutes / padIntervalMinutes);
                 const lastBar = response.data[response.data.length - 1];
                 // 打印chart数据数组中的最后一个对象
@@ -3737,12 +3853,7 @@ class TradingApp {
                 }
 
                 // 计算时间跨度相关参数
-                const intervalValue = intervalSelect ? intervalSelect.value : '1min';
-                const chartIntervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
-                const chartSpanMinutes = Math.min(
-                    this.currentMonitor?.maxTimeSpan || MONITOR_CHART_MAX_MINUTES,
-                    MONITOR_CHART_MAX_MINUTES
-                );
+                const chartSpanMinutes = effectiveSpanMinutes;
                 const spanBars = Math.min(
                     MONITOR_CHART_MAX_POINTS,
                     Math.max(1, Math.round(chartSpanMinutes / chartIntervalMinutes))
@@ -4647,8 +4758,8 @@ class TradingApp {
                             if (nearestIndex <= (this.currentMonitor?.riskStartIndex ?? 0)) {
                                 nearestIndex = Math.min((this.currentMonitor?.riskStartIndex ?? 0) + 1, Math.max(times.length - 1, 0));
                             }
-                            const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
-                            const intervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
+                            const intervalValueRaw = document.getElementById('monitorInterval')?.value || '1 min';
+                            const intervalMinutes = INTERVAL_MINUTES_MAP[normalizeIntervalKey(intervalValueRaw) || '1min'] || 1;
                             const timeValue = times[nearestIndex];
                             const axisDate = timeValue instanceof Date ? new Date(timeValue.getTime())
                                 : (typeof timeValue === 'number' && Number.isFinite(timeValue) ? new Date(timeValue) : null);
@@ -4661,10 +4772,11 @@ class TradingApp {
                                 if (annotations.lossBox) annotations.lossBox.xMax = axisDate;
                             }
                             const computedSpan = (nearestIndex - (this.currentMonitor?.riskStartIndex ?? 0)) * intervalMinutes;
-                            this.currentMonitor.maxTimeSpan = Math.max(
-                                1,
-                                Math.min(computedSpan, MONITOR_CHART_MAX_MINUTES)
-                            );
+                            const durationLimit = getMonitorDurationMinutes(document.getElementById('monitorDuration')?.value);
+                            const effectiveSpan = Number.isFinite(durationLimit) && durationLimit > 0
+                                ? Math.min(computedSpan, durationLimit)
+                                : computedSpan;
+                            this.currentMonitor.maxTimeSpan = Math.max(1, effectiveSpan);
                         } else {
                             const labels = this.monitorChart.data.labels || [];
                             let index = Math.round(dataX);
@@ -4675,13 +4787,14 @@ class TradingApp {
                             annotation.xMax = label;
                             if (annotations.profitBox) annotations.profitBox.xMax = label;
                             if (annotations.lossBox) annotations.lossBox.xMax = label;
-                            const intervalValue = document.getElementById('monitorInterval')?.value || '1min';
-                            const intervalMinutes = INTERVAL_MINUTES_MAP[intervalValue] || 1;
+                            const intervalValue = document.getElementById('monitorInterval')?.value || '1 min';
+                            const intervalMinutes = INTERVAL_MINUTES_MAP[normalizeIntervalKey(intervalValue) || '1min'] || 1;
                             const newSpan = (index - this.currentMonitor.riskStartIndex) * intervalMinutes;
-                            this.currentMonitor.maxTimeSpan = Math.max(
-                                1,
-                                Math.min(newSpan, MONITOR_CHART_MAX_MINUTES)
-                            );
+                            const durationLimit = getMonitorDurationMinutes(document.getElementById('monitorDuration')?.value);
+                            const effectiveSpan = Number.isFinite(durationLimit) && durationLimit > 0
+                                ? Math.min(newSpan, durationLimit)
+                                : newSpan;
+                            this.currentMonitor.maxTimeSpan = Math.max(1, effectiveSpan);
                         }
                     } else {
                         const dataY = this.monitorChart.scales.y.getValueForPixel(canvasPosition.y);
@@ -5087,7 +5200,7 @@ class TradingApp {
 
                 const intervalSelect = document.getElementById('monitorInterval');
                 const intervalRaw = intervalSelect ? intervalSelect.value : '1 min';
-                const interval = intervalRaw.replace(/\s+/g, '');
+                const interval = normalizeIntervalKey(intervalRaw) || '1min';
                 const durationSelect = document.getElementById('monitorDuration');
                 const duration = durationSelect?.value || '30 M';
 
