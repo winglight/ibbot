@@ -230,16 +230,10 @@ class IBKRClient:
         else:
             return self.get_stock_contract(symbol, exchange, currency)
     
-    def get_historical_data(self, symbol: str, duration: str = '1 Y',
+    async def get_historical_data(self, symbol: str, duration: str = '1 Y',
                                 bar_size: str = '1 day', exchange: str = 'SMART') -> pd.DataFrame:
         """获取历史数据（在连接线程事件循环中执行，避免事件循环错误）"""
         try:
-            # 确保连接
-            if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for historical data: {symbol}")
-                    return pd.DataFrame()
-
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
@@ -247,31 +241,21 @@ class IBKRClient:
                 return pd.DataFrame()
 
             # MNQ是期货合约
-            if symbol == 'MNQ':
+            if symbol in ['MNQ', 'NQ', 'ES', 'MES']:
                 contract = self.get_future_contract(symbol, 'CME')
             else:
                 contract = self.get_stock_contract(symbol, exchange)
 
-            async def _fetch_async():
-                try:
-                    # 使用异步版本确认合约，确保拿到有效的 conId
-                    qualified = await ib.qualifyContractsAsync(contract)
-                    if not qualified:
-                        ibkr_logger.error(f"Failed to qualify contract for {symbol}")
-                        return None
-                    qc = qualified[0]
-                    # 使用异步版本请求历史数据
-                    return await ib.reqHistoricalDataAsync(
-                        qc, endDateTime='', durationStr=duration,
-                        barSizeSetting=bar_size, whatToShow='TRADES', useRTH=False
-                    )
-                except Exception as e:
-                    ibkr_logger.error(f"reqHistoricalDataAsync failed in connection thread: {e}")
-                    return None
-
-            # 在连接线程事件循环中执行异步操作，避免事件循环冲突
-            bars = self.connection_manager.run_async_in_connection_thread(_fetch_async())
-
+            qualified = await ib.qualifyContractsAsync(contract)
+            if not qualified:
+                ibkr_logger.error(f"Failed to qualify contract for {symbol}")
+                return None
+            qc = qualified[0]
+            # 使用异步版本请求历史数据
+            bars = await ib.reqHistoricalDataAsync(
+                qc, endDateTime='', durationStr=duration,
+                barSizeSetting=bar_size, whatToShow='TRADES', useRTH=False
+            )
             if not bars:
                 ibkr_logger.warning(f"No historical data returned for {symbol}")
                 return pd.DataFrame()

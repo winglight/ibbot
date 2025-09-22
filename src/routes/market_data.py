@@ -211,15 +211,6 @@ async def get_chart_data(
     user: Optional[str] = Depends(get_current_user),
 ):
     """获取图表数据"""
-    if not connection_manager.is_connected():
-        reason = None
-        try:
-            reason = connection_manager.get_last_connect_error()
-        except Exception:
-            reason = None
-        detail = "Not connected to IBKR" + (f": {reason}" if reason else "")
-        raise HTTPException(status_code=400, detail=detail)
-
     try:
         # 统一使用与历史接口一致的缓存策略，使用前缀避免冲突
         _clean_expired_cache()
@@ -296,63 +287,12 @@ async def get_chart_data(
                 }
 
         # 3) 需要拉取新数据（强制刷新或缓存不足）
-        loop = asyncio.get_event_loop()
-        try:
-            df = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: core.ibkr_client.get_historical_data(
-                        symbol=request.symbol,
-                        duration=request.duration,
-                        bar_size=request.bar_size,
-                        exchange=request.exchange,
-                    ),
-                ),
-                timeout=65.0,
-            )
-        except asyncio.TimeoutError:
-            # 超时时，如果有数据库缓存则回退
-            logger.error(
-                f"Chart data request timed out for {request.symbol}. IBKR connection status: "
-                f"{'Connected' if connection_manager.is_connected() else 'Disconnected'}"
-            )
-            if cache_df is not None and not cache_df.empty:
-                chart_data = []
-                try:
-                    for _, row in cache_df.iterrows():
-                        raw_time = row.get("date") if isinstance(row, dict) else row["date"] if "date" in cache_df.columns else _
-                        t = to_local_time(raw_time)
-                        chart_data.append(
-                            {
-                                "time": t,
-                                "open": float(row.get("open", 0) if isinstance(row, dict) else row.get("open", 0) if hasattr(row, "get") else row["open"] if "open" in cache_df.columns else 0),
-                                "high": float(row.get("high", 0) if isinstance(row, dict) else row.get("high", 0) if hasattr(row, "get") else row["high"] if "high" in cache_df.columns else 0),
-                                "low": float(row.get("low", 0) if isinstance(row, dict) else row.get("low", 0) if hasattr(row, "get") else row["low"] if "low" in cache_df.columns else 0),
-                                "close": float(row.get("close", 0) if isinstance(row, dict) else row.get("close", 0) if hasattr(row, "get") else row["close"] if "close" in cache_df.columns else 0),
-                                "volume": int(row.get("volume", 0) if isinstance(row, dict) else row.get("volume", 0) if hasattr(row, "get") else row["volume"] if "volume" in cache_df.columns else 0),
-                            }
-                        )
-                except Exception:
-                    chart_data = []
-                if chart_data:
-                    return {
-                        "success": True,
-                        "data": chart_data,
-                        "symbol": request.symbol,
-                        "duration": request.duration,
-                        "bar_size": request.bar_size,
-                    }
-
-            # 无缓存可用，返回超时错误
-            reason = None
-            try:
-                reason = connection_manager.get_last_connect_error()
-            except Exception:
-                reason = None
-            msg = "Chart data request timed out" + (
-                f". Possible cause: {reason}" if reason else ""
-            )
-            raise HTTPException(status_code=408, detail=msg)
+        df = await core.ibkr_client.get_historical_data(
+                    symbol=request.symbol,
+                    duration=request.duration,
+                    bar_size=request.bar_size,
+                    exchange=request.exchange,
+                )
 
         # 4) 成功获取数据
         if df is not None and not df.empty:
