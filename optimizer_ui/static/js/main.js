@@ -198,7 +198,9 @@ class OptimizerApp {
                         <button class="btn btn-ghost" data-modal-close>关闭</button>
                     </header>
                     <main>
-                        ${reports.length ? reports.map(this.renderReportCard).join('') : '<div class="empty-state">暂无报告</div>'}
+                                                ${reports.length
+                            ? reports.map((report) => this.renderReportCard(report)).join('')
+                            : '<div class="empty-state">暂无报告</div>'}
                     </main>
                 </div>
             `;

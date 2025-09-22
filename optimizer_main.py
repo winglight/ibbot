@@ -23,7 +23,7 @@ OPTIMIZER_APP_TITLE = "IBBot Optimizer"
 OPTIMIZER_APP_VERSION = "0.1.0"
 OPTIMIZER_UI_DIR = Path(__file__).parent / "optimizer_ui"
 DEFAULT_HOST = os.getenv("OPTIMIZER_HOST", "0.0.0.0")
-DEFAULT_PORT = int(os.getenv("OPTIMIZER_PORT", "8001"))
+DEFAULT_PORT = 8001  # Fixed default port
 
 
 def ensure_optimizer_ui_dir() -> None:
@@ -71,7 +71,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--port",
         type=int,
         default=DEFAULT_PORT,
-        help="Service port (default from OPTIMIZER_PORT or 8001)",
+        help="Service port (default: 8001)",
     )
     parser.add_argument(
         "--reload",
