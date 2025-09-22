@@ -3405,7 +3405,7 @@ class TradingApp {
                         }),
                         allowReadOnly: true,
                         // 增加超时时间，略高于后端65秒
-                        timeout: 6000
+                        timeout: 70000
                     });
                     
                     // 更新缓存（仅当允许使用缓存且非强制刷新）
