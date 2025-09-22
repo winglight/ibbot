@@ -253,7 +253,7 @@ class IBKRClient:
             qc = qualified[0]
             # 使用异步版本请求历史数据
             bars = await ib.reqHistoricalDataAsync(
-                qc, endDateTime='', durationStr=duration,
+                contract=contract, endDateTime='', durationStr=duration,
                 barSizeSetting=bar_size, whatToShow='TRADES', useRTH=False
             )
             if not bars:
