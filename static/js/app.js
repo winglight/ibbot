@@ -14,6 +14,93 @@ const MONITOR_FALLBACK_TZ = 'Asia/Shanghai';
 const MONITOR_CHART_MAX_MINUTES = 30;
 const MONITOR_CHART_MAX_POINTS = 3000;
 
+const MONITOR_DURATION_OPTIONS = {
+    '1 min': [
+        { value: '30 M', label: '30 分钟' },
+        { value: '1 H', label: '1 小时' },
+        { value: '4 H', label: '4 小时' },
+        { value: '1 D', label: '1 天' }
+    ],
+    '5 mins': [
+        { value: '30 M', label: '30 分钟' },
+        { value: '1 H', label: '1 小时' },
+        { value: '4 H', label: '4 小时' },
+        { value: '1 D', label: '1 天' },
+        { value: '1 W', label: '1 周' }
+    ],
+    '15 mins': [
+        { value: '1 H', label: '1 小时' },
+        { value: '4 H', label: '4 小时' },
+        { value: '1 D', label: '1 天' },
+        { value: '1 W', label: '1 周' },
+        { value: '1 M', label: '1 个月' }
+    ],
+    '30 mins': [
+        { value: '4 H', label: '4 小时' },
+        { value: '1 D', label: '1 天' },
+        { value: '1 W', label: '1 周' },
+        { value: '1 M', label: '1 个月' },
+        { value: '3 M', label: '3 个月' }
+    ],
+    '1 hour': [
+        { value: '1 D', label: '1 天' },
+        { value: '1 W', label: '1 周' },
+        { value: '1 M', label: '1 个月' },
+        { value: '3 M', label: '3 个月' },
+        { value: '1 Y', label: '1 年' }
+    ],
+    '1 day': [
+        { value: '1 W', label: '1 周' },
+        { value: '1 M', label: '1 个月' },
+        { value: '3 M', label: '3 个月' },
+        { value: '1 Y', label: '1 年' }
+    ]
+};
+
+function getMonitorDurationOptions(intervalValue) {
+    const intervalKey = typeof intervalValue === 'string'
+        ? intervalValue.trim().toLowerCase()
+        : '';
+    return MONITOR_DURATION_OPTIONS[intervalKey] || MONITOR_DURATION_OPTIONS['1 min'] || [];
+}
+
+function refreshMonitorDurationSelect(intervalValue, options = {}) {
+    const durationSelect = document.getElementById('monitorDuration');
+    if (!durationSelect) return;
+
+    const availableOptions = getMonitorDurationOptions(intervalValue);
+    const previousValue = durationSelect.value;
+    const preferredValue = options.preferredValue;
+
+    durationSelect.innerHTML = '';
+    availableOptions.forEach((item, index) => {
+        const optionEl = document.createElement('option');
+        optionEl.value = item.value;
+        optionEl.textContent = item.label;
+        if (index === 0 && !preferredValue && !previousValue) {
+            optionEl.selected = true;
+        }
+        durationSelect.appendChild(optionEl);
+    });
+
+    const hasPreferred = preferredValue && availableOptions.some(opt => opt.value === preferredValue);
+    const hasPrevious = availableOptions.some(opt => opt.value === previousValue);
+    const fallbackValue = availableOptions[0]?.value || '';
+
+    if (hasPreferred) {
+        durationSelect.value = preferredValue;
+    } else if (hasPrevious) {
+        durationSelect.value = previousValue;
+    } else if (fallbackValue) {
+        durationSelect.value = fallbackValue;
+    }
+
+    const changed = durationSelect.value !== previousValue;
+    if (options.triggerChange && changed) {
+        durationSelect.dispatchEvent(new Event('change'));
+    }
+}
+
 const TREND_LEVEL_STYLES = {
     0: {
         buyColor: '#60a5fa',
@@ -2857,9 +2944,22 @@ class TradingApp {
                 // 初次载入图表
                 this.loadMonitorChart(symbol, chartLoadOptions);
 
+                const intervalSelectEl = document.getElementById('monitorInterval');
+                const durationSelectEl = document.getElementById('monitorDuration');
+
+                refreshMonitorDurationSelect(intervalSelectEl?.value, {
+                    preferredValue: durationSelectEl?.value
+                });
+
                 const bindMonitorControl = (element) => {
                     if (!element || element.dataset.monitorBound === '1') return;
                     element.addEventListener('change', () => {
+                        if (element.id === 'monitorInterval') {
+                            refreshMonitorDurationSelect(element.value, {
+                                preferredValue: null,
+                                triggerChange: false
+                            });
+                        }
                         const activeSymbol = (this.currentMonitor?.symbol || symbol || '').trim();
                         if (!activeSymbol) return;
                         const barSize = document.getElementById('monitorInterval')?.value || '1 min';
@@ -2873,8 +2973,8 @@ class TradingApp {
                     element.dataset.monitorBound = '1';
                 };
 
-                bindMonitorControl(document.getElementById('monitorInterval'));
-                bindMonitorControl(document.getElementById('monitorDuration'));
+                bindMonitorControl(intervalSelectEl);
+                bindMonitorControl(durationSelectEl);
 
                 // 初始化预期PnL显示
                 this.updateExpectedPnL();
