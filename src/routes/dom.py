@@ -163,7 +163,7 @@ async def get_dom_stats(
     lookback_seconds: Optional[int] = Query(None, ge=60),
     start: Optional[str] = None,
     end: Optional[str] = None,
-    max_points: Optional[int] = Query(None, ge=100, le=5000),
+    max_points: Optional[int] = Query(None, ge=10, le=5000),
     user: Optional[str] = Depends(get_current_user),
 ):
     response = dom_service.get_stats(

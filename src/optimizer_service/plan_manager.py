@@ -15,6 +15,7 @@ from .schemas import (
     OptimizationPlanResponse,
     OptimizationPlanUpdate,
     OptimizationRequest,
+    TaskState,
 )
 from .storage import OptimizerTaskStore, TaskRecord, store as global_task_store
 from .db import OptimizerDatabase, optimizer_db
@@ -174,6 +175,15 @@ class PlanManager:
         request = plan.to_request()
         task_id = str(uuid.uuid4())
         self._task_store.create_task(task_id, request, plan_id=plan.id)
+        # Ensure observers immediately see the task as running rather than pending
+        # to avoid transient "pending" states when reports are queried right after
+        # a plan is triggered.
+        self._task_store.update_state(
+            task_id,
+            TaskState.RUNNING,
+            progress=0,
+            message="starting",
+        )
         plan.task_history.append(task_id)
         plan.updated_at = datetime.utcnow()
         await asyncio.to_thread(run_optimization_task, task_id, request, self._task_store)
