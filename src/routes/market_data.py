@@ -200,6 +200,10 @@ async def get_historical_data(
             "source": "ibkr_api",
         }
 
+    except HTTPException as exc:
+        # Preserve explicit HTTP errors (e.g. 404/408) so callers can handle
+        # them without the response being wrapped into a 500.
+        raise exc
     except Exception as e:
         logger.error(f"Historical data error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -461,6 +465,8 @@ async def get_realtime_data(
                     return {"success": True, "data": cached_data}
             raise HTTPException(status_code=404, detail="No data available")
 
+    except HTTPException as exc:
+        raise exc
     except Exception as e:
         logger.error(f"Real-time data error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
