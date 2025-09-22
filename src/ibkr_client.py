@@ -1483,6 +1483,35 @@ class IBKRClient:
                 sym = item.contract.symbol
                 current_price = None
                 price_source = None
+
+                # 合约乘数用于期货/期权的名义价值和PnL计算
+                contract_multiplier = 1.0
+                raw_multiplier = getattr(item.contract, "multiplier", None)
+                if raw_multiplier is not None:
+                    try:
+                        contract_multiplier = float(raw_multiplier) or 1.0
+                    except (TypeError, ValueError):
+                        contract_multiplier = 1.0
+
+                # 额外的乘数映射，确保常见期货合约的乘数正确
+                multiplier_overrides = {
+                    "MNQ": 2.0,   # Micro E-mini Nasdaq-100
+                    "NQ": 20.0,   # E-mini Nasdaq-100
+                    "MES": 5.0,
+                    "ES": 50.0,
+                    "MYM": 0.5,
+                    "YM": 5.0,
+                    "M2K": 5.0,
+                    "RTY": 50.0,
+                    "MCL": 100.0,
+                    "CL": 1000.0,
+                    "MGC": 10.0,
+                    "GC": 100.0,
+                }
+                if sym in multiplier_overrides:
+                    contract_multiplier = multiplier_overrides[sym]
+                if not math.isfinite(contract_multiplier) or contract_multiplier <= 0:
+                    contract_multiplier = 1.0
                 
                 # 1) 首先检查缓存是否有效
                 ts = self.price_cache_timestamp.get(sym)
@@ -1533,38 +1562,43 @@ class IBKRClient:
                 ibkr_logger.debug(f"Portfolio data for {sym}: marketPrice={item.marketPrice}, averageCost={item.averageCost}, position={item.position}")
                 ibkr_logger.debug(f"Price for {sym}: {current_price} (source: {price_source})")
                 
-                # Adjust average cost for futures by contract multiplier to get entry price
-                avg_cost_adjusted = item.averageCost
-                futures_multipliers = {
-                    'MNQ': 2,   # Micro E-mini Nasdaq-100
-                    'NQ': 20,   # E-mini Nasdaq-100
-                }
-                if sym in futures_multipliers and item.averageCost:
-                    avg_cost_adjusted = item.averageCost / futures_multipliers[sym]
-                    ibkr_logger.debug(f"Futures multiplier adjustment for {sym}: {item.averageCost} / {futures_multipliers[sym]} = {avg_cost_adjusted}")
-                else:
-                    ibkr_logger.debug(f"No futures multiplier adjustment for {sym}, using original averageCost: {avg_cost_adjusted}")
+                position_qty = float(item.position or 0)
 
-                market_value = item.position * current_price
-                
-                # 计算未实现盈亏，区分多头和空头持仓
-                unrealized_pnl = 0
-                if hasattr(item, 'unrealizedPNL'):
-                    # 如果IBKR直接提供了未实现盈亏，优先使用
-                    unrealized_pnl = item.unrealizedPNL
+                # IBKR 对期货返回的 averageCost 已经乘以乘数，因此除以乘数得到每份合约的成本价
+                avg_cost_raw = float(item.averageCost or 0.0)
+                if contract_multiplier != 0:
+                    avg_cost_adjusted = avg_cost_raw / contract_multiplier
                 else:
-                    # 否则根据持仓方向计算
-                    if item.position > 0:  # 多头
-                        # 多头盈亏 = (当前价格 - 成本价) * 持仓数量
-                        unrealized_pnl = (current_price - avg_cost_adjusted) * item.position
-                    else:  # 空头
-                        # 空头盈亏 = (成本价 - 当前价格) * 持仓数量的绝对值
-                        unrealized_pnl = (avg_cost_adjusted - current_price) * abs(item.position)
-                
-                # 计算未实现盈亏百分比
-                unrealized_pnl_percent = 0
-                if item.position * avg_cost_adjusted != 0:
-                    unrealized_pnl_percent = (unrealized_pnl / abs(item.position * avg_cost_adjusted)) * 100
+                    avg_cost_adjusted = avg_cost_raw
+
+                if not math.isfinite(avg_cost_adjusted):
+                    avg_cost_adjusted = 0.0
+
+                market_value = position_qty * (current_price or 0) * contract_multiplier
+
+                # 计算未实现盈亏，统一按照乘数处理（避免依赖可能不准确的IB字段）
+                current_price_value = current_price or 0.0
+                unrealized_pnl = (current_price_value - avg_cost_adjusted) * position_qty * contract_multiplier
+
+                # 如果我们缺少价格，尝试回退到 IBKR 提供的未实现盈亏
+                ib_unrealized = getattr(item, 'unrealizedPNL', None)
+                try:
+                    ib_unrealized_val = float(ib_unrealized)
+                except (TypeError, ValueError):
+                    ib_unrealized_val = None
+
+                if (current_price_value == 0 or not math.isfinite(unrealized_pnl)) and ib_unrealized_val is not None:
+                    unrealized_pnl = ib_unrealized_val
+
+                if not math.isfinite(unrealized_pnl):
+                    unrealized_pnl = 0.0
+
+                # 计算未实现盈亏百分比（以持仓名义价值为基准）
+                position_notional = abs(position_qty * avg_cost_adjusted * contract_multiplier)
+                if position_notional:
+                    unrealized_pnl_percent = (unrealized_pnl / position_notional) * 100
+                else:
+                    unrealized_pnl_percent = 0.0
                 
                 position_info = {
                     'symbol': sym,
@@ -1573,6 +1607,7 @@ class IBKRClient:
                     'market_price': item.marketPrice if item.marketPrice == item.marketPrice else 0,
                     'current_price': current_price,
                     'market_value': market_value,
+                    'contract_multiplier': contract_multiplier,
                     'unrealized_pnl': unrealized_pnl,
                     'unrealized_pnl_percent': unrealized_pnl_percent,
                     'price_source': price_source,
