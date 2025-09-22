@@ -568,6 +568,9 @@ class DomStatsAggregator:
             self._payloads[safe_symbol] = payload
         path = self._path_for_symbol(safe_symbol)
         tmp_path = f"{path}.tmp"
+        directory = os.path.dirname(path)
+        if directory:
+            _ensure_directory(directory)
         try:
             with open(tmp_path, "wb") as fh:
                 pickle.dump(
