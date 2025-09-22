@@ -41,9 +41,38 @@ class OptimizerTaskStore:
         self._db = database
         self._load_from_db()
 
-    def create_task(self, task_id: str, request: OptimizationRequest, plan_id: Optional[str] = None) -> None:
+    def create_task(
+        self,
+        task_id: str,
+        request: OptimizationRequest,
+        plan_id: Optional[str] = None,
+        *,
+        initial_state: TaskState = TaskState.PENDING,
+        progress: int | None = None,
+        message: Optional[str] = None,
+    ) -> None:
+        """Create a task record and persist it.
+
+        ``PlanManager`` triggers tasks in the background. When observers query
+        the reports immediately after a plan is started we want them to see the
+        task as *running* rather than ``pending``. Otherwise there is a short
+        window where the task is still pending even though execution has
+        already been scheduled, which caused the tests to read a ``pending``
+        state unexpectedly. By allowing the caller to specify the initial
+        state we can mark plan triggered tasks as running right from the
+        beginning while keeping the default behaviour (pending) for the public
+        ``/api/optimize/start`` endpoint.
+        """
+
         with self._lock:
-            self._tasks[task_id] = TaskRecord(request=request, plan_id=plan_id)
+            record = TaskRecord(
+                request=request,
+                state=initial_state,
+                progress=max(0, min(100, progress)) if progress is not None else 0,
+                message=message,
+                plan_id=plan_id,
+            )
+            self._tasks[task_id] = record
             self._persist(task_id)
 
     def get_task(self, task_id: str) -> Optional[TaskRecord]:

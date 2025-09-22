@@ -174,13 +174,11 @@ class PlanManager:
     async def _trigger_plan(self, plan: OptimizationPlan, schedule_follow_up: bool) -> str:
         request = plan.to_request()
         task_id = str(uuid.uuid4())
-        self._task_store.create_task(task_id, request, plan_id=plan.id)
-        # Ensure observers immediately see the task as running rather than pending
-        # to avoid transient "pending" states when reports are queried right after
-        # a plan is triggered.
-        self._task_store.update_state(
+        self._task_store.create_task(
             task_id,
-            TaskState.RUNNING,
+            request,
+            plan_id=plan.id,
+            initial_state=TaskState.RUNNING,
             progress=0,
             message="starting",
         )
