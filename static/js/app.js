@@ -3651,6 +3651,8 @@ class TradingApp {
                 )
             );
 
+            const chartSpanMinutes = effectiveSpanMinutes;
+
             const normalizedBars = response.data.map((bar, index) => {
                 const raw = bar.time !== undefined && bar.time !== null ? bar.time : bar.date;
                 const parsedTime = this.parseMonitorChartTime(raw);
@@ -3853,7 +3855,6 @@ class TradingApp {
                 }
 
                 // 计算时间跨度相关参数
-                const chartSpanMinutes = effectiveSpanMinutes;
                 const spanBars = Math.min(
                     MONITOR_CHART_MAX_POINTS,
                     Math.max(1, Math.round(chartSpanMinutes / chartIntervalMinutes))
