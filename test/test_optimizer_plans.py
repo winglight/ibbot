@@ -20,6 +20,9 @@ def plan_payload(frequency_minutes: int = 0):
             "base": {
                 "long_thresholds": [0.75, 0.85],
                 "short_thresholds": [-0.75, -0.85],
+                "window": [8000, 10000],
+                "max_levels": [20, 30],
+                "depth_rows": [5, 10],
             },
             "features": {
                 "stacking": {"intensity": [0.3, 0.4]},
@@ -56,6 +59,9 @@ def test_plan_lifecycle():
         plan_id = plan["id"]
         assert plan["is_active"] is False
         assert plan["parameters"]["base"]["long_thresholds"] == [0.75, 0.85]
+        assert plan["parameters"]["base"]["window"] == [8000, 10000]
+        assert plan["parameters"]["base"]["max_levels"] == [20, 30]
+        assert plan["parameters"]["base"]["depth_rows"] == [5, 10]
         assert plan["base_metrics"] == ["obi5", "ofi", "trend_score"]
         assert plan["feature_metrics"] == ["stacking", "sweep"]
         assert set(plan["metrics"]) == set(plan["base_metrics"] + plan["feature_metrics"])

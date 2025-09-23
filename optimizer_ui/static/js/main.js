@@ -3,6 +3,9 @@ const DEFAULT_BASE_PARAMETER_TEMPLATE = {
     short_thresholds: [-0.75, -0.8, -0.85],
     persistence_seconds: [2, 3, 4],
     cooldown_threshold: [0, 0.1, 0.2],
+    window: [8000, 10000, 12000],
+    max_levels: [20, 30, 40],
+    depth_rows: [5, 10, 15],
 };
 
 const BASE_METRIC_PARAMETER_TEMPLATES = {
@@ -670,7 +673,10 @@ class OptimizerApp {
             ? parameterPayload.features ?? {}
             : {};
         if (baseInput) {
-            const baseJson = JSON.stringify(baseData && Object.keys(baseData).length ? baseData : DEFAULT_BASE_PARAMETER_TEMPLATE, null, 2);
+            const baseTemplate = this.cloneValue(DEFAULT_BASE_PARAMETER_TEMPLATE);
+            const hasBaseData = baseData && Object.keys(baseData).length;
+            const mergedBase = hasBaseData ? { ...baseTemplate, ...baseData } : baseTemplate;
+            const baseJson = JSON.stringify(mergedBase, null, 2);
             baseInput.value = baseJson;
             baseInput.dataset.userEdited = existingPlan ? 'true' : 'false';
         }
