@@ -96,7 +96,7 @@ def _extract_signals(history):
     ]
 
 
-@pytest.mark.parametrize('symbol', ['ES'])
+@pytest.mark.parametrize('symbol', ['MNQ'])
 def test_dom_phase4_full_loop(tmp_path, symbol):
     os.environ['DOM_SIGNAL_OUTCOME_DELAY_SECONDS'] = '1'
     os.environ['DOM_SIGNAL_OUTCOME_THRESHOLD'] = '0.001'
