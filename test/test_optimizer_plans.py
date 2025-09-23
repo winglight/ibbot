@@ -15,7 +15,16 @@ def plan_payload(frequency_minutes: int = 0):
         "strategy": "mnq_dom",
         "symbol": "MNQ",
         "metrics": ["obi", "ofi", "trend"],
-        "parameters": {"window": [10, 20], "threshold": [0.1, 0.2]},
+        "parameters": {
+            "base": {
+                "long_thresholds": [0.75, 0.85],
+                "short_thresholds": [-0.75, -0.85],
+            },
+            "features": {
+                "obi": {"imbalance_threshold": [0.55, 0.6]},
+                "ofi": {"ofi_zscore": [0.8, 1.0]},
+            },
+        },
         "algorithm": "grid",
         "start_date": "2023-01-01",
         "end_date": "2023-02-01",
@@ -45,6 +54,8 @@ def test_plan_lifecycle():
         plan = response.json()
         plan_id = plan["id"]
         assert plan["is_active"] is False
+        assert plan["parameters"]["base"]["long_thresholds"] == [0.75, 0.85]
+        assert "obi" in plan["parameters"]["features"]
 
         update_resp = client.patch(
             f"/api/optimize/plans/{plan_id}",

@@ -16,10 +16,27 @@ from .schemas import (
     OptimizationPlanUpdate,
     OptimizationRequest,
     TaskState,
+    as_threshold_parameter_set,
 )
 from .storage import OptimizerTaskStore, TaskRecord, store as global_task_store
 from .db import OptimizerDatabase, optimizer_db
 from .tasks import run_optimization_task
+
+
+def _model_dump(obj: Any, **kwargs: Any) -> Dict[str, Any]:
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(**kwargs)
+    return obj.dict(**kwargs)
+
+
+def _serialize_parameter_set(value: Any) -> Dict[str, Any]:
+    parameter_set = as_threshold_parameter_set(value)
+    return _model_dump(parameter_set)
+
+
+def _flatten_parameter_set(value: Any) -> Dict[str, List[Any]]:
+    parameter_set = as_threshold_parameter_set(value)
+    return parameter_set.flatten()
 
 
 @dataclass
@@ -29,7 +46,7 @@ class OptimizationPlan:
     strategy: str
     symbol: str
     metrics: List[str]
-    parameters: Dict[str, List[Any]]
+    parameters: Dict[str, Any]
     algorithm: OptimizationAlgorithm
     start_date: date
     end_date: date
@@ -47,7 +64,7 @@ class OptimizationPlan:
             strategy=self.strategy,
             start_date=self.start_date,
             end_date=self.end_date,
-            parameters=self.parameters,
+            parameters=_flatten_parameter_set(self.parameters),
             algorithm=self.algorithm,
             iterations=self.iterations,
             plan_id=self.id,
@@ -69,13 +86,14 @@ class PlanManager:
     def create_plan(self, payload: OptimizationPlanCreate) -> OptimizationPlan:
         now = datetime.utcnow()
         plan_id = str(uuid.uuid4())
+        parameter_dict = _serialize_parameter_set(payload.parameters)
         plan = OptimizationPlan(
             id=plan_id,
             name=payload.name,
             strategy=payload.strategy,
             symbol=payload.symbol,
             metrics=payload.metrics,
-            parameters=payload.parameters,
+            parameters=parameter_dict,
             algorithm=payload.algorithm,
             start_date=payload.start_date,
             end_date=payload.end_date,
@@ -106,8 +124,10 @@ class PlanManager:
             plan = self._plans[plan_id]
             if plan.is_active:
                 raise RuntimeError("active_plan_not_editable")
-            data = payload.dict(exclude_unset=True)
+            data = _model_dump(payload, exclude_unset=True)
             for field_name, value in data.items():
+                if field_name == "parameters" and value is not None:
+                    value = _serialize_parameter_set(value)
                 if hasattr(plan, field_name) and value is not None:
                     setattr(plan, field_name, value)
             plan.updated_at = datetime.utcnow()
@@ -230,7 +250,7 @@ class PlanManager:
             "strategy": plan.strategy,
             "symbol": plan.symbol,
             "metrics": plan.metrics,
-            "parameters": plan.parameters,
+            "parameters": _serialize_parameter_set(plan.parameters),
             "algorithm": plan.algorithm.value,
             "start_date": plan.start_date.isoformat(),
             "end_date": plan.end_date.isoformat(),
@@ -252,7 +272,7 @@ class PlanManager:
                 strategy=plan_data["strategy"],
                 symbol=plan_data["symbol"],
                 metrics=plan_data["metrics"],
-                parameters=plan_data["parameters"],
+                parameters=_serialize_parameter_set(plan_data["parameters"]),
                 algorithm=OptimizationAlgorithm(plan_data["algorithm"]),
                 start_date=date.fromisoformat(plan_data["start_date"]),
                 end_date=date.fromisoformat(plan_data["end_date"]),
