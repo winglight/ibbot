@@ -1,3 +1,28 @@
+const DEFAULT_BASE_PARAMETER_TEMPLATE = {
+    long_thresholds: [0.75, 0.8, 0.85],
+    short_thresholds: [-0.75, -0.8, -0.85],
+    persistence_seconds: [2, 3, 4],
+    cooldown_threshold: [0, 0.1, 0.2],
+};
+
+const METRIC_FEATURE_PARAMETER_TEMPLATES = {
+    obi: {
+        imbalance_threshold: [0.55, 0.6, 0.65],
+        obi_window_seconds: [10, 20, 30],
+        obi_zscore: [0.8, 1.0, 1.2],
+    },
+    ofi: {
+        ofi_window_seconds: [10, 20, 30],
+        ofi_zscore: [0.8, 1.0, 1.2],
+        cvd_zscore: [0.8, 1.0, 1.2],
+    },
+    trend: {
+        trend_score_long: [0.7, 0.8, 0.9],
+        trend_score_short: [-0.7, -0.8, -0.9],
+        trend_smoothing_window: [30, 45, 60],
+    },
+};
+
 class OptimizerApp {
     constructor(root) {
         this.root = root;
@@ -336,11 +361,17 @@ class OptimizerApp {
                                 <input id="iterations" name="iterations" type="number" min="1" placeholder="可留空" />
                             </div>
                         </div>
-                        <div class="input-group">
-                            <label for="parameters">参数组合（JSON）</label>
-                            <textarea id="parameters" name="parameters" required>{"window": [10, 20], "threshold": [0.1, 0.2]}</textarea>
+                        <div class="form-grid two-columns">
+                            <div class="input-group">
+                                <label for="base_parameters">基础阈值参数 JSON <span class="help-text">（例如长短入场阈值、持续时长等）</span></label>
+                                <textarea id="base_parameters" name="base_parameters" required></textarea>
+                            </div>
+                            <div class="input-group">
+                                <label for="feature_parameters">特征阈值参数 JSON <span class="help-text">（按指标拆分的阈值网格）</span></label>
+                                <textarea id="feature_parameters" name="feature_parameters" required></textarea>
+                            </div>
                         </div>
-                        <p class="section-subtitle">提示：参数 JSON 需符合字典形式，值为数组。</p>
+                        <p class="section-subtitle">提示：两个 JSON 字段分别描述基础阈值与特征阈值，需为对象格式且值为数组。</p>
                         <p class="error-text" id="plan-form-error" style="display:none;"></p>
                     </form>
                 </main>
@@ -352,6 +383,7 @@ class OptimizerApp {
         `;
         this.showModal(formHtml, () => this.handlePlanFormSubmit(existingPlan?.id || null));
         this.initializePlanForm(existingPlan);
+        this.setupParameterAutofill(existingPlan);
         this.prefillDataRange(!isEdit);
     }
 
@@ -378,6 +410,121 @@ class OptimizerApp {
         await fetchRange();
     }
 
+    cloneValue(value) {
+        if (value === undefined) return {};
+        return JSON.parse(JSON.stringify(value));
+    }
+
+    buildParameterTemplates(selectedMetrics) {
+        const base = this.cloneValue(DEFAULT_BASE_PARAMETER_TEMPLATE);
+        const features = {};
+        selectedMetrics.forEach((metric) => {
+            const template = METRIC_FEATURE_PARAMETER_TEMPLATES[metric];
+            if (template) {
+                features[metric] = this.cloneValue(template);
+            } else {
+                features[metric] = {};
+            }
+        });
+        return { base, features };
+    }
+
+    safeParseJson(text, fallback = {}) {
+        if (!text || !text.trim()) {
+            return this.cloneValue(fallback);
+        }
+        try {
+            const parsed = JSON.parse(text);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                return this.cloneValue(fallback);
+            }
+            return parsed;
+        } catch (err) {
+            return this.cloneValue(fallback);
+        }
+    }
+
+    mergeFeatureTemplates(selectedMetrics, currentFeatures, templateFeatures) {
+        const merged = {};
+        const featureSource = currentFeatures && typeof currentFeatures === 'object' && !Array.isArray(currentFeatures)
+            ? currentFeatures
+            : {};
+        selectedMetrics.forEach((metric) => {
+            const template = templateFeatures[metric] ? this.cloneValue(templateFeatures[metric]) : {};
+            const existing = featureSource[metric]
+                && typeof featureSource[metric] === 'object'
+                && !Array.isArray(featureSource[metric])
+                ? featureSource[metric]
+                : {};
+            merged[metric] = { ...template, ...existing };
+        });
+        return merged;
+    }
+
+    setupParameterAutofill(existingPlan) {
+        const form = document.getElementById('plan-form');
+        if (!form) return;
+        const baseField = form.querySelector('#base_parameters');
+        const featureField = form.querySelector('#feature_parameters');
+        if (!baseField || !featureField) return;
+
+        const markEdited = (event) => {
+            event.target.dataset.userEdited = 'true';
+        };
+        [baseField, featureField].forEach((field) => field.addEventListener('input', markEdited));
+
+        const updateTemplates = () => {
+            const selectedMetrics = [...form.querySelectorAll('input[name="metrics"]:checked')].map((el) => el.value);
+            const templates = this.buildParameterTemplates(selectedMetrics);
+            if (baseField.dataset.userEdited !== 'true') {
+                baseField.value = JSON.stringify(templates.base, null, 2);
+            }
+            const currentFeatures = this.safeParseJson(featureField.value, {});
+            const mergedFeatures = featureField.dataset.userEdited === 'true'
+                ? this.mergeFeatureTemplates(selectedMetrics, currentFeatures, templates.features)
+                : templates.features;
+            featureField.value = JSON.stringify(mergedFeatures, null, 2);
+        };
+
+        const checkboxList = form.querySelectorAll('input[name="metrics"]');
+        checkboxList.forEach((checkbox) => {
+            checkbox.addEventListener('change', updateTemplates);
+        });
+
+        if (!existingPlan) {
+            updateTemplates();
+        }
+    }
+
+    parseBaseParameters(rawValue) {
+        const payload = this.safeParseJson(rawValue, {});
+        const entries = Object.entries(payload);
+        if (!entries.length) {
+            throw new Error('基础阈值参数 JSON 需包含至少一项');
+        }
+        entries.forEach(([key, value]) => {
+            if (!Array.isArray(value) || !value.length) {
+                throw new Error(`基础阈值参数 ${key} 需为非空数组`);
+            }
+        });
+        return payload;
+    }
+
+    parseFeatureParameters(rawValue) {
+        const payload = this.safeParseJson(rawValue || '{}', {});
+        Object.entries(payload).forEach(([metric, config]) => {
+            if (!config || typeof config !== 'object' || Array.isArray(config)) {
+                throw new Error(`特征阈值参数 ${metric} 需为对象`);
+            }
+            Object.entries(config).forEach(([key, values]) => {
+                if (!Array.isArray(values) || !values.length) {
+                    throw new Error(`特征阈值参数 ${metric}.${key} 需为非空数组`);
+                }
+            });
+        });
+        return payload;
+    }
+
     initializePlanForm(existingPlan) {
         const form = document.getElementById('plan-form');
         if (!form) return;
@@ -397,12 +544,26 @@ class OptimizerApp {
                 input.value = value;
             }
         });
-        const paramsInput = form.querySelector('#parameters');
-        if (paramsInput) {
-            const jsonText = existingPlan?.parameters
-                ? JSON.stringify(existingPlan.parameters, null, 2)
-                : '{"window": [10, 20], "threshold": [0.1, 0.2]}';
-            paramsInput.value = jsonText;
+        const baseInput = form.querySelector('#base_parameters');
+        const featureInput = form.querySelector('#feature_parameters');
+        const parameterPayload = existingPlan?.parameters ?? null;
+        const isNested = parameterPayload && typeof parameterPayload === 'object' && !Array.isArray(parameterPayload)
+            && ('base' in parameterPayload || 'features' in parameterPayload);
+        const baseData = isNested
+            ? parameterPayload.base ?? {}
+            : parameterPayload ?? {};
+        const featureData = isNested
+            ? parameterPayload.features ?? {}
+            : {};
+        if (baseInput) {
+            const baseJson = JSON.stringify(baseData && Object.keys(baseData).length ? baseData : DEFAULT_BASE_PARAMETER_TEMPLATE, null, 2);
+            baseInput.value = baseJson;
+            baseInput.dataset.userEdited = existingPlan ? 'true' : 'false';
+        }
+        if (featureInput) {
+            const featureJson = JSON.stringify(featureData, null, 2);
+            featureInput.value = featureJson;
+            featureInput.dataset.userEdited = existingPlan ? 'true' : 'false';
         }
     }
 
@@ -438,22 +599,24 @@ class OptimizerApp {
         const getValue = (name) => (formData.get(name) || '').toString().trim();
         const metrics = [...form.querySelectorAll('input[name="metrics"]:checked')].map((el) => el.value);
         if (!metrics.length) throw new Error('至少选择一个指标');
-        let parameters;
-        try {
-            parameters = JSON.parse(getValue('parameters'));
-            if (typeof parameters !== 'object' || Array.isArray(parameters)) {
-                throw new Error();
+        const baseParameters = this.parseBaseParameters(getValue('base_parameters'));
+        const featureParameters = this.parseFeatureParameters(getValue('feature_parameters'));
+        const normalizedFeatures = {};
+        metrics.forEach((metric) => {
+            if (featureParameters[metric]) {
+                normalizedFeatures[metric] = featureParameters[metric];
             }
-        } catch (err) {
-            throw new Error('参数组合需为合法 JSON 对象');
-        }
+        });
         const iterationsRaw = getValue('iterations');
         const payload = {
             name: getValue('name'),
             symbol: getValue('symbol').toUpperCase(),
             strategy: getValue('strategy') || 'default_strategy',
             metrics,
-            parameters,
+            parameters: {
+                base: baseParameters,
+                features: normalizedFeatures,
+            },
             algorithm: getValue('algorithm') || this.state.metadata.algorithms[0] || 'grid',
             start_date: getValue('start_date'),
             end_date: getValue('end_date'),

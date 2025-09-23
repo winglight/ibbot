@@ -7,10 +7,10 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Literal
 
 try:
-    from pydantic import BaseModel, Field, field_validator, FieldValidationInfo
+    from pydantic import BaseModel, Field, field_validator, FieldValidationInfo, model_validator
     PYDANTIC_V2 = True
 except ImportError:  # pragma: no cover - fallback for pydantic v1
-    from pydantic import BaseModel, Field, validator
+    from pydantic import BaseModel, Field, validator, root_validator
 
     PYDANTIC_V2 = False
 
@@ -102,6 +102,88 @@ class OptimizationRequest(BaseModel):
             return iterations
 
 
+class ThresholdParameterSet(BaseModel):
+    base: Dict[str, List[Any]] = Field(
+        default_factory=dict,
+        description="Primary threshold grids such as long/short triggers",
+    )
+    features: Dict[str, Dict[str, List[Any]]] = Field(
+        default_factory=dict,
+        description="Feature-specific threshold grids keyed by metric",
+    )
+
+    if PYDANTIC_V2:  # pragma: no branch
+
+        @model_validator(mode="before")
+        def transform_legacy(cls, values: Any) -> Any:
+            if isinstance(values, dict) and "base" not in values and "features" not in values:
+                return {"base": values, "features": {}}
+            return values
+
+        @field_validator("base")
+        def validate_base(cls, value: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+            if not value:
+                raise ValueError("base parameter grid must include at least one entry")
+            for name, candidates in value.items():
+                if not isinstance(candidates, list) or not candidates:
+                    raise ValueError(f"base parameter '{name}' must define at least one candidate value")
+            return value
+
+        @field_validator("features")
+        def validate_features(
+            cls, value: Dict[str, Dict[str, List[Any]]]
+        ) -> Dict[str, Dict[str, List[Any]]]:
+            for metric, grid in value.items():
+                if not isinstance(grid, dict):
+                    raise ValueError(f"feature '{metric}' must define a parameter map")
+                for name, candidates in grid.items():
+                    if not isinstance(candidates, list) or not candidates:
+                        raise ValueError(
+                            f"feature '{metric}' parameter '{name}' must define at least one candidate value"
+                        )
+            return value
+
+    else:
+
+        @root_validator(pre=True)  # type: ignore[misc]
+        def transform_legacy(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+            if isinstance(values, dict) and "base" not in values and "features" not in values:
+                return {"base": values, "features": {}}
+            return values
+
+        @validator("base")  # type: ignore[misc]
+        def validate_base(cls, value: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+            if not value:
+                raise ValueError("base parameter grid must include at least one entry")
+            for name, candidates in value.items():
+                if not isinstance(candidates, list) or not candidates:
+                    raise ValueError(f"base parameter '{name}' must define at least one candidate value")
+            return value
+
+        @validator("features")  # type: ignore[misc]
+        def validate_features(
+            cls, value: Dict[str, Dict[str, List[Any]]]
+        ) -> Dict[str, Dict[str, List[Any]]]:
+            for metric, grid in value.items():
+                if not isinstance(grid, dict):
+                    raise ValueError(f"feature '{metric}' must define a parameter map")
+                for name, candidates in grid.items():
+                    if not isinstance(candidates, list) or not candidates:
+                        raise ValueError(
+                            f"feature '{metric}' parameter '{name}' must define at least one candidate value"
+                        )
+            return value
+
+    def flatten(self) -> Dict[str, List[Any]]:
+        flat: Dict[str, List[Any]] = {}
+        for name, candidates in self.base.items():
+            flat[name] = list(candidates)
+        for metric, grid in self.features.items():
+            for name, candidates in grid.items():
+                flat[f"{metric}__{name}"] = list(candidates)
+        return flat
+
+
 class OptimizationStartResponse(BaseModel):
     status: str = Field(..., example="ok")
     task_id: str = Field(..., description="Identifier of the optimization task")
@@ -145,7 +227,7 @@ class OptimizationPlanBase(BaseModel):
     strategy: str = Field(..., min_length=1, description="Strategy identifier associated with the plan")
     symbol: str = Field(..., min_length=1, description="Instrument or market symbol")
     metrics: List[str] = Field(..., description="Metrics to evaluate, e.g. obi/ofi/trend")
-    parameters: Dict[str, List[Any]]
+    parameters: ThresholdParameterSet
     algorithm: OptimizationAlgorithm
     start_date: date
     end_date: date
@@ -192,7 +274,7 @@ class OptimizationPlanUpdate(BaseModel):
     strategy: Optional[str] = None
     symbol: Optional[str] = None
     metrics: Optional[List[str]] = None
-    parameters: Optional[Dict[str, List[Any]]] = None
+    parameters: Optional[ThresholdParameterSet] = None
     algorithm: Optional[OptimizationAlgorithm] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
@@ -283,3 +365,11 @@ class OptimizerDataRangeResponse(BaseModel):
     start_date: date
     end_date: date
     records: Optional[int]
+
+
+def as_threshold_parameter_set(value: Any) -> ThresholdParameterSet:
+    if isinstance(value, ThresholdParameterSet):
+        return value
+    if PYDANTIC_V2:  # pragma: no branch
+        return ThresholdParameterSet.model_validate(value)
+    return ThresholdParameterSet.parse_obj(value)
