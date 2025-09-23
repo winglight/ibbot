@@ -45,7 +45,8 @@ class OptimizationPlan:
     name: str
     strategy: str
     symbol: str
-    metrics: List[str]
+    base_metrics: List[str]
+    feature_metrics: List[str]
     parameters: Dict[str, Any]
     algorithm: OptimizationAlgorithm
     start_date: date
@@ -58,6 +59,20 @@ class OptimizationPlan:
     last_run_at: Optional[datetime] = None
     next_run_at: Optional[datetime] = None
     task_history: List[str] = field(default_factory=list)
+    metrics: List[str] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.refresh_metrics()
+
+    def refresh_metrics(self) -> None:
+        seen = set()
+        combined: List[str] = []
+        for value in list(self.base_metrics) + list(self.feature_metrics):
+            if value in seen:
+                continue
+            seen.add(value)
+            combined.append(value)
+        self.metrics = combined
 
     def to_request(self) -> OptimizationRequest:
         return OptimizationRequest(
@@ -92,7 +107,8 @@ class PlanManager:
             name=payload.name,
             strategy=payload.strategy,
             symbol=payload.symbol,
-            metrics=payload.metrics,
+            base_metrics=list(payload.base_metrics),
+            feature_metrics=list(payload.feature_metrics),
             parameters=parameter_dict,
             algorithm=payload.algorithm,
             start_date=payload.start_date,
@@ -128,9 +144,13 @@ class PlanManager:
             for field_name, value in data.items():
                 if field_name == "parameters" and value is not None:
                     value = _serialize_parameter_set(value)
+                elif field_name in {"base_metrics", "feature_metrics"} and value is not None:
+                    value = list(value)
                 if hasattr(plan, field_name) and value is not None:
                     setattr(plan, field_name, value)
             plan.updated_at = datetime.utcnow()
+            if data.keys() & {"base_metrics", "feature_metrics"}:
+                plan.refresh_metrics()
             self._db.save_plan(self._plan_to_dict(plan))
             return plan
 
@@ -227,7 +247,9 @@ class PlanManager:
             name=plan.name,
             strategy=plan.strategy,
             symbol=plan.symbol,
-            metrics=plan.metrics,
+            base_metrics=list(plan.base_metrics),
+            feature_metrics=list(plan.feature_metrics),
+            metrics=list(plan.metrics),
             parameters=plan.parameters,
             algorithm=plan.algorithm,
             start_date=plan.start_date,
@@ -249,7 +271,11 @@ class PlanManager:
             "name": plan.name,
             "strategy": plan.strategy,
             "symbol": plan.symbol,
-            "metrics": plan.metrics,
+            "metrics": {
+                "all": list(plan.metrics),
+                "base": list(plan.base_metrics),
+                "feature": list(plan.feature_metrics),
+            },
             "parameters": _serialize_parameter_set(plan.parameters),
             "algorithm": plan.algorithm.value,
             "start_date": plan.start_date.isoformat(),
@@ -271,7 +297,8 @@ class PlanManager:
                 name=plan_data["name"],
                 strategy=plan_data["strategy"],
                 symbol=plan_data["symbol"],
-                metrics=plan_data["metrics"],
+                base_metrics=plan_data.get("base_metrics", []) or plan_data.get("metrics", []),
+                feature_metrics=plan_data.get("feature_metrics", []),
                 parameters=_serialize_parameter_set(plan_data["parameters"]),
                 algorithm=OptimizationAlgorithm(plan_data["algorithm"]),
                 start_date=date.fromisoformat(plan_data["start_date"]),

@@ -28,7 +28,8 @@ from .schemas import (
 from .plan_manager import plan_manager
 from .metadata import (
     get_available_algorithms,
-    get_available_metrics,
+    get_available_base_metrics,
+    get_available_feature_metrics,
     get_symbol_data_range,
 )
 from .storage import store
@@ -45,7 +46,8 @@ async def resume_plans():  # pragma: no cover - startup hook
 @router.get("/metadata", response_model=OptimizerMetadataResponse)
 async def get_optimizer_metadata() -> OptimizerMetadataResponse:
     return OptimizerMetadataResponse(
-        metrics=get_available_metrics(),
+        base_metrics=get_available_base_metrics(),
+        feature_metrics=get_available_feature_metrics(),
         algorithms=get_available_algorithms(),
     )
 
