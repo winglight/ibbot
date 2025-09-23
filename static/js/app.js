@@ -545,9 +545,6 @@ class TradingApp {
 
         let signal = safeNumber(point.signal);
         if (!Number.isFinite(signal)) {
-            signal = safeNumber(point.y);
-        }
-        if (!Number.isFinite(signal)) {
             if (Number.isFinite(obi) && Number.isFinite(ofi)) {
                 if (Number.isFinite(longObi) && Number.isFinite(longOfi) && obi >= longObi && ofi >= longOfi) {
                     signal = 1;
@@ -557,10 +554,7 @@ class TradingApp {
             }
         }
         if (!Number.isFinite(signal)) {
-            const suggestion = typeof point.suggestion === 'string' ? point.suggestion.toLowerCase() : '';
-            if (suggestion === 'buy') signal = 1;
-            else if (suggestion === 'sell') signal = -1;
-            else signal = 0;
+            signal = 0;
         }
         signal = Math.max(-1, Math.min(1, Number.isFinite(signal) ? signal : 0));
 
@@ -736,30 +730,107 @@ class TradingApp {
         const startMs = startOfDay.getTime();
         const endMs = startMs + 24 * 60 * 60 * 1000;
 
-        const entries = formatted
+        const rawEntries = formatted
             .filter(point => Number.isFinite(point.timestamp)
                 && Math.abs(point.signal) === 1
                 && point.timestamp >= startMs
                 && point.timestamp < endMs)
             .sort((a, b) => a.timestamp - b.timestamp);
 
+        const MERGE_WINDOW_MS = 60 * 1000;
+        const mergedGroups = [];
+        const appendEventsToGroup = (group, eventList) => {
+            if (!Array.isArray(eventList) || !eventList.length) return;
+            eventList.forEach((evt) => {
+                if (!evt || typeof evt !== 'object') return;
+                const rawCode = evt.code || evt.key || evt.label || '';
+                const codeText = rawCode ? String(rawCode).trim().toUpperCase() : '';
+                const labelSource = evt.label || evt.name || evt.description || evt.key || rawCode;
+                const labelText = labelSource ? String(labelSource).trim() : '';
+                if (!codeText && !labelText) return;
+                const side = typeof evt.side === 'string' ? evt.side.toLowerCase() : '';
+                const key = `${codeText}||${labelText}||${side}`;
+                if (group.eventKeySet.has(key)) return;
+                group.eventKeySet.add(key);
+                group.events.push({ ...evt });
+            });
+        };
+
+        rawEntries.forEach((entry) => {
+            const reason = entry.reason ? String(entry.reason).split('\n')[0] : '';
+            const events = Array.isArray(entry.events) ? entry.events : [];
+            const lastGroup = mergedGroups[mergedGroups.length - 1];
+            const withinWindow = lastGroup
+                && entry.signal === lastGroup.signal
+                && (entry.timestamp - lastGroup.endTimestamp) <= MERGE_WINDOW_MS;
+
+            if (withinWindow) {
+                lastGroup.endTimestamp = entry.timestamp;
+                lastGroup.count += 1;
+                if (Number.isFinite(entry.price)) lastGroup.price = entry.price;
+                if (Number.isFinite(entry.obi)) lastGroup.obi = entry.obi;
+                if (Number.isFinite(entry.ofi)) lastGroup.ofi = entry.ofi;
+                if (reason) lastGroup.reasonSet.add(reason);
+                appendEventsToGroup(lastGroup, events);
+            } else {
+                const group = {
+                    signal: entry.signal,
+                    startTimestamp: entry.timestamp,
+                    endTimestamp: entry.timestamp,
+                    price: Number.isFinite(entry.price) ? entry.price : null,
+                    obi: Number.isFinite(entry.obi) ? entry.obi : null,
+                    ofi: Number.isFinite(entry.ofi) ? entry.ofi : null,
+                    reasonSet: new Set(reason ? [reason] : []),
+                    events: [],
+                    eventKeySet: new Set(),
+                    count: 1,
+                };
+                appendEventsToGroup(group, events);
+                mergedGroups.push(group);
+            }
+        });
+
+        const aggregatedEntries = mergedGroups.map(group => ({
+            signal: group.signal,
+            startTimestamp: group.startTimestamp,
+            endTimestamp: group.endTimestamp,
+            price: group.price,
+            obi: group.obi,
+            ofi: group.ofi,
+            reasons: Array.from(group.reasonSet),
+            events: group.events.map(evt => ({ ...evt })),
+            count: group.count,
+        }));
+
         if (metaEl) {
-            metaEl.textContent = `今日信号：${entries.length} 条`;
+            metaEl.textContent = `今日信号：${aggregatedEntries.length} 条`;
         }
 
-        if (!entries.length) {
+        if (!aggregatedEntries.length) {
             this.monitorDomHistoryList.innerHTML = '<div class="list-group-item text-center text-muted py-2">暂无信号</div>';
             return;
         }
 
-        const html = entries.map((entry) => {
-            const timeText = new Date(entry.timestamp).toLocaleTimeString(undefined, { hour12: false });
+        const html = aggregatedEntries.map((entry) => {
+            const startTimeText = new Date(entry.startTimestamp).toLocaleTimeString(undefined, { hour12: false });
+            const endTimeText = entry.count > 1 && entry.endTimestamp && entry.endTimestamp !== entry.startTimestamp
+                ? new Date(entry.endTimestamp).toLocaleTimeString(undefined, { hour12: false })
+                : null;
+            const timeText = endTimeText ? `${startTimeText} ~ ${endTimeText}` : startTimeText;
             const direction = entry.signal > 0 ? '买入' : '卖出';
             const badgeClass = entry.signal > 0 ? 'bg-success' : 'bg-danger';
+            const countBadge = entry.count > 1 ? `<span class="badge bg-secondary me-2">x${entry.count}</span>` : '';
             const priceText = Number.isFinite(entry.price) ? `$${this.formatNumber(entry.price)}` : '—';
             const obiText = Number.isFinite(entry.obi) ? this.formatNumber(entry.obi) : '—';
             const ofiText = Number.isFinite(entry.ofi) ? this.formatNumber(entry.ofi) : '—';
-            const reason = entry.reason ? String(entry.reason).split('\n')[0] : '';
+            const reasons = Array.isArray(entry.reasons) ? entry.reasons : [];
+            const reasonText = reasons
+                .map(item => escapeHtml(item))
+                .filter(Boolean)
+                .join('；');
+            const reasonLine = reasonText
+                ? `<div class="text-muted small">${reasonText}</div>`
+                : '';
             const events = Array.isArray(entry.events) ? entry.events : [];
             const eventBadges = events
                 .map((evt) => {
@@ -768,23 +839,30 @@ class TradingApp {
                     const codeText = rawCode ? String(rawCode).trim() : '';
                     if (!codeText) return '';
                     const displayCode = codeText.slice(0, 2).toUpperCase();
+                    const labelSource = evt.label || evt.name || evt.description || evt.key || rawCode;
+                    const labelText = labelSource ? String(labelSource).trim() : displayCode;
                     const side = typeof evt.side === 'string' ? evt.side.toLowerCase() : '';
                     const colorClass = side === 'buy' ? 'bg-success' : side === 'sell' ? 'bg-danger' : 'bg-secondary';
-                    const title = escapeHtml(evt.label || evt.key || rawCode);
+                    const title = escapeHtml(labelText);
                     const inlineStyle = typeof evt.color === 'string' && evt.color.trim()
                         ? ` style="background-color:${escapeHtml(evt.color.trim())};color:#fff;"`
                         : '';
-                    return `<span class="badge ${colorClass} me-1"${inlineStyle} title="${title}">${escapeHtml(displayCode)}</span>`;
+                    return `<span class="d-inline-flex align-items-center me-2">`
+                        + `<span class="badge ${colorClass} me-1"${inlineStyle} title="${title}">${escapeHtml(displayCode)}</span>`
+                        + `<span class="ms-1">${escapeHtml(labelText)}</span>`
+                        + '</span>';
                 })
                 .filter(Boolean)
                 .join('');
-            const eventLine = eventBadges ? `<div class="text-muted small">${eventBadges}</div>` : '';
+            const eventLine = eventBadges
+                ? `<div class="text-muted small d-flex flex-wrap align-items-center gap-2">${eventBadges}</div>`
+                : '';
             return `
                 <div class="list-group-item d-flex justify-content-between align-items-start">
                     <div>
-                        <div class="fw-semibold"><span class="badge ${badgeClass} me-2">${direction}</span>${priceText}</div>
+                        <div class="fw-semibold"><span class="badge ${badgeClass} me-2">${direction}</span>${countBadge}${priceText}</div>
                         <div class="text-muted small">OBI ${obiText} · OFI ${ofiText}</div>
-                        ${reason ? `<div class="text-muted small">${escapeHtml(reason)}</div>` : ''}
+                        ${reasonLine}
                         ${eventLine}
                     </div>
                     <small class="text-muted ms-3">${timeText}</small>
@@ -963,9 +1041,7 @@ class TradingApp {
             }
         }
         if (!Number.isFinite(signal)) {
-            if (suggestion === 'buy') signal = 1;
-            else if (suggestion === 'sell') signal = -1;
-            else signal = 0;
+            signal = 0;
         }
         signal = Math.max(-1, Math.min(1, Number.isFinite(signal) ? signal : 0));
 
