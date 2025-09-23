@@ -293,6 +293,7 @@
             this.charts = {
                 trend: null,
                 indicator: null,
+                threshold: null,
             };
             this._polling = {
                 status: null,
@@ -352,8 +353,10 @@
                 lastResult: document.getElementById('domOptimizerLastResult'),
                 trendChart: document.getElementById('domOptimizerTrendChart'),
                 indicatorChart: document.getElementById('domOptimizerIndicatorChart'),
+                thresholdChart: document.getElementById('domOptimizerThresholdChart'),
                 trendRefreshBtn: document.getElementById('domOptimizerTrendRefreshBtn'),
                 indicatorRefreshBtn: document.getElementById('domOptimizerIndicatorRefreshBtn'),
+                thresholdRefreshBtn: document.getElementById('domOptimizerThresholdRefreshBtn'),
                 trendLiveToggle: document.getElementById('domOptimizerTrendLiveToggle'),
                 startInput: document.getElementById('domOptimizerStartInput'),
                 endInput: document.getElementById('domOptimizerEndInput'),
@@ -399,6 +402,7 @@
                 pageSizeInput,
                 trendRefreshBtn,
                 indicatorRefreshBtn,
+                thresholdRefreshBtn,
                 trendLiveToggle,
                 symbolInput,
                 signalsTable
@@ -418,9 +422,17 @@
                     this.refreshStatistics({ silent: true });
                 }
             });
+            thresholdRefreshBtn?.addEventListener('click', () => {
+                if (this.state.historyMetrics.length) {
+                    this.updateThresholdChart(this.state.historyMetrics);
+                } else {
+                    this.refreshStatistics({ silent: true });
+                }
+            });
             indicatorRefreshBtn?.addEventListener('click', () => {
                 if (this.state.historyMetrics.length) {
                     this.updateIndicatorChart(this.state.historyMetrics);
+                    this.updateThresholdChart(this.state.historyMetrics);
                 } else {
                     this.refreshStatistics({ silent: true });
                 }
@@ -1128,6 +1140,7 @@
                 this.state.historyMetrics = [];
                 this.updateTrendChart([]);
                 this.updateIndicatorChart([]);
+                this.updateThresholdChart([]);
                 return;
             }
             const ordered = metrics
@@ -1142,6 +1155,7 @@
             this.ensureIndicatorChart();
             this.updateTrendChart(ordered);
             this.updateIndicatorChart(ordered);
+            this.updateThresholdChart(ordered);
         }
 
         ensureTrendChart() {
@@ -1352,6 +1366,109 @@
             return chart;
         }
 
+        ensureThresholdChart() {
+            if (this.charts.threshold) return this.charts.threshold;
+            const canvas = this.elements.thresholdChart;
+            if (!(canvas && canvas.getContext)) return null;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return null;
+
+            const chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
+                            label: '价格',
+                            data: [],
+                            yAxisID: 'priceAxis',
+                            borderColor: '#2563eb',
+                            backgroundColor: 'rgba(37,99,235,0.15)',
+                            tension: 0.2,
+                            pointRadius: 0,
+                            spanGaps: true,
+                        },
+                        {
+                            label: 'Long OBI 阈值',
+                            data: [],
+                            yAxisID: 'thresholdAxis',
+                            borderColor: 'rgba(34,197,94,0.7)',
+                            borderDash: [6, 3],
+                            pointRadius: 0,
+                            spanGaps: true,
+                        },
+                        {
+                            label: 'Short OBI 阈值',
+                            data: [],
+                            yAxisID: 'thresholdAxis',
+                            borderColor: 'rgba(239,68,68,0.7)',
+                            borderDash: [6, 3],
+                            pointRadius: 0,
+                            spanGaps: true,
+                        },
+                        {
+                            label: 'Long OFI 阈值',
+                            data: [],
+                            yAxisID: 'thresholdAxis',
+                            borderColor: 'rgba(16,185,129,0.45)',
+                            borderDash: [4, 4],
+                            pointRadius: 0,
+                            spanGaps: true,
+                        },
+                        {
+                            label: 'Short OFI 阈值',
+                            data: [],
+                            yAxisID: 'thresholdAxis',
+                            borderColor: 'rgba(239,68,68,0.45)',
+                            borderDash: [4, 4],
+                            pointRadius: 0,
+                            spanGaps: true,
+                        },
+                    ],
+                },
+                options: {
+                    parsing: false,
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: { tooltipFormat: 'MM-dd HH:mm', displayFormats: { hour: 'MM-dd HH:mm', day: 'MM-dd' } },
+                            grid: { color: 'rgba(148,163,184,0.1)' },
+                        },
+                        priceAxis: {
+                            position: 'left',
+                            grid: { drawOnChartArea: false },
+                            title: { display: true, text: '价格' },
+                        },
+                        thresholdAxis: {
+                            position: 'right',
+                            grid: { drawOnChartArea: true, color: 'rgba(148,163,184,0.12)' },
+                            title: { display: true, text: '阈值' },
+                        },
+                    },
+                    plugins: {
+                        legend: { position: 'bottom' },
+                        tooltip: {
+                            callbacks: {
+                                label: (context) => {
+                                    const value = Number(context.parsed.y);
+                                    if (!Number.isFinite(value)) return context.dataset.label || '';
+                                    if (context.dataset.yAxisID === 'priceAxis') {
+                                        return `${context.dataset.label}: $${formatNumber(value, 2)}`;
+                                    }
+                                    return `${context.dataset.label}: ${formatNumber(value, 2)}`;
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+            chart._datasetMap = { price: 0, longObi: 1, shortObi: 2, longOfi: 3, shortOfi: 4 };
+            this.charts.threshold = chart;
+            return chart;
+        }
+
         updateTrendChart(metrics) {
             const chart = this.ensureTrendChart();
             if (!chart) return;
@@ -1423,6 +1540,84 @@
             ofiDataset.data = ofiData;
             signalDataset.data = signalData;
             this.updateIndicatorAnnotations(chart, thresholds);
+            chart.update('none');
+        }
+
+        updateThresholdChart(metrics) {
+            const chart = this.ensureThresholdChart();
+            if (!chart) return;
+            const map = chart._datasetMap || { price: 0, longObi: 1, shortObi: 2, longOfi: 3, shortOfi: 4 };
+
+            const priceData = [];
+            const longObiData = [];
+            const shortObiData = [];
+            const longOfiData = [];
+            const shortOfiData = [];
+            const thresholdValues = [];
+            const priceValues = [];
+
+            for (const item of metrics) {
+                const ts = resolveTimestampMs(item);
+                if (!ts) continue;
+                const price = resolvePrice(item);
+                if (Number.isFinite(price)) {
+                    priceData.push({ x: ts, y: price });
+                    priceValues.push(price);
+                }
+                const thresholds = item?.thresholds;
+                if (thresholds && typeof thresholds === 'object') {
+                    const longObi = toNumber(thresholds?.long?.obi ?? thresholds?.long?.obi5);
+                    const shortObi = toNumber(thresholds?.short?.obi ?? thresholds?.short?.obi5);
+                    const longOfi = toNumber(thresholds?.long?.ofi);
+                    const shortOfi = toNumber(thresholds?.short?.ofi);
+                    if (Number.isFinite(longObi)) {
+                        longObiData.push({ x: ts, y: longObi });
+                        thresholdValues.push(longObi);
+                    }
+                    if (Number.isFinite(shortObi)) {
+                        shortObiData.push({ x: ts, y: shortObi });
+                        thresholdValues.push(shortObi);
+                    }
+                    if (Number.isFinite(longOfi)) {
+                        longOfiData.push({ x: ts, y: longOfi });
+                        thresholdValues.push(longOfi);
+                    }
+                    if (Number.isFinite(shortOfi)) {
+                        shortOfiData.push({ x: ts, y: shortOfi });
+                        thresholdValues.push(shortOfi);
+                    }
+                }
+            }
+
+            const priceDataset = chart.data.datasets[map.price];
+            if (priceDataset) priceDataset.data = priceData;
+            const longObiDataset = chart.data.datasets[map.longObi];
+            if (longObiDataset) longObiDataset.data = longObiData;
+            const shortObiDataset = chart.data.datasets[map.shortObi];
+            if (shortObiDataset) shortObiDataset.data = shortObiData;
+            const longOfiDataset = chart.data.datasets[map.longOfi];
+            if (longOfiDataset) longOfiDataset.data = longOfiData;
+            const shortOfiDataset = chart.data.datasets[map.shortOfi];
+            if (shortOfiDataset) shortOfiDataset.data = shortOfiData;
+
+            const thresholdAxis = chart.options?.scales?.thresholdAxis;
+            if (thresholdAxis && thresholdValues.length) {
+                const min = Math.min(...thresholdValues);
+                const max = Math.max(...thresholdValues);
+                const span = max - min || 1;
+                thresholdAxis.min = min - span * 0.15;
+                thresholdAxis.max = max + span * 0.15;
+            }
+
+            const priceAxis = chart.options?.scales?.priceAxis;
+            if (priceAxis && priceValues.length) {
+                const min = Math.min(...priceValues);
+                const max = Math.max(...priceValues);
+                const span = max - min || (min * 0.05) || 1;
+                priceAxis.min = min - span * 0.05;
+                priceAxis.max = max + span * 0.05;
+            }
+
             chart.update('none');
         }
 
