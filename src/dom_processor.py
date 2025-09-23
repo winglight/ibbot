@@ -541,11 +541,14 @@ class DOMProcessor:
         feature_cfg = params.get("features", {}) if isinstance(params, dict) else {}
         long_feature_ok = True
         short_feature_ok = True
+        flags = features.get("feature_flags") or {}
 
         stacking_thr = float(feature_cfg.get("stacking", {}).get("intensity", 0.0))
         if stacking_thr > 0:
-            long_feature_ok &= features.get("stacking_intensity_buy", 0.0) >= 0.75 * stacking_thr
-            short_feature_ok &= features.get("stacking_intensity_sell", 0.0) >= 0.75 * stacking_thr
+            if flags.get("stacking_buy"):
+                long_feature_ok &= features.get("stacking_intensity_buy", 0.0) >= 0.75 * stacking_thr
+            if flags.get("stacking_sell"):
+                short_feature_ok &= features.get("stacking_intensity_sell", 0.0) >= 0.75 * stacking_thr
 
         absorption_thr = float(feature_cfg.get("absorption", {}).get("index", 0.0))
         if absorption_thr > 0:
@@ -556,22 +559,25 @@ class DOMProcessor:
             absorption_sell = features.get("absorption_index_sell")
             if absorption_sell not in (None, 0):
                 short_feature_ok &= absorption_sell >= absorption_thr
-
         sweep_thr = float(feature_cfg.get("sweep", {}).get("intensity", 0.0))
         if sweep_thr > 0:
-            long_feature_ok &= features.get("sweep_intensity_up", 0.0) >= 0.7 * sweep_thr
-            short_feature_ok &= features.get("sweep_intensity_down", 0.0) >= 0.7 * sweep_thr
+            if flags.get("sweep_up"):
+                long_feature_ok &= features.get("sweep_intensity_up", 0.0) >= 0.7 * sweep_thr
+            if flags.get("sweep_down"):
+                short_feature_ok &= features.get("sweep_intensity_down", 0.0) >= 0.7 * sweep_thr
 
         fake_thr = float(feature_cfg.get("fake_breakout", {}).get("prob", 0.0))
-        if fake_thr > 0 and features.get("fake_breakout_prob", 0.0) >= fake_thr:
-            long_feature_ok = False
-            short_feature_ok = False
+        if fake_thr > 0 and flags.get("fake_breakout"):
+            if features.get("fake_breakout_prob", 0.0) >= fake_thr:
+                long_feature_ok = False
+                short_feature_ok = False
 
         reversal_thr = float(feature_cfg.get("obi_ofi_reversal", {}).get("score", 0.0))
-        if reversal_thr > 0 and features.get("obi_ofi_reversal_score", 0.0) >= reversal_thr:
-            # reversals invalidate continuation trades, require a reset
-            long_feature_ok = False
-            short_feature_ok = False
+        if reversal_thr > 0 and flags.get("obi_ofi_reversal"):
+            if features.get("obi_ofi_reversal_score", 0.0) >= reversal_thr:
+                # reversals invalidate continuation trades, require a reset
+                long_feature_ok = False
+                short_feature_ok = False
 
         if (
             features.get("obi5", 0) >= long_obi

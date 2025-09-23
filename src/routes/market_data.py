@@ -302,12 +302,24 @@ async def get_chart_data(
                 }
 
         # 3) 需要拉取新数据（强制刷新或缓存不足）
-        df = await core.ibkr_client.get_historical_data(
-                    symbol=request.symbol,
-                    duration=request.duration,
-                    bar_size=request.bar_size,
-                    exchange=request.exchange,
-                )
+        ib_client = getattr(core, "ibkr_client", None)
+        if ib_client is None or not connection_manager.is_connected():
+            reason = None
+            try:
+                reason = connection_manager.get_last_connect_error()
+            except Exception:
+                reason = None
+            detail = "Not connected to IBKR"
+            if reason:
+                detail = f"{detail}: {reason}"
+            raise HTTPException(status_code=400, detail=detail)
+
+        df = await ib_client.get_historical_data(
+            symbol=request.symbol,
+            duration=request.duration,
+            bar_size=request.bar_size,
+            exchange=request.exchange,
+        )
 
         # 4) 成功获取数据
         if df is not None and not df.empty:
