@@ -35,7 +35,7 @@ def _append_initial_metric(cache, symbol, metrics):
 
 def test_tracker_marks_long_success(cache):
     tracker = SignalOutcomeTracker(cache, evaluation_delay_seconds=60, price_move_threshold=0.01)
-    symbol = "ES"
+    symbol = "MNQ"
     base_ts = time.time() * 1000.0
     entry_price = 100.0
     metrics = {"timestamp": base_ts, "mid_price": entry_price}
@@ -111,9 +111,9 @@ def test_dom_service_registers_and_resolves_outcome(tmp_path):
             "test_metrics": metrics,
             "test_signals": {"long": True, "short": False},
         }
-        service._on_depth_update("ES", data)
+        service._on_depth_update("MNQ", data)
 
-        history = cache.get_history("ES")
+        history = cache.get_history("MNQ")
         assert history["metrics"][-1]["signal_type"] == "long"
         signal_id = history["metrics"][-1]["signal_id"]
 
@@ -133,9 +133,9 @@ def test_dom_service_registers_and_resolves_outcome(tmp_path):
             "test_metrics": later_metrics,
             "test_signals": {"long": False, "short": False},
         }
-        service._on_depth_update("ES", data2)
+        service._on_depth_update("MNQ", data2)
 
-        final_history = cache.get_history("ES")
+        final_history = cache.get_history("MNQ")
         stored = next(item for item in final_history["metrics"] if item.get("signal_id") == signal_id)
         assert stored["outcome"] == 1
     finally:

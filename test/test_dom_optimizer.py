@@ -99,10 +99,10 @@ def test_optimizer_applies_thresholds_and_updates_state(orchestrator):
             "outcome": 0,
         },
     ]
-    _append_metrics(service._cache, "ES", metrics)
+    _append_metrics(service._cache, "MNQ", metrics)
 
     result = orchestrator_inst.run_optimization(
-        "ES",
+        "MNQ",
         min_signals=2,
         obi_candidates=[0.6, 0.65, 0.7, 0.75],
         ofi_candidates=[0.0, 5.0],
@@ -128,7 +128,7 @@ def test_optimizer_applies_thresholds_and_updates_state(orchestrator):
     assert status["last_started_at"] == result["started_at"]
     assert status["last_run_at"] == result["completed_at"]
     assert status["last_result"]["duration_ms"] == pytest.approx(result["duration_ms"])
-    assert status["last_result"]["symbol"] == "ES"
+    assert status["last_result"]["symbol"] == "MNQ"
 
     schedule_status = orchestrator_inst.configure_schedule(enabled=True, interval_minutes=60)
     assert schedule_status["schedule"]["enabled"] is True
@@ -171,7 +171,7 @@ def test_schedule_plan_configuration(orchestrator):
         enabled=True,
         interval_minutes=30,
         start_at=start_at,
-        symbol="es",
+        symbol="MNQ",
         lookback_minutes=120,
         limit=200,
         apply_updates=False,
@@ -183,7 +183,7 @@ def test_schedule_plan_configuration(orchestrator):
 
     assert status["schedule"]["enabled"] is True
     assert status["schedule"]["interval_minutes"] == 30
-    assert status["plan"]["symbol"] == "ES"
+    assert status["plan"]["symbol"] == "MNQ"
     assert status["plan"]["lookback_minutes"] == 120
     assert status["plan"]["limit"] == 200
     assert status["plan"]["apply_updates"] is False
@@ -218,13 +218,13 @@ def test_run_scheduled_once(orchestrator):
             "outcome": 0,
         },
     ]
-    _append_metrics(service._cache, "ES", metrics)
+    _append_metrics(service._cache, "MNQ", metrics)
 
     orchestrator_inst.configure_schedule(
         enabled=True,
         interval_minutes=5,
         start_at=_now() - timedelta(minutes=1),
-        symbol="ES",
+        symbol="MNQ",
         lookback_minutes=60,
         apply_updates=False,
         min_signals=1,
@@ -233,12 +233,12 @@ def test_run_scheduled_once(orchestrator):
 
     result = orchestrator_inst.run_scheduled_once(reference_time=_now())
     assert result is not None
-    assert result["symbol"] == "ES"
+    assert result["symbol"] == "MNQ"
     assert result["feature_thresholds"]["stacking"]["intensity"] == pytest.approx(0.6)
     status = orchestrator_inst.get_status()
     assert status["status"] == "succeeded"
     assert status["scheduled_at"] is not None
-    assert status["plan"]["symbol"] == "ES"
+    assert status["plan"]["symbol"] == "MNQ"
     assert status["schedule"]["next_run_at"] is not None
 
 
@@ -254,7 +254,7 @@ def test_run_optimization_failure_updates_state(orchestrator, monkeypatch):
             "outcome": 1,
         }
     ]
-    _append_metrics(service._cache, "ES", metrics)
+    _append_metrics(service._cache, "MNQ", metrics)
 
     def raise_error(self, *args, **kwargs):
         raise RuntimeError("boom")
@@ -262,7 +262,7 @@ def test_run_optimization_failure_updates_state(orchestrator, monkeypatch):
     monkeypatch.setattr(DOMParameterTuner, "optimize_with_history", raise_error)
 
     with pytest.raises(RuntimeError):
-        orchestrator_inst.run_optimization("ES")
+        orchestrator_inst.run_optimization("MNQ")
 
     status = orchestrator_inst.get_status()
     assert status["status"] == "failed"
@@ -300,7 +300,7 @@ def test_state_restored_from_persistence(monkeypatch, tmp_path):
         orchestrator_one.configure_schedule(
             enabled=True,
             interval_minutes=45,
-            symbol="ES",
+            symbol="MNQ",
             lookback_minutes=90,
             apply_updates=False,
         )
@@ -314,7 +314,7 @@ def test_state_restored_from_persistence(monkeypatch, tmp_path):
         status = orchestrator_two.get_status()
         assert status["schedule"]["enabled"] is True
         assert status["schedule"]["interval_minutes"] == 45
-        assert status["plan"]["symbol"] == "ES"
+        assert status["plan"]["symbol"] == "MNQ"
         assert status["plan"]["lookback_minutes"] == 90
         assert status["plan"]["apply_updates"] is False
         assert "feature_thresholds" in status["plan"]
@@ -328,7 +328,7 @@ def test_automation_defaults_loaded_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_LOOKBACK_MINUTES", "30")
     monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_MIN_SIGNALS", "5")
     monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_APPLY_UPDATES", "0")
-    monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_SYMBOL", "es")
+    monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_SYMBOL", "MNQ")
     monkeypatch.setenv("DOM_AUTOMATION_DEFAULT_LIMIT", "200")
 
     service = DOMService()
@@ -348,7 +348,7 @@ def test_automation_defaults_loaded_from_env(monkeypatch, tmp_path):
         assert status["plan"]["lookback_minutes"] == 30
         assert status["plan"]["min_signals"] == 5
         assert status["plan"]["apply_updates"] is False
-        assert status["plan"]["symbol"] == "ES"
+        assert status["plan"]["symbol"] == "MNQ"
         assert status["plan"]["limit"] == 200
         assert "feature_thresholds" in status["plan"]
     finally:

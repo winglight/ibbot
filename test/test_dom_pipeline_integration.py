@@ -74,7 +74,7 @@ def _push_update(service, symbol, ts_ms, mid_price, signals, obi, ofi):
 
 
 def test_dom_pipeline_integration(tmp_path):
-    symbol = "ES"
+    symbol = "MNQ"
     service = _build_service(tmp_path)
     dummy_db = DummyDB()
     service.db_manager = dummy_db

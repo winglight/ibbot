@@ -66,7 +66,7 @@ def test_data_push_failure_returns_error_and_state(monkeypatch):
     response = client.post(
         "/api/strategies/Test/data-push",
         headers=headers,
-        json={"enabled": True, "subscription": "dom_trend", "symbol": "ES"},
+        json={"enabled": True, "subscription": "dom_trend", "symbol": "MNQ"},
     )
 
     assert response.status_code == 200
@@ -76,7 +76,7 @@ def test_data_push_failure_returns_error_and_state(monkeypatch):
     state = payload["state"]
     assert state["active"] is False
     assert state["subscription"] == "dom_trend"
-    assert state["symbol"] == "ES"
+    assert state["symbol"] == "MNQ"
 
 
 def test_data_push_success_returns_state(monkeypatch):
@@ -86,7 +86,7 @@ def test_data_push_success_returns_state(monkeypatch):
     response = client.post(
         "/api/strategies/Test/data-push",
         headers=headers,
-        json={"enabled": True, "subscription": "dom_trend", "symbol": "ES"},
+        json={"enabled": True, "subscription": "dom_trend", "symbol": "MNQ"},
     )
 
     assert response.status_code == 200
@@ -95,4 +95,4 @@ def test_data_push_success_returns_state(monkeypatch):
     state = payload["state"]
     assert state["active"] is True
     assert state["subscription"] == "dom_trend"
-    assert state["symbol"] == "ES"
+    assert state["symbol"] == "MNQ"
