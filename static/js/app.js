@@ -5219,22 +5219,39 @@ class TradingApp {
 
                 const alignToInterval = (date) => {
                     const aligned = new Date(date.getTime());
-                    switch (interval) {
+                    const intervalKey = typeof interval === 'string' ? interval : '';
+                    switch (intervalKey) {
                         case '1min':
+                        case '1mins':
                             aligned.setSeconds(0, 0);
                             break;
-                        case '5min': {
+                        case '5min':
+                        case '5mins': {
                             const minutes5 = Math.floor(aligned.getMinutes() / 5) * 5;
                             aligned.setMinutes(minutes5, 0, 0);
                             break;
                         }
-                        case '15min': {
+                        case '15min':
+                        case '15mins': {
                             const minutes15 = Math.floor(aligned.getMinutes() / 15) * 15;
                             aligned.setMinutes(minutes15, 0, 0);
                             break;
                         }
+                        case '30min':
+                        case '30mins': {
+                            const minutes30 = Math.floor(aligned.getMinutes() / 30) * 30;
+                            aligned.setMinutes(minutes30, 0, 0);
+                            break;
+                        }
                         case '1hour':
+                        case '1hours':
+                        case '60min':
+                        case '60mins':
                             aligned.setMinutes(0, 0, 0);
+                            break;
+                        case '1day':
+                        case '1days':
+                            aligned.setHours(0, 0, 0, 0);
                             break;
                         default:
                             break;
