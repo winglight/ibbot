@@ -1,6 +1,8 @@
-from typing import List, Optional
+from typing import Any, List, Optional
 import asyncio
 from datetime import datetime
+
+import json
 
 from fastapi import (
     APIRouter,
@@ -124,15 +126,59 @@ async def ack_alert(
 @router.websocket("/ws/dom/{symbol}")
 async def dom_ws(websocket: WebSocket, symbol: str):
     await websocket.accept()
+
+    def _make_signature(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, dict) and not value:
+            return None
+        try:
+            return json.dumps(value, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return repr(value)
+
+    last_metrics_signature: Optional[str] = None
+    last_events_signature: Optional[str] = None
+    last_error: Optional[str] = None
     try:
         while True:
-            await websocket.send_json(
-                {
-                    "symbol": symbol,
-                    "metrics": dom_service.get_metrics(symbol),
-                    "events": dom_service.get_events(),
-                }
-            )
+            metrics = dom_service.get_metrics(symbol)
+            events = dom_service.get_events()
+
+            metrics_signature = _make_signature(metrics)
+            events_signature = _make_signature(events)
+
+            if metrics_signature and metrics_signature != last_metrics_signature:
+                await websocket.send_json(
+                    {
+                        "symbol": symbol,
+                        "metrics": metrics,
+                        "events": events,
+                    }
+                )
+                last_metrics_signature = metrics_signature
+                last_events_signature = events_signature
+                last_error = None
+            else:
+                if not metrics_signature:
+                    error_message = "DOM metrics unavailable"
+                else:
+                    error_message = "DOM metrics stale: no new data received"
+
+                if last_error != error_message or events_signature != last_events_signature:
+                    await websocket.send_json(
+                        {
+                            "symbol": symbol,
+                            "metrics": None,
+                            "events": events,
+                            "error": error_message,
+                        }
+                    )
+                    last_error = error_message
+                    last_events_signature = events_signature
+                    if not metrics_signature:
+                        last_metrics_signature = None
+
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:
         return

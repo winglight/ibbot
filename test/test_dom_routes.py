@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 import time
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 import core
@@ -158,8 +158,10 @@ def test_dom_api_flow(client, monkeypatch):
     assert r.json()["alerts"] == []
 
     # websocket
+    original_sleep = asyncio.sleep
+
     async def instant_sleep(_):
-        pass
+        await original_sleep(0)
 
     monkeypatch.setattr("src.routes.dom.asyncio.sleep", instant_sleep)
     with test_client.websocket_connect("/ws/dom/TEST") as ws:
@@ -169,6 +171,76 @@ def test_dom_api_flow(client, monkeypatch):
     # stop stream
     r = test_client.post("/api/dom/stop", json={"symbol": "TEST"}, headers=headers)
     assert r.status_code == 200 and r.json()["success"]
+
+
+def test_dom_ws_reports_unavailable_and_stale_states(monkeypatch):
+    from src.routes.dom import dom_ws
+
+    class FakeWebSocket:
+        def __init__(self, max_messages: int):
+            self.max_messages = max_messages
+            self.messages = []
+
+        async def accept(self):
+            return None
+
+        async def send_json(self, data):
+            self.messages.append(data)
+            if len(self.messages) >= self.max_messages:
+                raise WebSocketDisconnect(code=1000)
+
+    original_sleep = asyncio.sleep
+
+    async def instant_sleep(_):
+        await original_sleep(0)
+
+    monkeypatch.setattr("src.routes.dom.asyncio.sleep", instant_sleep)
+
+    def make_metrics_provider(payloads):
+        iterator = iter(payloads)
+
+        def _get_metrics(symbol):
+            try:
+                return next(iterator)
+            except StopIteration:
+                return {}
+
+        return _get_metrics
+
+    monkeypatch.setattr("src.routes.dom.dom_service.get_events", lambda: [])
+
+    # Case 1: no metrics available should yield an explicit error
+    monkeypatch.setattr(
+        "src.routes.dom.dom_service.get_metrics",
+        make_metrics_provider([{}]),
+    )
+    ws_no_metrics = FakeWebSocket(max_messages=1)
+    asyncio.run(dom_ws(ws_no_metrics, "UNKNOWN"))
+    assert ws_no_metrics.messages == [
+        {
+            "symbol": "UNKNOWN",
+            "metrics": None,
+            "events": [],
+            "error": "DOM metrics unavailable",
+        }
+    ]
+
+    # Case 2: repeated metrics should raise a stale-data error on subsequent iteration
+    monkeypatch.setattr(
+        "src.routes.dom.dom_service.get_metrics",
+        make_metrics_provider(
+            [
+                {"timestamp": 1.0, "obi5": 0.5},
+                {"timestamp": 1.0, "obi5": 0.5},
+            ]
+        ),
+    )
+    ws_stale = FakeWebSocket(max_messages=2)
+    asyncio.run(dom_ws(ws_stale, "TEST"))
+    assert ws_stale.messages[0]["metrics"] == {"timestamp": 1.0, "obi5": 0.5}
+    assert "error" not in ws_stale.messages[0]
+    assert ws_stale.messages[1]["metrics"] is None
+    assert ws_stale.messages[1]["error"] == "DOM metrics stale: no new data received"
 
 
 def test_dom_optimization_endpoints(client):
