@@ -6,7 +6,7 @@ import pytest
 
 from src.dom_cache import DomCacheManager
 from src.dom_optimizer import DOMOptimizationOrchestrator, _now
-from src.dom_parameter_tuner import DOMParameterTuner
+from src.dom_parameter_tuner import DOMParameterTuner, DEFAULT_FEATURE_THRESHOLDS
 from src.dom_service import DOMService
 from src.dom_stats import DomStatsAggregator
 
@@ -115,9 +115,11 @@ def test_optimizer_applies_thresholds_and_updates_state(orchestrator):
     assert result["positive_signals"] == 2
     assert result["negative_signals"] == 2
     assert result["insufficient_data"] is False
+    assert result["feature_thresholds"] == DEFAULT_FEATURE_THRESHOLDS
 
     updated_base = service.get_tuner_base_thresholds()
     assert updated_base["long"]["obi"] >= 0.65
+    assert service.get_tuner_feature_thresholds() == DEFAULT_FEATURE_THRESHOLDS
     assert "dom_automation_state" in dummy_db.configs
 
     status = orchestrator_inst.get_status()
@@ -132,6 +134,7 @@ def test_optimizer_applies_thresholds_and_updates_state(orchestrator):
     assert schedule_status["schedule"]["enabled"] is True
     assert schedule_status["schedule"]["interval_minutes"] == 60
     assert schedule_status["next_run_at"] is not None
+    assert "feature_thresholds" in schedule_status["plan"]
 
     disabled_status = orchestrator_inst.configure_schedule(enabled=False, interval_minutes=None)
     assert disabled_status["schedule"]["enabled"] is False
@@ -157,6 +160,7 @@ def test_optimizer_reports_insufficient_data(orchestrator):
     assert result["applied"] is False
     assert result["insufficient_data"] is True
     assert result["evaluated_records"] == 0
+    assert result["feature_thresholds"] == DEFAULT_FEATURE_THRESHOLDS
 
 
 def test_schedule_plan_configuration(orchestrator):
@@ -174,6 +178,7 @@ def test_schedule_plan_configuration(orchestrator):
         min_signals=2,
         obi_candidates=[0.6, "0.7", None],
         ofi_candidates=[0, 5.5],
+        feature_thresholds={"stacking": {"intensity": 0.55}},
     )
 
     assert status["schedule"]["enabled"] is True
@@ -185,6 +190,7 @@ def test_schedule_plan_configuration(orchestrator):
     assert status["plan"]["min_signals"] == 2
     assert status["plan"]["obi_candidates"] == [0.6, 0.7]
     assert status["plan"]["ofi_candidates"] == [0.0, 5.5]
+    assert status["plan"]["feature_thresholds"]["stacking"]["intensity"] == pytest.approx(0.55)
     assert status["status"] == "idle"
 
     disabled = orchestrator_inst.configure_schedule(enabled=False, interval_minutes=None)
@@ -222,11 +228,13 @@ def test_run_scheduled_once(orchestrator):
         lookback_minutes=60,
         apply_updates=False,
         min_signals=1,
+        feature_thresholds={"stacking": {"intensity": 0.6}},
     )
 
     result = orchestrator_inst.run_scheduled_once(reference_time=_now())
     assert result is not None
     assert result["symbol"] == "ES"
+    assert result["feature_thresholds"]["stacking"]["intensity"] == pytest.approx(0.6)
     status = orchestrator_inst.get_status()
     assert status["status"] == "succeeded"
     assert status["scheduled_at"] is not None
@@ -309,6 +317,7 @@ def test_state_restored_from_persistence(monkeypatch, tmp_path):
         assert status["plan"]["symbol"] == "ES"
         assert status["plan"]["lookback_minutes"] == 90
         assert status["plan"]["apply_updates"] is False
+        assert "feature_thresholds" in status["plan"]
     finally:
         orchestrator_two.shutdown()
 
@@ -341,5 +350,6 @@ def test_automation_defaults_loaded_from_env(monkeypatch, tmp_path):
         assert status["plan"]["apply_updates"] is False
         assert status["plan"]["symbol"] == "ES"
         assert status["plan"]["limit"] == 200
+        assert "feature_thresholds" in status["plan"]
     finally:
         orchestrator.shutdown()

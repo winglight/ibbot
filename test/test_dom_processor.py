@@ -1,16 +1,28 @@
+import copy
+
 import pytest
 
 from src.dom_processor import DOMRingBuffer, DOMProcessor
+from src.dom_parameter_tuner import DEFAULT_FEATURE_THRESHOLDS
 
 
 class _StaticTuner:
     def __init__(self) -> None:
+        feature_thresholds = copy.deepcopy(DEFAULT_FEATURE_THRESHOLDS)
+        feature_thresholds["stacking"]["intensity"] = 0.0
+        feature_thresholds["stacking"]["min_depth"] = 0.0
+        feature_thresholds["absorption"]["index"] = 0.0
+        feature_thresholds["sweep"]["intensity"] = 0.0
+        feature_thresholds["fake_breakout"]["prob"] = 1.0
+        feature_thresholds["obi_ofi_reversal"]["score"] = 1.1
+        feature_thresholds["wall_pull_no_follow"]["score"] = 1.0
         self.thresholds = {
             "session": {"active": "RTH"},
             "long": {"obi": 0.8, "ofi": 0.0},
             "short": {"obi": 0.2, "ofi": 0.0},
             "absorb": {"obi_buy": 0.4, "obi_sell": 0.6, "ofi_sign": 0.0},
             "sweep": {"ofi_multiplier": 2.0, "min_abs_ofi": 0.0},
+            "features": feature_thresholds,
         }
 
     def update(self, metrics, events=()):
@@ -62,6 +74,8 @@ def test_calc_obi_and_ofi():
     })
     expected_ofi = 13 - 12  # ask diff ignored as mid moved up
     assert p.last_metrics["ofi"] == expected_ofi
+    assert isinstance(p.last_metrics.get("feature_flags"), dict)
+    assert isinstance(p.last_metrics.get("events"), list)
 
 
 def test_compute_features_and_cvd():
@@ -74,6 +88,8 @@ def test_compute_features_and_cvd():
     m = p.last_metrics
     assert m["cvd"] == 6.0
     assert pytest.approx(m["zscore_obi5"], rel=1e-5) == 1.0
+    assert 0.0 <= m["fake_breakout_prob"] <= 1.0
+    assert "feature_flags" in m and isinstance(m["feature_flags"], dict)
 
 
 def test_mid_price_preserves_scale():
@@ -89,11 +105,19 @@ def test_mid_price_preserves_scale():
 
 
 def test_detect_events_absorb():
-    p = DOMProcessor(window=5, max_levels=1)
-    p.on_depth_update({"bids": [(100, 10)], "asks": [(101, 20)]})
-    p.on_depth_update({"bids": [(100, 11)], "asks": [(101, 18)]})
-    events = p.detect_events(p.features_history)
-    assert "buy_absorb" in events
+    p = DOMProcessor(window=5, max_levels=2)
+    p.on_depth_update({
+        "bids": [(100, 20), (99, 18)],
+        "asks": [(101, 50), (102, 30)],
+    })
+    p.on_depth_update({
+        "bids": [(100, 28), (99, 18)],
+        "asks": [(101, 40), (102, 30)],
+    })
+    events, details = p.detect_events(p.features_history)
+    assert "absorption_buy" in events
+    assert any(evt.get("key") == "absorption_buy" for evt in details)
+    assert p.last_metrics["feature_flags"]["absorption_buy"]
 
 
 def test_trend_score_range():
@@ -104,6 +128,21 @@ def test_trend_score_range():
     assert score is not None
     assert -1.0 <= score <= 1.0
     assert score > 0
+
+
+def test_stacking_feature_flags():
+    p = DOMProcessor(window=5, max_levels=3)
+    p.on_depth_update({
+        "bids": [(100, 20), (99, 15), (98, 10)],
+        "asks": [(101, 25), (102, 20), (103, 15)],
+    })
+    p.on_depth_update({
+        "bids": [(100, 80), (99, 40), (98, 20)],
+        "asks": [(101, 20), (102, 15), (103, 10)],
+    })
+    flags = p.last_metrics["feature_flags"]
+    assert flags["stacking_buy"]
+    assert any(evt.get("code") == "K" for evt in p.last_metrics.get("events", []))
 
 
 def test_dom_processor_respects_custom_thresholds():

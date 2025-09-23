@@ -640,6 +640,12 @@
                                                 <input type="text" class="form-control" id="domOptimizerTrendCandidatesInput" placeholder="0.5,0.7,0.85,0.95">
                                             </div>
                                             <div class="form-text">仅在手动优化时使用，留空则使用默认组合。</div>
+                                            <label for="domOptimizerFeatureThresholdsInput" class="form-label mt-3">特征阈值配置 (JSON)</label>
+                                            <textarea class="form-control font-monospace" id="domOptimizerFeatureThresholdsInput" rows="6" placeholder='{"stacking": {"intensity": 0.35}}'></textarea>
+                                            <div class="d-flex justify-content-between align-items-center form-text mt-1">
+                                                <span>留空沿用当前配置，支持手动调整堆单/吸收等特征阈值。</span>
+                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerFeaturePresetBtn">填充当前配置</button>
+                                            </div>
                                         </div>
                                     </form>
                                     <div class="d-grid gap-2 mt-2">

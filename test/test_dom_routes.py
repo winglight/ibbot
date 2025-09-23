@@ -150,12 +150,13 @@ def test_dom_api_flow(client, monkeypatch):
     # alerts list and ack
     r = test_client.get("/api/alerts", headers=headers)
     alerts = r.json()["alerts"]
-    assert len(alerts) == 1
-    alert_id = alerts[0]["id"]
-    r = test_client.post(f"/api/alerts/{alert_id}/ack", headers=headers)
-    assert r.json()["success"]
+    assert len(alerts) >= 1
+    assert any(alert.get("event", {}).get("code") for alert in alerts)
+    for alert in alerts:
+        r = test_client.post(f"/api/alerts/{alert['id']}/ack", headers=headers)
+        assert r.json()["success"]
     r = test_client.get("/api/alerts", headers=headers)
-    assert r.json()["alerts"] == []
+    assert r.json().get("alerts") == []
 
     # websocket
     original_sleep = asyncio.sleep
@@ -268,7 +269,11 @@ def test_dom_optimization_endpoints(client):
 
     resp = test_client.post(
         "/api/dom/optimize",
-        json={"symbol": "TEST", "min_signals": 1},
+        json={
+            "symbol": "TEST",
+            "min_signals": 1,
+            "feature_thresholds": {"stacking": {"intensity": 0.45}},
+        },
         headers=headers,
     )
     assert resp.status_code == 200
@@ -278,6 +283,7 @@ def test_dom_optimization_endpoints(client):
     assert data["duration_ms"] > 0
     assert data["started_at"]
     assert data["completed_at"]
+    assert data["feature_thresholds"]["stacking"]["intensity"] == pytest.approx(0.45)
 
     status_resp = test_client.get("/api/dom/automation/status", headers=headers)
     assert status_resp.status_code == 200
@@ -296,6 +302,7 @@ def test_dom_optimization_endpoints(client):
             "symbol": "TEST",
             "lookback_minutes": 15,
             "apply_updates": False,
+            "feature_thresholds": {"cancel_rate": {"rate": 1.5}},
         },
         headers=headers,
     )
@@ -307,6 +314,7 @@ def test_dom_optimization_endpoints(client):
     assert schedule_data["plan"]["symbol"] == "TEST"
     assert schedule_data["plan"]["lookback_minutes"] == 15
     assert schedule_data["plan"]["apply_updates"] is False
+    assert schedule_data["plan"]["feature_thresholds"]["cancel_rate"]["rate"] == pytest.approx(1.5)
 
 
 def test_dom_automation_requires_write_access(client):

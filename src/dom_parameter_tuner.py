@@ -40,6 +40,19 @@ DEFAULT_BASE_THRESHOLDS: Dict[str, Dict[str, float]] = {
     "sweep": {"ofi_multiplier": 2.0, "min_abs_ofi": 0.0},
 }
 
+DEFAULT_FEATURE_THRESHOLDS: Dict[str, Dict[str, float]] = {
+    "stacking": {"intensity": 0.35, "min_depth": 50.0},
+    "pulling": {"intensity": 0.3, "min_depth": 30.0},
+    "wall": {"strength": 0.35, "min_size": 80.0},
+    "cancel_rate": {"rate": 1.2},
+    "absorption": {"index": 0.6},
+    "sweep": {"intensity": 0.7},
+    "fake_breakout": {"prob": 0.65},
+    "wall_pull_no_follow": {"score": 0.6},
+    "obi_ofi_reversal": {"score": 0.75},
+    "spread": {"delta_ticks": 2.0},
+}
+
 RTH_START = time(9, 30)
 RTH_END = time(16, 15)
 
@@ -99,6 +112,7 @@ class DOMParameterTuner:
         self,
         base_thresholds: Optional[MutableMapping[str, Dict[str, float]]] = None,
         *,
+        feature_thresholds: Optional[MutableMapping[str, Dict[str, float]]] = None,
         stats_window: int = 900,
         penalty_decay: float = 0.98,
         penalty_step: float = 0.02,
@@ -108,6 +122,10 @@ class DOMParameterTuner:
     ) -> None:
         self.base_thresholds: Dict[str, Dict[str, float]] = {
             key: dict(value) for key, value in (base_thresholds or DEFAULT_BASE_THRESHOLDS).items()
+        }
+        self.feature_thresholds: Dict[str, Dict[str, float]] = {
+            key: {sub: float(val) for sub, val in dict(value).items()}
+            for key, value in (feature_thresholds or DEFAULT_FEATURE_THRESHOLDS).items()
         }
         self.profiles: Dict[str, SessionProfile] = {
             "RTH": SessionProfile(RollingStats(stats_window), RollingStats(stats_window)),
@@ -125,9 +143,7 @@ class DOMParameterTuner:
         else:
             self.session_tz = timezone.utc
         self._pending_sweeps: List[Dict[str, int]] = []
-        self.thresholds: Dict[str, Dict[str, float]] = {
-            key: dict(value) for key, value in self.base_thresholds.items()
-        }
+        self.thresholds: Dict[str, Dict[str, float]] = self._compute_thresholds("RTH", self.profiles["RTH"])
 
     # ------------------------------------------------------------------
     def _current_session(self, timestamp_ns: Optional[int]) -> str:
@@ -238,6 +254,10 @@ class DOMParameterTuner:
             "short": {"obi": short_obi, "ofi": short_ofi},
             "absorb": dict(base["absorb"]),
             "sweep": dict(base["sweep"]),
+            "features": {
+                key: {sub: float(val) for sub, val in value.items()}
+                for key, value in self.feature_thresholds.items()
+            },
         }
         return thresholds
 
@@ -371,4 +391,5 @@ __all__ = [
     "RollingStats",
     "SessionProfile",
     "DEFAULT_BASE_THRESHOLDS",
+    "DEFAULT_FEATURE_THRESHOLDS",
 ]

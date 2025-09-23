@@ -1,4 +1,4 @@
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 import asyncio
 from datetime import datetime
 
@@ -233,6 +233,7 @@ class OptimizeRequest(BaseModel):
     obi_candidates: Optional[List[float]] = None
     ofi_candidates: Optional[List[float]] = None
     trend_candidates: Optional[List[float]] = None
+    feature_thresholds: Optional[Dict[str, Dict[str, float]]] = None
 
 
 @router.post("/api/dom/optimize")
@@ -254,6 +255,7 @@ async def optimize_dom_parameters(
             obi_candidates=req.obi_candidates,
             ofi_candidates=req.ofi_candidates,
             trend_candidates=req.trend_candidates,
+            feature_thresholds=req.feature_thresholds,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -276,6 +278,7 @@ class AutomationScheduleRequest(BaseModel):
     min_signals: Optional[int] = Field(default=None, ge=0)
     obi_candidates: Optional[List[float]] = None
     ofi_candidates: Optional[List[float]] = None
+    feature_thresholds: Optional[Dict[str, Dict[str, float]]] = None
 
 
 @router.post("/api/dom/automation/schedule")
@@ -298,6 +301,7 @@ async def configure_dom_automation(
             min_signals=req.min_signals,
             obi_candidates=req.obi_candidates,
             ofi_candidates=req.ofi_candidates,
+            feature_thresholds=req.feature_thresholds,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

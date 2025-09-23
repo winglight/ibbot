@@ -18,7 +18,11 @@ from src.dom_dependencies import (
 )
 from src.database import get_db_manager
 from src.dom_processor import DOMProcessor
-from src.dom_parameter_tuner import DOMParameterTuner, DEFAULT_BASE_THRESHOLDS
+from src.dom_parameter_tuner import (
+    DOMParameterTuner,
+    DEFAULT_BASE_THRESHOLDS,
+    DEFAULT_FEATURE_THRESHOLDS,
+)
 from src.dom_signal_tracker import SignalOutcomeTracker, resolve_outcome_config
 from src.dom_stats import DomStatsAggregator
 
@@ -82,6 +86,7 @@ class DOMService:
                 max_levels=persisted_config.get("max_levels", dom_config.max_levels),
                 trend_thresholds=persisted_config.get("trend_thresholds"),
                 tuner_base_thresholds=persisted_config.get("tuner_base_thresholds"),
+                tuner_feature_thresholds=persisted_config.get("tuner_feature_thresholds"),
                 tuner_parameters=persisted_config.get("tuner_parameters"),
                 persist=False,
             )
@@ -91,6 +96,7 @@ class DOMService:
                 max_levels=getattr(dom_config, "max_levels", 30),
                 trend_thresholds=list(self.trend_thresholds),
                 tuner_base_thresholds=None,
+                tuner_feature_thresholds=None,
                 tuner_parameters=None,
                 persist=False,
             )
@@ -329,6 +335,7 @@ class DOMService:
         max_levels: Any,
         trend_thresholds: Optional[List[float]] = None,
         tuner_base_thresholds: Optional[Dict[str, Any]] = None,
+        tuner_feature_thresholds: Optional[Dict[str, Any]] = None,
         tuner_parameters: Optional[Dict[str, Any]] = None,
         *,
         persist: bool,
@@ -359,10 +366,17 @@ class DOMService:
             tuner_base_thresholds if tuner_base_thresholds is not None else self._get_current_base_thresholds()
         )
 
+        feature_thresholds = self._sanitize_feature_thresholds(
+            tuner_feature_thresholds
+            if tuner_feature_thresholds is not None
+            else self._get_current_feature_thresholds()
+        )
+
         tuner_params = self._resolve_tuner_parameters(overrides=tuner_parameters)
 
         parameter_tuner = DOMParameterTuner(
             base_thresholds=base_thresholds,
+            feature_thresholds=feature_thresholds,
             stats_window=int(tuner_params["stats_window"]),
             penalty_decay=float(tuner_params["penalty_decay"]),
             penalty_step=float(tuner_params["penalty_step"]),
@@ -399,6 +413,7 @@ class DOMService:
                 "max_levels": dom_config.max_levels,
                 "trend_thresholds": list(self.trend_thresholds),
                 "tuner_base_thresholds": copy.deepcopy(base_thresholds),
+                "tuner_feature_thresholds": copy.deepcopy(feature_thresholds),
                 "tuner_parameters": copy.deepcopy(self._tuner_parameters),
             }
             try:
@@ -571,32 +586,60 @@ class DOMService:
             or list(self.trend_thresholds)
             or list(DEFAULT_TREND_THRESHOLDS),
             "tuner_base_thresholds": self._get_current_base_thresholds(),
+            "tuner_feature_thresholds": self._get_current_feature_thresholds(),
             "tuner_parameters": copy.deepcopy(self._tuner_parameters),
         }
 
     # --------------------------------------------------------------
-    def apply_tuner_base_thresholds(
+    def apply_tuner_thresholds(
         self,
         base_thresholds: Dict[str, Any],
         *,
+        feature_thresholds: Optional[Dict[str, Any]] = None,
         persist: bool = True,
         trend_thresholds: Optional[List[float]] = None,
-    ) -> Dict[str, Dict[str, float]]:
-        sanitized = self._sanitize_base_thresholds(base_thresholds)
+    ) -> Dict[str, Dict[str, Dict[str, float]]]:
+        sanitized_base = self._sanitize_base_thresholds(base_thresholds)
+        sanitized_features = (
+            self._sanitize_feature_thresholds(feature_thresholds)
+            if feature_thresholds is not None
+            else self._get_current_feature_thresholds()
+        )
         current_config = self.get_config()
         logger.info(
-            "Applying tuner base thresholds | new_thresholds={}",
-            sanitized,
+            "Applying tuner thresholds | base={} features={}",
+            sanitized_base,
+            sanitized_features,
         )
         self._apply_config(
             window=current_config["window"],
             max_levels=current_config["max_levels"],
             trend_thresholds=trend_thresholds or current_config.get("trend_thresholds"),
-            tuner_base_thresholds=sanitized,
+            tuner_base_thresholds=sanitized_base,
+            tuner_feature_thresholds=sanitized_features,
             tuner_parameters=self._tuner_parameters,
             persist=persist,
         )
-        return sanitized
+        return {
+            "base": sanitized_base,
+            "features": sanitized_features,
+        }
+
+    def apply_tuner_base_thresholds(
+        self,
+        base_thresholds: Dict[str, Any],
+        *,
+        feature_thresholds: Optional[Dict[str, Any]] = None,
+        persist: bool = True,
+        trend_thresholds: Optional[List[float]] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        result = self.apply_tuner_thresholds(
+            base_thresholds,
+            feature_thresholds=feature_thresholds,
+            persist=persist,
+            trend_thresholds=trend_thresholds,
+        )
+        return result["base"]
 
     # --------------------------------------------------------------
     def get_tuner_base_thresholds(self) -> Dict[str, Dict[str, float]]:
@@ -608,6 +651,17 @@ class DOMService:
         if tuner and getattr(tuner, "base_thresholds", None):
             return copy.deepcopy(tuner.base_thresholds)
         return copy.deepcopy(DEFAULT_BASE_THRESHOLDS)
+
+    # --------------------------------------------------------------
+    def get_tuner_feature_thresholds(self) -> Dict[str, Dict[str, float]]:
+        return self._get_current_feature_thresholds()
+
+    # --------------------------------------------------------------
+    def _get_current_feature_thresholds(self) -> Dict[str, Dict[str, float]]:
+        tuner = getattr(self.processor, "parameter_tuner", None)
+        if tuner and getattr(tuner, "feature_thresholds", None):
+            return copy.deepcopy(tuner.feature_thresholds)
+        return copy.deepcopy(DEFAULT_FEATURE_THRESHOLDS)
 
     def _sanitize_base_thresholds(
         self, values: Optional[Dict[str, Any]]
@@ -633,6 +687,36 @@ class DOMService:
                     source_value = incoming.get(key)
                 target[key] = _coerce(source_value, float(default_value))
         return sanitized
+
+    def _sanitize_feature_thresholds(
+        self, values: Optional[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, float]]:
+        sanitized = copy.deepcopy(DEFAULT_FEATURE_THRESHOLDS)
+        if not isinstance(values, dict):
+            return sanitized
+
+        def _coerce(value: Any, fallback: float) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float(fallback)
+
+        for section, defaults in DEFAULT_FEATURE_THRESHOLDS.items():
+            target = sanitized.setdefault(section, {})
+            incoming = values.get(section) if isinstance(values.get(section), dict) else {}
+            if not isinstance(target, dict):
+                continue
+            for key, default_value in defaults.items():
+                source_value = None
+                if isinstance(incoming, dict):
+                    source_value = incoming.get(key)
+                target[key] = _coerce(source_value, float(default_value))
+        return sanitized
+
+    def sanitize_feature_thresholds(
+        self, values: Optional[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, float]]:
+        return self._sanitize_feature_thresholds(values)
 
 
 # Global service instance

@@ -20,6 +20,116 @@
         idle: 'bg-secondary'
     };
 
+    const EVENT_SIDE_COLORS = {
+        buy: '#22c55e',
+        sell: '#ef4444',
+        neutral: '#f97316',
+    };
+
+    const DEFAULT_FEATURE_THRESHOLD_TEMPLATE = {
+        stacking: { intensity: 0.35, min_depth: 50 },
+        pulling: { intensity: 0.3, min_depth: 30 },
+        wall: { strength: 0.35, min_size: 80 },
+        cancel_rate: { rate: 1.2 },
+        absorption: { index: 0.6 },
+        sweep: { intensity: 0.7 },
+        fake_breakout: { prob: 0.65 },
+        wall_pull_no_follow: { score: 0.6 },
+        obi_ofi_reversal: { score: 0.75 },
+        spread: { delta_ticks: 2 },
+    };
+
+    const domOptimizerEventPlugin = {
+        id: 'domOptimizerEventMarkers',
+        afterDatasetsDraw(chart) {
+            const { ctx } = chart;
+            if (!ctx) return;
+            chart.data.datasets.forEach((dataset, datasetIndex) => {
+                if (!dataset || !dataset.domEvents) return;
+                const meta = chart.getDatasetMeta(datasetIndex);
+                if (!meta || !meta.data) return;
+                meta.data.forEach((element, index) => {
+                    const raw = dataset.data?.[index];
+                    if (!element || !raw) return;
+                    const { x, y } = element.getProps(['x', 'y'], true);
+                    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+                    const code = typeof raw.code === 'string' ? raw.code : '?';
+                    const color = raw.color || EVENT_SIDE_COLORS.neutral;
+                    ctx.save();
+                    ctx.fillStyle = color;
+                    ctx.font = 'bold 12px "Inter", "Helvetica", sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(code, x, y);
+                    ctx.restore();
+                });
+            });
+        },
+    };
+
+    function cloneFeatureThresholds(value) {
+        if (!value || typeof value !== 'object') return null;
+        try {
+            return JSON.parse(JSON.stringify(value));
+        } catch (error) {
+            console.warn('Failed to clone feature thresholds', error);
+            return null;
+        }
+    }
+
+    function parseFeatureThresholdsInput(rawValue) {
+        if (!rawValue) return null;
+        if (typeof rawValue === 'object') {
+            return cloneFeatureThresholds(rawValue);
+        }
+        if (typeof rawValue !== 'string') return null;
+        const trimmed = rawValue.trim();
+        if (!trimmed) return null;
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                throw new Error('特征阈值必须是对象');
+            }
+            return parsed;
+        } catch (error) {
+            throw new Error(`特征阈值 JSON 解析失败: ${error.message}`);
+        }
+    }
+
+    function stringifyFeatureThresholds(value) {
+        if (!value || typeof value !== 'object') return '';
+        try {
+            return JSON.stringify(value, null, 2);
+        } catch (error) {
+            console.warn('Failed to stringify feature thresholds', error);
+            return '';
+        }
+    }
+
+    function resolveEventColor(event) {
+        if (!event || typeof event !== 'object') return EVENT_SIDE_COLORS.neutral;
+        if (typeof event.color === 'string') return event.color;
+        const side = typeof event.side === 'string' ? event.side.toLowerCase() : '';
+        if (side === 'buy') return EVENT_SIDE_COLORS.buy;
+        if (side === 'sell') return EVENT_SIDE_COLORS.sell;
+        if (typeof event.key === 'string') {
+            if (event.key.includes('buy')) return EVENT_SIDE_COLORS.buy;
+            if (event.key.includes('sell')) return EVENT_SIDE_COLORS.sell;
+        }
+        return EVENT_SIDE_COLORS.neutral;
+    }
+
+    function normaliseEventCode(event) {
+        if (!event || typeof event !== 'object') return '?';
+        if (typeof event.code === 'string' && event.code.trim()) {
+            return event.code.trim().slice(0, 2);
+        }
+        if (typeof event.key === 'string' && event.key.trim()) {
+            return event.key.trim().charAt(0).toUpperCase();
+        }
+        return '?';
+    }
+
     function toNumber(value) {
         const numeric = Number(value);
         return Number.isFinite(numeric) ? numeric : null;
@@ -271,6 +381,7 @@
                 statsMetadata: null,
                 latestSignal: null,
                 trendThresholds: [0.5, 0.7, 0.85, 0.95],
+                featureThresholds: null,
                 orderCache: {
                     symbol: null,
                     fetchedAt: 0,
@@ -336,6 +447,8 @@
                 obiCandidatesInput: document.getElementById('domOptimizerObiCandidatesInput'),
                 ofiCandidatesInput: document.getElementById('domOptimizerOfiCandidatesInput'),
                 trendCandidatesInput: document.getElementById('domOptimizerTrendCandidatesInput'),
+                featureThresholdsInput: document.getElementById('domOptimizerFeatureThresholdsInput'),
+                featurePresetBtn: document.getElementById('domOptimizerFeaturePresetBtn'),
                 refreshStatsBtn: document.getElementById('domOptimizerRefreshStatsBtn'),
                 statsTotal: document.getElementById('domOptimizerStatsTotal'),
                 statsBySide: document.getElementById('domOptimizerStatsBySide'),
@@ -405,7 +518,9 @@
                 thresholdRefreshBtn,
                 trendLiveToggle,
                 symbolInput,
-                signalsTable
+                signalsTable,
+                featurePresetBtn,
+                featureThresholdsInput,
             } = this.elements;
 
             refreshStatusBtn?.addEventListener('click', () => this.refreshAutomationStatus({ force: true }));
@@ -440,6 +555,16 @@
             trendLiveToggle?.addEventListener('click', () => {
                 const current = trendLiveToggle.dataset.active === '1';
                 this.setLiveMode(!current);
+            });
+
+            featurePresetBtn?.addEventListener('click', () => {
+                this.fillFeatureThresholdPreset();
+            });
+            featureThresholdsInput?.addEventListener('change', () => {
+                const parsed = this.safeParseFeatureThresholds(featureThresholdsInput.value);
+                if (parsed) {
+                    this.state.featureThresholds = parsed;
+                }
             });
 
             pagination?.addEventListener('click', (event) => {
@@ -965,6 +1090,10 @@
                 const nextRun = statusPayload?.next_run_at || statusPayload?.schedule?.next_run_at;
                 this.elements.nextRun.textContent = formatIsoDatetime(nextRun);
             }
+            const planFeatures = statusPayload?.plan?.feature_thresholds;
+            if (planFeatures) {
+                this.state.featureThresholds = cloneFeatureThresholds(planFeatures) || planFeatures;
+            }
             this.renderLastResult(statusPayload?.last_result);
         }
 
@@ -989,6 +1118,14 @@
             ];
             if (thresholds) {
                 parts.push(`<div class="text-muted">阈值: ${thresholds}</div>`);
+            }
+            if (result?.feature_thresholds) {
+                const cloned = cloneFeatureThresholds(result.feature_thresholds) || result.feature_thresholds;
+                const featureText = stringifyFeatureThresholds(cloned);
+                if (featureText) {
+                    parts.push(`<pre class="bg-light border rounded small px-2 py-1 text-break mt-2 mb-0">${escapeHtml(featureText)}</pre>`);
+                }
+                this.state.featureThresholds = cloned;
             }
             this.elements.lastResult.innerHTML = parts.join('');
             this.elements.lastResultPanel.classList.remove('border-danger', 'border-success');
@@ -1158,6 +1295,43 @@
             this.updateThresholdChart(ordered);
         }
 
+        safeParseFeatureThresholds(rawValue) {
+            try {
+                return parseFeatureThresholdsInput(rawValue);
+            } catch (error) {
+                if (error && error.message) {
+                    this.notify('warning', error.message);
+                }
+                return null;
+            }
+        }
+
+        fillFeatureThresholdPreset() {
+            const template = this.state.featureThresholds
+                ? cloneFeatureThresholds(this.state.featureThresholds)
+                : cloneFeatureThresholds(DEFAULT_FEATURE_THRESHOLD_TEMPLATE)
+                || DEFAULT_FEATURE_THRESHOLD_TEMPLATE;
+            if (this.elements.featureThresholdsInput) {
+                this.elements.featureThresholdsInput.value = stringifyFeatureThresholds(template);
+            }
+            if (template) {
+                this.state.featureThresholds = template;
+            }
+        }
+
+        getFeatureThresholdPayload() {
+            const input = this.elements.featureThresholdsInput;
+            if (!input) return null;
+            const text = typeof input.value === 'string' ? input.value.trim() : '';
+            if (!text) return null;
+            const parsed = this.safeParseFeatureThresholds(text);
+            if (!parsed) {
+                throw new Error('特征阈值 JSON 解析失败');
+            }
+            this.state.featureThresholds = cloneFeatureThresholds(parsed) || parsed;
+            return parsed;
+        }
+
         ensureTrendChart() {
             if (this.charts.trend) return this.charts.trend;
             const canvas = this.elements.trendChart;
@@ -1194,6 +1368,17 @@
                                 borderColor: (ctx) => (ctx.p0.parsed.y >= 0 ? '#16a34a' : '#dc2626'),
                                 backgroundColor: (ctx) => (ctx.p0.parsed.y >= 0 ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)'),
                             },
+                        },
+                        {
+                            label: 'Events',
+                            type: 'scatter',
+                            data: [],
+                            yAxisID: 'trendAxis',
+                            parsing: false,
+                            showLine: false,
+                            pointRadius: 0,
+                            pointHitRadius: 12,
+                            domEvents: true,
                         },
                     ],
                 },
@@ -1233,6 +1418,15 @@
                         tooltip: {
                             callbacks: {
                                 label(context) {
+                                    if (context.dataset?.domEvents) {
+                                        const raw = context.raw || {};
+                                        const label = raw.label || raw.code || '事件';
+                                        if (raw.side) {
+                                            const sideLabel = raw.side === 'buy' ? '买方' : raw.side === 'sell' ? '卖方' : raw.side;
+                                            return `${label} (${sideLabel})`;
+                                        }
+                                        return label;
+                                    }
                                     const label = context.dataset.label || '';
                                     const value = Number(context.parsed.y);
                                     if (!Number.isFinite(value)) return label;
@@ -1245,8 +1439,9 @@
                         },
                     },
                 },
+                plugins: [domOptimizerEventPlugin],
             });
-            chart._datasetMap = { price: 0, trend: 1 };
+            chart._datasetMap = { price: 0, trend: 1, events: 2 };
             this.charts.trend = chart;
             return chart;
         }
@@ -1474,6 +1669,7 @@
             if (!chart) return;
             const priceData = [];
             const trendData = [];
+            const eventData = [];
             for (const item of metrics) {
                 const ts = resolveTimestampMs(item);
                 if (!ts) continue;
@@ -1485,11 +1681,29 @@
                 if (Number.isFinite(trend)) {
                     trendData.push({ x: ts, y: trend });
                 }
+                const events = Array.isArray(item?.events) ? item.events : [];
+                if (events.length) {
+                    events.forEach((evt) => {
+                        const code = normaliseEventCode(evt);
+                        eventData.push({
+                            x: ts,
+                            y: Number.isFinite(trend) ? trend : 0,
+                            code,
+                            label: typeof evt?.label === 'string' ? evt.label : code,
+                            side: typeof evt?.side === 'string' ? evt.side : null,
+                            color: resolveEventColor(evt),
+                        });
+                    });
+                }
             }
             const priceDataset = chart.data.datasets[chart._datasetMap.price];
             const trendDataset = chart.data.datasets[chart._datasetMap.trend];
+            const eventDataset = chart.data.datasets[chart._datasetMap.events];
             priceDataset.data = priceData;
             trendDataset.data = trendData;
+            if (eventDataset) {
+                eventDataset.data = eventData;
+            }
             chart.update('none');
         }
 
@@ -2610,6 +2824,8 @@
                 if (ofiCandidates) payload.ofi_candidates = ofiCandidates;
                 const trendCandidates = parseCandidates(this.elements.trendCandidatesInput?.value);
                 if (trendCandidates) payload.trend_candidates = trendCandidates;
+                const featureThresholds = this.getFeatureThresholdPayload();
+                if (featureThresholds) payload.feature_thresholds = featureThresholds;
                 const response = await this.apiCall('/dom/optimize', {
                     method: 'POST',
                     body: JSON.stringify(payload),
@@ -2650,6 +2866,15 @@
                     this.elements.trendCandidatesInput.value = trendList.join(', ');
                 }
             }
+            let featureText = '';
+            if (result?.feature_thresholds) {
+                const cloned = cloneFeatureThresholds(result.feature_thresholds) || result.feature_thresholds;
+                featureText = stringifyFeatureThresholds(cloned) || '';
+                this.state.featureThresholds = cloned;
+                if (result?.applied && this.elements.featureThresholdsInput) {
+                    this.elements.featureThresholdsInput.value = featureText;
+                }
+            }
             const rows = [
                 `<div class="mb-2">状态: ${outcome} · 完成时间 ${completedAt}</div>`,
                 `<div>精度: <strong>${precision}</strong> · 评估 ${evaluated} 次 (成功 ${positives} / 失败 ${negatives} / 待评估 ${pending})</div>`
@@ -2662,6 +2887,9 @@
                     : null;
             if (trendLabel) {
                 rows.push(`<div class="text-muted">Trend 阈值: ${trendLabel}</div>`);
+            }
+            if (featureText) {
+                rows.push(`<pre class="bg-light border rounded small px-2 py-1 text-break">${escapeHtml(featureText)}</pre>`);
             }
             this.elements.optimizeResult.innerHTML = rows.join('');
         }
@@ -2705,6 +2933,16 @@
                     if (Number.isFinite(longOfi)) {
                         this.elements.ofiCandidatesInput.value = String(longOfi);
                     }
+                }
+                const featureThresholds = response?.tuner_feature_thresholds;
+                if (featureThresholds) {
+                    const cloned = cloneFeatureThresholds(featureThresholds) || featureThresholds;
+                    this.state.featureThresholds = cloned;
+                    if (this.elements.featureThresholdsInput && !this.elements.featureThresholdsInput.value) {
+                        this.elements.featureThresholdsInput.value = stringifyFeatureThresholds(cloned);
+                    }
+                } else if (this.elements.featureThresholdsInput && !this.elements.featureThresholdsInput.value) {
+                    this.elements.featureThresholdsInput.value = stringifyFeatureThresholds(DEFAULT_FEATURE_THRESHOLD_TEMPLATE);
                 }
             } catch (error) {
                 if (!auto) {
