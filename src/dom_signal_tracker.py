@@ -272,7 +272,7 @@ class SignalOutcomeTracker:
         if not diffs:
             return None, None
 
-        diff_price = max(diffs)
+        diff_price = min(diffs)
         threshold_pct = diff_price / reference_price if reference_price else None
         return (max(threshold_pct, 0.0) if threshold_pct is not None else None, abs(diff_price))
 
@@ -296,15 +296,20 @@ class SignalOutcomeTracker:
             return {"outcome": None}
 
         rule, point_value = self._fetch_risk_context(pending.symbol)
-        threshold_pct = self.price_move_threshold
+        base_threshold_pct = self.price_move_threshold
+        threshold_pct = base_threshold_pct
         target_currency = None
 
         if rule:
             derived_pct, diff_price = self._derive_threshold_from_rule(pending, rule, reference_price)
             if derived_pct is not None:
-                threshold_pct = max(derived_pct, 0.0)
-            if diff_price is not None:
-                target_currency = self._price_to_currency(diff_price, point_value)
+                effective_pct = max(derived_pct, 0.0)
+                if base_threshold_pct is not None:
+                    effective_pct = min(effective_pct, base_threshold_pct)
+                threshold_pct = effective_pct
+            if diff_price is not None and threshold_pct is not None:
+                effective_diff = reference_price * threshold_pct
+                target_currency = self._price_to_currency(effective_diff, point_value)
 
         if target_currency is None:
             target_currency = self._price_to_currency(reference_price * threshold_pct, point_value)
