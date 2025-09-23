@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import pickle
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -567,12 +568,21 @@ class DomStatsAggregator:
         with self._lock:
             self._payloads[safe_symbol] = payload
         path = self._path_for_symbol(safe_symbol)
-        tmp_path = f"{path}.tmp"
         directory = os.path.dirname(path)
         if directory:
             _ensure_directory(directory)
+
+        tmp_file = None
+        tmp_path: Optional[str] = None
         try:
-            with open(tmp_path, "wb") as fh:
+            tmp_file = tempfile.NamedTemporaryFile(
+                "wb",
+                delete=False,
+                dir=directory or None,
+                prefix=os.path.basename(path) + ".",
+                suffix=".tmp",
+            )
+            with tmp_file as fh:
                 pickle.dump(
                     {
                         "version": self.VERSION,
@@ -581,11 +591,15 @@ class DomStatsAggregator:
                     fh,
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
+            tmp_path = tmp_file.name
             os.replace(tmp_path, path)
         except Exception:
             logger.exception("Failed to persist DOM stats payload for %s", safe_symbol)
             try:
-                os.remove(tmp_path)
+                if tmp_path is None and tmp_file is not None:
+                    tmp_path = tmp_file.name
+                if tmp_path is not None:
+                    os.remove(tmp_path)
             except OSError:
                 pass
 
