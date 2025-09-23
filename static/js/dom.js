@@ -113,6 +113,82 @@ class DOMManager {
         return lines.join('\n');
     }
 
+    toNumber(value) {
+        if (value === null || value === undefined || value === '') return null;
+        if (typeof value === 'number') {
+            return Number.isFinite(value) ? value : null;
+        }
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    resolveSignalFromThresholds(obi, ofi, thresholds) {
+        const safeThresholds = thresholds && typeof thresholds === 'object' ? thresholds : {};
+        const longCfg = safeThresholds.long && typeof safeThresholds.long === 'object' ? safeThresholds.long : {};
+        const shortCfg = safeThresholds.short && typeof safeThresholds.short === 'object' ? safeThresholds.short : {};
+        const longObi = this.toNumber(longCfg.obi ?? longCfg.obi5);
+        const shortObi = this.toNumber(shortCfg.obi ?? shortCfg.obi5);
+        const longOfi = this.toNumber(longCfg.ofi);
+        const shortOfi = this.toNumber(shortCfg.ofi);
+
+        let signal = 0;
+        if (Number.isFinite(obi) && Number.isFinite(ofi)) {
+            if (Number.isFinite(longObi) && Number.isFinite(longOfi) && obi >= longObi && ofi >= longOfi) {
+                signal = 1;
+            } else if (Number.isFinite(shortObi) && Number.isFinite(shortOfi) && obi <= shortObi && ofi <= shortOfi) {
+                signal = -1;
+            }
+        }
+
+        return {
+            signal,
+            longObi,
+            shortObi,
+            longOfi,
+            shortOfi,
+        };
+    }
+
+    buildMonitorPointFromMetrics(entry) {
+        if (!entry || typeof entry !== 'object') return null;
+        const ts = this.extractTimestamp(entry);
+        if (!Number.isFinite(ts)) return null;
+
+        const trendScore = this.toNumber(entry.trend_score);
+        const obi = this.toNumber(entry.obi5 ?? entry.obi);
+        const ofi = this.toNumber(entry.ofi);
+        const thresholds = entry.thresholds && typeof entry.thresholds === 'object'
+            ? entry.thresholds
+            : null;
+
+        const { level: trendLevel, suggestion: trendSuggestion } = this.computeTrendSignal(trendScore);
+        const reason = this.buildTrendReason(entry, trendSuggestion, trendLevel);
+        const { signal, longObi, shortObi, longOfi, shortOfi } = this.resolveSignalFromThresholds(obi, ofi, thresholds);
+
+        let suggestion = trendSuggestion;
+        if (signal > 0) suggestion = 'buy';
+        else if (signal < 0) suggestion = 'sell';
+
+        const price = this.toNumber(entry.mid_price ?? entry.price ?? entry.signal_price);
+
+        return {
+            x: ts,
+            timestamp: ts,
+            signal,
+            score: trendScore,
+            level: trendLevel,
+            suggestion,
+            reason,
+            price,
+            obi,
+            ofi,
+            thresholds: {
+                long: { obi: longObi, ofi: longOfi },
+                short: { obi: shortObi, ofi: shortOfi },
+            },
+        };
+    }
+
     resolveTrendColors(info) {
         const { level, suggestion } = info || {};
         const style = getTrendLevelStyle(level || 0);
@@ -465,27 +541,19 @@ class DOMManager {
                 return ta - tb;
             });
 
-            const trendPoints = [];
             const metricWindowMs = 60 * 1000;
+            const monitorPoints = [];
             const metricPayload = [];
             metricsHistory.forEach((entry) => {
-                const ts = this.extractTimestamp(entry);
-                if (!Number.isFinite(ts)) return;
-                const trendScore = typeof entry.trend_score === 'number' ? entry.trend_score : null;
-                const { level, suggestion } = this.computeTrendSignal(trendScore);
-                const reason = this.buildTrendReason(entry, suggestion, level);
-                trendPoints.push({
-                    x: ts,
-                    timestamp: ts,
-                    y: trendScore ?? 0,
-                    reason,
-                    suggestion,
-                    level,
-                    price: typeof entry.mid_price === 'number' && Number.isFinite(entry.mid_price)
-                        ? entry.mid_price
-                        : undefined
+                const point = this.buildMonitorPointFromMetrics(entry);
+                if (!point) return;
+                monitorPoints.push(point);
+                metricPayload.push({
+                    entry,
+                    ts: point.timestamp,
+                    level: point.level,
+                    suggestion: point.suggestion,
                 });
-                metricPayload.push({ entry, ts, level, suggestion });
             });
 
             if (this.metricsChart && metricPayload.length) {
@@ -506,10 +574,10 @@ class DOMManager {
 
                 filtered.forEach(({ entry, ts, level, suggestion }) => {
                     const colors = this.resolveTrendColors({ level, suggestion });
-                    const obi = typeof entry.obi5 === 'number' ? entry.obi5 : 0;
-                    const ofi = typeof entry.ofi === 'number' ? entry.ofi : 0;
-                    const zObi = typeof entry.zscore_obi5 === 'number' ? entry.zscore_obi5 : 0;
-                    const zOfi = typeof entry.zscore_ofi === 'number' ? entry.zscore_ofi : 0;
+                    const obi = this.toNumber(entry.obi5 ?? entry.obi) ?? 0;
+                    const ofi = this.toNumber(entry.ofi) ?? 0;
+                    const zObi = this.toNumber(entry.zscore_obi5) ?? 0;
+                    const zOfi = this.toNumber(entry.zscore_ofi) ?? 0;
                     if (ds[0]) {
                         ds[0].data.push({ x: ts, y: obi });
                         ds[0].pointBackgroundColor.push(colors.pointColor);
@@ -533,16 +601,16 @@ class DOMManager {
             const trendWindowMs = 60 * 1000;
             const trendMaxPoints = 240;
             const trimmedTrendPoints = (() => {
-                if (!trendPoints.length) return [];
-                const lastTs = trendPoints[trendPoints.length - 1].timestamp;
+                if (!monitorPoints.length) return [];
+                const lastTs = monitorPoints[monitorPoints.length - 1].timestamp;
                 if (Number.isFinite(lastTs)) {
                     const cutoff = lastTs - trendWindowMs;
-                    const sliced = trendPoints.filter(point => point.timestamp >= cutoff);
+                    const sliced = monitorPoints.filter(point => point.timestamp >= cutoff);
                     if (sliced.length) {
                         return sliced.slice(-trendMaxPoints);
                     }
                 }
-                return trendPoints.slice(-trendMaxPoints);
+                return monitorPoints.slice(-trendMaxPoints);
             })();
 
             if (trimmedTrendPoints.length) {
@@ -575,7 +643,7 @@ class DOMManager {
                 }
 
                 const lastPoint = trimmedTrendPoints[trimmedTrendPoints.length - 1];
-                const dir = lastPoint.y > 0 ? 1 : lastPoint.y < 0 ? -1 : 0;
+                const dir = (lastPoint.signal || 0) > 0 ? 1 : (lastPoint.signal || 0) < 0 ? -1 : 0;
                 this.lastTrendLevel = lastPoint.level || 0;
                 this.lastTrendDir = dir;
             } else if (replaceExisting && typeof this.app.resetMonitorTrendData === 'function') {
@@ -714,7 +782,10 @@ class DOMManager {
                     longBias: suggestion === 'buy',
                     shortBias: suggestion === 'sell',
                     maxPoints: 240,
-                    threshold: 0.5
+                    threshold: 0.5,
+                    obi,
+                    ofi,
+                    thresholds: m.thresholds,
                 });
             } else {
                 console.warn('[DOM Manager] addMonitorTrendPoint方法不存在');

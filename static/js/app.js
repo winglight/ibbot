@@ -390,6 +390,9 @@ class TradingApp {
         this.domSignals = [];
         this.monitorTrendChart = null;
         this.monitorTrendData = [];
+        this.monitorTrendDatasetMap = { signal: 0 };
+        this.monitorDomHistoryList = null;
+        this.monitorDomHistoryMeta = null;
         this.candlestickSupported = false;
         this.candlestickLoader = null;
         this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
@@ -495,11 +498,16 @@ class TradingApp {
         } else {
             this.monitorTrendData = [];
         }
-        if (this.monitorTrendChart?.data?.datasets?.[0]) {
-            this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
-            this.syncTrendReferenceLines();
+        if (this.monitorTrendChart?.data?.datasets?.length) {
+            const baseData = this.getFormattedTrendChartData();
+            const signalIndex = this.monitorTrendDatasetMap?.signal ?? 0;
+            if (this.monitorTrendChart.data.datasets[signalIndex]) {
+                this.monitorTrendChart.data.datasets[signalIndex].data = baseData;
+            }
+            this.updateMonitorSignalOverlayDatasets();
             this.monitorTrendChart.update('none');
         }
+        this.renderMonitorSignalHistory();
     }
 
     resetMonitorTrendData() {
@@ -511,11 +519,65 @@ class TradingApp {
         const rawTime = point.timestamp ?? point.x ?? point.time ?? point.date;
         const normalized = this.normalizeMonitorTime(rawTime);
         if (normalized == null) return null;
+        const safeNumber = (value) => {
+            if (value === null || value === undefined || value === '') return null;
+            if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : null;
+        };
+
+        const score = safeNumber(point.score ?? point.trend_score ?? point.y);
+        const obi = safeNumber(point.obi);
+        const ofi = safeNumber(point.ofi);
+        const thresholds = point.thresholds && typeof point.thresholds === 'object' ? point.thresholds : {};
+        const longCfg = thresholds.long && typeof thresholds.long === 'object' ? thresholds.long : {};
+        const shortCfg = thresholds.short && typeof thresholds.short === 'object' ? thresholds.short : {};
+        const longObi = safeNumber(longCfg.obi ?? longCfg.obi5);
+        const shortObi = safeNumber(shortCfg.obi ?? shortCfg.obi5);
+        const longOfi = safeNumber(longCfg.ofi);
+        const shortOfi = safeNumber(shortCfg.ofi);
+
+        let signal = safeNumber(point.signal);
+        if (!Number.isFinite(signal)) {
+            signal = safeNumber(point.y);
+        }
+        if (!Number.isFinite(signal)) {
+            if (Number.isFinite(obi) && Number.isFinite(ofi)) {
+                if (Number.isFinite(longObi) && Number.isFinite(longOfi) && obi >= longObi && ofi >= longOfi) {
+                    signal = 1;
+                } else if (Number.isFinite(shortObi) && Number.isFinite(shortOfi) && obi <= shortObi && ofi <= shortOfi) {
+                    signal = -1;
+                }
+            }
+        }
+        if (!Number.isFinite(signal)) {
+            const suggestion = typeof point.suggestion === 'string' ? point.suggestion.toLowerCase() : '';
+            if (suggestion === 'buy') signal = 1;
+            else if (suggestion === 'sell') signal = -1;
+            else signal = 0;
+        }
+        signal = Math.max(-1, Math.min(1, Number.isFinite(signal) ? signal : 0));
+
+        const price = safeNumber(point.price);
+        const suggestion = typeof point.suggestion === 'string' ? point.suggestion.toLowerCase() : null;
+        const normalizedSuggestion = suggestion === 'buy' ? 'buy' : suggestion === 'sell' ? 'sell' : null;
+
         return {
             ...point,
             timestamp: normalized,
             x: normalized,
-            displayTime: new Date(normalized)
+            displayTime: new Date(normalized),
+            score,
+            signal,
+            y: signal,
+            obi,
+            ofi,
+            price,
+            suggestion: normalizedSuggestion ?? point.suggestion ?? null,
+            thresholds: {
+                long: { obi: longObi, ofi: longOfi },
+                short: { obi: shortObi, ofi: shortOfi },
+            },
         };
     }
 
@@ -524,6 +586,145 @@ class TradingApp {
         return this.monitorTrendData
             .map(point => this.formatTrendPointForChart(point))
             .filter(point => point !== null);
+    }
+
+    updateMonitorSignalOverlayDatasets() {
+        if (!this.monitorTrendChart) return;
+        const chart = this.monitorTrendChart;
+        const map = this.monitorTrendDatasetMap || { signal: 0 };
+        const baseData = this.getFormattedTrendChartData();
+
+        const signalDataset = chart.data?.datasets?.[map.signal];
+        if (signalDataset) {
+            const entries = baseData.map(point => ({
+                x: point.x,
+                y: Number.isFinite(point.signal) ? point.signal : 0,
+                suggestion: point.suggestion,
+                reason: point.reason,
+                price: point.price,
+                obi: point.obi,
+                ofi: point.ofi,
+                thresholds: point.thresholds,
+                score: point.score,
+                level: point.level,
+            }));
+            signalDataset.data = entries;
+            const background = entries.map(item => {
+                if (item.y > 0) return 'rgba(34,197,94,0.45)';
+                if (item.y < 0) return 'rgba(239,68,68,0.45)';
+                return 'rgba(148,163,184,0.18)';
+            });
+            signalDataset.backgroundColor = background;
+            signalDataset.borderColor = background;
+        }
+
+        const assignDataset = (key, extractor) => {
+            const idx = map[key];
+            if (idx === undefined) return;
+            const dataset = chart.data?.datasets?.[idx];
+            if (!dataset) return;
+            dataset.data = baseData
+                .map(point => {
+                    const value = extractor(point);
+                    return Number.isFinite(value) ? { x: point.x, y: value } : null;
+                })
+                .filter(Boolean);
+        };
+
+        assignDataset('obi', point => point.obi);
+        assignDataset('ofi', point => point.ofi);
+        assignDataset('longObi', point => point.thresholds?.long?.obi);
+        assignDataset('shortObi', point => point.thresholds?.short?.obi);
+        assignDataset('longOfi', point => point.thresholds?.long?.ofi);
+        assignDataset('shortOfi', point => point.thresholds?.short?.ofi);
+        assignDataset('price', point => point.price);
+
+        const indicatorValues = [];
+        const priceValues = [];
+        baseData.forEach(point => {
+            if (Number.isFinite(point.obi)) indicatorValues.push(point.obi);
+            if (Number.isFinite(point.ofi)) indicatorValues.push(point.ofi);
+            const lObi = point.thresholds?.long?.obi;
+            const sObi = point.thresholds?.short?.obi;
+            const lOfi = point.thresholds?.long?.ofi;
+            const sOfi = point.thresholds?.short?.ofi;
+            [lObi, sObi, lOfi, sOfi].forEach((value) => {
+                if (Number.isFinite(value)) indicatorValues.push(value);
+            });
+            if (Number.isFinite(point.price)) priceValues.push(point.price);
+        });
+
+        const indicatorAxis = chart.options?.scales?.indicatorAxis;
+        if (indicatorAxis && indicatorValues.length) {
+            const min = Math.min(...indicatorValues);
+            const max = Math.max(...indicatorValues);
+            const span = max - min || 1;
+            indicatorAxis.min = min - span * 0.1;
+            indicatorAxis.max = max + span * 0.1;
+        }
+
+        const priceAxis = chart.options?.scales?.priceAxis;
+        if (priceAxis && priceValues.length) {
+            const min = Math.min(...priceValues);
+            const max = Math.max(...priceValues);
+            const span = max - min || (min * 0.05) || 1;
+            priceAxis.min = min - span * 0.05;
+            priceAxis.max = max + span * 0.05;
+        }
+    }
+
+    renderMonitorSignalHistory() {
+        if (!this.monitorDomHistoryList) {
+            this.monitorDomHistoryList = document.getElementById('monitorDomHistoryList');
+        }
+        if (!this.monitorDomHistoryList) return;
+        if (!this.monitorDomHistoryMeta) {
+            this.monitorDomHistoryMeta = document.getElementById('monitorDomHistoryMeta');
+        }
+        const metaEl = this.monitorDomHistoryMeta;
+        const formatted = this.getFormattedTrendChartData();
+        const now = new Date();
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const startMs = startOfDay.getTime();
+        const endMs = startMs + 24 * 60 * 60 * 1000;
+
+        const entries = formatted
+            .filter(point => Number.isFinite(point.timestamp)
+                && Math.abs(point.signal) === 1
+                && point.timestamp >= startMs
+                && point.timestamp < endMs)
+            .sort((a, b) => a.timestamp - b.timestamp);
+
+        if (metaEl) {
+            metaEl.textContent = `今日信号：${entries.length} 条`;
+        }
+
+        if (!entries.length) {
+            this.monitorDomHistoryList.innerHTML = '<div class="list-group-item text-center text-muted py-2">暂无信号</div>';
+            return;
+        }
+
+        const html = entries.map((entry) => {
+            const timeText = new Date(entry.timestamp).toLocaleTimeString(undefined, { hour12: false });
+            const direction = entry.signal > 0 ? '买入' : '卖出';
+            const badgeClass = entry.signal > 0 ? 'bg-success' : 'bg-danger';
+            const priceText = Number.isFinite(entry.price) ? `$${this.formatNumber(entry.price)}` : '—';
+            const obiText = Number.isFinite(entry.obi) ? this.formatNumber(entry.obi) : '—';
+            const ofiText = Number.isFinite(entry.ofi) ? this.formatNumber(entry.ofi) : '—';
+            const reason = entry.reason ? String(entry.reason).split('\n')[0] : '';
+            return `
+                <div class="list-group-item d-flex justify-content-between align-items-start">
+                    <div>
+                        <div class="fw-semibold"><span class="badge ${badgeClass} me-2">${direction}</span>${priceText}</div>
+                        <div class="text-muted small">OBI ${obiText} · OFI ${ofiText}</div>
+                        ${reason ? `<div class="text-muted small">${reason}</div>` : ''}
+                    </div>
+                    <small class="text-muted ms-3">${timeText}</small>
+                </div>
+            `;
+        }).join('');
+
+        this.monitorDomHistoryList.innerHTML = html;
     }
 
     getTrendValues(chart) {
@@ -561,169 +762,28 @@ class TradingApp {
 
     // 仅在创建 chart 后、首轮配置时调用一次
     setupTrendLegendAndAnnotations(chart) {
-        const that = this;
+        if (!chart) return;
         const opts = chart.options || (chart.options = {});
         const plugins = opts.plugins || (opts.plugins = {});
-
-        const hasLegend = Object.prototype.hasOwnProperty.call(plugins, 'legend');
-        const legend = hasLegend ? plugins.legend : null;
-
-        const legendLabels = legend?.labels || {};
-        const newLegend = {
-            ...(legend || {}),
-            display: true,
-            position: 'top',
-            align: 'end',
-            labels: {
-            ...legendLabels,
-            generateLabels(chart) {
-                const v = that.getTrendValues(chart);
-                if (!v) return [];
-                return [
-                { text: `Latest: ${that.fmt(v.latest)}`, fillStyle: 'yellow', strokeStyle: 'yellow', lineWidth: 2 },
-                { text: `Min: ${that.fmt(v.min)}`,       fillStyle: 'red',    strokeStyle: 'red',    lineWidth: 2 },
-                { text: `Max: ${that.fmt(v.max)}`,       fillStyle: 'green',  strokeStyle: 'green',  lineWidth: 2 },
-                ];
-            },
-            // 若还想显示原 datasets 的图例，把这行删掉
-            filter() { return false; }
-            },
-            onClick: () => {}
-        };
-
-        // —— 关键：如果 legend 不存在，不要立刻写入，延后到微任务 —— //
-        if (!hasLegend) {
-            queueMicrotask(() => {
-            // 这里已经不在脚本化解析栈里，安全赋值
-            plugins.legend = newLegend;
-            chart.update('none');
-            });
+        if (!plugins.legend) {
+            plugins.legend = {
+                display: true,
+                position: 'top',
+            };
         } else {
-            // 已存在时，仅就地合并，不换引用
-            Object.assign(legend, newLegend);
-            legend.labels = newLegend.labels; // 覆盖 labels（对象内仍为就地写入）
+            plugins.legend.display = true;
+            plugins.legend.position = plugins.legend.position || 'top';
         }
-
-        // annotation：同理，先判断是否存在，缺失则延后创建；存在则就地改
-        // const hasAnno = Object.prototype.hasOwnProperty.call(plugins, 'annotation');
-        // if (!hasAnno) {
-        //     queueMicrotask(() => {
-        //     plugins.annotation = { annotations: {
-        //         latestLine: { type: 'line', borderColor: 'yellow', borderWidth: 1 },
-        //         minLine:    { type: 'line', borderColor: 'red',    borderWidth: 1 },
-        //         maxLine:    { type: 'line', borderColor: 'green',  borderWidth: 1 },
-        //     }};
-        //     chart.update('none');
-        //     });
-        // } else {
-        //     const anns = plugins.annotation.annotations || (plugins.annotation.annotations = {});
-        //     anns.latestLine = anns.latestLine || { type: 'line', borderColor: 'yellow', borderWidth: 1 };
-        //     anns.minLine    = anns.minLine    || { type: 'line', borderColor: 'red',    borderWidth: 1 };
-        //     anns.maxLine    = anns.maxLine    || { type: 'line', borderColor: 'green',  borderWidth: 1 };
-        // }
     }
 
     // 需要时手动调用；只在数值变化时更新 yMin/yMax，避免触发外层 watch 循环
     refreshTrend(chart) {
-        const v = this.getTrendValues(chart);
-        const anns = chart.options.plugins?.annotation?.annotations;
-        if (!anns) return; // 还没初始化
-
-        let changed = false;
-        const setLine = (line, y) => {
-            if (!line) return;
-            if (line.yMin !== y || line.yMax !== y) {
-            line.yMin = y; line.yMax = y;
-            changed = true;
-            }
-        };
-
-        if (!v) {
-            ['latestLine','minLine','maxLine'].forEach(k => {
-            if (anns[k] && ('yMin' in anns[k])) {
-                delete anns[k].yMin; delete anns[k].yMax; changed = true;
-            }
-            });
-        } else {
-            setLine(anns.latestLine, v.latest);
-            setLine(anns.minLine,    v.min);
-            setLine(anns.maxLine,    v.max);
-        }
-        if (changed) chart.update('none');
+        this.updateMonitorSignalOverlayDatasets();
     }
 
 
     syncTrendReferenceLines() {
-        if (!this.monitorTrendChart || !Array.isArray(this.monitorTrendChart.data?.datasets)) return;
-
-        const chart = this.monitorTrendChart;
-        const baseDataset = chart.data.datasets[0];
-        if (!baseDataset) return;
-
-        // Hide primary dataset from legend so that legend focuses on reference lines
-        baseDataset._excludeFromLegend = true;
-        const that = this;
-        const parsedPoints = Array.isArray(baseDataset.data)
-            ? baseDataset.data.map((point) => {
-                if (!point) return null;
-                const rawTime = point.timestamp ?? point.x ?? point.displayTime ?? null;
-                const xValue = that.normalizeMonitorTime(rawTime);
-                const rawY = typeof point.y === 'number' ? point.y
-                    : (typeof point.value === 'number' ? point.value
-                        : (typeof point.score === 'number' ? point.score : null));
-                if (!Number.isFinite(xValue) || !Number.isFinite(rawY)) return null;
-                return { x: xValue, y: rawY };
-            }).filter(Boolean)
-            : [];
-
-        if (!parsedPoints.length) {
-            chart.data.datasets = chart.data.datasets.filter((_, index) => index === 0);
-            return;
-        }
-
-        const values = parsedPoints.map(point => point.y);
-        if (!values.length) {
-            chart.data.datasets = chart.data.datasets.filter((_, index) => index === 0);
-            return;
-        }
-
-        const latestValue = values[values.length - 1];
-        const minValue = Math.min(...values);
-        const maxValue = Math.max(...values);
-
-        const lineTypes = [
-            { key: 'latest', label: '最新值', color: 'rgba(255, 205, 86, 0.9)', value: latestValue, dash: [6, 4], order: 4 },
-            { key: 'min', label: '最小值', color: 'rgba(220, 53, 69, 0.85)', value: minValue, dash: [], order: 3 },
-            { key: 'max', label: '最大值', color: 'rgba(25, 135, 84, 0.85)', value: maxValue, dash: [], order: 3 }
-        ];
-
-        const lineDatasets = lineTypes.map((descriptor) => {
-            const dataset = {
-                type: 'line',
-                label: `${descriptor.label}: ${this.formatNumber(descriptor.value)}`,
-                data: parsedPoints.map(point => ({ x: point.x, y: descriptor.value })),
-                borderColor: descriptor.color,
-                backgroundColor: descriptor.color,
-                borderWidth: 1.5,
-                pointRadius: 0,
-                pointHoverRadius: 0,
-                pointHitRadius: 0,
-                fill: false,
-                tension: 0,
-                parsing: false,
-                spanGaps: true,
-                stepped: false,
-                borderDash: descriptor.dash,
-                segment: descriptor.dash.length ? { borderDash: descriptor.dash } : undefined,
-                yAxisID: 'y',
-                xAxisID: 'x',
-                order: descriptor.order,
-                _refLineType: descriptor.key
-            };
-            return dataset;
-        });
-
-        chart.data.datasets = [baseDataset, ...lineDatasets];
+        this.updateMonitorSignalOverlayDatasets();
     }
 
     deriveTrendLevel(score) {
@@ -737,43 +797,35 @@ class TradingApp {
     }
 
     addMonitorTrendPoint(time, score, options = {}) {
-        console.log('[App] addMonitorTrendPoint 开始 - score:', score, 'time:', time, 'options:', options);
-        
-        if (typeof score !== 'number' || Number.isNaN(score)) {
-            console.warn('[App] addMonitorTrendPoint - 无效的score值:', score);
-            return;
-        }
+        const safeNumber = (value) => {
+            if (value === null || value === undefined || value === '') return null;
+            if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : null;
+        };
 
-        let x = this.normalizeMonitorTime(time ?? Date.now());
-        if (x == null) {
-            x = Date.now();
-        }
-        
-        console.log('[App] addMonitorTrendPoint - 标准化时间:', x);
+        const normalizedTime = this.normalizeMonitorTime(time ?? Date.now());
+        const x = normalizedTime == null ? Date.now() : normalizedTime;
+        const numericScore = safeNumber(score);
 
         const providedReason = typeof options.reason === 'string' ? options.reason : '';
         const reasonLines = [];
-        const trendLine = `Trend Score ${score.toFixed(2)}`;
-
         const providedLineSet = new Set();
         if (providedReason) {
             providedReason.split('\n').forEach((line) => {
                 const trimmed = line.trim();
                 if (trimmed) {
-                    const lower = trimmed.toLowerCase();
-                    providedLineSet.add(lower);
+                    providedLineSet.add(trimmed.toLowerCase());
                     reasonLines.push(trimmed);
                 }
             });
         }
 
-        if (!providedLineSet.has(trendLine.toLowerCase())) {
-            reasonLines.unshift(trendLine);
-        }
-
-        if (reasonLines.length === 0) {
-            reasonLines.push(trendLine);
-            reasonLines.push('指标变化有限，保持观察');
+        if (Number.isFinite(numericScore)) {
+            const trendLine = `Trend Score ${numericScore.toFixed(2)}`;
+            if (!providedLineSet.has(trendLine.toLowerCase())) {
+                reasonLines.unshift(trendLine);
+            }
         }
 
         const normalizeSuggestion = (value) => {
@@ -792,38 +844,73 @@ class TradingApp {
                 suggestion = 'sell';
             }
         }
+
+        const thresholdValue = typeof options.threshold === 'number' && options.threshold > 0
+            ? options.threshold
+            : 0.5;
+        if (!suggestion && Number.isFinite(numericScore)) {
+            if (numericScore >= thresholdValue) suggestion = 'buy';
+            else if (numericScore <= -thresholdValue) suggestion = 'sell';
+        }
+
+        const obi = safeNumber(options.obi);
+        const ofi = safeNumber(options.ofi);
+        const thresholds = options.thresholds && typeof options.thresholds === 'object' ? options.thresholds : {};
+        const longCfg = thresholds.long && typeof thresholds.long === 'object' ? thresholds.long : {};
+        const shortCfg = thresholds.short && typeof thresholds.short === 'object' ? thresholds.short : {};
+        const longObi = safeNumber(longCfg.obi ?? longCfg.obi5);
+        const shortObi = safeNumber(shortCfg.obi ?? shortCfg.obi5);
+        const longOfi = safeNumber(longCfg.ofi);
+        const shortOfi = safeNumber(shortCfg.ofi);
+
+        let signal = safeNumber(options.signal);
+        if (!Number.isFinite(signal)) {
+            if (Number.isFinite(obi) && Number.isFinite(ofi)) {
+                if (Number.isFinite(longObi) && Number.isFinite(longOfi) && obi >= longObi && ofi >= longOfi) {
+                    signal = 1;
+                } else if (Number.isFinite(shortObi) && Number.isFinite(shortOfi) && obi <= shortObi && ofi <= shortOfi) {
+                    signal = -1;
+                }
+            }
+        }
+        if (!Number.isFinite(signal)) {
+            if (suggestion === 'buy') signal = 1;
+            else if (suggestion === 'sell') signal = -1;
+            else signal = 0;
+        }
+        signal = Math.max(-1, Math.min(1, Number.isFinite(signal) ? signal : 0));
+
         if (!suggestion) {
-            const threshold = typeof options.threshold === 'number' && options.threshold > 0
-                ? options.threshold
-                : 0.5;
-            if (score >= threshold) suggestion = 'buy';
-            else if (score <= -threshold) suggestion = 'sell';
+            suggestion = signal > 0 ? 'buy' : signal < 0 ? 'sell' : null;
         }
 
         const level = typeof options.level === 'number'
             ? options.level
-            : this.deriveTrendLevel(score);
-        const price = typeof options.price === 'number' && Number.isFinite(options.price)
-            ? options.price
-            : undefined;
+            : this.deriveTrendLevel(numericScore);
+        const price = safeNumber(options.price);
 
         if (!Array.isArray(this.monitorTrendData)) {
             this.monitorTrendData = [];
-            console.log('[App] addMonitorTrendPoint - 初始化monitorTrendData数组');
         }
+
+        const reasonText = reasonLines.length ? reasonLines.join('\n') : providedReason || '指标变化有限，保持观察';
 
         const newPoint = {
             x,
             timestamp: x,
-            y: score,
-            reason: reasonLines.join('\n'),
+            signal,
+            score: numericScore,
+            reason: reasonText,
             suggestion,
             level,
-            price
+            price,
+            obi,
+            ofi,
+            thresholds: {
+                long: { obi: longObi, ofi: longOfi },
+                short: { obi: shortObi, ofi: shortOfi },
+            },
         };
-        
-        console.log('[App] addMonitorTrendPoint - 创建新数据点:', newPoint);
-        console.log('[App] addMonitorTrendPoint - 当前monitorTrendData长度:', this.monitorTrendData.length);
 
         let inserted = false;
         for (let i = 0; i < this.monitorTrendData.length; i++) {
@@ -843,9 +930,6 @@ class TradingApp {
         if (!inserted) {
             this.monitorTrendData.push(newPoint);
         }
-        
-        console.log('[App] addMonitorTrendPoint - 数据插入后monitorTrendData长度:', this.monitorTrendData.length);
-        console.log('[App] addMonitorTrendPoint - 最新5个数据点:', this.monitorTrendData.slice(-5));
 
         const windowMs = typeof options.windowMs === 'number' && options.windowMs > 0
             ? options.windowMs
@@ -865,21 +949,17 @@ class TradingApp {
             this.monitorTrendData.shift();
         }
 
-        if (this.monitorTrendChart?.data?.datasets?.[0]) {
-            console.log('[App] addMonitorTrendPoint - 更新monitorTrendChart，数据点数量:', this.monitorTrendData.length);
-            this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
-            this.syncTrendReferenceLines();
+        if (this.monitorTrendChart?.data?.datasets?.length) {
+            const baseData = this.getFormattedTrendChartData();
+            const signalIndex = this.monitorTrendDatasetMap?.signal ?? 0;
+            if (this.monitorTrendChart.data.datasets[signalIndex]) {
+                this.monitorTrendChart.data.datasets[signalIndex].data = baseData;
+            }
+            this.updateMonitorSignalOverlayDatasets();
             this.monitorTrendChart.update('none');
-            console.log('[App] addMonitorTrendPoint - 图表更新完成');
-        } else {
-            console.warn('[App] addMonitorTrendPoint - monitorTrendChart不存在或未初始化');
-            console.log('[App] addMonitorTrendPoint - monitorTrendChart状态:', {
-                exists: !!this.monitorTrendChart,
-                hasData: !!this.monitorTrendChart?.data,
-                hasDatasets: !!this.monitorTrendChart?.data?.datasets,
-                hasFirstDataset: !!this.monitorTrendChart?.data?.datasets?.[0]
-            });
         }
+
+        this.renderMonitorSignalHistory();
     }
 
     syncCharts(source, target) {
@@ -1087,6 +1167,9 @@ class TradingApp {
         // Login events are now handled by LoginManager
 
         this.initSidePanels();
+
+        this.monitorDomHistoryList = document.getElementById('monitorDomHistoryList');
+        this.monitorDomHistoryMeta = document.getElementById('monitorDomHistoryMeta');
 
         // DOM 已就绪时同步访客模式下的界面元素状态，避免初始渲染遗漏
         this.updateReadOnlyMode(this.isReadOnly, this.authRole, { persist: false });
@@ -4510,141 +4593,229 @@ class TradingApp {
                     if (trendCtx) {
                         if (!this.monitorTrendChart) {
                             console.log('[loadMonitorChart] Creating new monitorTrendChart with data points:', this.monitorTrendData?.length || 0);
+                            const signalData = this.getFormattedTrendChartData();
+                            this.monitorTrendDatasetMap = {
+                                signal: 0,
+                                obi: 1,
+                                ofi: 2,
+                                longObi: 3,
+                                shortObi: 4,
+                                longOfi: 5,
+                                shortOfi: 6,
+                                price: 7,
+                            };
                             this.monitorTrendChart = new Chart(trendCtx, {
-                                type: 'line',
+                                type: 'bar',
                                 data: {
-                                    datasets: [{
-                                        label: 'Trend Score',
-                                    data: this.getFormattedTrendChartData(),
-                                    borderColor: 'rgba(255,165,0,0.9)',
-                                    backgroundColor: 'rgba(255,165,0,0.1)',
-                                    showLine: false,
-                                    borderWidth: 0,
-                                    fill: false,
-                                    pointRadius: (ctx) => {
-                                        const level = ctx.raw?.level ?? 0;
-                                        return getTrendLevelStyle(level).pointRadius ?? 3;
-                                    },
-                                        pointHoverRadius: (ctx) => {
-                                            const level = ctx.raw?.level ?? 0;
-                                            return getTrendLevelStyle(level).hoverRadius ?? 5;
+                                    datasets: [
+                                        {
+                                            type: 'bar',
+                                            id: 'signal',
+                                            label: '信号',
+                                            data: signalData,
+                                            yAxisID: 'signalAxis',
+                                            borderSkipped: false,
+                                            borderRadius: 2,
+                                            barPercentage: 1,
+                                            categoryPercentage: 1,
+                                            backgroundColor: [],
                                         },
-                                        pointHitRadius: (ctx) => {
-                                            const level = ctx.raw?.level ?? 0;
-                                            const style = getTrendLevelStyle(level);
-                                            const base = style.hoverRadius ?? 5;
-                                            return Math.max(10, base + 6);
+                                        {
+                                            type: 'line',
+                                            id: 'obi',
+                                            label: 'OBI',
+                                            data: [],
+                                            yAxisID: 'indicatorAxis',
+                                            borderColor: 'rgba(59,130,246,0.9)',
+                                            backgroundColor: 'rgba(59,130,246,0.15)',
+                                            tension: 0.25,
+                                            pointRadius: 0,
+                                            spanGaps: true,
                                         },
-                                        pointBackgroundColor: (ctx) => {
-                                            const raw = ctx.raw || {};
-                                            const style = getTrendLevelStyle(raw.level ?? 0);
-                                            if (raw.suggestion === 'buy') return style.buyColor || '#16a34a';
-                                            if (raw.suggestion === 'sell') return style.sellColor || '#dc2626';
-                                            return style.neutralColor || '#94a3b8';
+                                        {
+                                            type: 'line',
+                                            id: 'ofi',
+                                            label: 'OFI',
+                                            data: [],
+                                            yAxisID: 'indicatorAxis',
+                                            borderColor: 'rgba(234,88,12,0.9)',
+                                            backgroundColor: 'rgba(234,88,12,0.15)',
+                                            tension: 0.25,
+                                            pointRadius: 0,
+                                            spanGaps: true,
                                         },
-                                        pointBorderColor: (ctx) => {
-                                            const style = getTrendLevelStyle(ctx.raw?.level ?? 0);
-                                            return style.borderColor || '#ffffff';
+                                        {
+                                            type: 'line',
+                                            id: 'longObi',
+                                            label: 'Long OBI 阈值',
+                                            data: [],
+                                            yAxisID: 'indicatorAxis',
+                                            borderColor: 'rgba(16,185,129,0.7)',
+                                            borderDash: [6, 4],
+                                            pointRadius: 0,
+                                            spanGaps: true,
                                         },
-                                        pointBorderWidth: (ctx) => {
-                                            const style = getTrendLevelStyle(ctx.raw?.level ?? 0);
-                                            return style.borderWidth ?? 1;
+                                        {
+                                            type: 'line',
+                                            id: 'shortObi',
+                                            label: 'Short OBI 阈值',
+                                            data: [],
+                                            yAxisID: 'indicatorAxis',
+                                            borderColor: 'rgba(239,68,68,0.7)',
+                                            borderDash: [6, 4],
+                                            pointRadius: 0,
+                                            spanGaps: true,
                                         },
-                                        tension: 0.2,
-                                        spanGaps: true,
-                                        yAxisID: 'y'
-                                    }]
+                                        {
+                                            type: 'line',
+                                            id: 'longOfi',
+                                            label: 'Long OFI 阈值',
+                                            data: [],
+                                            yAxisID: 'indicatorAxis',
+                                            borderColor: 'rgba(16,185,129,0.4)',
+                                            borderDash: [4, 4],
+                                            pointRadius: 0,
+                                            spanGaps: true,
+                                        },
+                                        {
+                                            type: 'line',
+                                            id: 'shortOfi',
+                                            label: 'Short OFI 阈值',
+                                            data: [],
+                                            yAxisID: 'indicatorAxis',
+                                            borderColor: 'rgba(239,68,68,0.4)',
+                                            borderDash: [4, 4],
+                                            pointRadius: 0,
+                                            spanGaps: true,
+                                        },
+                                        {
+                                            type: 'line',
+                                            id: 'price',
+                                            label: '价格',
+                                            data: [],
+                                            yAxisID: 'priceAxis',
+                                            borderColor: 'rgba(99,102,241,0.85)',
+                                            backgroundColor: 'rgba(99,102,241,0.1)',
+                                            tension: 0.15,
+                                            pointRadius: 0,
+                                            spanGaps: true,
+                                        },
+                                    ],
                                 },
                                 options: {
+                                    parsing: false,
                                     responsive: true,
                                     maintainAspectRatio: false,
                                     interaction: { intersect: false, mode: 'index' },
                                     plugins: {
-                                        legend: {
-                                            display: true,
-                                            position: 'top',
-                                            align: 'end',
-                                            labels: {
-                                                padding: 12
-                                            }
-                                        },
+                                        legend: { display: true, position: 'top' },
                                         zoom: {
                                             pan: { enabled: true, mode: 'x' },
                                             zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
-                                            onZoom: ({chart}) => this.syncCharts(chart, this.monitorChart),
-                                            onPan: ({chart}) => this.syncCharts(chart, this.monitorChart)
+                                            onZoom: ({ chart }) => this.syncCharts(chart, this.monitorChart),
+                                            onPan: ({ chart }) => this.syncCharts(chart, this.monitorChart),
                                         },
                                         tooltip: {
                                             callbacks: {
+                                                title: (items) => {
+                                                    if (!items?.length) return '';
+                                                    const ts = items[0].parsed?.x;
+                                                    if (!Number.isFinite(ts)) return '';
+                                                    return new Date(ts).toLocaleString(undefined, { hour12: false });
+                                                },
                                                 label: (context) => {
-                                                    const lines = [];
+                                                    const datasetId = context.dataset?.id;
                                                     const value = context.parsed?.y;
-                                                    if (typeof value === 'number') {
-                                                        lines.push(`Trend Score: ${value.toFixed(2)}`);
-                                                    }
-                                                    const rawReason = context.raw?.reason;
-                                                    if (rawReason) {
-                                                        String(rawReason).split('\n').forEach((line) => {
-                                                            if (line) lines.push(line);
-                                                        });
-                                                    }
-                                                    if (context.raw?.suggestion) {
-                                                        const label = getTrendSuggestionLabel(context.raw.suggestion, context.raw.level);
-                                                        if (label) {
-                                                            lines.push(`建议：${label}`);
-                                                        } else {
-                                                            lines.push(context.raw.suggestion === 'buy' ? '建议：Buy' : '建议：Sell');
+                                                    const raw = context.raw || {};
+                                                    if (datasetId === 'signal') {
+                                                        const lines = [];
+                                                        const direction = raw.y > 0 ? '多头信号' : '空头信号';
+                                                        lines.push(direction);
+                                                        if (Number.isFinite(raw.price)) {
+                                                            lines.push(`价格: $${this.formatNumber(raw.price)}`);
                                                         }
+                                                        if (Number.isFinite(raw.obi)) {
+                                                            lines.push(`OBI: ${this.formatNumber(raw.obi)}`);
+                                                        }
+                                                        if (Number.isFinite(raw.ofi)) {
+                                                            lines.push(`OFI: ${this.formatNumber(raw.ofi)}`);
+                                                        }
+                                                        if (raw.reason) {
+                                                            String(raw.reason).split('\n').forEach((line) => {
+                                                                if (line) lines.push(line);
+                                                            });
+                                                        }
+                                                        return lines;
                                                     }
-                                                    return lines;
-                                                }
-                                            }
+                                                    if (datasetId === 'price') {
+                                                        return `价格: $${this.formatNumber(value)}`;
+                                                    }
+                                                    if (datasetId === 'obi') {
+                                                        return `OBI: ${this.formatNumber(value)}`;
+                                                    }
+                                                    if (datasetId === 'ofi') {
+                                                        return `OFI: ${this.formatNumber(value)}`;
+                                                    }
+                                                    if (datasetId === 'longObi' || datasetId === 'shortObi') {
+                                                        return `${context.dataset.label}: ${this.formatNumber(value)}`;
+                                                    }
+                                                    if (datasetId === 'longOfi' || datasetId === 'shortOfi') {
+                                                        return `${context.dataset.label}: ${this.formatNumber(value)}`;
+                                                    }
+                                                    return `${context.dataset.label}: ${this.formatNumber(value)}`;
+                                                },
+                                            },
                                         },
-                                        trendSignalLabel: { offset: 18 }
                                     },
                                     scales: {
                                         x: {
                                             type: 'time',
-                                            time: { unit: 'minute', displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'MMM dd' } }
+                                            time: { unit: 'minute', displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'MMM dd' } },
                                         },
-                                        y: {
+                                        signalAxis: {
                                             position: 'left',
-                                            min: -1,
-                                            max: 1,
-                                            title: { display: true, text: 'Trend Score' }
-                                        }
-                                    }
+                                            display: false,
+                                            min: -1.5,
+                                            max: 1.5,
+                                        },
+                                        indicatorAxis: {
+                                            position: 'left',
+                                            grid: { drawOnChartArea: true },
+                                            title: { display: true, text: 'OBI / OFI' },
+                                        },
+                                        priceAxis: {
+                                            position: 'right',
+                                            grid: { drawOnChartArea: false },
+                                            title: { display: true, text: '价格' },
+                                        },
+                                    },
                                 },
-                                plugins: [TrendSignalLabelPlugin]
                             });
-                            console.log('[loadMonitorChart] MonitorTrendChart created successfully');
-                            console.log('[loadMonitorChart] Chart data after creation:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
-                            // 创建好 chart 后：
                             this.setupTrendLegendAndAnnotations(this.monitorTrendChart);
-
-                            this.syncTrendReferenceLines();
+                            this.updateMonitorSignalOverlayDatasets();
                             this.monitorTrendChart.update('none');
+                            this.renderMonitorSignalHistory();
                         } else {
-                            console.log('[loadMonitorChart] Updating existing monitorTrendChart');
-                            console.log('[loadMonitorChart] Current chart data length:', this.monitorTrendChart.data.datasets[0].data?.length || 0);
-                            this.monitorTrendChart.data.datasets[0].data = this.getFormattedTrendChartData();
-                            this.monitorTrendChart.data.datasets[0].showLine = false;
-                            this.monitorTrendChart.data.datasets[0].borderWidth = 0;
-                            this.monitorTrendChart.data.datasets[0].fill = false;
-                            const trendYScale = this.monitorTrendChart.options?.scales?.y;
-                            if (trendYScale) {
-                                trendYScale.min = -1;
-                                trendYScale.max = 1;
-                                if ('beginAtZero' in trendYScale) delete trendYScale.beginAtZero;
-                                if ('suggestedMin' in trendYScale) delete trendYScale.suggestedMin;
-                                if ('suggestedMax' in trendYScale) delete trendYScale.suggestedMax;
-                                if ('grace' in trendYScale) delete trendYScale.grace;
+                            if (!this.monitorTrendDatasetMap || !('price' in this.monitorTrendDatasetMap)) {
+                                this.monitorTrendDatasetMap = {
+                                    signal: 0,
+                                    obi: 1,
+                                    ofi: 2,
+                                    longObi: 3,
+                                    shortObi: 4,
+                                    longOfi: 5,
+                                    shortOfi: 6,
+                                    price: 7,
+                                };
                             }
-                            this.syncTrendReferenceLines();
-                            // 每次你数据有变更（或初始化数据之后），显式调用：
-                            this.refreshTrend(this.monitorTrendChart);
+                            const baseData = this.getFormattedTrendChartData();
+                            const signalIndex = this.monitorTrendDatasetMap?.signal ?? 0;
+                            if (this.monitorTrendChart.data.datasets[signalIndex]) {
+                                this.monitorTrendChart.data.datasets[signalIndex].data = baseData;
+                            }
+                            this.updateMonitorSignalOverlayDatasets();
                             this.monitorTrendChart.update('none');
-                            console.log('[loadMonitorChart] MonitorTrendChart updated');
+                            this.renderMonitorSignalHistory();
                         }
                     } else {
                         console.warn('[loadMonitorChart] Trend chart context not found - cannot create/update trend chart');
