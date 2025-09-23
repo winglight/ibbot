@@ -402,6 +402,9 @@ class DOMProcessor:
         def _register(event_key: str) -> None:
             if event_key not in flags:
                 return
+            if flags[event_key]:
+                # Already recorded during a previous stage; avoid duplicates
+                return
             flags[event_key] = True
             events.append(event_key)
             meta = EVENT_METADATA.get(event_key, {"code": event_key[:1].upper(), "label": event_key})
