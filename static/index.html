@@ -626,25 +626,22 @@
                                             <input type="number" class="form-control form-control-sm" id="domOptimizerMinSignalsInput" min="0" value="0">
                                         </div>
                                         <div class="col-12">
-                                            <label class="form-label">候选阈值 (OBI / OFI / Trend)</label>
-                                            <div class="input-group input-group-sm mb-2">
-                                                <span class="input-group-text">OBI</span>
-                                                <input type="text" class="form-control" id="domOptimizerObiCandidatesInput" placeholder="0.55,0.6,0.65,0.7">
+                                            <label class="form-label mb-1">阈值配置</label>
+                                            <div class="small text-muted mb-2">参数分为两层：基础阈值（OBI / OFI / Trend 等核心指标）与特征阈值（堆单、吸收等特征信号）。</div>
+                                            <div class="d-flex justify-content-end mb-2">
+                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerFeaturePresetBtn">
+                                                    <i class="fas fa-download me-1"></i>填充当前配置
+                                                </button>
                                             </div>
-                                            <div class="input-group input-group-sm mb-2">
-                                                <span class="input-group-text">OFI</span>
-                                                <input type="text" class="form-control" id="domOptimizerOfiCandidatesInput" placeholder="0,5,10,15">
+                                            <div class="border rounded-3 p-3 bg-light mb-3">
+                                                <div class="fw-semibold text-uppercase small text-muted mb-2">基础阈值 JSON</div>
+                                                <textarea class="form-control font-monospace" id="domOptimizerBaseThresholdsInput" rows="5" placeholder='{"base_thresholds": {"long": {"obi5": 0.6, "ofi": 0.0}}, "obi_candidates": [0.55, 0.6, 0.65, 0.7], "ofi_candidates": [0, 5, 10, 15], "trend_candidates": [0.5, 0.7, 0.85, 0.95]}'></textarea>
+                                                <div class="form-text mt-1">可同时编辑基础阈值及候选组合，留空则沿用后端配置。</div>
                                             </div>
-                                            <div class="input-group input-group-sm">
-                                                <span class="input-group-text">Trend</span>
-                                                <input type="text" class="form-control" id="domOptimizerTrendCandidatesInput" placeholder="0.5,0.7,0.85,0.95">
-                                            </div>
-                                            <div class="form-text">仅在手动优化时使用，留空则使用默认组合。</div>
-                                            <label for="domOptimizerFeatureThresholdsInput" class="form-label mt-3">特征阈值配置 (JSON)</label>
-                                            <textarea class="form-control font-monospace" id="domOptimizerFeatureThresholdsInput" rows="6" placeholder='{"stacking": {"intensity": 0.35}}'></textarea>
-                                            <div class="d-flex justify-content-between align-items-center form-text mt-1">
-                                                <span>留空沿用当前配置，支持手动调整堆单/吸收等特征阈值。</span>
-                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerFeaturePresetBtn">填充当前配置</button>
+                                            <div class="border rounded-3 p-3 bg-light">
+                                                <div class="fw-semibold text-uppercase small text-muted mb-2">特征阈值 JSON</div>
+                                                <textarea class="form-control font-monospace" id="domOptimizerFeatureThresholdsInput" rows="6" placeholder='{"stacking": {"intensity": 0.35}}'></textarea>
+                                                <div class="form-text mt-1">支持堆单 / 吸收等特征的细粒度阈值配置，留空则保持当前设置。</div>
                                             </div>
                                         </div>
                                     </form>

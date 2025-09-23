@@ -4,7 +4,9 @@
         symbol: 'domOptimizer.symbol',
         lookback: 'domOptimizer.lookback',
         limit: 'domOptimizer.limit',
-        pageSize: 'domOptimizer.pageSize'
+        pageSize: 'domOptimizer.pageSize',
+        baseThresholds: 'domOptimizer.baseThresholds',
+        featureThresholds: 'domOptimizer.featureThresholds'
     };
 
     const LOOKBACK_MINUTES_PRESETS = [10, 30, 60, 120, 180, 240, 360, 720, 1440, 2880, 10080, -1];
@@ -24,6 +26,18 @@
         buy: '#22c55e',
         sell: '#ef4444',
         neutral: '#f97316',
+    };
+
+    const DEFAULT_BASE_THRESHOLD_TEMPLATE = {
+        baseThresholds: {
+            long: { obi5: 0.6, ofi: 0.0 },
+            short: { obi5: 0.4, ofi: 0.0 },
+            absorb: { obi_buy: 0.4, obi_sell: 0.6, ofi_sign: 0.0 },
+            sweep: { ofi_multiplier: 2.0, min_abs_ofi: 0.0 },
+        },
+        obiCandidates: [0.55, 0.6, 0.65, 0.7],
+        ofiCandidates: [0, 5, 10, 15],
+        trendCandidates: [0.5, 0.7, 0.85, 0.95],
     };
 
     const DEFAULT_FEATURE_THRESHOLD_TEMPLATE = {
@@ -67,6 +81,16 @@
         },
     };
 
+    function cloneBaseThresholds(value) {
+        if (!value || typeof value !== 'object') return null;
+        try {
+            return JSON.parse(JSON.stringify(value));
+        } catch (error) {
+            console.warn('Failed to clone base thresholds', error);
+            return null;
+        }
+    }
+
     function cloneFeatureThresholds(value) {
         if (!value || typeof value !== 'object') return null;
         try {
@@ -74,6 +98,141 @@
         } catch (error) {
             console.warn('Failed to clone feature thresholds', error);
             return null;
+        }
+    }
+
+    function normalizeCandidateArray(value) {
+        if (value === undefined || value === null) return null;
+        let candidates = [];
+        if (Array.isArray(value)) {
+            candidates = value;
+        } else if (typeof value === 'number') {
+            candidates = [value];
+        } else if (typeof value === 'string') {
+            candidates = value.split(/[\s,]+/).map((token) => Number(token.trim()));
+        } else {
+            return null;
+        }
+        const numeric = candidates
+            .map((item) => Number(item))
+            .filter((item) => Number.isFinite(item));
+        if (!numeric.length) return null;
+        const unique = [];
+        numeric.forEach((item) => {
+            if (!unique.some((existing) => Math.abs(existing - item) < 1e-9)) {
+                unique.push(item);
+            }
+        });
+        unique.sort((a, b) => a - b);
+        return unique;
+    }
+
+    function parseBaseThresholdsInput(rawValue) {
+        if (!rawValue) return null;
+        let parsed = rawValue;
+        if (typeof rawValue === 'string') {
+            const trimmed = rawValue.trim();
+            if (!trimmed) return null;
+            try {
+                parsed = JSON.parse(trimmed);
+            } catch (error) {
+                throw new Error(`基础阈值 JSON 解析失败: ${error.message}`);
+            }
+        } else if (typeof rawValue === 'object' && !Array.isArray(rawValue)) {
+            parsed = cloneBaseThresholds(rawValue) || rawValue;
+        } else {
+            throw new Error('基础阈值 JSON 必须是对象');
+        }
+
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('基础阈值 JSON 必须是对象');
+        }
+
+        const config = {
+            baseThresholds: null,
+            obiCandidates: null,
+            ofiCandidates: null,
+            trendCandidates: null,
+        };
+
+        const baseSource = (parsed.base_thresholds && typeof parsed.base_thresholds === 'object' && !Array.isArray(parsed.base_thresholds))
+            ? parsed.base_thresholds
+            : (parsed.baseThresholds && typeof parsed.baseThresholds === 'object' && !Array.isArray(parsed.baseThresholds))
+                ? parsed.baseThresholds
+                : null;
+        const source = baseSource || parsed;
+        if (source && typeof source === 'object') {
+            const entries = {};
+            Object.keys(source).forEach((key) => {
+                if (key === 'base_thresholds' || key === 'baseThresholds') return;
+                const value = source[key];
+                if (value && typeof value === 'object' && !Array.isArray(value)) {
+                    entries[key] = cloneBaseThresholds(value) || value;
+                }
+            });
+            if (Object.keys(entries).length) {
+                config.baseThresholds = entries;
+            } else if (baseSource) {
+                config.baseThresholds = cloneBaseThresholds(baseSource) || baseSource;
+            }
+        }
+
+        config.obiCandidates = normalizeCandidateArray(parsed.obi_candidates ?? parsed.obiCandidates);
+        config.ofiCandidates = normalizeCandidateArray(parsed.ofi_candidates ?? parsed.ofiCandidates);
+        config.trendCandidates = normalizeCandidateArray(
+            parsed.trend_candidates
+            ?? parsed.trendCandidates
+            ?? parsed.trend_thresholds
+            ?? parsed.trendThresholds,
+        );
+
+        if (
+            !config.baseThresholds
+            && !config.obiCandidates
+            && !config.ofiCandidates
+            && !config.trendCandidates
+        ) {
+            throw new Error('基础阈值 JSON 需包含 base_thresholds 或候选数组');
+        }
+
+        return config;
+    }
+
+    function stringifyBaseThresholds(config) {
+        if (!config || typeof config !== 'object') return '';
+        const payload = {};
+        if (Object.prototype.hasOwnProperty.call(config, 'baseThresholds')) {
+            const base = config.baseThresholds && typeof config.baseThresholds === 'object'
+                ? cloneBaseThresholds(config.baseThresholds) || config.baseThresholds
+                : null;
+            if (base && Object.keys(base).length) {
+                payload.base_thresholds = base;
+            }
+        }
+        if (Object.prototype.hasOwnProperty.call(config, 'obiCandidates')) {
+            const obi = normalizeCandidateArray(config.obiCandidates);
+            if (obi && obi.length) {
+                payload.obi_candidates = obi;
+            }
+        }
+        if (Object.prototype.hasOwnProperty.call(config, 'ofiCandidates')) {
+            const ofi = normalizeCandidateArray(config.ofiCandidates);
+            if (ofi && ofi.length) {
+                payload.ofi_candidates = ofi;
+            }
+        }
+        if (Object.prototype.hasOwnProperty.call(config, 'trendCandidates')) {
+            const trend = normalizeCandidateArray(config.trendCandidates);
+            if (trend && trend.length) {
+                payload.trend_candidates = trend;
+            }
+        }
+        if (!Object.keys(payload).length) return '';
+        try {
+            return JSON.stringify(payload, null, 2);
+        } catch (error) {
+            console.warn('Failed to stringify base thresholds', error);
+            return '';
         }
     }
 
@@ -241,17 +400,6 @@
             .replace(/'/g, '&#39;');
     }
 
-    function parseCandidates(input) {
-        if (!input) return null;
-        const parts = String(input)
-            .split(/[,\s]+/)
-            .map((token) => token.trim())
-            .filter(Boolean)
-            .map((token) => Number(token))
-            .filter((value) => Number.isFinite(value));
-        return parts.length ? parts : null;
-    }
-
     function formatIsoDatetime(value) {
         if (!value) return '-';
         const date = value instanceof Date ? value : new Date(value);
@@ -381,6 +529,12 @@
                 statsMetadata: null,
                 latestSignal: null,
                 trendThresholds: [0.5, 0.7, 0.85, 0.95],
+                baseThresholds: null,
+                baseThresholdCandidates: {
+                    obi: null,
+                    ofi: null,
+                    trend: null,
+                },
                 featureThresholds: null,
                 orderCache: {
                     symbol: null,
@@ -444,9 +598,7 @@
                 lookbackDisplay: document.getElementById('domOptimizerLookbackDisplay'),
                 statsLimitInput: document.getElementById('domOptimizerStatsLimitInput'),
                 minSignalsInput: document.getElementById('domOptimizerMinSignalsInput'),
-                obiCandidatesInput: document.getElementById('domOptimizerObiCandidatesInput'),
-                ofiCandidatesInput: document.getElementById('domOptimizerOfiCandidatesInput'),
-                trendCandidatesInput: document.getElementById('domOptimizerTrendCandidatesInput'),
+                baseThresholdsInput: document.getElementById('domOptimizerBaseThresholdsInput'),
                 featureThresholdsInput: document.getElementById('domOptimizerFeatureThresholdsInput'),
                 featurePresetBtn: document.getElementById('domOptimizerFeaturePresetBtn'),
                 refreshStatsBtn: document.getElementById('domOptimizerRefreshStatsBtn'),
@@ -520,6 +672,7 @@
                 symbolInput,
                 signalsTable,
                 featurePresetBtn,
+                baseThresholdsInput,
                 featureThresholdsInput,
             } = this.elements;
 
@@ -558,13 +711,19 @@
             });
 
             featurePresetBtn?.addEventListener('click', () => {
-                this.fillFeatureThresholdPreset();
+                this.fillFeatureThresholdPreset().catch(() => {});
             });
-            featureThresholdsInput?.addEventListener('change', () => {
-                const parsed = this.safeParseFeatureThresholds(featureThresholdsInput.value);
-                if (parsed) {
-                    this.state.featureThresholds = parsed;
-                }
+            baseThresholdsInput?.addEventListener('input', () => {
+                this.handleBaseThresholdInputChange();
+            });
+            baseThresholdsInput?.addEventListener('blur', () => {
+                this.handleBaseThresholdBlur();
+            });
+            featureThresholdsInput?.addEventListener('input', () => {
+                this.handleFeatureThresholdInputChange();
+            });
+            featureThresholdsInput?.addEventListener('blur', () => {
+                this.handleFeatureThresholdBlur();
             });
 
             pagination?.addEventListener('click', (event) => {
@@ -634,12 +793,14 @@
 
         restorePreferences() {
             if (!this.elements.section) return;
-            const { symbolInput, lookbackInput, statsLimitInput, pageSizeInput } = this.elements;
+            const { symbolInput, lookbackInput, statsLimitInput, pageSizeInput, baseThresholdsInput, featureThresholdsInput } = this.elements;
             const storedSymbol = localStorage.getItem(STORAGE_KEYS.symbol);
             const storedLookbackRaw = localStorage.getItem(STORAGE_KEYS.lookback);
             const storedLookbackMinutes = coerceMinutesFromStorage(storedLookbackRaw);
             const storedLimit = localStorage.getItem(STORAGE_KEYS.limit);
             const storedPageSize = localStorage.getItem(STORAGE_KEYS.pageSize);
+            const storedBaseThresholds = localStorage.getItem(STORAGE_KEYS.baseThresholds);
+            const storedFeatureThresholds = localStorage.getItem(STORAGE_KEYS.featureThresholds);
 
             if (storedSymbol && symbolInput) symbolInput.value = storedSymbol;
             if (storedLimit && statsLimitInput) statsLimitInput.value = storedLimit;
@@ -649,6 +810,22 @@
                 const parsed = parseInt(pageSizeInput.value, 10);
                 if (Number.isFinite(parsed) && parsed > 0) {
                     this.state.pageSize = parsed;
+                }
+            }
+
+            if (storedBaseThresholds && baseThresholdsInput) {
+                baseThresholdsInput.value = storedBaseThresholds;
+                const parsedBase = this.safeParseBaseThresholds(storedBaseThresholds);
+                if (parsedBase) {
+                    this.applyBaseThresholdConfig(parsedBase);
+                }
+            }
+
+            if (storedFeatureThresholds && featureThresholdsInput) {
+                featureThresholdsInput.value = storedFeatureThresholds;
+                const parsedFeature = this.safeParseFeatureThresholds(storedFeatureThresholds);
+                if (parsedFeature) {
+                    this.state.featureThresholds = cloneFeatureThresholds(parsedFeature) || parsedFeature;
                 }
             }
 
@@ -1119,6 +1296,18 @@
             if (thresholds) {
                 parts.push(`<div class="text-muted">阈值: ${thresholds}</div>`);
             }
+            if (result?.updated_thresholds) {
+                const baseThresholds = cloneBaseThresholds(result.updated_thresholds) || result.updated_thresholds;
+                this.applyBaseThresholdConfig({
+                    baseThresholds,
+                    obiCandidates: this.state.baseThresholdCandidates?.obi,
+                    ofiCandidates: this.state.baseThresholdCandidates?.ofi,
+                    trendCandidates: this.state.baseThresholdCandidates?.trend,
+                }, {
+                    updateInput: Boolean(result?.applied),
+                    persist: Boolean(result?.applied),
+                });
+            }
             if (result?.feature_thresholds) {
                 const cloned = cloneFeatureThresholds(result.feature_thresholds) || result.feature_thresholds;
                 const featureText = stringifyFeatureThresholds(cloned);
@@ -1126,6 +1315,10 @@
                     parts.push(`<pre class="bg-light border rounded small px-2 py-1 text-break mt-2 mb-0">${escapeHtml(featureText)}</pre>`);
                 }
                 this.state.featureThresholds = cloned;
+                if (result?.applied && featureText && this.elements.featureThresholdsInput) {
+                    this.elements.featureThresholdsInput.value = featureText;
+                    this.persistPreference(STORAGE_KEYS.featureThresholds, featureText);
+                }
             }
             this.elements.lastResult.innerHTML = parts.join('');
             this.elements.lastResultPanel.classList.remove('border-danger', 'border-success');
@@ -1295,6 +1488,114 @@
             this.updateThresholdChart(ordered);
         }
 
+        safeParseBaseThresholds(rawValue) {
+            try {
+                return parseBaseThresholdsInput(rawValue);
+            } catch (error) {
+                if (error && error.message) {
+                    this.notify('warning', error.message);
+                }
+                return null;
+            }
+        }
+
+        applyBaseThresholdConfig(config, options = {}) {
+            const { updateInput = false, persist = false } = options || {};
+            const sanitized = config || {};
+            const hasBase = Object.prototype.hasOwnProperty.call(sanitized, 'baseThresholds');
+            const hasObi = Object.prototype.hasOwnProperty.call(sanitized, 'obiCandidates');
+            const hasOfi = Object.prototype.hasOwnProperty.call(sanitized, 'ofiCandidates');
+            const hasTrend = Object.prototype.hasOwnProperty.call(sanitized, 'trendCandidates');
+
+            const resolvedBase = hasBase
+                ? cloneBaseThresholds(sanitized.baseThresholds) || sanitized.baseThresholds || null
+                : this.state.baseThresholds;
+            const previousCandidates = this.state.baseThresholdCandidates || { obi: null, ofi: null, trend: null };
+            const resolvedObi = hasObi
+                ? normalizeCandidateArray(sanitized.obiCandidates)
+                : normalizeCandidateArray(previousCandidates.obi);
+            const resolvedOfi = hasOfi
+                ? normalizeCandidateArray(sanitized.ofiCandidates)
+                : normalizeCandidateArray(previousCandidates.ofi);
+            const resolvedTrend = hasTrend
+                ? normalizeCandidateArray(sanitized.trendCandidates)
+                : normalizeCandidateArray(previousCandidates.trend);
+
+            this.state.baseThresholds = resolvedBase
+                ? cloneBaseThresholds(resolvedBase) || resolvedBase
+                : null;
+            this.state.baseThresholdCandidates = {
+                obi: resolvedObi,
+                ofi: resolvedOfi,
+                trend: resolvedTrend,
+            };
+
+            if (updateInput && this.elements.baseThresholdsInput) {
+                const text = stringifyBaseThresholds({
+                    baseThresholds: this.state.baseThresholds,
+                    obiCandidates: this.state.baseThresholdCandidates.obi,
+                    ofiCandidates: this.state.baseThresholdCandidates.ofi,
+                    trendCandidates: this.state.baseThresholdCandidates.trend,
+                }) || '';
+                this.elements.baseThresholdsInput.value = text;
+                if (persist) {
+                    this.persistPreference(STORAGE_KEYS.baseThresholds, text);
+                }
+            }
+        }
+
+        handleBaseThresholdInputChange() {
+            const input = this.elements.baseThresholdsInput;
+            if (!input) return;
+            this.persistPreference(STORAGE_KEYS.baseThresholds, input.value ?? '');
+        }
+
+        handleBaseThresholdBlur() {
+            const input = this.elements.baseThresholdsInput;
+            if (!input) return;
+            const text = typeof input.value === 'string' ? input.value.trim() : '';
+            if (!text) {
+                this.applyBaseThresholdConfig({
+                    baseThresholds: null,
+                    obiCandidates: null,
+                    ofiCandidates: null,
+                    trendCandidates: null,
+                }, { updateInput: false, persist: true });
+                return;
+            }
+            const parsed = this.safeParseBaseThresholds(text);
+            if (parsed) {
+                this.applyBaseThresholdConfig(parsed, { updateInput: true, persist: true });
+            }
+        }
+
+        handleFeatureThresholdInputChange() {
+            const input = this.elements.featureThresholdsInput;
+            if (!input) return;
+            this.persistPreference(STORAGE_KEYS.featureThresholds, input.value ?? '');
+        }
+
+        handleFeatureThresholdBlur() {
+            const input = this.elements.featureThresholdsInput;
+            if (!input) return;
+            const text = typeof input.value === 'string' ? input.value.trim() : '';
+            if (!text) {
+                this.state.featureThresholds = null;
+                this.persistPreference(STORAGE_KEYS.featureThresholds, '');
+                return;
+            }
+            const parsed = this.safeParseFeatureThresholds(text);
+            if (parsed) {
+                const cloned = cloneFeatureThresholds(parsed) || parsed;
+                this.state.featureThresholds = cloned;
+                const normalized = stringifyFeatureThresholds(cloned);
+                if (normalized) {
+                    input.value = normalized;
+                    this.persistPreference(STORAGE_KEYS.featureThresholds, normalized);
+                }
+            }
+        }
+
         safeParseFeatureThresholds(rawValue) {
             try {
                 return parseFeatureThresholdsInput(rawValue);
@@ -1306,17 +1607,72 @@
             }
         }
 
-        fillFeatureThresholdPreset() {
-            const template = this.state.featureThresholds
-                ? cloneFeatureThresholds(this.state.featureThresholds)
-                : cloneFeatureThresholds(DEFAULT_FEATURE_THRESHOLD_TEMPLATE)
-                || DEFAULT_FEATURE_THRESHOLD_TEMPLATE;
-            if (this.elements.featureThresholdsInput) {
-                this.elements.featureThresholdsInput.value = stringifyFeatureThresholds(template);
+        async fillFeatureThresholdPreset() {
+            const button = this.elements.featurePresetBtn;
+            try {
+                this.setButtonLoading(button, true, '同步中');
+                const response = await this.apiCall('/config/dom', {
+                    allowReadOnly: true,
+                    useCache: false,
+                });
+                if (!response || response.success === false) {
+                    throw new Error(response?.detail || '获取配置失败');
+                }
+                const baseThresholds = cloneBaseThresholds(response?.tuner_base_thresholds)
+                    || cloneBaseThresholds(DEFAULT_BASE_THRESHOLD_TEMPLATE.baseThresholds)
+                    || DEFAULT_BASE_THRESHOLD_TEMPLATE.baseThresholds;
+                const trendCandidates = Array.isArray(response?.trend_thresholds)
+                    ? normalizeCandidateArray(response.trend_thresholds)
+                    : null;
+                const baseConfig = {
+                    baseThresholds,
+                    obiCandidates: this.state.baseThresholdCandidates?.obi
+                        ?? DEFAULT_BASE_THRESHOLD_TEMPLATE.obiCandidates,
+                    ofiCandidates: this.state.baseThresholdCandidates?.ofi
+                        ?? DEFAULT_BASE_THRESHOLD_TEMPLATE.ofiCandidates,
+                    trendCandidates: trendCandidates
+                        ?? this.state.baseThresholdCandidates?.trend
+                        ?? DEFAULT_BASE_THRESHOLD_TEMPLATE.trendCandidates,
+                };
+                this.applyBaseThresholdConfig(baseConfig, { updateInput: true, persist: true });
+
+                const featureThresholds = cloneFeatureThresholds(response?.tuner_feature_thresholds)
+                    || cloneFeatureThresholds(DEFAULT_FEATURE_THRESHOLD_TEMPLATE)
+                    || DEFAULT_FEATURE_THRESHOLD_TEMPLATE;
+                this.state.featureThresholds = featureThresholds;
+                const featureText = stringifyFeatureThresholds(featureThresholds);
+                if (this.elements.featureThresholdsInput) {
+                    this.elements.featureThresholdsInput.value = featureText;
+                }
+                this.persistPreference(STORAGE_KEYS.featureThresholds, featureText);
+                this.notify('success', '已填充当前 DOM 配置');
+            } catch (error) {
+                this.notify('error', `获取配置失败: ${error?.message || error}`);
+            } finally {
+                this.setButtonLoading(button, false);
             }
-            if (template) {
-                this.state.featureThresholds = template;
+        }
+
+        getBaseThresholdPayload() {
+            const input = this.elements.baseThresholdsInput;
+            if (!input) return null;
+            const text = typeof input.value === 'string' ? input.value.trim() : '';
+            if (!text) return null;
+            const parsed = this.safeParseBaseThresholds(text);
+            if (!parsed) {
+                throw new Error('基础阈值 JSON 解析失败');
             }
+            this.applyBaseThresholdConfig(parsed, { updateInput: true, persist: true });
+            const candidates = this.state.baseThresholdCandidates || {};
+            const cloneArray = (value) => (Array.isArray(value) && value.length ? value.map((num) => Number(num)).filter((num) => Number.isFinite(num)) : null);
+            return {
+                baseThresholds: this.state.baseThresholds
+                    ? cloneBaseThresholds(this.state.baseThresholds) || this.state.baseThresholds
+                    : null,
+                obiCandidates: cloneArray(candidates.obi),
+                ofiCandidates: cloneArray(candidates.ofi),
+                trendCandidates: cloneArray(candidates.trend),
+            };
         }
 
         getFeatureThresholdPayload() {
@@ -1328,8 +1684,14 @@
             if (!parsed) {
                 throw new Error('特征阈值 JSON 解析失败');
             }
-            this.state.featureThresholds = cloneFeatureThresholds(parsed) || parsed;
-            return parsed;
+            const cloned = cloneFeatureThresholds(parsed) || parsed;
+            this.state.featureThresholds = cloned;
+            const normalized = stringifyFeatureThresholds(cloned);
+            if (normalized && this.elements.featureThresholdsInput) {
+                this.elements.featureThresholdsInput.value = normalized;
+                this.persistPreference(STORAGE_KEYS.featureThresholds, normalized);
+            }
+            return cloned;
         }
 
         ensureTrendChart() {
@@ -2818,12 +3180,21 @@
                     apply: applyUpdates,
                     min_signals: Math.max(minSignals, 0)
                 };
-                const obiCandidates = parseCandidates(this.elements.obiCandidatesInput?.value);
-                if (obiCandidates) payload.obi_candidates = obiCandidates;
-                const ofiCandidates = parseCandidates(this.elements.ofiCandidatesInput?.value);
-                if (ofiCandidates) payload.ofi_candidates = ofiCandidates;
-                const trendCandidates = parseCandidates(this.elements.trendCandidatesInput?.value);
-                if (trendCandidates) payload.trend_candidates = trendCandidates;
+                const baseConfig = this.getBaseThresholdPayload();
+                if (baseConfig) {
+                    if (baseConfig.baseThresholds) {
+                        payload.base_thresholds = baseConfig.baseThresholds;
+                    }
+                    if (baseConfig.obiCandidates) {
+                        payload.obi_candidates = baseConfig.obiCandidates;
+                    }
+                    if (baseConfig.ofiCandidates) {
+                        payload.ofi_candidates = baseConfig.ofiCandidates;
+                    }
+                    if (baseConfig.trendCandidates) {
+                        payload.trend_candidates = baseConfig.trendCandidates;
+                    }
+                }
                 const featureThresholds = this.getFeatureThresholdPayload();
                 if (featureThresholds) payload.feature_thresholds = featureThresholds;
                 const response = await this.apiCall('/dom/optimize', {
@@ -2862,9 +3233,19 @@
                 : null;
             if (trendList && result?.applied) {
                 this.setTrendThresholds(trendList);
-                if (this.elements.trendCandidatesInput && !this.elements.trendCandidatesInput.value) {
-                    this.elements.trendCandidatesInput.value = trendList.join(', ');
-                }
+            }
+            if (result?.updated_thresholds) {
+                const baseThresholds = cloneBaseThresholds(result.updated_thresholds) || result.updated_thresholds;
+                const config = {
+                    baseThresholds,
+                    obiCandidates: this.state.baseThresholdCandidates?.obi,
+                    ofiCandidates: this.state.baseThresholdCandidates?.ofi,
+                    trendCandidates: trendList || this.state.baseThresholdCandidates?.trend,
+                };
+                this.applyBaseThresholdConfig(config, {
+                    updateInput: Boolean(result?.applied),
+                    persist: Boolean(result?.applied),
+                });
             }
             let featureText = '';
             if (result?.feature_thresholds) {
@@ -2873,6 +3254,7 @@
                 this.state.featureThresholds = cloned;
                 if (result?.applied && this.elements.featureThresholdsInput) {
                     this.elements.featureThresholdsInput.value = featureText;
+                    this.persistPreference(STORAGE_KEYS.featureThresholds, featureText);
                 }
             }
             const rows = [
@@ -2909,6 +3291,23 @@
                 }
                 const thresholds = this.describeThresholds(response?.tuner_base_thresholds);
                 this.setTrendThresholds(response?.trend_thresholds);
+                const baseThresholds = cloneBaseThresholds(response?.tuner_base_thresholds)
+                    || cloneBaseThresholds(DEFAULT_BASE_THRESHOLD_TEMPLATE.baseThresholds)
+                    || DEFAULT_BASE_THRESHOLD_TEMPLATE.baseThresholds;
+                const trendCandidates = Array.isArray(response?.trend_thresholds)
+                    ? normalizeCandidateArray(response.trend_thresholds)
+                    : null;
+                const baseConfig = {
+                    baseThresholds,
+                    obiCandidates: this.state.baseThresholdCandidates?.obi
+                        ?? DEFAULT_BASE_THRESHOLD_TEMPLATE.obiCandidates,
+                    ofiCandidates: this.state.baseThresholdCandidates?.ofi
+                        ?? DEFAULT_BASE_THRESHOLD_TEMPLATE.ofiCandidates,
+                    trendCandidates: trendCandidates
+                        ?? this.state.baseThresholdCandidates?.trend
+                        ?? DEFAULT_BASE_THRESHOLD_TEMPLATE.trendCandidates,
+                };
+                this.applyBaseThresholdConfig(baseConfig, { updateInput: true, persist: true });
                 const trendThresholds = Array.isArray(this.state.trendThresholds)
                     ? this.state.trendThresholds.map((v) => formatNumber(Number(v), 2)).join(', ')
                     : '-';
@@ -2917,33 +3316,15 @@
                     `<div class="text-muted">Trend 阈值: ${trendThresholds}</div>`
                 ].join('');
                 this.elements.optimizeResult.innerHTML = html;
-                if (this.elements.trendCandidatesInput && !this.elements.trendCandidatesInput.value) {
-                    this.elements.trendCandidatesInput.value = Array.isArray(this.state.trendThresholds)
-                        ? this.state.trendThresholds.join(', ')
-                        : '';
+                const featureThresholds = cloneFeatureThresholds(response?.tuner_feature_thresholds)
+                    || cloneFeatureThresholds(DEFAULT_FEATURE_THRESHOLD_TEMPLATE)
+                    || DEFAULT_FEATURE_THRESHOLD_TEMPLATE;
+                this.state.featureThresholds = featureThresholds;
+                const featureText = stringifyFeatureThresholds(featureThresholds);
+                if (this.elements.featureThresholdsInput) {
+                    this.elements.featureThresholdsInput.value = featureText;
                 }
-                if (!this.elements.obiCandidatesInput?.value) {
-                    const longObi = toNumber(response?.tuner_base_thresholds?.long?.obi5);
-                    if (Number.isFinite(longObi)) {
-                        this.elements.obiCandidatesInput.value = String(longObi);
-                    }
-                }
-                if (!this.elements.ofiCandidatesInput?.value) {
-                    const longOfi = toNumber(response?.tuner_base_thresholds?.long?.ofi);
-                    if (Number.isFinite(longOfi)) {
-                        this.elements.ofiCandidatesInput.value = String(longOfi);
-                    }
-                }
-                const featureThresholds = response?.tuner_feature_thresholds;
-                if (featureThresholds) {
-                    const cloned = cloneFeatureThresholds(featureThresholds) || featureThresholds;
-                    this.state.featureThresholds = cloned;
-                    if (this.elements.featureThresholdsInput && !this.elements.featureThresholdsInput.value) {
-                        this.elements.featureThresholdsInput.value = stringifyFeatureThresholds(cloned);
-                    }
-                } else if (this.elements.featureThresholdsInput && !this.elements.featureThresholdsInput.value) {
-                    this.elements.featureThresholdsInput.value = stringifyFeatureThresholds(DEFAULT_FEATURE_THRESHOLD_TEMPLATE);
-                }
+                this.persistPreference(STORAGE_KEYS.featureThresholds, featureText);
             } catch (error) {
                 if (!auto) {
                     this.notify('error', `加载配置失败: ${error?.message || error}`);
