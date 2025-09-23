@@ -83,6 +83,7 @@ class DOMOptimizationOrchestrator:
                 "min_signals": defaults.min_signals,
                 "obi_candidates": None,
                 "ofi_candidates": None,
+                "feature_thresholds": None,
             },
         }
 
@@ -249,6 +250,7 @@ class DOMOptimizationOrchestrator:
         min_signals: Optional[int] = None,
         obi_candidates: Optional[List[Any]] = None,
         ofi_candidates: Optional[List[Any]] = None,
+        feature_thresholds: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             self._ensure_state_defaults_locked()
@@ -287,6 +289,9 @@ class DOMOptimizationOrchestrator:
 
             if ofi_candidates is not None:
                 plan["ofi_candidates"] = self._sanitize_candidates(ofi_candidates)
+
+            if feature_thresholds is not None:
+                plan["feature_thresholds"] = self.service.sanitize_feature_thresholds(feature_thresholds)
 
             schedule = self._state.setdefault("schedule", {})
             if not enabled:
@@ -379,6 +384,7 @@ class DOMOptimizationOrchestrator:
         obi_candidates: Optional[List[Any]] = None,
         ofi_candidates: Optional[List[Any]] = None,
         trend_candidates: Optional[List[Any]] = None,
+        feature_thresholds: Optional[Dict[str, Any]] = None,
         scheduled: bool = False,
         scheduled_time: Optional[datetime] = None,
     ) -> Dict[str, Any]:
@@ -443,28 +449,48 @@ class DOMOptimizationOrchestrator:
             evaluated = positives + negatives
 
             base_thresholds = self.service.get_tuner_base_thresholds()
-            tuner = DOMParameterTuner(base_thresholds=copy.deepcopy(base_thresholds))
+            current_feature_thresholds = self.service.get_tuner_feature_thresholds()
+            requested_feature_thresholds = (
+                self.service.sanitize_feature_thresholds(feature_thresholds)
+                if feature_thresholds is not None
+                else copy.deepcopy(current_feature_thresholds)
+            )
+            tuner = DOMParameterTuner(
+                base_thresholds=copy.deepcopy(base_thresholds),
+                feature_thresholds=copy.deepcopy(requested_feature_thresholds),
+            )
 
             min_required = max(int(min_signals or 0), 0)
             should_optimize = evaluated > 0 and (min_required == 0 or evaluated >= min_required)
 
             if should_optimize:
-                updated_thresholds = tuner.optimize_with_history(
+                updated_base_thresholds = tuner.optimize_with_history(
                     signals,
                     obi_candidates=self._sanitize_candidates(obi_candidates),
                     ofi_candidates=self._sanitize_candidates(ofi_candidates),
                 )
+                updated_thresholds = {
+                    "base": copy.deepcopy(updated_base_thresholds),
+                    "features": copy.deepcopy(requested_feature_thresholds),
+                }
                 applied = bool(apply_updates)
                 if applied:
                     self.service.apply_tuner_base_thresholds(
-                        updated_thresholds,
+                        updated_base_thresholds,
                         persist=True,
                         trend_thresholds=trend_thresholds,
+                        feature_thresholds=requested_feature_thresholds,
                     )
                 else:
-                    updated_thresholds = copy.deepcopy(updated_thresholds)
+                    updated_thresholds = {
+                        "base": copy.deepcopy(updated_base_thresholds),
+                        "features": copy.deepcopy(requested_feature_thresholds),
+                    }
             else:
-                updated_thresholds = copy.deepcopy(base_thresholds)
+                updated_thresholds = {
+                    "base": copy.deepcopy(base_thresholds),
+                    "features": copy.deepcopy(requested_feature_thresholds),
+                }
                 applied = False
                 logger.info(
                     "Skipping DOM optimisation due to insufficient evaluated signals",
@@ -494,7 +520,8 @@ class DOMOptimizationOrchestrator:
                 "pending_signals": pending_count,
                 "total_records": total_records,
                 "precision": precision,
-                "updated_thresholds": copy.deepcopy(updated_thresholds),
+                "updated_thresholds": copy.deepcopy(updated_thresholds.get("base")),
+                "feature_thresholds": copy.deepcopy(updated_thresholds.get("features")),
                 "history_window": {"start": window_start, "end": window_end},
                 "insufficient_data": not should_optimize,
             }
@@ -603,6 +630,7 @@ class DOMOptimizationOrchestrator:
 
         obi_candidates = self._sanitize_candidates(plan.get("obi_candidates"))
         ofi_candidates = self._sanitize_candidates(plan.get("ofi_candidates"))
+        feature_thresholds = plan.get("feature_thresholds")
 
         return self.run_optimization(
             symbol,
@@ -613,6 +641,7 @@ class DOMOptimizationOrchestrator:
             min_signals=min_required_int,
             obi_candidates=obi_candidates,
             ofi_candidates=ofi_candidates,
+            feature_thresholds=feature_thresholds,
             scheduled=True,
             scheduled_time=reference_time,
         )

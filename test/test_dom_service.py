@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from src.dom_parameter_tuner import DEFAULT_BASE_THRESHOLDS
+from src.dom_parameter_tuner import DEFAULT_BASE_THRESHOLDS, DEFAULT_FEATURE_THRESHOLDS
 from src.dom_service import DOMService
 from src.dom_processor import DOMProcessor
 
@@ -36,6 +36,7 @@ def test_dom_service_tuner_env_configuration(monkeypatch):
     assert tuner.reversal_window_ns == 120 * 1_000_000_000
     assert service.get_config()["tuner_parameters"]["stats_window"] == 1200
     assert service.get_config()["tuner_parameters"]["session_timezone"] == "UTC"
+    assert service.get_config()["tuner_feature_thresholds"] == DEFAULT_FEATURE_THRESHOLDS
 
 
 def test_dom_service_persisted_tuner_config_overrides_env(monkeypatch):
@@ -48,6 +49,7 @@ def test_dom_service_persisted_tuner_config_overrides_env(monkeypatch):
                 "max_levels": 25,
                 "trend_thresholds": [0.4, 0.6, 0.8, 0.9],
                 "tuner_base_thresholds": copy.deepcopy(DEFAULT_BASE_THRESHOLDS),
+                "tuner_feature_thresholds": copy.deepcopy(DEFAULT_FEATURE_THRESHOLDS),
                 "tuner_parameters": {
                     "stats_window": 1800,
                     "penalty_decay": 0.85,
@@ -73,3 +75,4 @@ def test_dom_service_persisted_tuner_config_overrides_env(monkeypatch):
     assert tuner.reversal_window_ns == 90 * 1_000_000_000
     assert service.get_config()["tuner_parameters"]["stats_window"] == 1800
     assert service.get_config()["tuner_parameters"]["session_timezone"] == "Europe/London"
+    assert service.get_config()["tuner_feature_thresholds"] == DEFAULT_FEATURE_THRESHOLDS
