@@ -545,9 +545,6 @@ class TradingApp {
 
         let signal = safeNumber(point.signal);
         if (!Number.isFinite(signal)) {
-            signal = safeNumber(point.y);
-        }
-        if (!Number.isFinite(signal)) {
             if (Number.isFinite(obi) && Number.isFinite(ofi)) {
                 if (Number.isFinite(longObi) && Number.isFinite(longOfi) && obi >= longObi && ofi >= longOfi) {
                     signal = 1;
@@ -557,10 +554,7 @@ class TradingApp {
             }
         }
         if (!Number.isFinite(signal)) {
-            const suggestion = typeof point.suggestion === 'string' ? point.suggestion.toLowerCase() : '';
-            if (suggestion === 'buy') signal = 1;
-            else if (suggestion === 'sell') signal = -1;
-            else signal = 0;
+            signal = 0;
         }
         signal = Math.max(-1, Math.min(1, Number.isFinite(signal) ? signal : 0));
 
@@ -768,17 +762,24 @@ class TradingApp {
                     const codeText = rawCode ? String(rawCode).trim() : '';
                     if (!codeText) return '';
                     const displayCode = codeText.slice(0, 2).toUpperCase();
+                    const labelSource = evt.label || evt.name || evt.description || evt.key || rawCode;
+                    const labelText = labelSource ? String(labelSource).trim() : displayCode;
                     const side = typeof evt.side === 'string' ? evt.side.toLowerCase() : '';
                     const colorClass = side === 'buy' ? 'bg-success' : side === 'sell' ? 'bg-danger' : 'bg-secondary';
-                    const title = escapeHtml(evt.label || evt.key || rawCode);
+                    const title = escapeHtml(labelText);
                     const inlineStyle = typeof evt.color === 'string' && evt.color.trim()
                         ? ` style="background-color:${escapeHtml(evt.color.trim())};color:#fff;"`
                         : '';
-                    return `<span class="badge ${colorClass} me-1"${inlineStyle} title="${title}">${escapeHtml(displayCode)}</span>`;
+                    return `<span class="d-inline-flex align-items-center me-2">`
+                        + `<span class="badge ${colorClass} me-1"${inlineStyle} title="${title}">${escapeHtml(displayCode)}</span>`
+                        + `<span class="ms-1">${escapeHtml(labelText)}</span>`
+                        + '</span>';
                 })
                 .filter(Boolean)
                 .join('');
-            const eventLine = eventBadges ? `<div class="text-muted small">${eventBadges}</div>` : '';
+            const eventLine = eventBadges
+                ? `<div class="text-muted small d-flex flex-wrap align-items-center gap-2">${eventBadges}</div>`
+                : '';
             return `
                 <div class="list-group-item d-flex justify-content-between align-items-start">
                     <div>
@@ -963,9 +964,7 @@ class TradingApp {
             }
         }
         if (!Number.isFinite(signal)) {
-            if (suggestion === 'buy') signal = 1;
-            else if (suggestion === 'sell') signal = -1;
-            else signal = 0;
+            signal = 0;
         }
         signal = Math.max(-1, Math.min(1, Number.isFinite(signal) ? signal : 0));
 
