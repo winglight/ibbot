@@ -1,5 +1,39 @@
 const DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95];
 
+const EVENT_SIDE_COLORS = {
+    buy: '#22c55e',
+    sell: '#ef4444',
+    neutral: '#f97316',
+};
+
+const domEventMarkerPlugin = {
+    id: 'domEventMarkers',
+    afterDatasetsDraw(chart) {
+        const { ctx } = chart;
+        if (!ctx) return;
+        chart.data.datasets.forEach((dataset, datasetIndex) => {
+            if (!dataset || !dataset.domEvents) return;
+            const meta = chart.getDatasetMeta(datasetIndex);
+            if (!meta || !meta.data) return;
+            meta.data.forEach((element, index) => {
+                const raw = dataset.data?.[index];
+                if (!element || !raw) return;
+                const { x, y } = element.getProps(['x', 'y'], true);
+                if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+                const code = typeof raw.code === 'string' ? raw.code : '?';
+                const color = raw.color || EVENT_SIDE_COLORS.neutral;
+                ctx.save();
+                ctx.fillStyle = color;
+                ctx.font = 'bold 12px "Inter", "Helvetica", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(code, x, y);
+                ctx.restore();
+            });
+        });
+    },
+};
+
 class DOMManager {
     constructor(app) {
         this.app = app;
@@ -104,6 +138,24 @@ class DOMManager {
             const state = metrics.zscore_ofi > 0 ? '积极买单' : '积极卖单';
             lines.push(`Z-OFI ${metrics.zscore_ofi.toFixed(1)} (${state})`);
         }
+        if (Array.isArray(metrics?.events) && metrics.events.length) {
+            const tags = metrics.events
+                .map((evt) => {
+                    if (!evt || typeof evt !== 'object') return null;
+                    if (typeof evt.label === 'string' && evt.label.trim()) return evt.label.trim();
+                    if (typeof evt.code === 'string' && evt.code.trim()) return evt.code.trim();
+                    if (typeof evt.key === 'string' && evt.key.trim()) return evt.key.trim();
+                    return null;
+                })
+                .filter((value, index, arr) => value && arr.indexOf(value) === index);
+            if (tags.length) {
+                lines.push(`事件 ${tags.join(' / ')}`);
+            }
+        }
+        if (typeof metrics?.fake_breakout_prob === 'number' && Number.isFinite(metrics.fake_breakout_prob)) {
+            const pct = Math.round(metrics.fake_breakout_prob * 100);
+            lines.push(`假突破概率 ${pct}%`);
+        }
         if (suggestion) {
             lines.push(suggestion === 'buy' ? '触发做多信号' : '触发做空信号');
         }
@@ -147,6 +199,20 @@ class DOMManager {
             longOfi,
             shortOfi,
         };
+    }
+
+    resolveEventColor(event) {
+        if (!event || typeof event !== 'object') return EVENT_SIDE_COLORS.neutral;
+        const explicit = typeof event.color === 'string' ? event.color : null;
+        if (explicit) return explicit;
+        const side = typeof event.side === 'string' ? event.side.toLowerCase() : '';
+        if (side === 'buy') return EVENT_SIDE_COLORS.buy;
+        if (side === 'sell') return EVENT_SIDE_COLORS.sell;
+        if (typeof event.key === 'string') {
+            if (event.key.includes('buy')) return EVENT_SIDE_COLORS.buy;
+            if (event.key.includes('sell')) return EVENT_SIDE_COLORS.sell;
+        }
+        return EVENT_SIDE_COLORS.neutral;
     }
 
     buildMonitorPointFromMetrics(entry) {
@@ -557,37 +623,39 @@ class DOMManager {
             });
 
             if (this.metricsChart && metricPayload.length) {
-                const ds = this.metricsChart.data.datasets || [];
+                const datasets = this.metricsChart.data.datasets || [];
+                const trendDataset = datasets[0];
+                const eventDataset = datasets[1];
+                if (trendDataset) trendDataset.data = [];
+                if (eventDataset) eventDataset.data = [];
+
                 const lastTs = metricPayload[metricPayload.length - 1].ts;
                 const cutoff = lastTs - metricWindowMs;
                 const filtered = metricPayload.filter(item => item.ts >= cutoff);
-                if (ds[0]) {
-                    ds[0].data = [];
-                    ds[0].pointBackgroundColor = [];
-                }
-                if (ds[1]) {
-                    ds[1].data = [];
-                    ds[1].backgroundColor = [];
-                }
-                if (ds[2]) ds[2].data = [];
-                if (ds[3]) ds[3].data = [];
 
-                filtered.forEach(({ entry, ts, level, suggestion }) => {
-                    const colors = this.resolveTrendColors({ level, suggestion });
-                    const obi = this.toNumber(entry.obi5 ?? entry.obi) ?? 0;
-                    const ofi = this.toNumber(entry.ofi) ?? 0;
-                    const zObi = this.toNumber(entry.zscore_obi5) ?? 0;
-                    const zOfi = this.toNumber(entry.zscore_ofi) ?? 0;
-                    if (ds[0]) {
-                        ds[0].data.push({ x: ts, y: obi });
-                        ds[0].pointBackgroundColor.push(colors.pointColor);
+                filtered.forEach(({ entry, ts }) => {
+                    const trend = this.toNumber(entry.trend_score);
+                    if (trendDataset) {
+                        trendDataset.data.push({ x: ts, y: Number.isFinite(trend) ? trend : null });
                     }
-                    if (ds[1]) {
-                        ds[1].data.push({ x: ts, y: ofi });
-                        ds[1].backgroundColor.push(colors.barColor);
+                    if (eventDataset) {
+                        const eventList = Array.isArray(entry.events) ? entry.events : [];
+                        eventList.forEach((evt) => {
+                            if (!evt || typeof evt !== 'object') return;
+                            const code = typeof evt.code === 'string' && evt.code.trim()
+                                ? evt.code.trim().slice(0, 2)
+                                : (evt.key ? String(evt.key).charAt(0).toUpperCase() : '?');
+                            eventDataset.data.push({
+                                x: ts,
+                                y: Number.isFinite(trend) ? trend : 0,
+                                code,
+                                key: evt.key || null,
+                                label: evt.label || code,
+                                side: evt.side || null,
+                                color: this.resolveEventColor(evt),
+                            });
+                        });
                     }
-                    if (ds[2]) ds[2].data.push({ x: ts, y: zObi });
-                    if (ds[3]) ds[3].data.push({ x: ts, y: zOfi });
                 });
 
                 if (filtered.length) {
@@ -691,29 +759,85 @@ class DOMManager {
             type: 'line',
             data: {
                 datasets: [
-                    { label: 'OBI', data: [], borderColor: 'blue', pointBackgroundColor: [], fill: false, yAxisID: 'y' },
-                    { type: 'bar', label: 'OFI', data: [], backgroundColor: [], yAxisID: 'y1' },
-                    { label: 'Z-OBI', data: [], borderColor: 'green', borderDash: [5,5], pointRadius: 0, fill: false, yAxisID: 'y' },
-                    { label: 'Z-OFI', data: [], borderColor: 'red', borderDash: [5,5], pointRadius: 0, fill: false, yAxisID: 'y1' }
-                ]
+                    {
+                        label: 'Trend Score',
+                        data: [],
+                        yAxisID: 'trend',
+                        fill: false,
+                        parsing: false,
+                        tension: 0.25,
+                        borderWidth: 2,
+                        borderColor: '#60a5fa',
+                        pointRadius: 3,
+                        pointHoverRadius: 4,
+                        pointBorderWidth: 0,
+                        pointBackgroundColor: (ctxPoint) => {
+                            const value = Number(ctxPoint.raw?.y);
+                            if (value > 0.05) return EVENT_SIDE_COLORS.buy;
+                            if (value < -0.05) return EVENT_SIDE_COLORS.sell;
+                            return '#9ca3af';
+                        },
+                    },
+                    {
+                        label: '事件',
+                        type: 'scatter',
+                        data: [],
+                        yAxisID: 'trend',
+                        parsing: false,
+                        showLine: false,
+                        pointRadius: 0,
+                        pointHitRadius: 10,
+                        domEvents: true,
+                    },
+                ],
             },
             options: {
                 animation: false,
+                parsing: false,
+                maintainAspectRatio: false,
                 scales: {
-                    x: { type: 'time', time: { unit: 'second' } },
-                    y: { position: 'left', beginAtZero: true, title: { display: true, text: 'OBI/Z-OBI' } },
-                    y1: { position: 'right', beginAtZero: true, grid: { display: false }, title: { display: true, text: 'OFI/Z-OFI' } }
-                }
-            }
+                    x: {
+                        type: 'time',
+                        time: { unit: 'second', tooltipFormat: 'HH:mm:ss' },
+                        ticks: { maxRotation: 0 },
+                    },
+                    trend: {
+                        position: 'left',
+                        min: -1,
+                        max: 1,
+                        title: { display: true, text: 'Trend Score' },
+                        grid: { color: 'rgba(148, 163, 184, 0.25)' },
+                        ticks: { stepSize: 0.5 },
+                    },
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        mode: 'nearest',
+                        callbacks: {
+                            label(context) {
+                                if (context.dataset?.domEvents) {
+                                    const raw = context.raw || {};
+                                    const label = raw.label || raw.code || '事件';
+                                    return `${label}${raw.side ? ` (${raw.side === 'buy' ? '买' : '卖'})` : ''}`;
+                                }
+                                const value = Number(context.parsed?.y);
+                                if (!Number.isFinite(value)) return 'Trend: —';
+                                return `Trend: ${value.toFixed(2)}`;
+                            },
+                        },
+                    },
+                },
+            },
+            plugins: [domEventMarkerPlugin],
         });
     }
 
     resetCharts() {
         if (this.metricsChart) {
-            this.metricsChart.data.datasets.forEach(ds => {
-                ds.data = [];
-                if (ds.pointBackgroundColor) ds.pointBackgroundColor = [];
-                if (Array.isArray(ds.backgroundColor)) ds.backgroundColor = [];
+            this.metricsChart.data.datasets.forEach((dataset) => {
+                dataset.data = [];
+                if (Array.isArray(dataset.pointBackgroundColor)) dataset.pointBackgroundColor = [];
             });
             this.metricsChart.update();
         }
@@ -722,11 +846,12 @@ class DOMManager {
     addMetricPoint(m) {
         const windowMs = 60 * 1000; // keep 1 minute of data to avoid huge time ranges
         const sampleTime = this.extractTimestamp(m) ?? Date.now();
-        const obi = typeof m.obi5 === 'number' ? m.obi5 : null;
-        const ofi = typeof m.ofi === 'number' ? m.ofi : null;
-        const trendScore = typeof m.trend_score === 'number' ? m.trend_score : null;
+        const obi = this.toNumber(m.obi5 ?? m.obi);
+        const ofi = this.toNumber(m.ofi);
+        const trendScore = this.toNumber(m.trend_score);
+        const fakeBreakoutProb = this.toNumber(m.fake_breakout_prob);
+        const events = Array.isArray(m.events) ? m.events.map(evt => ({ ...evt })) : [];
 
-        // 调试日志：检查trend_score数据
         console.log('[DOM Manager] addMetricPoint - trend_score:', trendScore, 'raw data:', m.trend_score, 'full metric:', m);
 
         const { level, suggestion } = this.computeTrendSignal(trendScore);
@@ -734,36 +859,48 @@ class DOMManager {
             trend_score: trendScore,
             obi5: obi,
             ofi,
-            zscore_obi5: typeof m.zscore_obi5 === 'number' ? m.zscore_obi5 : null,
-            zscore_ofi: typeof m.zscore_ofi === 'number' ? m.zscore_ofi : null
+            zscore_obi5: this.toNumber(m.zscore_obi5),
+            zscore_ofi: this.toNumber(m.zscore_ofi),
+            fake_breakout_prob: fakeBreakoutProb,
+            events,
         };
         const reason = this.buildTrendReason(metricsPayload, suggestion, level);
-        const colors = this.resolveTrendColors({ level, suggestion, trendScore });
 
         if (this.metricsChart) {
-            const ds = this.metricsChart.data.datasets;
-            ds[0].data.push({ x: sampleTime, y: obi ?? 0 });
-            ds[0].pointBackgroundColor.push(colors.pointColor);
-            ds[1].data.push({ x: sampleTime, y: ofi ?? 0 });
-            ds[1].backgroundColor.push(colors.barColor);
-            ds[2].data.push({ x: sampleTime, y: metricsPayload.zscore_obi5 ?? 0 });
-            ds[3].data.push({ x: sampleTime, y: metricsPayload.zscore_ofi ?? 0 });
-            // prune old points and colors
-            ds.forEach((dataset) => {
-                dataset.data = dataset.data.filter(p => p.x >= sampleTime - windowMs);
-                if (dataset.pointBackgroundColor) {
-                    dataset.pointBackgroundColor = dataset.pointBackgroundColor.slice(-dataset.data.length);
-                }
-                if (Array.isArray(dataset.backgroundColor)) {
-                    dataset.backgroundColor = dataset.backgroundColor.slice(-dataset.data.length);
-                }
-            });
+            const datasets = this.metricsChart.data.datasets || [];
+            const trendDataset = datasets[0];
+            const eventDataset = datasets[1];
+            if (trendDataset) {
+                trendDataset.data.push({
+                    x: sampleTime,
+                    y: Number.isFinite(trendScore) ? trendScore : null,
+                });
+                trendDataset.data = trendDataset.data.filter((point) => point.x >= sampleTime - windowMs);
+            }
+            if (eventDataset) {
+                events.forEach((evt) => {
+                    const baseCode = typeof evt.code === 'string' && evt.code.trim()
+                        ? evt.code.trim().slice(0, 2)
+                        : (evt.key ? String(evt.key).charAt(0).toUpperCase() : '?');
+                    eventDataset.data.push({
+                        x: sampleTime,
+                        y: Number.isFinite(trendScore) ? trendScore : 0,
+                        code: baseCode,
+                        key: evt.key || null,
+                        label: evt.label || baseCode,
+                        side: evt.side || null,
+                        color: this.resolveEventColor(evt),
+                    });
+                });
+                eventDataset.data = eventDataset.data.filter((point) => point.x >= sampleTime - windowMs);
+            }
             this.metricsChart.options.scales.x.min = sampleTime - windowMs;
             this.metricsChart.options.scales.x.max = sampleTime;
             this.metricsChart.update('none');
         }
-        const price = typeof m.mid_price === 'number' && Number.isFinite(m.mid_price) ? m.mid_price : 0;
-        if (trendScore !== null) {
+
+        const price = this.toNumber(m.mid_price);
+        if (trendScore !== null && Number.isFinite(trendScore)) {
             const dir = trendScore > 0 ? 1 : trendScore < 0 ? -1 : 0;
             if (level > 0 && (level !== this.lastTrendLevel || dir !== this.lastTrendDir)) {
                 this.app.addDomSignal({ time: sampleTime, price, score: trendScore, level });
@@ -786,6 +923,9 @@ class DOMManager {
                     obi,
                     ofi,
                     thresholds: m.thresholds,
+                    events,
+                    featureFlags: m.feature_flags && typeof m.feature_flags === 'object' ? { ...m.feature_flags } : {},
+                    fakeBreakoutProb,
                 });
             } else {
                 console.warn('[DOM Manager] addMonitorTrendPoint方法不存在');

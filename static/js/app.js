@@ -561,6 +561,11 @@ class TradingApp {
         const price = safeNumber(point.price);
         const suggestion = typeof point.suggestion === 'string' ? point.suggestion.toLowerCase() : null;
         const normalizedSuggestion = suggestion === 'buy' ? 'buy' : suggestion === 'sell' ? 'sell' : null;
+        const events = Array.isArray(point.events) ? point.events.map(evt => ({ ...evt })) : [];
+        const featureFlags = point.featureFlags && typeof point.featureFlags === 'object'
+            ? { ...point.featureFlags }
+            : {};
+        const fakeBreakoutProb = safeNumber(point.fake_breakout_prob ?? point.fakeBreakoutProb);
 
         return {
             ...point,
@@ -578,6 +583,9 @@ class TradingApp {
                 long: { obi: longObi, ofi: longOfi },
                 short: { obi: shortObi, ofi: shortOfi },
             },
+            events,
+            featureFlags,
+            fake_breakout_prob: fakeBreakoutProb,
         };
     }
 
@@ -683,6 +691,7 @@ class TradingApp {
         }
         const metaEl = this.monitorDomHistoryMeta;
         const formatted = this.getFormattedTrendChartData();
+        const escapeHtml = (text) => String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
         const now = new Date();
         const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         const startMs = startOfDay.getTime();
@@ -712,12 +721,27 @@ class TradingApp {
             const obiText = Number.isFinite(entry.obi) ? this.formatNumber(entry.obi) : '—';
             const ofiText = Number.isFinite(entry.ofi) ? this.formatNumber(entry.ofi) : '—';
             const reason = entry.reason ? String(entry.reason).split('\n')[0] : '';
+            const events = Array.isArray(entry.events) ? entry.events : [];
+            const eventBadges = events
+                .map((evt) => {
+                    if (!evt || typeof evt !== 'object') return '';
+                    const code = evt.code || evt.label || evt.key;
+                    if (!code) return '';
+                    const side = typeof evt.side === 'string' ? evt.side.toLowerCase() : '';
+                    const color = side === 'buy' ? 'bg-success' : side === 'sell' ? 'bg-danger' : 'bg-secondary';
+                    const title = escapeHtml(evt.label || evt.key || code);
+                    return `<span class="badge ${color} me-1" title="${title}">${escapeHtml(code)}</span>`;
+                })
+                .filter(Boolean)
+                .join('');
+            const eventLine = eventBadges ? `<div class="text-muted small">${eventBadges}</div>` : '';
             return `
                 <div class="list-group-item d-flex justify-content-between align-items-start">
                     <div>
                         <div class="fw-semibold"><span class="badge ${badgeClass} me-2">${direction}</span>${priceText}</div>
                         <div class="text-muted small">OBI ${obiText} · OFI ${ofiText}</div>
-                        ${reason ? `<div class="text-muted small">${reason}</div>` : ''}
+                        ${reason ? `<div class="text-muted small">${escapeHtml(reason)}</div>` : ''}
+                        ${eventLine}
                     </div>
                     <small class="text-muted ms-3">${timeText}</small>
                 </div>
@@ -804,6 +828,26 @@ class TradingApp {
             return Number.isFinite(parsed) ? parsed : null;
         };
 
+        const normalizeEvents = (payload) => (Array.isArray(payload) ? payload.map(evt => ({ ...evt })) : []);
+        const mergeEvents = (existingEvents, incomingEvents) => {
+            const combined = [
+                ...(Array.isArray(existingEvents) ? existingEvents : []),
+                ...(Array.isArray(incomingEvents) ? incomingEvents : []),
+            ];
+            if (!combined.length) return [];
+            const seen = new Set();
+            const result = [];
+            combined.forEach((evt) => {
+                if (!evt || typeof evt !== 'object') return;
+                const code = typeof evt.code === 'string' ? evt.code : '';
+                const key = `${evt.key || code}-${evt.side || ''}`;
+                if (seen.has(key)) return;
+                seen.add(key);
+                result.push({ ...evt });
+            });
+            return result;
+        };
+
         const normalizedTime = this.normalizeMonitorTime(time ?? Date.now());
         const x = normalizedTime == null ? Date.now() : normalizedTime;
         const numericScore = safeNumber(score);
@@ -888,6 +932,11 @@ class TradingApp {
             ? options.level
             : this.deriveTrendLevel(numericScore);
         const price = safeNumber(options.price);
+        const events = normalizeEvents(options.events);
+        const featureFlags = options.featureFlags && typeof options.featureFlags === 'object'
+            ? { ...options.featureFlags }
+            : {};
+        const fakeBreakoutProb = safeNumber(options.fakeBreakoutProb ?? options.fake_breakout_prob);
 
         if (!Array.isArray(this.monitorTrendData)) {
             this.monitorTrendData = [];
@@ -910,6 +959,9 @@ class TradingApp {
                 long: { obi: longObi, ofi: longOfi },
                 short: { obi: shortObi, ofi: shortOfi },
             },
+            events,
+            featureFlags,
+            fake_breakout_prob: fakeBreakoutProb,
         };
 
         let inserted = false;
@@ -917,7 +969,17 @@ class TradingApp {
             const existing = this.monitorTrendData[i];
             if (!existing) continue;
             if (existing.x === x) {
-                this.monitorTrendData[i] = { ...existing, ...newPoint };
+                const mergedEvents = mergeEvents(existing.events, newPoint.events);
+                const mergedFlags = {
+                    ...(existing.featureFlags || {}),
+                    ...(newPoint.featureFlags || {}),
+                };
+                this.monitorTrendData[i] = {
+                    ...existing,
+                    ...newPoint,
+                    events: mergedEvents,
+                    featureFlags: mergedFlags,
+                };
                 inserted = true;
                 break;
             }
