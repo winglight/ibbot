@@ -6,12 +6,28 @@ from datetime import date, timedelta
 from typing import Dict, List
 
 
-DEFAULT_METRICS: List[str] = ["obi", "ofi", "trend"]
+DEFAULT_BASE_METRICS: List[str] = ["obi5", "ofi", "trend_score", "cvd", "mid_price"]
+DEFAULT_FEATURE_METRICS: List[str] = [
+    "stacking",
+    "pulling",
+    "wall",
+    "cancel_rate",
+    "absorption",
+    "sweep",
+    "fake_breakout",
+    "wall_pull_no_follow",
+    "obi_ofi_reversal",
+    "spread",
+]
 DEFAULT_ALGORITHMS: List[str] = ["grid", "random", "bayesian"]
 
 
-def get_available_metrics() -> List[str]:
-    return list(DEFAULT_METRICS)
+def get_available_base_metrics() -> List[str]:
+    return list(DEFAULT_BASE_METRICS)
+
+
+def get_available_feature_metrics() -> List[str]:
+    return list(DEFAULT_FEATURE_METRICS)
 
 
 def get_available_algorithms() -> List[str]:

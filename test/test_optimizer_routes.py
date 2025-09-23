@@ -36,8 +36,9 @@ def test_metadata_endpoint():
         response = client.get("/api/optimize/metadata")
         assert response.status_code == 200
         payload = response.json()
-        assert set(payload.keys()) == {"metrics", "algorithms"}
-        assert "obi" in payload["metrics"]
+        assert set(payload.keys()) == {"base_metrics", "feature_metrics", "algorithms"}
+        assert "obi5" in payload["base_metrics"]
+        assert "stacking" in payload["feature_metrics"]
         assert "grid" in payload["algorithms"]
 
 

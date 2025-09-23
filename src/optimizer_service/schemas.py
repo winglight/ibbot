@@ -226,7 +226,8 @@ class OptimizationPlanBase(BaseModel):
     name: str = Field(..., min_length=1)
     strategy: str = Field(..., min_length=1, description="Strategy identifier associated with the plan")
     symbol: str = Field(..., min_length=1, description="Instrument or market symbol")
-    metrics: List[str] = Field(..., description="Metrics to evaluate, e.g. obi/ofi/trend")
+    base_metrics: List[str] = Field(default_factory=list, description="Primary indicators to optimise")
+    feature_metrics: List[str] = Field(default_factory=list, description="Event or feature indicators to optimise")
     parameters: ThresholdParameterSet
     algorithm: OptimizationAlgorithm
     start_date: date
@@ -236,11 +237,17 @@ class OptimizationPlanBase(BaseModel):
 
     if PYDANTIC_V2:  # pragma: no branch
 
-        @field_validator("metrics")
-        def validate_metrics(cls, v: List[str]) -> List[str]:
-            if not v:
-                raise ValueError("metrics must not be empty")
-            return [value.strip() for value in v if value.strip()]
+        @field_validator("base_metrics", "feature_metrics")
+        def normalize_metric_lists(cls, values: List[str]) -> List[str]:
+            cleaned = []
+            seen = set()
+            for value in values or []:
+                trimmed = value.strip()
+                if not trimmed or trimmed in seen:
+                    continue
+                cleaned.append(trimmed)
+                seen.add(trimmed)
+            return cleaned
 
         @field_validator("end_date")
         def validate_plan_dates(cls, v: date, info: FieldValidationInfo) -> date:
@@ -249,13 +256,25 @@ class OptimizationPlanBase(BaseModel):
                 raise ValueError("end_date must not be earlier than start_date")
             return v
 
+        @model_validator(mode="after")
+        def ensure_metrics_present(cls, values: "OptimizationPlanBase") -> "OptimizationPlanBase":
+            if not values.base_metrics and not values.feature_metrics:
+                raise ValueError("at least one base or feature metric must be selected")
+            return values
+
     else:
 
-        @validator("metrics")  # type: ignore[misc]
-        def validate_metrics(cls, v: List[str]) -> List[str]:
-            if not v:
-                raise ValueError("metrics must not be empty")
-            return [value.strip() for value in v if value.strip()]
+        @validator("base_metrics", "feature_metrics")  # type: ignore[misc]
+        def normalize_metric_lists(cls, v: List[str]) -> List[str]:
+            cleaned: List[str] = []
+            seen = set()
+            for value in v or []:
+                trimmed = value.strip()
+                if not trimmed or trimmed in seen:
+                    continue
+                cleaned.append(trimmed)
+                seen.add(trimmed)
+            return cleaned
 
         @validator("end_date")  # type: ignore[misc]
         def validate_plan_dates(cls, v: date, values: Dict[str, Any]) -> date:
@@ -263,6 +282,14 @@ class OptimizationPlanBase(BaseModel):
             if start and v < start:
                 raise ValueError("end_date must not be earlier than start_date")
             return v
+
+        @root_validator  # type: ignore[misc]
+        def ensure_metrics_present(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+            base = values.get("base_metrics") or []
+            features = values.get("feature_metrics") or []
+            if not base and not features:
+                raise ValueError("at least one base or feature metric must be selected")
+            return values
 
 
 class OptimizationPlanCreate(OptimizationPlanBase):
@@ -273,7 +300,8 @@ class OptimizationPlanUpdate(BaseModel):
     name: Optional[str] = None
     strategy: Optional[str] = None
     symbol: Optional[str] = None
-    metrics: Optional[List[str]] = None
+    base_metrics: Optional[List[str]] = None
+    feature_metrics: Optional[List[str]] = None
     parameters: Optional[ThresholdParameterSet] = None
     algorithm: Optional[OptimizationAlgorithm] = None
     start_date: Optional[date] = None
@@ -283,13 +311,23 @@ class OptimizationPlanUpdate(BaseModel):
 
     if PYDANTIC_V2:  # pragma: no branch
 
-        @field_validator("metrics")
-        def validate_metrics(cls, v: Optional[List[str]]):
-            if v is None:
-                return v
-            if not v:
-                raise ValueError("metrics must not be empty")
-            return [value.strip() for value in v if value.strip()]
+        @field_validator("base_metrics", "feature_metrics")
+        def normalize_metrics(
+            cls, values: Optional[List[str]]
+        ) -> Optional[List[str]]:
+            if values is None:
+                return None
+            cleaned = []
+            seen = set()
+            for value in values:
+                trimmed = value.strip()
+                if not trimmed or trimmed in seen:
+                    continue
+                cleaned.append(trimmed)
+                seen.add(trimmed)
+            if not cleaned:
+                raise ValueError("metric list must not be empty")
+            return cleaned
 
         @field_validator("end_date")
         def validate_plan_dates(cls, v: Optional[date], info: FieldValidationInfo):
@@ -300,13 +338,23 @@ class OptimizationPlanUpdate(BaseModel):
 
     else:
 
-        @validator("metrics")  # type: ignore[misc]
-        def validate_metrics(cls, v: Optional[List[str]]):
+        @validator("base_metrics", "feature_metrics")  # type: ignore[misc]
+        def normalize_metrics(
+            cls, v: Optional[List[str]]
+        ):  # pylint: disable=unused-argument
             if v is None:
                 return v
-            if not v:
-                raise ValueError("metrics must not be empty")
-            return [value.strip() for value in v if value.strip()]
+            cleaned: List[str] = []
+            seen = set()
+            for value in v:
+                trimmed = value.strip()
+                if not trimmed or trimmed in seen:
+                    continue
+                cleaned.append(trimmed)
+                seen.add(trimmed)
+            if not cleaned:
+                raise ValueError("metric list must not be empty")
+            return cleaned
 
         @validator("end_date")  # type: ignore[misc]
         def validate_plan_dates(cls, v: Optional[date], values: Dict[str, Any]):
@@ -318,6 +366,7 @@ class OptimizationPlanUpdate(BaseModel):
 
 class OptimizationPlanResponse(OptimizationPlanBase):
     id: str
+    metrics: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     is_active: bool
@@ -356,7 +405,8 @@ class OptimizationPlanReportList(BaseModel):
 
 
 class OptimizerMetadataResponse(BaseModel):
-    metrics: List[str]
+    base_metrics: List[str]
+    feature_metrics: List[str]
     algorithms: List[str]
 
 
