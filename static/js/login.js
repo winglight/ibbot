@@ -5,6 +5,9 @@
 class LoginManager {
     constructor(app) {
         this.app = app;
+        this._pendingReadOnlyUpdate = null;
+        this._readOnlyRetryTimer = null;
+        this._readOnlyRetryAttempts = 0;
         this.init();
     }
 
@@ -16,7 +19,109 @@ class LoginManager {
         this.toggleAuthButtons(!!localStorage.getItem('access_token'));
         const storedRole = localStorage.getItem('user_role') || 'admin';
         const isReadOnly = localStorage.getItem('is_read_only') === '1';
-        this.app.updateReadOnlyMode(isReadOnly, storedRole, { persist: false });
+        this.applyReadOnlyMode(isReadOnly, storedRole, { persist: false });
+    }
+
+    /**
+     * 安全地更新应用的只读模式状态
+     * 如果 TradingApp 尚未暴露 updateReadOnlyMode，则执行降级处理并重试
+     */
+    applyReadOnlyMode(isReadOnly, role = 'admin', options = {}) {
+        if (this.app && typeof this.app.updateReadOnlyMode === 'function') {
+            this.clearReadOnlyRetry();
+            this._pendingReadOnlyUpdate = null;
+            this.app.updateReadOnlyMode(isReadOnly, role, options);
+            return;
+        }
+
+        const update = {
+            isReadOnly: !!isReadOnly,
+            role,
+            options
+        };
+        this._pendingReadOnlyUpdate = update;
+        this.syncReadOnlyFallback(update);
+        this.scheduleReadOnlyRetry();
+    }
+
+    /**
+     * 当 updateReadOnlyMode 暂不可用时同步本地状态和 UI
+     */
+    syncReadOnlyFallback(update) {
+        if (!update) return;
+
+        const { isReadOnly, role, options } = update;
+        const persist = options?.persist !== false;
+        const normalizedRole = role || (isReadOnly ? 'visitor' : 'admin');
+
+        if (this.app) {
+            this.app.isReadOnly = !!isReadOnly;
+            this.app.authRole = normalizedRole;
+        }
+
+        if (persist) {
+            if (isReadOnly) {
+                localStorage.setItem('is_read_only', '1');
+            } else {
+                localStorage.removeItem('is_read_only');
+            }
+            if (role) {
+                localStorage.setItem('user_role', role);
+            } else {
+                localStorage.removeItem('user_role');
+            }
+        }
+
+        if (typeof document !== 'undefined' && document.body) {
+            document.body.classList.toggle('read-only-mode', !!isReadOnly);
+            const badge = document.getElementById('authRoleBadge');
+            if (badge) {
+                if (isReadOnly) {
+                    badge.classList.remove('d-none');
+                    badge.innerHTML = '<i class="fas fa-user-shield me-1"></i>Visitor Read Only';
+                } else if (role && role.toLowerCase() !== 'admin') {
+                    badge.classList.remove('d-none');
+                    badge.innerHTML = `<i class="fas fa-user me-1"></i>${role}`;
+                } else {
+                    badge.classList.add('d-none');
+                    badge.textContent = '';
+                }
+            }
+            const banner = document.getElementById('readOnlyBanner');
+            if (banner) {
+                banner.classList.toggle('d-none', !isReadOnly);
+            }
+        }
+    }
+
+    /**
+     * 安排重试，等待 TradingApp 初始化完成
+     */
+    scheduleReadOnlyRetry() {
+        if (this._readOnlyRetryTimer) return;
+        if (this._readOnlyRetryAttempts >= 20) return;
+
+        const schedule = typeof window !== 'undefined'
+            ? window.setTimeout.bind(window)
+            : setTimeout;
+        this._readOnlyRetryTimer = schedule(() => {
+            this._readOnlyRetryTimer = null;
+            this._readOnlyRetryAttempts += 1;
+            const pending = this._pendingReadOnlyUpdate;
+            if (!pending) return;
+            this.applyReadOnlyMode(pending.isReadOnly, pending.role, pending.options);
+        }, 200);
+    }
+
+    /**
+     * 清理重试状态
+     */
+    clearReadOnlyRetry() {
+        if (this._readOnlyRetryTimer) {
+            clearTimeout(this._readOnlyRetryTimer);
+            this._readOnlyRetryTimer = null;
+        }
+        this._readOnlyRetryAttempts = 0;
     }
 
     /**
@@ -85,7 +190,7 @@ class LoginManager {
                     localStorage.removeItem('is_read_only');
                 }
                 this.toggleAuthButtons(true);
-                this.app.updateReadOnlyMode(!!res.is_read_only, res.role || 'admin');
+                this.applyReadOnlyMode(!!res.is_read_only, res.role || 'admin');
 
                 const modalEl = document.getElementById('loginModal');
                 const modal = bootstrap.Modal.getInstance(modalEl);
@@ -153,7 +258,7 @@ class LoginManager {
                     localStorage.removeItem('is_read_only');
                 }
                 this.toggleAuthButtons(true);
-                this.app.updateReadOnlyMode(!!res.is_read_only, res.role || localStorage.getItem('user_role') || 'admin');
+                this.applyReadOnlyMode(!!res.is_read_only, res.role || localStorage.getItem('user_role') || 'admin');
 
                 await this.app.ensureDefaultConnectionConfig();
 
@@ -222,7 +327,7 @@ class LoginManager {
         localStorage.removeItem('is_read_only');
         localStorage.removeItem('user_role');
         this.toggleAuthButtons(false);
-        this.app.updateReadOnlyMode(false, 'admin');
+        this.applyReadOnlyMode(false, 'admin');
         this.app.showAlert('info', '已退出登录');
     }
 
