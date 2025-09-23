@@ -34,6 +34,10 @@ const domEventMarkerPlugin = {
     },
 };
 
+if (typeof window !== 'undefined') {
+    window.domEventMarkerPlugin = domEventMarkerPlugin;
+}
+
 class DOMManager {
     constructor(app) {
         this.app = app;
@@ -237,11 +241,21 @@ class DOMManager {
 
         const price = this.toNumber(entry.mid_price ?? entry.price ?? entry.signal_price);
 
+        const events = Array.isArray(entry.events)
+            ? entry.events.map(evt => (evt && typeof evt === 'object' ? { ...evt } : evt))
+            : [];
+        const rawFeatureFlags = entry.feature_flags ?? entry.featureFlags;
+        const featureFlags = rawFeatureFlags && typeof rawFeatureFlags === 'object'
+            ? { ...rawFeatureFlags }
+            : null;
+        const fakeBreakoutProb = this.toNumber(entry.fake_breakout_prob ?? entry.fakeBreakoutProb);
+
         return {
             x: ts,
             timestamp: ts,
             signal,
             score: trendScore,
+            trend_score: trendScore,
             level: trendLevel,
             suggestion,
             reason,
@@ -252,6 +266,10 @@ class DOMManager {
                 long: { obi: longObi, ofi: longOfi },
                 short: { obi: shortObi, ofi: shortOfi },
             },
+            events,
+            featureFlags,
+            feature_flags: featureFlags,
+            fake_breakout_prob: fakeBreakoutProb,
         };
     }
 
@@ -668,6 +686,30 @@ class DOMManager {
 
             const trendWindowMs = 60 * 1000;
             const trendMaxPoints = 240;
+            const mergeEvents = (existingEvents, incomingEvents) => {
+                const combined = [
+                    ...(Array.isArray(existingEvents) ? existingEvents : []),
+                    ...(Array.isArray(incomingEvents) ? incomingEvents : []),
+                ];
+                if (!combined.length) return [];
+                const seen = new Set();
+                const result = [];
+                combined.forEach((evt) => {
+                    if (!evt || typeof evt !== 'object') return;
+                    const code = typeof evt.code === 'string' ? evt.code : '';
+                    const key = `${evt.key || code}-${evt.side || ''}`;
+                    if (seen.has(key)) return;
+                    seen.add(key);
+                    result.push({ ...evt });
+                });
+                return result;
+            };
+
+            const mergeFeatureFlags = (existingFlags, incomingFlags) => ({
+                ...(existingFlags && typeof existingFlags === 'object' ? existingFlags : {}),
+                ...(incomingFlags && typeof incomingFlags === 'object' ? incomingFlags : {}),
+            });
+
             const trimmedTrendPoints = (() => {
                 if (!monitorPoints.length) return [];
                 const lastTs = monitorPoints[monitorPoints.length - 1].timestamp;
@@ -689,7 +731,16 @@ class DOMManager {
                     trimmedTrendPoints.forEach(point => {
                         const idx = merged.findIndex(item => item && item.timestamp === point.timestamp);
                         if (idx >= 0) {
-                            merged[idx] = { ...merged[idx], ...point };
+                            const existing = merged[idx] || {};
+                            const combinedEvents = mergeEvents(existing.events, point.events);
+                            const combinedFlags = mergeFeatureFlags(existing.featureFlags || existing.feature_flags, point.featureFlags || point.feature_flags);
+                            merged[idx] = {
+                                ...existing,
+                                ...point,
+                                events: combinedEvents,
+                                featureFlags: combinedFlags,
+                                feature_flags: combinedFlags,
+                            };
                         } else {
                             merged.push(point);
                         }

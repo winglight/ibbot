@@ -284,6 +284,12 @@ const TREND_LEVEL_STYLES = {
     }
 };
 
+const MONITOR_EVENT_SIDE_COLORS = {
+    buy: '#22c55e',
+    sell: '#ef4444',
+    neutral: '#64748b',
+};
+
 function getTrendLevelStyle(level) {
     const key = Number.isFinite(level) ? Number(level) : 0;
     return TREND_LEVEL_STYLES[key] || TREND_LEVEL_STYLES[0];
@@ -390,7 +396,7 @@ class TradingApp {
         this.domSignals = [];
         this.monitorTrendChart = null;
         this.monitorTrendData = [];
-        this.monitorTrendDatasetMap = { signal: 0 };
+        this.monitorTrendDatasetMap = { trend: 0, events: 1, price: 2 };
         this.monitorDomHistoryList = null;
         this.monitorDomHistoryMeta = null;
         this.candlestickSupported = false;
@@ -499,10 +505,10 @@ class TradingApp {
             this.monitorTrendData = [];
         }
         if (this.monitorTrendChart?.data?.datasets?.length) {
-            const baseData = this.getFormattedTrendChartData();
-            const signalIndex = this.monitorTrendDatasetMap?.signal ?? 0;
-            if (this.monitorTrendChart.data.datasets[signalIndex]) {
-                this.monitorTrendChart.data.datasets[signalIndex].data = baseData;
+            const baseData = this.getFormattedTrendChartData().filter(item => Number.isFinite(item?.y));
+            const trendIndex = this.monitorTrendDatasetMap?.trend ?? 0;
+            if (this.monitorTrendChart.data.datasets[trendIndex]) {
+                this.monitorTrendChart.data.datasets[trendIndex].data = baseData;
             }
             this.updateMonitorSignalOverlayDatasets();
             this.monitorTrendChart.update('none');
@@ -526,7 +532,7 @@ class TradingApp {
             return Number.isFinite(parsed) ? parsed : null;
         };
 
-        const score = safeNumber(point.score ?? point.trend_score ?? point.y);
+        const trendScore = safeNumber(point.score ?? point.trend_score ?? point.y);
         const obi = safeNumber(point.obi);
         const ofi = safeNumber(point.ofi);
         const thresholds = point.thresholds && typeof point.thresholds === 'object' ? point.thresholds : {};
@@ -562,9 +568,10 @@ class TradingApp {
         const suggestion = typeof point.suggestion === 'string' ? point.suggestion.toLowerCase() : null;
         const normalizedSuggestion = suggestion === 'buy' ? 'buy' : suggestion === 'sell' ? 'sell' : null;
         const events = Array.isArray(point.events) ? point.events.map(evt => ({ ...evt })) : [];
-        const featureFlags = point.featureFlags && typeof point.featureFlags === 'object'
-            ? { ...point.featureFlags }
-            : {};
+        const featureFlagSource = (point.featureFlags && typeof point.featureFlags === 'object')
+            ? point.featureFlags
+            : (point.feature_flags && typeof point.feature_flags === 'object' ? point.feature_flags : null);
+        const featureFlags = featureFlagSource ? { ...featureFlagSource } : {};
         const fakeBreakoutProb = safeNumber(point.fake_breakout_prob ?? point.fakeBreakoutProb);
 
         return {
@@ -572,9 +579,10 @@ class TradingApp {
             timestamp: normalized,
             x: normalized,
             displayTime: new Date(normalized),
-            score,
+            score: trendScore,
+            trend_score: trendScore,
             signal,
-            y: signal,
+            y: Number.isFinite(trendScore) ? trendScore : null,
             obi,
             ofi,
             price,
@@ -585,6 +593,7 @@ class TradingApp {
             },
             events,
             featureFlags,
+            feature_flags: featureFlags,
             fake_breakout_prob: fakeBreakoutProb,
         };
     }
@@ -599,85 +608,115 @@ class TradingApp {
     updateMonitorSignalOverlayDatasets() {
         if (!this.monitorTrendChart) return;
         const chart = this.monitorTrendChart;
-        const map = this.monitorTrendDatasetMap || { signal: 0 };
+        const map = this.monitorTrendDatasetMap || { trend: 0, events: 1, price: 2 };
         const baseData = this.getFormattedTrendChartData();
 
-        const signalDataset = chart.data?.datasets?.[map.signal];
-        if (signalDataset) {
-            const entries = baseData.map(point => ({
-                x: point.x,
-                y: Number.isFinite(point.signal) ? point.signal : 0,
-                suggestion: point.suggestion,
-                reason: point.reason,
-                price: point.price,
-                obi: point.obi,
-                ofi: point.ofi,
-                thresholds: point.thresholds,
-                score: point.score,
-                level: point.level,
-            }));
-            signalDataset.data = entries;
-            const background = entries.map(item => {
-                if (item.y > 0) return 'rgba(34,197,94,0.45)';
-                if (item.y < 0) return 'rgba(239,68,68,0.45)';
-                return 'rgba(148,163,184,0.18)';
-            });
-            signalDataset.backgroundColor = background;
-            signalDataset.borderColor = background;
-        }
-
-        const assignDataset = (key, extractor) => {
-            const idx = map[key];
-            if (idx === undefined) return;
-            const dataset = chart.data?.datasets?.[idx];
-            if (!dataset) return;
-            dataset.data = baseData
-                .map(point => {
-                    const value = extractor(point);
-                    return Number.isFinite(value) ? { x: point.x, y: value } : null;
-                })
-                .filter(Boolean);
+        const resolveEventColor = (event) => {
+            if (!event || typeof event !== 'object') return MONITOR_EVENT_SIDE_COLORS.neutral;
+            if (typeof event.color === 'string' && event.color.trim()) {
+                return event.color.trim();
+            }
+            const side = typeof event.side === 'string' ? event.side.toLowerCase() : '';
+            if (side === 'buy') return MONITOR_EVENT_SIDE_COLORS.buy;
+            if (side === 'sell') return MONITOR_EVENT_SIDE_COLORS.sell;
+            return MONITOR_EVENT_SIDE_COLORS.neutral;
         };
 
-        assignDataset('obi', point => point.obi);
-        assignDataset('ofi', point => point.ofi);
-        assignDataset('longObi', point => point.thresholds?.long?.obi);
-        assignDataset('shortObi', point => point.thresholds?.short?.obi);
-        assignDataset('longOfi', point => point.thresholds?.long?.ofi);
-        assignDataset('shortOfi', point => point.thresholds?.short?.ofi);
-        assignDataset('price', point => point.price);
+        const trendDataset = chart.data?.datasets?.[map.trend];
+        if (trendDataset) {
+            const entries = baseData
+                .filter(point => Number.isFinite(point.score))
+                .map(point => ({
+                    x: point.x,
+                    y: point.score,
+                    score: point.score,
+                    signal: point.signal,
+                    suggestion: point.suggestion,
+                    reason: point.reason,
+                    price: point.price,
+                    obi: point.obi,
+                    ofi: point.ofi,
+                    thresholds: point.thresholds,
+                    events: Array.isArray(point.events) ? point.events : [],
+                    level: point.level,
+                    fake_breakout_prob: point.fake_breakout_prob,
+                    featureFlags: point.featureFlags,
+                    feature_flags: point.feature_flags ?? point.featureFlags,
+                }));
+            trendDataset.data = entries;
+        }
 
-        const indicatorValues = [];
-        const priceValues = [];
-        baseData.forEach(point => {
-            if (Number.isFinite(point.obi)) indicatorValues.push(point.obi);
-            if (Number.isFinite(point.ofi)) indicatorValues.push(point.ofi);
-            const lObi = point.thresholds?.long?.obi;
-            const sObi = point.thresholds?.short?.obi;
-            const lOfi = point.thresholds?.long?.ofi;
-            const sOfi = point.thresholds?.short?.ofi;
-            [lObi, sObi, lOfi, sOfi].forEach((value) => {
-                if (Number.isFinite(value)) indicatorValues.push(value);
+        const eventDataset = chart.data?.datasets?.[map.events];
+        if (eventDataset) {
+            const entries = [];
+            baseData.forEach((point) => {
+                if (!Number.isFinite(point.score)) return;
+                const events = Array.isArray(point.events) ? point.events : [];
+                events.forEach((event) => {
+                    if (!event || typeof event !== 'object') return;
+                    const labelSource = event.label || event.name || event.description || event.code || event.key || '';
+                    const labelText = labelSource ? String(labelSource).trim() : '';
+                    const rawCode = event.code || event.key || labelText;
+                    const code = rawCode ? String(rawCode).trim().toUpperCase().slice(0, 2) : '';
+                    if (!code) return;
+                    const side = typeof event.side === 'string' ? event.side : null;
+                    entries.push({
+                        x: point.x,
+                        y: point.score,
+                        code,
+                        label: labelText || code,
+                        side,
+                        color: resolveEventColor(event),
+                        price: point.price,
+                        score: point.score,
+                        thresholds: point.thresholds,
+                        reason: point.reason,
+                    });
+                });
             });
-            if (Number.isFinite(point.price)) priceValues.push(point.price);
-        });
+            eventDataset.data = entries;
+        }
 
-        const indicatorAxis = chart.options?.scales?.indicatorAxis;
-        if (indicatorAxis && indicatorValues.length) {
-            const min = Math.min(...indicatorValues);
-            const max = Math.max(...indicatorValues);
-            const span = max - min || 1;
-            indicatorAxis.min = min - span * 0.1;
-            indicatorAxis.max = max + span * 0.1;
+        const priceDataset = chart.data?.datasets?.[map.price];
+        if (priceDataset) {
+            priceDataset.data = baseData
+                .map(point => (Number.isFinite(point.price) ? { x: point.x, y: point.price } : null))
+                .filter(Boolean);
+        }
+
+        const trendValues = Array.isArray(trendDataset?.data)
+            ? trendDataset.data.map(item => (item && Number.isFinite(item.y) ? item.y : null)).filter(Number.isFinite)
+            : [];
+        const trendAxis = chart.options?.scales?.trendAxis;
+        if (trendAxis) {
+            if (trendValues.length) {
+                const min = Math.min(...trendValues);
+                const max = Math.max(...trendValues);
+                const span = max - min || 1;
+                const padding = span * 0.1;
+                trendAxis.min = min - padding;
+                trendAxis.max = max + padding;
+            } else {
+                trendAxis.min = -1;
+                trendAxis.max = 1;
+            }
         }
 
         const priceAxis = chart.options?.scales?.priceAxis;
-        if (priceAxis && priceValues.length) {
-            const min = Math.min(...priceValues);
-            const max = Math.max(...priceValues);
-            const span = max - min || (min * 0.05) || 1;
-            priceAxis.min = min - span * 0.05;
-            priceAxis.max = max + span * 0.05;
+        if (priceAxis) {
+            const priceValues = Array.isArray(priceDataset?.data)
+                ? priceDataset.data.map(item => (item && Number.isFinite(item.y) ? item.y : null)).filter(Number.isFinite)
+                : [];
+            if (priceValues.length) {
+                const min = Math.min(...priceValues);
+                const max = Math.max(...priceValues);
+                const span = max - min || (Math.abs(min) * 0.05) || 1;
+                priceAxis.min = min - span * 0.05;
+                priceAxis.max = max + span * 0.05;
+                priceAxis.display = true;
+            } else {
+                priceAxis.display = false;
+            }
         }
     }
 
@@ -725,12 +764,17 @@ class TradingApp {
             const eventBadges = events
                 .map((evt) => {
                     if (!evt || typeof evt !== 'object') return '';
-                    const code = evt.code || evt.label || evt.key;
-                    if (!code) return '';
+                    const rawCode = evt.code || evt.label || evt.key;
+                    const codeText = rawCode ? String(rawCode).trim() : '';
+                    if (!codeText) return '';
+                    const displayCode = codeText.slice(0, 2).toUpperCase();
                     const side = typeof evt.side === 'string' ? evt.side.toLowerCase() : '';
-                    const color = side === 'buy' ? 'bg-success' : side === 'sell' ? 'bg-danger' : 'bg-secondary';
-                    const title = escapeHtml(evt.label || evt.key || code);
-                    return `<span class="badge ${color} me-1" title="${title}">${escapeHtml(code)}</span>`;
+                    const colorClass = side === 'buy' ? 'bg-success' : side === 'sell' ? 'bg-danger' : 'bg-secondary';
+                    const title = escapeHtml(evt.label || evt.key || rawCode);
+                    const inlineStyle = typeof evt.color === 'string' && evt.color.trim()
+                        ? ` style="background-color:${escapeHtml(evt.color.trim())};color:#fff;"`
+                        : '';
+                    return `<span class="badge ${colorClass} me-1"${inlineStyle} title="${title}">${escapeHtml(displayCode)}</span>`;
                 })
                 .filter(Boolean)
                 .join('');
@@ -752,8 +796,9 @@ class TradingApp {
     }
 
     getTrendValues(chart) {
-        const ds0 = chart.data?.datasets?.[0];
-        const arr = Array.isArray(ds0?.data) ? ds0.data : [];
+        const trendIndex = this.monitorTrendDatasetMap?.trend ?? 0;
+        const dataset = chart.data?.datasets?.[trendIndex];
+        const arr = Array.isArray(dataset?.data) ? dataset.data : [];
         const ys = arr.map(p => (typeof p === 'number' ? p : p?.y)).filter(Number.isFinite);
         if (!ys.length) return null;
         return { latest: ys[ys.length - 1], min: Math.min(...ys), max: Math.max(...ys) };
@@ -949,6 +994,8 @@ class TradingApp {
             timestamp: x,
             signal,
             score: numericScore,
+            trend_score: numericScore,
+            y: Number.isFinite(numericScore) ? numericScore : null,
             reason: reasonText,
             suggestion,
             level,
@@ -961,6 +1008,7 @@ class TradingApp {
             },
             events,
             featureFlags,
+            feature_flags: featureFlags,
             fake_breakout_prob: fakeBreakoutProb,
         };
 
@@ -979,6 +1027,7 @@ class TradingApp {
                     ...newPoint,
                     events: mergedEvents,
                     featureFlags: mergedFlags,
+                    feature_flags: mergedFlags,
                 };
                 inserted = true;
                 break;
@@ -1012,10 +1061,10 @@ class TradingApp {
         }
 
         if (this.monitorTrendChart?.data?.datasets?.length) {
-            const baseData = this.getFormattedTrendChartData();
-            const signalIndex = this.monitorTrendDatasetMap?.signal ?? 0;
-            if (this.monitorTrendChart.data.datasets[signalIndex]) {
-                this.monitorTrendChart.data.datasets[signalIndex].data = baseData;
+            const baseData = this.getFormattedTrendChartData().filter(item => Number.isFinite(item?.y));
+            const trendIndex = this.monitorTrendDatasetMap?.trend ?? 0;
+            if (this.monitorTrendChart.data.datasets[trendIndex]) {
+                this.monitorTrendChart.data.datasets[trendIndex].data = baseData;
             }
             this.updateMonitorSignalOverlayDatasets();
             this.monitorTrendChart.update('none');
@@ -4653,102 +4702,44 @@ class TradingApp {
                     console.log('[loadMonitorChart] Current monitorTrendData length:', this.monitorTrendData?.length || 0);
                     console.log('[loadMonitorChart] MonitorTrendData sample:', this.monitorTrendData?.slice(0, 3));
                     if (trendCtx) {
+
                         if (!this.monitorTrendChart) {
                             console.log('[loadMonitorChart] Creating new monitorTrendChart with data points:', this.monitorTrendData?.length || 0);
-                            const signalData = this.getFormattedTrendChartData();
-                            this.monitorTrendDatasetMap = {
-                                signal: 0,
-                                obi: 1,
-                                ofi: 2,
-                                longObi: 3,
-                                shortObi: 4,
-                                longOfi: 5,
-                                shortOfi: 6,
-                                price: 7,
-                            };
+                            const baseData = this.getFormattedTrendChartData().filter(item => Number.isFinite(item?.y));
+                            const eventMarkerPlugin = (typeof window !== 'undefined' && window.domEventMarkerPlugin)
+                                ? window.domEventMarkerPlugin
+                                : null;
+                            this.monitorTrendDatasetMap = { trend: 0, events: 1, price: 2 };
                             this.monitorTrendChart = new Chart(trendCtx, {
-                                type: 'bar',
+                                type: 'line',
                                 data: {
                                     datasets: [
                                         {
-                                            type: 'bar',
-                                            id: 'signal',
-                                            label: '信号',
-                                            data: signalData,
-                                            yAxisID: 'signalAxis',
-                                            borderSkipped: false,
-                                            borderRadius: 2,
-                                            barPercentage: 1,
-                                            categoryPercentage: 1,
-                                            backgroundColor: [],
-                                        },
-                                        {
                                             type: 'line',
-                                            id: 'obi',
-                                            label: 'OBI',
-                                            data: [],
-                                            yAxisID: 'indicatorAxis',
-                                            borderColor: 'rgba(59,130,246,0.9)',
+                                            id: 'trend',
+                                            label: '趋势分数',
+                                            data: baseData,
+                                            yAxisID: 'trendAxis',
+                                            borderColor: 'rgba(59,130,246,0.85)',
                                             backgroundColor: 'rgba(59,130,246,0.15)',
+                                            borderWidth: 2,
                                             tension: 0.25,
                                             pointRadius: 0,
+                                            pointHoverRadius: 3,
                                             spanGaps: true,
                                         },
                                         {
-                                            type: 'line',
-                                            id: 'ofi',
-                                            label: 'OFI',
+                                            type: 'scatter',
+                                            id: 'events',
+                                            label: '事件',
                                             data: [],
-                                            yAxisID: 'indicatorAxis',
-                                            borderColor: 'rgba(234,88,12,0.9)',
-                                            backgroundColor: 'rgba(234,88,12,0.15)',
-                                            tension: 0.25,
+                                            yAxisID: 'trendAxis',
                                             pointRadius: 0,
-                                            spanGaps: true,
-                                        },
-                                        {
-                                            type: 'line',
-                                            id: 'longObi',
-                                            label: 'Long OBI 阈值',
-                                            data: [],
-                                            yAxisID: 'indicatorAxis',
-                                            borderColor: 'rgba(16,185,129,0.7)',
-                                            borderDash: [6, 4],
-                                            pointRadius: 0,
-                                            spanGaps: true,
-                                        },
-                                        {
-                                            type: 'line',
-                                            id: 'shortObi',
-                                            label: 'Short OBI 阈值',
-                                            data: [],
-                                            yAxisID: 'indicatorAxis',
-                                            borderColor: 'rgba(239,68,68,0.7)',
-                                            borderDash: [6, 4],
-                                            pointRadius: 0,
-                                            spanGaps: true,
-                                        },
-                                        {
-                                            type: 'line',
-                                            id: 'longOfi',
-                                            label: 'Long OFI 阈值',
-                                            data: [],
-                                            yAxisID: 'indicatorAxis',
-                                            borderColor: 'rgba(16,185,129,0.4)',
-                                            borderDash: [4, 4],
-                                            pointRadius: 0,
-                                            spanGaps: true,
-                                        },
-                                        {
-                                            type: 'line',
-                                            id: 'shortOfi',
-                                            label: 'Short OFI 阈值',
-                                            data: [],
-                                            yAxisID: 'indicatorAxis',
-                                            borderColor: 'rgba(239,68,68,0.4)',
-                                            borderDash: [4, 4],
-                                            pointRadius: 0,
-                                            spanGaps: true,
+                                            pointHoverRadius: 6,
+                                            pointHitRadius: 12,
+                                            borderWidth: 0,
+                                            showLine: false,
+                                            domEvents: true,
                                         },
                                         {
                                             type: 'line',
@@ -4756,9 +4747,10 @@ class TradingApp {
                                             label: '价格',
                                             data: [],
                                             yAxisID: 'priceAxis',
-                                            borderColor: 'rgba(99,102,241,0.85)',
-                                            backgroundColor: 'rgba(99,102,241,0.1)',
-                                            tension: 0.15,
+                                            borderColor: 'rgba(234,179,8,0.85)',
+                                            backgroundColor: 'rgba(234,179,8,0.12)',
+                                            borderWidth: 2,
+                                            tension: 0.2,
                                             pointRadius: 0,
                                             spanGaps: true,
                                         },
@@ -4789,10 +4781,19 @@ class TradingApp {
                                                     const datasetId = context.dataset?.id;
                                                     const value = context.parsed?.y;
                                                     const raw = context.raw || {};
-                                                    if (datasetId === 'signal') {
+                                                    if (datasetId === 'trend') {
                                                         const lines = [];
-                                                        const direction = raw.y > 0 ? '多头信号' : '空头信号';
-                                                        lines.push(direction);
+                                                        const scoreValue = Number.isFinite(value) ? value : raw.score;
+                                                        if (Number.isFinite(scoreValue)) {
+                                                            lines.push(`趋势分数: ${this.formatNumber(scoreValue)}`);
+                                                        }
+                                                        if (Number.isFinite(raw.signal) && raw.signal !== 0) {
+                                                            lines.push(raw.signal > 0 ? '方向: 做多' : '方向: 做空');
+                                                        }
+                                                        if (raw.suggestion && !lines.some(line => line.startsWith('建议'))) {
+                                                            const label = raw.suggestion === 'buy' ? '建议: 做多' : raw.suggestion === 'sell' ? '建议: 做空' : `建议: ${raw.suggestion}`;
+                                                            lines.push(label);
+                                                        }
                                                         if (Number.isFinite(raw.price)) {
                                                             lines.push(`价格: $${this.formatNumber(raw.price)}`);
                                                         }
@@ -4802,27 +4803,59 @@ class TradingApp {
                                                         if (Number.isFinite(raw.ofi)) {
                                                             lines.push(`OFI: ${this.formatNumber(raw.ofi)}`);
                                                         }
+                                                        const longObi = raw.thresholds?.long?.obi;
+                                                        const longOfi = raw.thresholds?.long?.ofi;
+                                                        const shortObi = raw.thresholds?.short?.obi;
+                                                        const shortOfi = raw.thresholds?.short?.ofi;
+                                                        if (Number.isFinite(longObi) || Number.isFinite(longOfi)) {
+                                                            const obiText = Number.isFinite(longObi) ? this.formatNumber(longObi) : '—';
+                                                            const ofiText = Number.isFinite(longOfi) ? this.formatNumber(longOfi) : '—';
+                                                            lines.push(`多头阈值: OBI ${obiText} / OFI ${ofiText}`);
+                                                        }
+                                                        if (Number.isFinite(shortObi) || Number.isFinite(shortOfi)) {
+                                                            const obiText = Number.isFinite(shortObi) ? this.formatNumber(shortObi) : '—';
+                                                            const ofiText = Number.isFinite(shortOfi) ? this.formatNumber(shortOfi) : '—';
+                                                            lines.push(`空头阈值: OBI ${obiText} / OFI ${ofiText}`);
+                                                        }
+                                                        if (Number.isFinite(raw.fake_breakout_prob)) {
+                                                            const pct = Math.round(raw.fake_breakout_prob * 100);
+                                                            lines.push(`假突破概率: ${pct}%`);
+                                                        }
                                                         if (raw.reason) {
                                                             String(raw.reason).split('\n').forEach((line) => {
-                                                                if (line) lines.push(line);
+                                                                const trimmed = line.trim();
+                                                                if (trimmed) lines.push(trimmed);
                                                             });
+                                                        }
+                                                        return lines;
+                                                    }
+                                                    if (datasetId === 'events') {
+                                                        const lines = [];
+                                                        if (raw.label) {
+                                                            lines.push(String(raw.label));
+                                                        } else if (raw.code) {
+                                                            lines.push(String(raw.code));
+                                                        }
+                                                        if (raw.side) {
+                                                            const side = String(raw.side).toLowerCase();
+                                                            if (side === 'buy') lines.push('方向: 做多');
+                                                            else if (side === 'sell') lines.push('方向: 做空');
+                                                            else lines.push(`方向: ${raw.side}`);
+                                                        }
+                                                        if (Number.isFinite(raw.score)) {
+                                                            lines.push(`趋势分数: ${this.formatNumber(raw.score)}`);
+                                                        }
+                                                        if (Number.isFinite(raw.price)) {
+                                                            lines.push(`价格: $${this.formatNumber(raw.price)}`);
+                                                        }
+                                                        if (raw.reason) {
+                                                            const firstLine = String(raw.reason).split('\n').find(line => line && line.trim());
+                                                            if (firstLine) lines.push(firstLine.trim());
                                                         }
                                                         return lines;
                                                     }
                                                     if (datasetId === 'price') {
                                                         return `价格: $${this.formatNumber(value)}`;
-                                                    }
-                                                    if (datasetId === 'obi') {
-                                                        return `OBI: ${this.formatNumber(value)}`;
-                                                    }
-                                                    if (datasetId === 'ofi') {
-                                                        return `OFI: ${this.formatNumber(value)}`;
-                                                    }
-                                                    if (datasetId === 'longObi' || datasetId === 'shortObi') {
-                                                        return `${context.dataset.label}: ${this.formatNumber(value)}`;
-                                                    }
-                                                    if (datasetId === 'longOfi' || datasetId === 'shortOfi') {
-                                                        return `${context.dataset.label}: ${this.formatNumber(value)}`;
                                                     }
                                                     return `${context.dataset.label}: ${this.formatNumber(value)}`;
                                                 },
@@ -4834,46 +4867,37 @@ class TradingApp {
                                             type: 'time',
                                             time: { unit: 'minute', displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'MMM dd' } },
                                         },
-                                        signalAxis: {
-                                            position: 'left',
-                                            display: false,
-                                            min: -1.5,
-                                            max: 1.5,
-                                        },
-                                        indicatorAxis: {
+                                        trendAxis: {
+                                            type: 'linear',
                                             position: 'left',
                                             grid: { drawOnChartArea: true },
-                                            title: { display: true, text: 'OBI / OFI' },
+                                            title: { display: true, text: '趋势分数' },
+                                            suggestedMin: -1,
+                                            suggestedMax: 1,
                                         },
                                         priceAxis: {
+                                            type: 'linear',
                                             position: 'right',
                                             grid: { drawOnChartArea: false },
                                             title: { display: true, text: '价格' },
+                                            display: false,
                                         },
                                     },
                                 },
+                                plugins: eventMarkerPlugin ? [eventMarkerPlugin] : [],
                             });
                             this.setupTrendLegendAndAnnotations(this.monitorTrendChart);
                             this.updateMonitorSignalOverlayDatasets();
                             this.monitorTrendChart.update('none');
                             this.renderMonitorSignalHistory();
                         } else {
-                            if (!this.monitorTrendDatasetMap || !('price' in this.monitorTrendDatasetMap)) {
-                                this.monitorTrendDatasetMap = {
-                                    signal: 0,
-                                    obi: 1,
-                                    ofi: 2,
-                                    longObi: 3,
-                                    shortObi: 4,
-                                    longOfi: 5,
-                                    shortOfi: 6,
-                                    price: 7,
-                                };
+                            if (!this.monitorTrendDatasetMap || this.monitorTrendDatasetMap.trend === undefined) {
+                                this.monitorTrendDatasetMap = { trend: 0, events: 1, price: 2 };
                             }
-                            const baseData = this.getFormattedTrendChartData();
-                            const signalIndex = this.monitorTrendDatasetMap?.signal ?? 0;
-                            if (this.monitorTrendChart.data.datasets[signalIndex]) {
-                                this.monitorTrendChart.data.datasets[signalIndex].data = baseData;
+                            const baseData = this.getFormattedTrendChartData().filter(item => Number.isFinite(item?.y));
+                            const trendIndex = this.monitorTrendDatasetMap?.trend ?? 0;
+                            if (this.monitorTrendChart.data.datasets[trendIndex]) {
+                                this.monitorTrendChart.data.datasets[trendIndex].data = baseData;
                             }
                             this.updateMonitorSignalOverlayDatasets();
                             this.monitorTrendChart.update('none');
