@@ -5,22 +5,81 @@ const DEFAULT_BASE_PARAMETER_TEMPLATE = {
     cooldown_threshold: [0, 0.1, 0.2],
 };
 
-const METRIC_FEATURE_PARAMETER_TEMPLATES = {
-    obi: {
-        imbalance_threshold: [0.55, 0.6, 0.65],
-        obi_window_seconds: [10, 20, 30],
-        obi_zscore: [0.8, 1.0, 1.2],
+const BASE_METRIC_PARAMETER_TEMPLATES = {
+    obi5: {
+        obi5_threshold: [0.55, 0.6, 0.65],
+        obi5_window_seconds: [10, 20, 30],
     },
     ofi: {
+        ofi_threshold: [0.0, 0.05, 0.1],
         ofi_window_seconds: [10, 20, 30],
-        ofi_zscore: [0.8, 1.0, 1.2],
-        cvd_zscore: [0.8, 1.0, 1.2],
     },
-    trend: {
+    trend_score: {
         trend_score_long: [0.7, 0.8, 0.9],
         trend_score_short: [-0.7, -0.8, -0.9],
         trend_smoothing_window: [30, 45, 60],
     },
+    cvd: {
+        cvd_delta: [400, 600, 800],
+        cvd_window_seconds: [20, 30, 45],
+    },
+    mid_price: {
+        mid_price_offset_ticks: [0.5, 1, 1.5],
+    },
+};
+
+const FEATURE_PARAMETER_TEMPLATES = {
+    stacking: {
+        intensity: [0.3, 0.35, 0.4],
+        min_depth: [40, 60, 80],
+    },
+    pulling: {
+        intensity: [0.25, 0.3, 0.35],
+        min_depth: [20, 30, 40],
+    },
+    wall: {
+        strength: [0.3, 0.4, 0.5],
+        min_size: [60, 80, 100],
+    },
+    cancel_rate: {
+        rate: [1.0, 1.2, 1.4],
+    },
+    absorption: {
+        index: [0.5, 0.6, 0.7],
+    },
+    sweep: {
+        intensity: [0.6, 0.7, 0.8],
+    },
+    fake_breakout: {
+        prob: [0.55, 0.65, 0.75],
+    },
+    wall_pull_no_follow: {
+        score: [0.5, 0.6, 0.7],
+    },
+    obi_ofi_reversal: {
+        score: [0.65, 0.75, 0.85],
+    },
+    spread: {
+        delta_ticks: [1, 2, 3],
+    },
+};
+
+const METRIC_LABELS = {
+    obi5: "订单簿不平衡 (OBI5)",
+    ofi: "订单流差 (OFI)",
+    trend_score: "趋势评分",
+    cvd: "累计成交量差 (CVD)",
+    mid_price: "中间价",
+    stacking: "堆单强度",
+    pulling: "撤单强度",
+    wall: "墙单强度",
+    cancel_rate: "撤单速率",
+    absorption: "吸收指数",
+    sweep: "扫单检测",
+    fake_breakout: "假突破启发式",
+    wall_pull_no_follow: "撤墙+无跟随",
+    obi_ofi_reversal: "OBI/OFI 快速反转",
+    spread: "价差变化",
 };
 
 class OptimizerApp {
@@ -31,9 +90,20 @@ class OptimizerApp {
         this.refreshMetadataButton = document.getElementById('btn-refresh-metadata');
         this.newPlanButton = document.getElementById('btn-new-plan');
         this.state = {
-            metadata: { metrics: [], algorithms: [] },
+            metadata: { base_metrics: [], feature_metrics: [], algorithms: [] },
             plans: [],
         };
+    }
+
+    formatMetricName(metric) {
+        return METRIC_LABELS[metric] || metric;
+    }
+
+    formatMetricList(list) {
+        if (!list || !list.length) {
+            return '无';
+        }
+        return list.map((item) => this.formatMetricName(item)).join(', ');
     }
 
     async init() {
@@ -76,7 +146,12 @@ class OptimizerApp {
     }
 
     async loadMetadata(force = false) {
-        if (!force && this.state.metadata.metrics.length) return;
+        if (
+            !force
+            && (this.state.metadata.base_metrics.length || this.state.metadata.feature_metrics.length)
+        ) {
+            return;
+        }
         try {
             const res = await fetch('/api/optimize/metadata');
             if (!res.ok) throw new Error('Failed to load metadata');
@@ -102,14 +177,17 @@ class OptimizerApp {
     renderMetadataTags() {
         const container = document.getElementById('metadata-tags');
         if (!container) return;
-        const { metrics, algorithms } = this.state.metadata;
-        if (!metrics.length && !algorithms.length) {
+        const { base_metrics: baseMetrics, feature_metrics: featureMetrics, algorithms } = this.state.metadata;
+        if (!baseMetrics.length && !featureMetrics.length && !algorithms.length) {
             container.innerHTML = '<span class="tag">未检测到配置</span>';
             return;
         }
-        const metricTags = metrics.map((m) => `<span class="tag">指标 · ${m}</span>`).join('');
+        const baseTags = baseMetrics.map((m) => `<span class="tag">基础 · ${this.formatMetricName(m)}</span>`).join('');
+        const featureTags = featureMetrics
+            .map((m) => `<span class="tag">特征 · ${this.formatMetricName(m)}</span>`)
+            .join('');
         const algorithmTags = algorithms.map((a) => `<span class="tag">算法 · ${a}</span>`).join('');
-        container.innerHTML = metricTags + algorithmTags;
+        container.innerHTML = baseTags + featureTags + algorithmTags;
     }
 
     renderPlanTable() {
@@ -136,7 +214,9 @@ class OptimizerApp {
     renderPlanRow(plan) {
         const statusClass = plan.is_active ? 'running' : 'success';
         const statusLabel = plan.is_active ? '运行中' : '暂停';
-        const metrics = plan.metrics?.join(', ') || '-';
+        const baseMetrics = this.formatMetricList(plan.base_metrics);
+        const featureMetrics = this.formatMetricList(plan.feature_metrics);
+        const metricsHtml = `<div>基础：${baseMetrics}</div><div>特征：${featureMetrics}</div>`;
         const frequency = plan.frequency_minutes
             ? `${plan.frequency_minutes} 分钟`
             : '手动触发';
@@ -148,7 +228,7 @@ class OptimizerApp {
                 <td>${plan.name}</td>
                 <td>${plan.symbol}</td>
                 <td>${plan.algorithm}</td>
-                <td>${metrics}</td>
+                <td>${metricsHtml}</td>
                 <td>${frequency}</td>
                 <td><span class="status-pill ${statusClass}">${statusLabel}</span></td>
                 <td>${updated}</td>
@@ -282,22 +362,48 @@ class OptimizerApp {
 
     openPlanDialog(existingPlan = null) {
         const isEdit = Boolean(existingPlan);
-        const { metrics, algorithms } = this.state.metadata;
-        const metricBucket = [...metrics];
-        const existingMetrics = new Set(existingPlan?.metrics ?? []);
+        const { base_metrics: baseMetrics, feature_metrics: featureMetrics, algorithms } = this.state.metadata;
+        const baseBucket = [...baseMetrics];
+        const featureBucket = [...featureMetrics];
+        const existingBase = new Set(existingPlan?.base_metrics ?? []);
+        const existingFeature = new Set(existingPlan?.feature_metrics ?? []);
         if (existingPlan) {
-            existingPlan.metrics.forEach((metric) => {
-                if (!metricBucket.includes(metric)) {
-                    metricBucket.push(metric);
+            (existingPlan.base_metrics || []).forEach((metric) => {
+                if (!baseBucket.includes(metric)) {
+                    baseBucket.push(metric);
                 }
             });
+            (existingPlan.feature_metrics || []).forEach((metric) => {
+                if (!featureBucket.includes(metric)) {
+                    featureBucket.push(metric);
+                }
+            });
+            const featureKeys = Object.keys(existingPlan.parameters?.features || {});
+            featureKeys.forEach((metric) => {
+                if (!featureBucket.includes(metric)) {
+                    featureBucket.push(metric);
+                }
+                existingFeature.add(metric);
+            });
         }
-        const metricCheckboxes = metricBucket
+        const defaultBaseSelection = isEdit ? existingBase : new Set(baseBucket);
+        const defaultFeatureSelection = isEdit ? existingFeature : new Set(featureBucket);
+        const baseCheckboxes = baseBucket
             .map((metric) => {
-                const checked = !isEdit || existingMetrics.has(metric);
+                const checked = defaultBaseSelection.has(metric);
                 return `
                 <label class="tag">
-                    <input type="checkbox" name="metrics" value="${metric}" ${checked ? 'checked' : ''} /> ${metric}
+                    <input type="checkbox" name="base_metrics" value="${metric}" ${checked ? 'checked' : ''} /> ${this.formatMetricName(metric)}
+                </label>
+            `;
+            })
+            .join('');
+        const featureCheckboxes = featureBucket
+            .map((metric) => {
+                const checked = defaultFeatureSelection.has(metric);
+                return `
+                <label class="tag">
+                    <input type="checkbox" name="feature_metrics" value="${metric}" ${checked ? 'checked' : ''} /> ${this.formatMetricName(metric)}
                 </label>
             `;
             })
@@ -346,8 +452,12 @@ class OptimizerApp {
                             </div>
                         </div>
                         <div class="input-group">
-                            <label>指标选择</label>
-                            <div class="tag-list">${metricCheckboxes || '<span class="tag">暂无预设指标</span>'}</div>
+                            <label>基础指标</label>
+                            <div class="tag-list">${baseCheckboxes || '<span class="tag">暂无基础指标</span>'}</div>
+                        </div>
+                        <div class="input-group">
+                            <label>特征指标</label>
+                            <div class="tag-list">${featureCheckboxes || '<span class="tag">暂无特征指标</span>'}</div>
                         </div>
                         <div class="form-grid two-columns">
                             <div class="input-group">
@@ -415,16 +525,19 @@ class OptimizerApp {
         return JSON.parse(JSON.stringify(value));
     }
 
-    buildParameterTemplates(selectedMetrics) {
+    buildParameterTemplates(selectedBaseMetrics, selectedFeatureMetrics) {
         const base = this.cloneValue(DEFAULT_BASE_PARAMETER_TEMPLATE);
+        selectedBaseMetrics.forEach((metric) => {
+            const template = BASE_METRIC_PARAMETER_TEMPLATES[metric];
+            if (!template) return;
+            Object.entries(template).forEach(([key, value]) => {
+                base[key] = this.cloneValue(value);
+            });
+        });
         const features = {};
-        selectedMetrics.forEach((metric) => {
-            const template = METRIC_FEATURE_PARAMETER_TEMPLATES[metric];
-            if (template) {
-                features[metric] = this.cloneValue(template);
-            } else {
-                features[metric] = {};
-            }
+        selectedFeatureMetrics.forEach((metric) => {
+            const template = FEATURE_PARAMETER_TEMPLATES[metric];
+            features[metric] = template ? this.cloneValue(template) : {};
         });
         return { base, features };
     }
@@ -444,12 +557,12 @@ class OptimizerApp {
         }
     }
 
-    mergeFeatureTemplates(selectedMetrics, currentFeatures, templateFeatures) {
+    mergeFeatureTemplates(selectedFeatureMetrics, currentFeatures, templateFeatures) {
         const merged = {};
         const featureSource = currentFeatures && typeof currentFeatures === 'object' && !Array.isArray(currentFeatures)
             ? currentFeatures
             : {};
-        selectedMetrics.forEach((metric) => {
+        selectedFeatureMetrics.forEach((metric) => {
             const template = templateFeatures[metric] ? this.cloneValue(templateFeatures[metric]) : {};
             const existing = featureSource[metric]
                 && typeof featureSource[metric] === 'object'
@@ -474,19 +587,20 @@ class OptimizerApp {
         [baseField, featureField].forEach((field) => field.addEventListener('input', markEdited));
 
         const updateTemplates = () => {
-            const selectedMetrics = [...form.querySelectorAll('input[name="metrics"]:checked')].map((el) => el.value);
-            const templates = this.buildParameterTemplates(selectedMetrics);
+            const selectedBase = [...form.querySelectorAll('input[name="base_metrics"]:checked')].map((el) => el.value);
+            const selectedFeatures = [...form.querySelectorAll('input[name="feature_metrics"]:checked')].map((el) => el.value);
+            const templates = this.buildParameterTemplates(selectedBase, selectedFeatures);
             if (baseField.dataset.userEdited !== 'true') {
                 baseField.value = JSON.stringify(templates.base, null, 2);
             }
             const currentFeatures = this.safeParseJson(featureField.value, {});
             const mergedFeatures = featureField.dataset.userEdited === 'true'
-                ? this.mergeFeatureTemplates(selectedMetrics, currentFeatures, templates.features)
+                ? this.mergeFeatureTemplates(selectedFeatures, currentFeatures, templates.features)
                 : templates.features;
             featureField.value = JSON.stringify(mergedFeatures, null, 2);
         };
 
-        const checkboxList = form.querySelectorAll('input[name="metrics"]');
+        const checkboxList = form.querySelectorAll('input[name="base_metrics"], input[name="feature_metrics"]');
         checkboxList.forEach((checkbox) => {
             checkbox.addEventListener('change', updateTemplates);
         });
@@ -597,12 +711,15 @@ class OptimizerApp {
     collectPlanPayload(form) {
         const formData = new FormData(form);
         const getValue = (name) => (formData.get(name) || '').toString().trim();
-        const metrics = [...form.querySelectorAll('input[name="metrics"]:checked')].map((el) => el.value);
-        if (!metrics.length) throw new Error('至少选择一个指标');
+        const baseMetrics = [...form.querySelectorAll('input[name="base_metrics"]:checked')].map((el) => el.value);
+        const featureMetrics = [...form.querySelectorAll('input[name="feature_metrics"]:checked')].map((el) => el.value);
+        if (!baseMetrics.length && !featureMetrics.length) {
+            throw new Error('至少选择一个基础或特征指标');
+        }
         const baseParameters = this.parseBaseParameters(getValue('base_parameters'));
         const featureParameters = this.parseFeatureParameters(getValue('feature_parameters'));
         const normalizedFeatures = {};
-        metrics.forEach((metric) => {
+        featureMetrics.forEach((metric) => {
             if (featureParameters[metric]) {
                 normalizedFeatures[metric] = featureParameters[metric];
             }
@@ -612,7 +729,8 @@ class OptimizerApp {
             name: getValue('name'),
             symbol: getValue('symbol').toUpperCase(),
             strategy: getValue('strategy') || 'default_strategy',
-            metrics,
+            base_metrics: baseMetrics,
+            feature_metrics: featureMetrics,
             parameters: {
                 base: baseParameters,
                 features: normalizedFeatures,
