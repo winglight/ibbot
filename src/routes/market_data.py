@@ -216,6 +216,17 @@ async def get_chart_data(
 ):
     """获取图表数据"""
     try:
+        if not connection_manager.is_connected():
+            reason = None
+            try:
+                reason = connection_manager.get_last_connect_error()
+            except Exception:
+                reason = None
+            detail = "Not connected to IBKR"
+            if reason:
+                detail = f"{detail}: {reason}"
+            raise HTTPException(status_code=400, detail=detail)
+
         # 统一使用与历史接口一致的缓存策略，使用前缀避免冲突
         _clean_expired_cache()
         now = now_local()

@@ -549,8 +549,13 @@ class DOMProcessor:
 
         absorption_thr = float(feature_cfg.get("absorption", {}).get("index", 0.0))
         if absorption_thr > 0:
-            long_feature_ok &= features.get("absorption_index_buy", 0.0) >= absorption_thr
-            short_feature_ok &= features.get("absorption_index_sell", 0.0) >= absorption_thr
+            absorption_buy = features.get("absorption_index_buy")
+            if absorption_buy not in (None, 0):
+                long_feature_ok &= absorption_buy >= absorption_thr
+
+            absorption_sell = features.get("absorption_index_sell")
+            if absorption_sell not in (None, 0):
+                short_feature_ok &= absorption_sell >= absorption_thr
 
         sweep_thr = float(feature_cfg.get("sweep", {}).get("intensity", 0.0))
         if sweep_thr > 0:
