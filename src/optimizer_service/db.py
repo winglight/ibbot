@@ -147,12 +147,30 @@ class OptimizerDatabase:
     def load_plans(self) -> Iterable[Dict[str, Any]]:
         cursor = self._conn.execute("SELECT * FROM optimizer_plans")
         for row in cursor.fetchall():
+            raw_metrics = _json_load(row["metrics"])
+            if isinstance(raw_metrics, dict):
+                base_metrics = list(raw_metrics.get("base") or raw_metrics.get("base_metrics") or [])
+                feature_metrics = list(raw_metrics.get("feature") or raw_metrics.get("feature_metrics") or [])
+                all_metrics = list(raw_metrics.get("all") or raw_metrics.get("metrics") or [])
+                if not all_metrics:
+                    seen = []
+                    for value in base_metrics + feature_metrics:
+                        if value in seen:
+                            continue
+                        seen.append(value)
+                    all_metrics = seen
+            else:
+                all_metrics = list(raw_metrics or [])
+                base_metrics = list(all_metrics)
+                feature_metrics = []
             yield {
                 "id": row["id"],
                 "name": row["name"],
                 "strategy": row["strategy"],
                 "symbol": row["symbol"],
-                "metrics": _json_load(row["metrics"]) or [],
+                "metrics": all_metrics,
+                "base_metrics": base_metrics,
+                "feature_metrics": feature_metrics,
                 "parameters": _json_load(row["parameters"]) or {},
                 "algorithm": row["algorithm"],
                 "start_date": row["start_date"],

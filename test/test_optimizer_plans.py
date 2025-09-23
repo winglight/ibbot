@@ -14,15 +14,19 @@ def plan_payload(frequency_minutes: int = 0):
         "name": "MNQ日内优化",
         "strategy": "mnq_dom",
         "symbol": "MNQ",
-        "metrics": ["obi", "ofi", "trend"],
+        "base_metrics": ["obi5", "ofi", "trend_score"],
+        "feature_metrics": ["stacking", "sweep"],
         "parameters": {
             "base": {
                 "long_thresholds": [0.75, 0.85],
                 "short_thresholds": [-0.75, -0.85],
+                "window": [8000, 10000],
+                "max_levels": [20, 30],
+                "depth_rows": [5, 10],
             },
             "features": {
-                "obi": {"imbalance_threshold": [0.55, 0.6]},
-                "ofi": {"ofi_zscore": [0.8, 1.0]},
+                "stacking": {"intensity": [0.3, 0.4]},
+                "sweep": {"intensity": [0.6, 0.7]},
             },
         },
         "algorithm": "grid",
@@ -55,18 +59,28 @@ def test_plan_lifecycle():
         plan_id = plan["id"]
         assert plan["is_active"] is False
         assert plan["parameters"]["base"]["long_thresholds"] == [0.75, 0.85]
-        assert "obi" in plan["parameters"]["features"]
+        assert plan["parameters"]["base"]["window"] == [8000, 10000]
+        assert plan["parameters"]["base"]["max_levels"] == [20, 30]
+        assert plan["parameters"]["base"]["depth_rows"] == [5, 10]
+        assert plan["base_metrics"] == ["obi5", "ofi", "trend_score"]
+        assert plan["feature_metrics"] == ["stacking", "sweep"]
+        assert set(plan["metrics"]) == set(plan["base_metrics"] + plan["feature_metrics"])
+        assert "stacking" in plan["parameters"]["features"]
 
         update_resp = client.patch(
             f"/api/optimize/plans/{plan_id}",
             json={
                 "name": "MNQ计划-更新",
                 "frequency_minutes": 15,
-                "metrics": ["obi", "ofi"],
+                "base_metrics": ["obi5", "ofi"],
+                "feature_metrics": ["stacking"],
             },
         )
         assert update_resp.status_code == 200
-        assert update_resp.json()["name"] == "MNQ计划-更新"
+        updated_plan = update_resp.json()
+        assert updated_plan["name"] == "MNQ计划-更新"
+        assert updated_plan["base_metrics"] == ["obi5", "ofi"]
+        assert updated_plan["feature_metrics"] == ["stacking"]
 
         start_resp = client.post(f"/api/optimize/plans/{plan_id}/start")
         assert start_resp.status_code == 200
