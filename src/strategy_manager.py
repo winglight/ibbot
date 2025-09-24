@@ -9,6 +9,7 @@ import csv
 import hashlib
 import hmac
 import time
+import importlib
 import importlib.util
 import sys
 import asyncio
@@ -588,28 +589,49 @@ class StrategyManager:
             return None
 
         module_key = str(module_path)
+        import_name, package_name = self._infer_module_import_context(module_path)
         module_name = self._loaded_internal_modules.get(module_key)
 
         module = None
         if module_name and module_name in sys.modules:
             module = sys.modules[module_name]
         else:
-            module_name = f"internal_strategy_{hashlib.md5(module_key.encode()).hexdigest()}"
-            try:
-                spec = importlib.util.spec_from_file_location(module_name, module_path)
-                if not spec or not spec.loader:
-                    raise ImportError("Unable to resolve module specification")
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = module
-                spec.loader.exec_module(module)  # type: ignore[arg-type]
-                self._loaded_internal_modules[module_key] = module_name
-            except Exception as exc:
-                strategy_logger.error(
-                    f"Failed to load internal strategy module {module_path}: {exc}"
-                )
-                if module_name in sys.modules:
-                    sys.modules.pop(module_name, None)
-                return None
+            if import_name:
+                try:
+                    module = importlib.import_module(import_name)
+                    module_name = import_name
+                    self._loaded_internal_modules[module_key] = module_name
+                except Exception as exc:
+                    strategy_logger.error(
+                        f"Failed to import internal strategy module {import_name}: {exc}"
+                    )
+                    module = None
+
+            if module is None:
+                module_name = f"internal_strategy_{hashlib.md5(module_key.encode()).hexdigest()}"
+                try:
+                    spec = importlib.util.spec_from_file_location(module_name, module_path)
+                    if not spec or not spec.loader:
+                        raise ImportError("Unable to resolve module specification")
+                    module = importlib.util.module_from_spec(spec)
+                    if package_name:
+                        module.__package__ = package_name
+                        parent_pkg = package_name
+                        if parent_pkg not in sys.modules:
+                            try:
+                                importlib.import_module(parent_pkg)
+                            except Exception:
+                                pass
+                    sys.modules[module_name] = module
+                    spec.loader.exec_module(module)  # type: ignore[arg-type]
+                    self._loaded_internal_modules[module_key] = module_name
+                except Exception as exc:
+                    strategy_logger.error(
+                        f"Failed to load internal strategy module {module_path}: {exc}"
+                    )
+                    if module_name in sys.modules:
+                        sys.modules.pop(module_name, None)
+                    return None
 
         if not module:
             return None
@@ -666,6 +688,42 @@ class StrategyManager:
             return None
 
         return instance
+
+    def _infer_module_import_context(self, module_path: Path) -> Tuple[Optional[str], Optional[str]]:
+        """Determine the import and package names for a strategy module path."""
+
+        try:
+            resolved = module_path.resolve()
+        except FileNotFoundError:
+            return None, None
+
+        import_name: Optional[str] = None
+        package_name: Optional[str] = None
+
+        try:
+            src_root = Path(__file__).resolve().parent
+            relative = resolved.relative_to(src_root)
+        except ValueError:
+            return None, None
+
+        parts = list(relative.parts)
+        if not parts:
+            return None, None
+
+        module_stem = resolved.stem
+        parent_parts = parts[:-1]
+
+        if parent_parts:
+            candidate_parent = ["src", *parent_parts]
+            if all(part.isidentifier() for part in candidate_parent):
+                package_name = ".".join(candidate_parent)
+        else:
+            package_name = "src"
+
+        if module_stem.isidentifier() and package_name:
+            import_name = f"{package_name}.{module_stem}"
+
+        return import_name, package_name
 
     def _apply_persisted_parameters(self, name: str, runtime: "BaseStrategy") -> None:
         """Load persisted parameter overrides for a runtime strategy instance."""
