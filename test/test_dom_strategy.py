@@ -62,6 +62,21 @@ class FakeOrderManager:
         self.orders.append(payload)
 
 
+def _sample_long_metrics() -> dict:
+    return {
+        "mid_price": 15000.0,
+        "symbol": "MNQ",
+        "tick_size": 0.25,
+        "imbalance": 0.68,
+        "imb": 0.68,
+        "z_stack_bid": 1.25,
+        "z_ofi": 1.4,
+        "support_band": {"low": 14998.0, "high": 15002.0},
+        "absorb_up": True,
+        "spread_ticks": 25.0,
+    }
+
+
 @pytest.fixture
 def strategy_setup():
     dom_service = FakeDOMService()
@@ -71,7 +86,7 @@ def strategy_setup():
     rule = RiskRule(symbol="MNQ", stop_loss_price=14980.0)
     risk_manager.risk_rules["MNQ"] = rule
 
-    strategy = DOMStrategy(cooldown_seconds=0, trend_threshold=0.85)
+    strategy = DOMStrategy(cooldown_seconds=0)
     strategy.set_dependencies(
         dom_service=dom_service,
         queue_manager=queue,
@@ -85,8 +100,7 @@ def strategy_setup():
 def test_dom_strategy_places_order_on_signal(strategy_setup):
     strategy, dom_service, queue, _, order_manager = strategy_setup
 
-    metrics = {"trend_score": 0.9, "mid_price": 15000.0, "symbol": "MNQ"}
-    dom_service.emit("MNQ", metrics)
+    dom_service.emit("MNQ", _sample_long_metrics())
 
     assert len(queue.tasks) == 1
     task_type, payload = queue.tasks[0]
@@ -107,7 +121,7 @@ def test_dom_strategy_breaker_blocks_after_losses(strategy_setup):
     strategy.register_trade_result(-25)
     assert strategy.breaker_tripped is True
 
-    dom_service.emit("MNQ", {"trend_score": 0.9, "mid_price": 15000.0, "symbol": "MNQ"})
+    dom_service.emit("MNQ", _sample_long_metrics())
     assert len(queue.tasks) == 0
     assert order_manager.orders == []
 
@@ -116,7 +130,7 @@ def test_dom_strategy_stop_prevents_orders(strategy_setup):
     strategy, dom_service, queue, _, order_manager = strategy_setup
 
     strategy.disable()
-    dom_service.emit("MNQ", {"trend_score": 0.9, "mid_price": 15000.0, "symbol": "MNQ"})
+    dom_service.emit("MNQ", _sample_long_metrics())
     assert len(queue.tasks) == 0
     assert order_manager.orders == []
 
@@ -143,7 +157,14 @@ def test_internal_strategy_info_exposes_dom_summary(tmp_path, monkeypatch):
 
     manager.set_dependencies(risk_manager=StubRisk(), queue_manager=None)
 
-    strategy = DOMStrategy(symbol="MNQ", trend_threshold=0.9, cooldown_seconds=20, max_loss_streak=4)
+    strategy = DOMStrategy(
+        symbol="MNQ",
+        cooldown_seconds=20,
+        max_loss_streak=4,
+        structure_window_seconds=12.0,
+        structure_tolerance_ticks=1.5,
+        min_signal_conditions=4,
+    )
     manager.register_internal_strategy(strategy)
 
     info = manager.get_internal_strategy_info(strategy.name)
@@ -159,5 +180,8 @@ def test_internal_strategy_info_exposes_dom_summary(tmp_path, monkeypatch):
     params = info.get("risk_parameters", {})
     assert params.get("cooldown_seconds") == 20
     assert params.get("max_loss_streak") == 4
-    assert pytest.approx(params.get("trend_threshold")) == 0.9
+    assert params.get("trend_threshold") is None
     assert params.get("default_quantity") == strategy.default_quantity
+    assert pytest.approx(params.get("structure_window_seconds")) == 12.0
+    assert pytest.approx(params.get("structure_tolerance_ticks")) == 1.5
+    assert params.get("min_signal_conditions") == 4

@@ -6,7 +6,7 @@ import asyncio
 import math
 import time
 from dataclasses import asdict
-from typing import Any, Awaitable, Dict, Optional
+from typing import Any, Awaitable, Dict, Optional, Sequence, Tuple
 
 from loguru import logger
 
@@ -17,27 +17,33 @@ FUTURES_SYMBOLS = {"MNQ", "NQ", "ES", "MES"}
 
 
 class DOMStrategy(BaseStrategy):
-    """Automatically submits trades when DOM trend score crosses thresholds."""
+    """DOM结构共振驱动的自动化交易策略。"""
 
     def __init__(
         self,
         *,
         name: str = "DOM Strategy",
         description: str = (
-            "基于盘口(Depth of Market)特征的自动化策略：结合订单簿不平衡、订单流失衡和"
-            "扫单/吸收事件评分，在趋势信号跨过阈值时触发下单，并通过冷却期与断路器控"
-            "制噪音交易。"
+            "基于盘口(Depth of Market)的结构化策略：聚焦支撑/压力区的多重共振信号，"
+            "同时结合盘口堆叠、订单流与扫单/吸收事件，仅在满足足够条件时自动下单，"
+            "并借助冷却期与断路器控制噪音风险。"
         ),
         symbol: Optional[str] = None,
         trend_threshold: Optional[float] = None,
         cooldown_seconds: int = 15,
         max_loss_streak: int = 3,
+        structure_window_seconds: float = 10.0,
+        structure_tolerance_ticks: float = 2.0,
+        min_signal_conditions: int = 3,
     ) -> None:
         super().__init__(name=name, description=description)
         self.symbol = symbol.upper() if symbol else None
         self.trend_threshold = trend_threshold
         self.cooldown_seconds = max(0, cooldown_seconds)
         self.max_loss_streak = max(1, max_loss_streak)
+        self.structure_window_seconds = max(0.0, float(structure_window_seconds))
+        self.structure_tolerance_ticks = max(0.0, float(structure_tolerance_ticks))
+        self.min_signal_conditions = max(1, int(min_signal_conditions))
         self.dom_service: Optional[Any] = None
         self.breaker_tripped: bool = False
         self.loss_streak: int = 0
@@ -53,11 +59,12 @@ class DOMStrategy(BaseStrategy):
         self._threshold_hits: int = 0
         self._buy_signals: int = 0
         self._sell_signals: int = 0
+        self._price_extremes: Dict[str, Dict[str, float]] = {}
         self.file_path = "src/strategies/dom_strategy.py"
         self.summary_points = [
-            "实时监听DOM趋势得分与订单流不平衡，信号跨越阈值时自动开仓",
-            "为每次信号提供冷却时间，防止高频噪音连续触发",
-            "跟踪连亏次数并触发断路器，由RiskManager接管仓位与风险"
+            "仅在中间价触达支撑/压力区并满足≥3条盘口确认条件时入场",
+            "综合盘口堆叠、订单流偏向、扫单/吸收与价差变化过滤噪音",
+            "配合冷却期与断路器，结合RiskManager执行仓位与风控管理"
         ]
 
     # ------------------------------------------------------------------
@@ -89,6 +96,7 @@ class DOMStrategy(BaseStrategy):
         self._threshold_hits = 0
         self._buy_signals = 0
         self._sell_signals = 0
+        self._price_extremes.clear()
         if not self._listener_attached:
             self.dom_service.add_listener(self._on_dom_metrics)
             self._listener_attached = True
@@ -145,22 +153,19 @@ class DOMStrategy(BaseStrategy):
             return
         if self.symbol and symbol_code != self.symbol:
             return
-        score = metrics.get("trend_score")
         price = metrics.get("mid_price")
-        if score is None or price is None:
+        if price is None:
             return
         now = time.time()
         self._last_data_timestamp = now
         self._processed_count += 1
-        threshold = self._resolve_threshold()
-        if threshold <= 0:
+        tick_size = self._resolve_tick_size(symbol_code, metrics)
+        price_float = self._safe_float(price)
+        if price_float is None:
             return
-        direction = 0
-        if score >= threshold:
-            direction = 1
-        elif score <= -threshold:
-            direction = -1
-        else:
+        self._update_price_extremes(symbol_code, price_float, now, tick_size)
+        direction, satisfied = self._evaluate_signal(symbol_code, metrics, price_float, tick_size, now)
+        if direction == 0:
             self._last_signal_direction = 0
             return
 
@@ -178,9 +183,13 @@ class DOMStrategy(BaseStrategy):
         else:
             self._sell_signals += 1
         self.logger.info(
-            f"DOM trend trigger: score={score:.2f} direction={'BUY' if direction > 0 else 'SELL'} symbol={symbol_code}"
+            "DOM结构信号触发: direction=%s satisfied=%s symbol=%s price=%.2f",
+            "BUY" if direction > 0 else "SELL",
+            ",".join(satisfied) or "-",
+            symbol_code,
+            price_float,
         )
-        self._execute_trade(symbol_code, direction, float(price), metrics)
+        self._execute_trade(symbol_code, direction, price_float, metrics)
 
     # ------------------------------------------------------------------
     def _execute_trade(self, symbol: str, direction: int, price: float, metrics: Dict[str, Any]) -> None:
@@ -227,20 +236,492 @@ class DOMStrategy(BaseStrategy):
         return "SMART", "STK"
 
     # ------------------------------------------------------------------
-    def _resolve_threshold(self) -> float:
-        if self.trend_threshold is not None:
-            try:
-                return float(self.trend_threshold)
-            except (TypeError, ValueError):
-                pass
-        if self.dom_service and getattr(self.dom_service, "trend_thresholds", None):
-            try:
-                thresholds = [float(v) for v in self.dom_service.trend_thresholds]
-                if thresholds:
-                    return max(thresholds)
-            except Exception:
-                logger.debug("Failed to parse trend thresholds from DOM service")
-        return 0.85
+    def _safe_float(self, value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    # ------------------------------------------------------------------
+    def _resolve_tick_size(self, symbol: str, metrics: Dict[str, Any]) -> float:
+        candidates = [
+            metrics.get("tick_size"),
+            metrics.get("price_tick_size"),
+            metrics.get("min_tick"),
+            metrics.get("tick"),
+        ]
+        for container_key in ("instrument", "contract", "meta", "structure"):
+            container = metrics.get(container_key)
+            if isinstance(container, dict):
+                candidates.extend(
+                    container.get(key)
+                    for key in ("tick_size", "min_tick", "price_tick_size", "tick")
+                )
+        for candidate in candidates:
+            tick = self._safe_float(candidate)
+            if tick and tick > 0:
+                return tick
+        if symbol.upper() in FUTURES_SYMBOLS:
+            return 0.25
+        return 0.01
+
+    # ------------------------------------------------------------------
+    def _update_price_extremes(self, symbol: str, price: float, now: float, tick_size: float) -> None:
+        state = self._price_extremes.setdefault(
+            symbol,
+            {"low": price, "low_time": now, "high": price, "high_time": now},
+        )
+        tolerance = max(tick_size * 0.5, 0.0)
+        low_price = self._safe_float(state.get("low"))
+        if low_price is None or price < low_price - tolerance:
+            state["low"] = price
+            state["low_time"] = now
+        high_price = self._safe_float(state.get("high"))
+        if high_price is None or price > high_price + tolerance:
+            state["high"] = price
+            state["high_time"] = now
+
+    # ------------------------------------------------------------------
+    def _evaluate_signal(
+        self,
+        symbol: str,
+        metrics: Dict[str, Any],
+        price: float,
+        tick_size: float,
+        now: float,
+    ) -> Tuple[int, Sequence[str]]:
+        tolerance_support = self._resolve_tolerance_ticks(metrics, "support")
+        tolerance_resistance = self._resolve_tolerance_ticks(metrics, "resistance")
+        window_seconds = self._resolve_window_seconds(metrics)
+
+        long_conditions = [
+            (
+                "position",
+                self._is_within_zone(
+                    "support", metrics, price, tick_size, tolerance_support
+                ),
+            ),
+            ("orderbook", self._orderbook_condition(metrics, bullish=True)),
+            ("orderflow", self._orderflow_condition(metrics, bullish=True)),
+            (
+                "absorption_or_spread",
+                self._long_absorption_condition(metrics, tick_size),
+            ),
+            (
+                "no_new_low",
+                self._recent_extreme_calm(symbol, "low", now, window_seconds),
+            ),
+        ]
+
+        short_conditions = [
+            (
+                "position",
+                self._is_within_zone(
+                    "resistance", metrics, price, tick_size, tolerance_resistance
+                ),
+            ),
+            ("orderbook", self._orderbook_condition(metrics, bullish=False)),
+            ("orderflow", self._orderflow_condition(metrics, bullish=False)),
+            (
+                "sweep_or_spread",
+                self._short_sweep_condition(metrics, tick_size),
+            ),
+            (
+                "no_new_high",
+                self._recent_extreme_calm(symbol, "high", now, window_seconds),
+            ),
+        ]
+
+        long_count = sum(1 for _, ok in long_conditions if ok)
+        short_count = sum(1 for _, ok in short_conditions if ok)
+
+        direction = 0
+        satisfied: Sequence[str] = []
+        if long_count >= self.min_signal_conditions:
+            direction = 1
+            satisfied = [name for name, ok in long_conditions if ok]
+        if short_count >= self.min_signal_conditions:
+            short_satisfied = [name for name, ok in short_conditions if ok]
+            if direction == 0 or short_count > long_count:
+                direction = -1
+                satisfied = short_satisfied
+            elif short_count == long_count:
+                direction = 0
+                satisfied = []
+        return direction, list(satisfied)
+
+    # ------------------------------------------------------------------
+    def _orderbook_condition(self, metrics: Dict[str, Any], *, bullish: bool) -> bool:
+        if bullish:
+            imbalance = self._get_float(metrics, ["imbalance", "imb", "book_imbalance", "obi5"])
+            stacking = self._get_float(
+                metrics,
+                ["z_stack_bid", "zscore_stack_bid", "stacking_zscore_buy", "stacking_z_buy"],
+            )
+            if stacking is None and self._has_feature_flag(metrics, "stacking_buy"):
+                stacking = 1.0
+            return (
+                (imbalance is not None and imbalance >= 0.60)
+                and (stacking is not None and stacking >= 1.0)
+            )
+        imbalance = self._get_float(metrics, ["imbalance", "imb", "book_imbalance", "obi5"])
+        stacking = self._get_float(
+            metrics,
+            ["z_stack_ask", "zscore_stack_ask", "stacking_zscore_sell", "stacking_z_sell"],
+        )
+        if stacking is None and self._has_feature_flag(metrics, "stacking_sell"):
+            stacking = 1.0
+        return (
+            (imbalance is not None and imbalance <= 0.40)
+            and (stacking is not None and stacking >= 1.0)
+        )
+
+    # ------------------------------------------------------------------
+    def _orderflow_condition(self, metrics: Dict[str, Any], *, bullish: bool) -> bool:
+        z_ofi = self._get_float(metrics, ["z_ofi", "zscore_ofi"])
+        z_cvd = self._get_float(metrics, ["z_cvd", "zscore_cvd"])
+        if bullish:
+            return (
+                (z_ofi is not None and z_ofi >= 1.0)
+                or (z_cvd is not None and z_cvd >= 1.0)
+            )
+        return (
+            (z_ofi is not None and z_ofi <= -1.0)
+            or (z_cvd is not None and z_cvd <= -1.0)
+        )
+
+    # ------------------------------------------------------------------
+    def _long_absorption_condition(self, metrics: Dict[str, Any], tick_size: float) -> bool:
+        absorb = self._boolean_metric(metrics, ["absorb_up", "absorption_buy", "absorb_buy"])
+        if not absorb and self._has_feature_flag(metrics, "absorption_buy"):
+            absorb = True
+        spread_ok = self._spread_within_limit(metrics, tick_size, 2.0, comparison="lte")
+        return absorb or spread_ok
+
+    # ------------------------------------------------------------------
+    def _short_sweep_condition(self, metrics: Dict[str, Any], tick_size: float) -> bool:
+        sweep = self._boolean_metric(metrics, ["sweep_down", "sweep_sell"])
+        if not sweep and self._has_feature_flag(metrics, "sweep_down"):
+            sweep = True
+        spread_not_tight = self._spread_within_limit(metrics, tick_size, 2.0, comparison="gte")
+        return sweep or spread_not_tight
+
+    # ------------------------------------------------------------------
+    def _recent_extreme_calm(
+        self,
+        symbol: str,
+        which: str,
+        now: float,
+        window_seconds: float,
+    ) -> bool:
+        if window_seconds <= 0:
+            return True
+        state = self._price_extremes.get(symbol)
+        if not state:
+            return False
+        key = "low_time" if which == "low" else "high_time"
+        ts = self._safe_float(state.get(key))
+        if ts is None:
+            return False
+        return (now - ts) >= window_seconds
+
+    # ------------------------------------------------------------------
+    def _is_within_zone(
+        self,
+        zone_type: str,
+        metrics: Dict[str, Any],
+        price: float,
+        tick_size: float,
+        tolerance_ticks: float,
+    ) -> bool:
+        tolerance_ticks = max(tolerance_ticks, 0.0)
+        tolerance_price = tolerance_ticks * max(tick_size, 1e-9)
+        for key in (
+            f"in_{zone_type}_zone",
+            f"{zone_type}_zone_active",
+            f"{zone_type}_active",
+            f"is_{zone_type}",
+        ):
+            if key in metrics and self._boolean_value(metrics.get(key)):
+                return True
+
+        zone_state = metrics.get("structure_zone") or metrics.get("structure_state")
+        if isinstance(zone_state, str) and zone_state.lower() == zone_type:
+            return True
+
+        for container_key in ("structure", "price_structure", "price_structures", "zones"):
+            container = metrics.get(container_key)
+            if not isinstance(container, dict):
+                continue
+            nested_state = container.get("zone") or container.get("state") or container.get("active")
+            if isinstance(nested_state, str) and nested_state.lower() == zone_type:
+                return True
+            direct_flag = container.get(f"in_{zone_type}") or container.get(f"{zone_type}_active")
+            if direct_flag is not None and self._boolean_value(direct_flag):
+                return True
+
+        band = self._extract_band(metrics, zone_type)
+        if band:
+            low, high = band
+            if low is not None and high is not None:
+                return (price >= low - tolerance_price) and (price <= high + tolerance_price)
+        return False
+
+    # ------------------------------------------------------------------
+    def _extract_band(self, metrics: Dict[str, Any], zone_type: str) -> Optional[Tuple[float, float]]:
+        low = self._get_float(
+            metrics,
+            [
+                f"{zone_type}_band_low",
+                f"{zone_type}_low",
+                f"{zone_type}_min",
+                f"{zone_type}_lower",
+            ],
+        )
+        high = self._get_float(
+            metrics,
+            [
+                f"{zone_type}_band_high",
+                f"{zone_type}_high",
+                f"{zone_type}_max",
+                f"{zone_type}_upper",
+            ],
+        )
+        if low is not None and high is not None:
+            if low > high:
+                low, high = high, low
+            return (low, high)
+
+        values: list[Any] = []
+        direct_keys = [
+            f"{zone_type}_band",
+            f"{zone_type}_zone",
+            f"{zone_type}_range",
+            f"{zone_type}_area",
+            f"{zone_type}_levels",
+        ]
+        for key in direct_keys:
+            if key in metrics:
+                values.append(metrics.get(key))
+
+        for container_key in ("structure", "price_structure", "price_structures", "zones", "levels"):
+            container = metrics.get(container_key)
+            if isinstance(container, dict):
+                for key in ([zone_type] + direct_keys):
+                    if key in container:
+                        values.append(container.get(key))
+
+        for value in values:
+            band = self._normalise_band_value(value)
+            if band is not None:
+                return band
+        return None
+
+    # ------------------------------------------------------------------
+    def _normalise_band_value(self, value: Any) -> Optional[Tuple[float, float]]:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            low = self._safe_float(
+                value.get("low")
+                or value.get("min")
+                or value.get("start")
+                or value.get("lower")
+            )
+            high = self._safe_float(
+                value.get("high")
+                or value.get("max")
+                or value.get("end")
+                or value.get("upper")
+            )
+            if low is not None and high is not None:
+                if low > high:
+                    low, high = high, low
+                return (low, high)
+            center = self._safe_float(
+                value.get("price")
+                or value.get("level")
+                or value.get("value")
+                or value.get("mid")
+            )
+            width = self._safe_float(value.get("width") or value.get("radius") or value.get("tolerance"))
+            if center is not None and width is not None and width >= 0:
+                return (center - width, center + width)
+            return None
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 2:
+                low = self._safe_float(value[0])
+                high = self._safe_float(value[1])
+                if low is None or high is None:
+                    return None
+                if low > high:
+                    low, high = high, low
+                return (low, high)
+            if len(value) == 1:
+                val = self._safe_float(value[0])
+                if val is not None:
+                    return (val, val)
+            return None
+        single = self._safe_float(value)
+        if single is None:
+            return None
+        return (single, single)
+
+    # ------------------------------------------------------------------
+    def _resolve_tolerance_ticks(self, metrics: Dict[str, Any], zone_type: str) -> float:
+        candidate_keys = [
+            f"{zone_type}_tolerance_ticks",
+            f"{zone_type}_tolerance",
+            f"{zone_type}_zone_tolerance",
+        ]
+        for key in candidate_keys:
+            ticks = self._safe_float(metrics.get(key))
+            if ticks is not None and ticks >= 0:
+                return ticks
+        for container_key in ("structure", "price_structure", "price_structures"):
+            container = metrics.get(container_key)
+            if not isinstance(container, dict):
+                continue
+            for key in (
+                f"{zone_type}_tolerance_ticks",
+                f"{zone_type}_tolerance",
+                "tolerance_ticks",
+            ):
+                ticks = self._safe_float(container.get(key))
+                if ticks is not None and ticks >= 0:
+                    return ticks
+        common = self._safe_float(metrics.get("structure_tolerance_ticks") or metrics.get("zone_tolerance_ticks"))
+        if common is not None and common >= 0:
+            return common
+        return self.structure_tolerance_ticks
+
+    # ------------------------------------------------------------------
+    def _get_float(
+        self,
+        metrics: Dict[str, Any],
+        keys: Sequence[str],
+        containers: Sequence[str] = ("features",),
+    ) -> Optional[float]:
+        for key in keys:
+            if key in metrics:
+                value = self._safe_float(metrics.get(key))
+                if value is not None:
+                    return value
+        for container_key in containers:
+            container = metrics.get(container_key)
+            if isinstance(container, dict):
+                for key in keys:
+                    if key in container:
+                        value = self._safe_float(container.get(key))
+                        if value is not None:
+                            return value
+        return None
+
+    # ------------------------------------------------------------------
+    def _boolean_metric(
+        self,
+        metrics: Dict[str, Any],
+        keys: Sequence[str],
+        containers: Sequence[str] = (),
+    ) -> bool:
+        for key in keys:
+            if key in metrics and self._boolean_value(metrics.get(key)):
+                return True
+        for container_key in containers:
+            container = metrics.get(container_key)
+            if isinstance(container, dict):
+                for key in keys:
+                    if key in container and self._boolean_value(container.get(key)):
+                        return True
+        return False
+
+    # ------------------------------------------------------------------
+    def _boolean_value(self, value: Any) -> bool:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on", "support", "resistance"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off"}:
+                return False
+            return bool(normalized)
+        try:
+            return bool(value)
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    def _has_feature_flag(self, metrics: Dict[str, Any], key: str) -> bool:
+        flags = metrics.get("feature_flags")
+        if isinstance(flags, dict):
+            return self._boolean_value(flags.get(key))
+        return False
+
+    # ------------------------------------------------------------------
+    def _spread_within_limit(
+        self,
+        metrics: Dict[str, Any],
+        tick_size: float,
+        threshold_ticks: float,
+        *,
+        comparison: str = "lte",
+    ) -> bool:
+        spread = self._get_float(
+            metrics,
+            ["spread_tick_count", "spread_ticks", "spread", "bid_ask_spread"],
+            containers=("depth", "quotes"),
+        )
+        if spread is None:
+            return False
+        normalized = self._normalise_spread_to_ticks(spread, tick_size)
+        if normalized is None:
+            return False
+        if comparison == "gte":
+            return normalized >= threshold_ticks
+        return normalized <= threshold_ticks
+
+    # ------------------------------------------------------------------
+    def _normalise_spread_to_ticks(self, spread: float, tick_size: float) -> Optional[float]:
+        value = self._safe_float(spread)
+        if value is None:
+            return None
+        value = abs(value)
+        tick = tick_size if tick_size and tick_size > 0 else 0.25
+        candidates = [value, value / tick, value / (tick * 100.0)]
+        positives = [c for c in candidates if math.isfinite(c) and c >= 0]
+        if not positives:
+            return None
+
+        def _score(candidate: float) -> Tuple[float, float]:
+            fractional = abs(candidate - round(candidate))
+            return (fractional, candidate)
+
+        best = min(positives, key=_score)
+        return best
+
+    # ------------------------------------------------------------------
+    def _resolve_window_seconds(self, metrics: Dict[str, Any]) -> float:
+        candidate_keys = [
+            "structure_window_seconds",
+            "structure_window_sec",
+            "extreme_window_seconds",
+            "extreme_window_sec",
+            "recent_extreme_window",
+            "signal_window_seconds",
+        ]
+        for key in candidate_keys:
+            seconds = self._safe_float(metrics.get(key))
+            if seconds is not None and seconds >= 0:
+                return seconds
+        for container_key in ("structure", "price_structure", "price_structures"):
+            container = metrics.get(container_key)
+            if isinstance(container, dict):
+                for key in ("window_seconds", "extreme_window_seconds"):
+                    seconds = self._safe_float(container.get(key))
+                    if seconds is not None and seconds >= 0:
+                        return seconds
+        return self.structure_window_seconds
 
     # ------------------------------------------------------------------
     def _determine_quantity(self, symbol: str, direction: int, price: float) -> int:
@@ -294,21 +775,17 @@ class DOMStrategy(BaseStrategy):
     def get_internal_info(self) -> Dict[str, Any]:
         """Expose summary information for the strategy panel."""
 
-        resolved_threshold = self.trend_threshold
-        if resolved_threshold is None:
-            try:
-                resolved_threshold = float(self._resolve_threshold())
-            except Exception:
-                resolved_threshold = None
-
         info: Dict[str, Any] = {
             "description": self.description,
             "file_path": self.file_path,
             "risk_parameters": {
-                "trend_threshold": float(resolved_threshold) if resolved_threshold is not None else None,
+                "trend_threshold": float(self.trend_threshold) if self.trend_threshold is not None else None,
                 "cooldown_seconds": self.cooldown_seconds,
                 "max_loss_streak": self.max_loss_streak,
                 "default_quantity": self.default_quantity,
+                "structure_window_seconds": self.structure_window_seconds,
+                "structure_tolerance_ticks": self.structure_tolerance_ticks,
+                "min_signal_conditions": self.min_signal_conditions,
             },
             "summary_points": list(self.summary_points),
         }
