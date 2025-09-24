@@ -934,10 +934,10 @@ class OrderManager:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    INSERT INTO orders 
-                    (order_id, symbol, action, quantity, order_type, price, status, 
-                     created_at, updated_at, executed_at, fill_price, order_source, 
-                     strategy_name, rule_id, parent_order_id, exchange, sec_type, 
+                    INSERT INTO orders
+                    (order_id, symbol, action, quantity, order_type, price, status,
+                     created_at, updated_at, executed_at, fill_price, order_source,
+                     strategy_name, rule_id, parent_order_id, exchange, sec_type,
                      notes, commission, is_deleted)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -954,6 +954,15 @@ class OrderManager:
                 )
                 conn.commit()
                 order_logger.debug(f"Order {order.order_id} saved to database")
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed: orders.order_id" in str(e):
+                order_logger.warning(
+                    f"Order {order.order_id} already exists in database. Falling back to update."
+                )
+                self._update_order_in_database(order)
+            else:
+                order_logger.error(f"Error saving order {order.order_id} to database: {e}")
+                raise
         except Exception as e:
             order_logger.error(f"Error saving order {order.order_id} to database: {e}")
             raise
