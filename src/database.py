@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from loguru import logger
+import asyncio
 
 from src.utils import (
     ensure_local_timezone,
@@ -345,7 +346,7 @@ class DatabaseManager:
     async def update_order_commission_pnl(self, order_id: str, commission: float, pnl: float):
         """异步更新订单的佣金和PnL"""
         try:
-            self.update_order(order_id, commission=commission, pnl=pnl)
+            await asyncio.to_thread(self.update_order, order_id, commission=commission, pnl=pnl)
             database_logger.info(f"Updated order {order_id} commission={commission}, pnl={pnl}")
         except Exception as e:
             database_logger.error(f"Error updating order {order_id} commission/pnl: {e}")

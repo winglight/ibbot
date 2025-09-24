@@ -1621,7 +1621,8 @@ class IBKRClient:
             if order_id:
                 # 更新订单状态为失败
                 order_manager = get_order_manager()
-                order_manager.update_order_status(
+                await asyncio.to_thread(
+                    order_manager.update_order_status,
                     order_id=order_id,
                     status=OrderStatus.REJECTED.value,
                     notes=f"IBKR Error {error_code}: {error_string}"
