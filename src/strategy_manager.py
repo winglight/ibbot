@@ -86,6 +86,7 @@ class StrategyManager:
         self.strategies: Dict[str, Strategy] = {}
         self.settings: Dict[str, Any] = {}
         self.internal_strategies_runtime: Dict[str, "BaseStrategy"] = {}
+        self._loaded_internal_modules: Dict[str, str] = {}
         self._last_position_add: Dict[Tuple[str, str, str], datetime] = {}
         self._auto_close_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
         self.data_push_state: Dict[str, Dict[str, Any]] = {}
@@ -499,6 +500,126 @@ class StrategyManager:
         key = f"{strategy_name}_{suffix}"
         return (self.settings or {}).get(key, default)
 
+    def _resolve_strategy_file_path(self, file_path: Optional[str]) -> Optional[Path]:
+        """Resolve absolute filesystem path for an internal strategy module."""
+
+        if not file_path:
+            return None
+
+        candidate = Path(file_path)
+        search_paths = []
+        if candidate.is_absolute():
+            search_paths.append(candidate)
+        else:
+            search_paths.append(Path.cwd() / candidate)
+            search_paths.append(self.strategy_dir / candidate)
+
+        for path in search_paths:
+            try:
+                resolved = path.resolve()
+            except FileNotFoundError:
+                continue
+            if resolved.exists():
+                return resolved
+        return None
+
+    def _load_internal_strategy_runtime(self, strategy: Optional[Strategy]) -> Optional["BaseStrategy"]:
+        """Dynamically load and register an internal strategy runtime instance."""
+
+        if not strategy or strategy.strategy_type != "internal":
+            return None
+
+        existing = self.internal_strategies_runtime.get(strategy.name)
+        if existing:
+            return existing
+
+        module_path = self._resolve_strategy_file_path(strategy.file_path)
+        if not module_path:
+            strategy_logger.warning(
+                f"Strategy file not found for {strategy.name}: {strategy.file_path}"
+            )
+            return None
+
+        module_key = str(module_path)
+        module_name = self._loaded_internal_modules.get(module_key)
+
+        module = None
+        if module_name and module_name in sys.modules:
+            module = sys.modules[module_name]
+        else:
+            module_name = f"internal_strategy_{hashlib.md5(module_key.encode()).hexdigest()}"
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, module_path)
+                if not spec or not spec.loader:
+                    raise ImportError("Unable to resolve module specification")
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)  # type: ignore[arg-type]
+                self._loaded_internal_modules[module_key] = module_name
+            except Exception as exc:
+                strategy_logger.error(
+                    f"Failed to load internal strategy module {module_path}: {exc}"
+                )
+                if module_name in sys.modules:
+                    sys.modules.pop(module_name, None)
+                return None
+
+        if not module:
+            return None
+
+        from src.strategies.dom_strategy import DOMStrategy
+        from src.strategies.base import BaseStrategy
+
+        strategy_cls: Optional[type] = None
+        for attr in module.__dict__.values():
+            if (
+                isinstance(attr, type)
+                and issubclass(attr, DOMStrategy)
+                and attr is not DOMStrategy
+            ):
+                strategy_cls = attr
+                break
+
+        if strategy_cls is None:
+            for attr in module.__dict__.values():
+                if (
+                    isinstance(attr, type)
+                    and issubclass(attr, BaseStrategy)
+                    and attr is not BaseStrategy
+                ):
+                    strategy_cls = attr
+                    break
+
+        if strategy_cls is None:
+            strategy_logger.warning(
+                f"No BaseStrategy subclass found in module {module_path} for {strategy.name}"
+            )
+            return None
+
+        try:
+            instance = strategy_cls()
+        except Exception as exc:
+            strategy_logger.error(
+                f"Failed to instantiate strategy class {strategy_cls.__name__}: {exc}"
+            )
+            return None
+
+        if getattr(instance, "name", None) != strategy.name:
+            try:
+                setattr(instance, "name", strategy.name)
+            except Exception:
+                pass
+
+        try:
+            self.register_internal_strategy(instance)
+        except Exception as exc:
+            strategy_logger.error(
+                f"Failed to register internal strategy runtime for {strategy.name}: {exc}"
+            )
+            return None
+
+        return instance
+
     def _apply_persisted_parameters(self, name: str, runtime: "BaseStrategy") -> None:
         """Load persisted parameter overrides for a runtime strategy instance."""
 
@@ -627,6 +748,8 @@ class StrategyManager:
                 return payload
 
             runtime = self.internal_strategies_runtime.get(strategy_name)
+            if runtime is None:
+                runtime = self._load_internal_strategy_runtime(record)
             if runtime:
                 if target_symbol and hasattr(runtime, "symbol"):
                     try:
@@ -982,6 +1105,10 @@ class StrategyManager:
 
     def get_internal_strategy_info(self, name: str) -> Optional[Dict[str, Any]]:
         """Return consolidated information for an internal strategy"""
+        record = self.strategies.get(name)
+        if record and record.strategy_type == "internal":
+            self._load_internal_strategy_runtime(record)
+
         strategy = self.get_strategy(name)
         if not strategy or strategy.get("strategy_type") != "internal":
             return None
@@ -1000,6 +1127,8 @@ class StrategyManager:
                         symbols.add(sym)
 
         runtime = self.internal_strategies_runtime.get(name)
+        if runtime is None:
+            runtime = self._load_internal_strategy_runtime(self.strategies.get(name))
         runtime_risk_rules: Dict[str, Any] = {}
         if runtime:
             runtime_symbol = getattr(runtime, "symbol", None)
@@ -1054,6 +1183,8 @@ class StrategyManager:
         """Return runtime status metrics for an internal strategy."""
 
         runtime = self.internal_strategies_runtime.get(name)
+        if runtime is None:
+            runtime = self._load_internal_strategy_runtime(self.strategies.get(name))
         status_provider = getattr(runtime, "get_runtime_status", None) if runtime else None
         default_status: Dict[str, Any] = {
             "is_receiving_data": False,
@@ -1117,6 +1248,8 @@ class StrategyManager:
 
             strategy = self.strategies[name]
             runtime = self.internal_strategies_runtime.get(name)
+            if runtime is None:
+                runtime = self._load_internal_strategy_runtime(strategy)
             param_definitions = (
                 runtime.get_parameter_definitions() if runtime else {}
             )
