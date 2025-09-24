@@ -90,6 +90,7 @@ class StrategyManager:
         self._last_position_add: Dict[Tuple[str, str, str], datetime] = {}
         self._auto_close_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
         self.data_push_state: Dict[str, Dict[str, Any]] = {}
+        self._pending_data_push_requests: List[Tuple[str, Optional[str], Optional[str]]] = []
 
         # 认证token（用于外部策略访问）
         self.auth_token = None
@@ -335,6 +336,17 @@ class StrategyManager:
             strategy_logger.warning(f"Strategy {name} on_registered hook failed: {exc}")
 
         strategy_logger.info(f"Internal strategy registered: {name}")
+
+        if record and record.enabled:
+            subscription = self._get_strategy_setting(name, "data_subscription")
+            target_symbol = (
+                self._get_strategy_setting(name, "primary_symbol")
+                or getattr(record, "primary_symbol", None)
+            )
+            if subscription and target_symbol:
+                self._request_data_push_activation(
+                    name, subscription=subscription, symbol=target_symbol
+                )
 
     def _load_from_database(self):
         """从数据库加载策略设置、策略和执行记录"""
@@ -705,6 +717,43 @@ class StrategyManager:
         if "configurable_parameters" not in payload or not payload["configurable_parameters"]:
             payload["configurable_parameters"] = schema
 
+    def _request_data_push_activation(
+        self,
+        strategy_name: str,
+        *,
+        subscription: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> None:
+        """Schedule asynchronous activation of a strategy's data push."""
+
+        async def _activate() -> None:
+            try:
+                result = await self.set_data_push(
+                    strategy_name,
+                    True,
+                    subscription=subscription,
+                    symbol=symbol,
+                )
+                if not result.get("success"):
+                    error_msg = result.get("error") or "unknown error"
+                    strategy_logger.warning(
+                        f"Auto data push enable failed for {strategy_name}: {error_msg}"
+                    )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Failed to auto-start data push for {strategy_name}: {exc}"
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            loop.create_task(_activate())
+        else:
+            self._pending_data_push_requests.append((strategy_name, subscription, symbol))
+
     def get_data_push_state(self, strategy_name: str) -> Dict[str, Any]:
         return dict(self.data_push_state.get(strategy_name, {}))
 
@@ -850,6 +899,62 @@ class StrategyManager:
             "awaiting_data": False,
             "last_data_timestamp": None,
         }
+
+    async def restore_data_push_states(self) -> None:
+        """Attempt to enable stored data push subscriptions for internal strategies."""
+
+        pending_requests = list(self._pending_data_push_requests)
+        self._pending_data_push_requests.clear()
+
+        for strategy_name, subscription, symbol in pending_requests:
+            try:
+                await self.set_data_push(
+                    strategy_name,
+                    True,
+                    subscription=subscription,
+                    symbol=symbol,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Deferred data push activation failed for {strategy_name}: {exc}"
+                )
+
+        for record in list(self.strategies.values()):
+            if record.strategy_type != "internal" or not record.enabled:
+                continue
+
+            state = self.data_push_state.get(record.name)
+            if state and state.get("active"):
+                continue
+
+            subscription = self._get_strategy_setting(record.name, "data_subscription")
+            if not subscription:
+                continue
+
+            target_symbol = (
+                self._get_strategy_setting(record.name, "primary_symbol")
+                or getattr(record, "primary_symbol", None)
+            )
+
+            if not target_symbol:
+                continue
+
+            try:
+                result = await self.set_data_push(
+                    record.name,
+                    True,
+                    subscription=subscription,
+                    symbol=target_symbol,
+                )
+                if not result.get("success"):
+                    error_msg = result.get("error") or "unknown error"
+                    strategy_logger.warning(
+                        f"Failed to restore data push for {record.name}: {error_msg}"
+                    )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Exception while restoring data push for {record.name}: {exc}"
+                )
 
     def _handle_position_setting_change(self, strategy_name: str) -> None:
         """Adjust runtime helpers when position-related settings are updated."""
@@ -1073,6 +1178,22 @@ class StrategyManager:
                     position_updates[f"{name}_close_before_close_minutes"] = int(close_minutes)
                 if position_updates:
                     self._persist_strategy_settings(position_updates)
+
+                if strategy.enabled:
+                    stored_subscription = data_subscription or self._get_strategy_setting(
+                        name, "data_subscription"
+                    )
+                    stored_symbol = (
+                        primary_symbol
+                        or getattr(strategy, "primary_symbol", None)
+                        or self._get_strategy_setting(name, "primary_symbol")
+                    )
+                    if stored_subscription and stored_symbol:
+                        self._request_data_push_activation(
+                            name,
+                            subscription=stored_subscription,
+                            symbol=stored_symbol,
+                        )
 
             strategy_logger.info(f"Strategy {name} added successfully")
             # 重新启动调度器以应用新的调度配置
@@ -1376,9 +1497,23 @@ class StrategyManager:
             if position_settings_changed:
                 self._handle_position_setting_change(name)
 
-            if restart_data_push and self.data_push_state.get(name, {}).get('enabled'):
+            stored_subscription = self._get_strategy_setting(name, "data_subscription")
+            stored_symbol = (
+                self._get_strategy_setting(name, "primary_symbol")
+                or getattr(strategy, "primary_symbol", None)
+            )
+
+            if restart_data_push:
                 try:
-                    await self.set_data_push(name, True)
+                    push_state = self.data_push_state.get(name, {})
+                    if push_state.get('enabled'):
+                        await self.set_data_push(name, True)
+                    elif strategy.enabled and stored_subscription and stored_symbol:
+                        self._request_data_push_activation(
+                            name,
+                            subscription=stored_subscription,
+                            symbol=stored_symbol,
+                        )
                 except Exception as exc:  # pragma: no cover - defensive guard
                     strategy_logger.warning(f"Failed to restart data push for {name}: {exc}")
 
