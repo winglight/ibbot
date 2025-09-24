@@ -415,6 +415,22 @@ class TradingApp {
         this.isReadOnly = localStorage.getItem('is_read_only') === '1';
         this.lastReadOnlyWarningAt = 0;
 
+        // Internal strategy summary helpers
+        this.summaryControlsInitialized = false;
+        this.summaryPrimarySaving = false;
+        this.summaryPrimaryCurrent = null;
+        this.summaryPushUpdating = false;
+        this.summaryPushAwaitingData = false;
+        this.summaryPushAwaitingTimer = null;
+        this.summaryStatusLoading = false;
+        this.summaryDataFeedCurrent = null;
+        this.wsHandlers = new Map();
+        this.strategyPerformanceCells = new Map();
+        this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
+
+        this.data_push_state = {};
+        this.sidePanelManagerInitialized = false;
+
         // 初始化登录管理器
         this.loginManager = new LoginManager(this);
         this.ibkrManager = new IBKRConnectionManager(this);
@@ -430,21 +446,6 @@ class TradingApp {
         );
         this.notificationsManager = new NotificationsManager(this);
         this.domManager = new DOMManager(this);
-
-        // Internal strategy summary helpers
-        this.summaryControlsInitialized = false;
-        this.summaryPrimarySaving = false;
-        this.summaryPrimaryCurrent = null;
-        this.summaryPushUpdating = false;
-        this.summaryPushAwaitingData = false;
-        this.summaryPushAwaitingTimer = null;
-        this.summaryStatusLoading = false;
-        this.summaryDataFeedCurrent = null;
-        this.data_push_state = {};
-        this.sidePanelManagerInitialized = false;
-        this.wsHandlers = new Map();
-        this.strategyPerformanceCells = new Map();
-        this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
 
         this.init();
     }

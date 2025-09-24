@@ -93,9 +93,12 @@ class RiskManager:
         
         # 订单队列
         self.order_queue = Queue()
-        
+
         # 调度器
         self.scheduler: Optional[AsyncIOScheduler] = None
+
+        # 监控任务串行化锁，避免并发运行导致的调度器告警
+        self._monitor_lock: asyncio.Lock = asyncio.Lock()
 
         # 组件依赖
         self.order_manager = None
@@ -476,7 +479,7 @@ class RiskManager:
         
         # 添加监控任务
         self.scheduler.add_job(
-            self._monitor_positions,
+            self._monitor_positions_tick,
             'interval',
             seconds=5,  # 从15秒改为5秒，大幅提高检查频率
             id='position_monitor',
@@ -640,6 +643,15 @@ class RiskManager:
     def get_risk_rules(self) -> Dict[str, RiskRule]:
         """获取所有风险规则"""
         return self.risk_rules.copy()
+
+    async def _monitor_positions_tick(self):
+        """调度器入口，确保持仓监控任务串行执行"""
+        if self._monitor_lock.locked():
+            risk_logger.debug("Previous position monitoring cycle still running, skipping this tick")
+            return
+
+        async with self._monitor_lock:
+            await self._monitor_positions()
 
     async def _monitor_positions(self):
         """监控持仓风险"""
