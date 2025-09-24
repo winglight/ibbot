@@ -11,7 +11,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 import asyncio
-from ib_insync import IB
+
+try:  # pragma: no cover - utility script, rarely exercised in tests
+    from ib_insync import IB
+except ImportError:  # pragma: no cover - allow diagnostics in stub mode
+    from src.ib_insync_stub import IB
 
 # 加载环境变量
 load_dotenv()

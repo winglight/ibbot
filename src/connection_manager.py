@@ -1,7 +1,11 @@
 from typing import Optional, Dict, Any
 from datetime import datetime
 from dataclasses import dataclass
-from ib_insync import IB, util, ExecutionFilter
+
+try:  # pragma: no cover - exercised indirectly when ib_insync is missing
+    from ib_insync import IB, util, ExecutionFilter
+except ImportError:  # pragma: no cover - fallback for test environments
+    from .ib_insync_stub import IB, util, ExecutionFilter
 from loguru import logger
 
 from .utils import now_local
