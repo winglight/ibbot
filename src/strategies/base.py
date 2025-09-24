@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Any
+from typing import Optional, Any, Dict, Iterable, List
 
 from loguru import logger
 
@@ -21,6 +21,7 @@ class BaseStrategy:
         self.risk_manager: Optional[Any] = None
         self.notification_manager: Optional[Any] = None
         self.logger = logger.bind(strategy=name)
+        self._parameter_definitions: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     def set_dependencies(
@@ -79,4 +80,104 @@ class BaseStrategy:
     def on_registered(self) -> None:
         """Hook called when the strategy is registered with the manager."""
         return None
+
+    # ------------------------------------------------------------------
+    def set_parameter_definitions(self, definitions: Dict[str, Dict[str, Any]]) -> None:
+        """Register editable parameter definitions for the strategy."""
+
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        for name, metadata in (definitions or {}).items():
+            if not isinstance(metadata, dict):
+                continue
+            entry = dict(metadata)
+            entry.setdefault("type", "float")
+            cleaned[name] = entry
+        self._parameter_definitions = cleaned
+
+    # ------------------------------------------------------------------
+    def get_parameter_definitions(self) -> Dict[str, Dict[str, Any]]:
+        """Return a copy of the configured parameter definitions."""
+
+        return {name: dict(meta) for name, meta in self._parameter_definitions.items()}
+
+    # ------------------------------------------------------------------
+    def describe_parameters(self) -> List[Dict[str, Any]]:
+        """Return parameter definitions decorated with current values."""
+
+        descriptions: List[Dict[str, Any]] = []
+        for name, meta in self._parameter_definitions.items():
+            entry = dict(meta)
+            entry["name"] = name
+            current = getattr(self, name, entry.get("default"))
+            entry["value"] = current
+            descriptions.append(entry)
+        return descriptions
+
+    # ------------------------------------------------------------------
+    def apply_parameter_updates(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and apply runtime parameter updates."""
+
+        if not updates:
+            return {}
+
+        applied: Dict[str, Any] = {}
+        definitions = self._parameter_definitions
+        for key, raw_value in updates.items():
+            if key not in definitions:
+                raise ValueError(f"Parameter '{key}' is not configurable for {self.name}")
+            definition = definitions[key]
+            coerced = self._coerce_parameter_value(key, raw_value, definition)
+            setattr(self, key, coerced)
+            applied[key] = coerced
+        return applied
+
+    # ------------------------------------------------------------------
+    def _coerce_parameter_value(self, name: str, value: Any, definition: Dict[str, Any]) -> Any:
+        """Coerce and validate an incoming parameter value."""
+
+        allow_null = bool(definition.get("allow_null"))
+        if value == "":
+            value = None
+
+        if value is None:
+            if allow_null:
+                return None
+            raise ValueError(f"Parameter '{name}' does not allow null values")
+
+        param_type = str(definition.get("type", "float")).lower()
+
+        try:
+            if param_type == "int":
+                coerced: Any = int(float(value))
+            elif param_type == "float":
+                coerced = float(value)
+            elif param_type == "bool":
+                if isinstance(value, str):
+                    lowered = value.strip().lower()
+                    if lowered in {"true", "1", "yes", "on"}:
+                        coerced = True
+                    elif lowered in {"false", "0", "no", "off"}:
+                        coerced = False
+                    else:
+                        raise ValueError
+                else:
+                    coerced = bool(value)
+            else:
+                coerced = value
+        except (TypeError, ValueError):
+            raise ValueError(f"Parameter '{name}' expects {param_type} values") from None
+
+        if param_type in {"int", "float"}:
+            minimum = definition.get("min")
+            maximum = definition.get("max")
+            if minimum is not None and coerced < minimum:
+                raise ValueError(f"Parameter '{name}' must be >= {minimum}")
+            if maximum is not None and coerced > maximum:
+                raise ValueError(f"Parameter '{name}' must be <= {maximum}")
+
+        choices: Optional[Iterable[Any]] = definition.get("choices")  # type: ignore[assignment]
+        if choices is not None and coerced not in choices:
+            raise ValueError(f"Parameter '{name}' value {coerced} not in allowed choices")
+
+        return coerced
 

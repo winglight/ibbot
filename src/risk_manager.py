@@ -164,12 +164,17 @@ class RiskManager:
         
         # 待处理的限价订单状态
         self.pending_orders: Dict[str, Dict[str, bool]] = {}
-        
+
         # 警告历史记录
         self.alert_history: Dict[str, Dict[str, datetime]] = {}
-        
+
+        # 仓位限制配置
+        self.position_limit_default: Optional[float] = None
+        self.position_limit_per_symbol: Dict[str, float] = {}
+
         # 从数据库加载现有数据
         self._load_from_database()
+        self._load_position_limits_from_db()
 
     def _load_from_database(self):
         """从数据库加载风险规则和订单记录到内存缓存"""
@@ -249,6 +254,52 @@ class RiskManager:
             risk_logger.info("Loaded risk runtime config from database")
         except Exception as e:
             risk_logger.warning(f"Failed to load risk_config: {e}")
+
+    def _load_position_limits_from_db(self) -> None:
+        """Load position limits (S rules) from configuration storage."""
+
+        default_limit: Optional[float] = None
+        per_symbol: Dict[str, float] = {}
+        try:
+            config = self.db_manager.get_config("s_rules", {}) or {}
+        except Exception as exc:  # pragma: no cover - defensive guard
+            risk_logger.warning(f"Failed to load s_rules config: {exc}")
+            config = {}
+
+        raw_limits = config.get("s2_max_positions")
+        if isinstance(raw_limits, dict):
+            for key, value in raw_limits.items():
+                try:
+                    numeric = abs(float(value))
+                except (TypeError, ValueError):
+                    continue
+                if str(key).lower() == "default":
+                    default_limit = numeric
+                else:
+                    per_symbol[str(key).upper()] = numeric
+        elif raw_limits is not None:
+            try:
+                default_limit = abs(float(raw_limits))
+            except (TypeError, ValueError):
+                default_limit = None
+
+        self.position_limit_default = default_limit
+        self.position_limit_per_symbol = per_symbol
+
+    def refresh_position_limits(self) -> None:
+        """Reload position limit configuration from persistent storage."""
+
+        self._load_position_limits_from_db()
+
+    def get_position_limit(self, symbol: str) -> Optional[float]:
+        """Return the maximum absolute position allowed for the symbol."""
+
+        if not symbol:
+            return self.position_limit_default
+        limit = self.position_limit_per_symbol.get(symbol.upper())
+        if limit is not None:
+            return limit
+        return self.position_limit_default
 
     # 新增：对外获取风控配置
     def get_config(self) -> Dict[str, Any]:

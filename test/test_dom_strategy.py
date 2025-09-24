@@ -1,4 +1,6 @@
+import asyncio
 import os
+import time
 
 import pytest
 
@@ -49,9 +51,14 @@ class FakeRiskManager:
         self.circuit_active = False
         self.loss_streak = 0
         self.daily_loss_R = 0.0
+        self.position_limit_default = 100
+        self.position_limit_per_symbol = {}
 
     def check_circuit_breaker_before_new_order(self):
         return True, "ok"
+
+    def get_position_limit(self, symbol: str):
+        return self.position_limit_per_symbol.get(symbol, self.position_limit_default)
 
 
 class FakeOrderManager:
@@ -135,6 +142,21 @@ def test_dom_strategy_stop_prevents_orders(strategy_setup):
     assert order_manager.orders == []
 
 
+def test_dom_strategy_respects_signal_frequency(strategy_setup):
+    strategy, dom_service, queue, _, _ = strategy_setup
+
+    strategy.signal_frequency_seconds = 0.5
+    dom_service.emit("MNQ", _sample_long_metrics())
+    assert len(queue.tasks) == 1
+
+    dom_service.emit("MNQ", _sample_long_metrics())
+    assert len(queue.tasks) == 1
+
+    time.sleep(0.6)
+    dom_service.emit("MNQ", _sample_long_metrics())
+    assert len(queue.tasks) == 2
+
+
 def test_internal_strategy_info_exposes_dom_summary(tmp_path, monkeypatch):
     from src import database as db_module
 
@@ -178,10 +200,59 @@ def test_internal_strategy_info_exposes_dom_summary(tmp_path, monkeypatch):
     assert pytest.approx(risk_rules["MNQ"].get("stop_loss_price")) == 14980.0
 
     params = info.get("risk_parameters", {})
-    assert params.get("cooldown_seconds") == 20
+    assert pytest.approx(params.get("cooldown_seconds")) == 20
     assert params.get("max_loss_streak") == 4
     assert params.get("trend_threshold") is None
     assert params.get("default_quantity") == strategy.default_quantity
     assert pytest.approx(params.get("structure_window_seconds")) == 12.0
     assert pytest.approx(params.get("structure_tolerance_ticks")) == 1.5
     assert params.get("min_signal_conditions") == 4
+    assert pytest.approx(params.get("signal_frequency_seconds")) == 60.0
+
+    configurable = info.get("configurable_parameters")
+    assert isinstance(configurable, list) and configurable
+    names = {item.get("name") for item in configurable}
+    assert "signal_frequency_seconds" in names
+    first_param = next(item for item in configurable if item.get("name") == "cooldown_seconds")
+    assert first_param.get("min") == 0.0
+
+
+def test_strategy_manager_parameter_updates(tmp_path, monkeypatch):
+    from src import database as db_module
+
+    db_path = tmp_path / "test_trading_params.db"
+    db_manager = db_module.DatabaseManager(db_path)
+    monkeypatch.setattr(db_module, "db_manager", db_manager, raising=False)
+    monkeypatch.setattr(db_module, "get_db_manager", lambda db_path=db_path: db_manager, raising=False)
+
+    from src import strategy_manager as strategy_module
+
+    monkeypatch.setattr(strategy_module, "get_db_manager", lambda: db_manager, raising=False)
+
+    manager = StrategyManager(data_dir=tmp_path / "data", strategy_dir=tmp_path / "strategies")
+    risk = FakeRiskManager()
+    risk.risk_rules["MNQ"] = RiskRule(symbol="MNQ", stop_loss_price=14980.0)
+    manager.set_dependencies(risk_manager=risk, queue_manager=None)
+
+    strategy = DOMStrategy(symbol="MNQ")
+    manager.register_internal_strategy(strategy)
+
+    assert pytest.approx(strategy.cooldown_seconds) == 15.0
+    assert pytest.approx(strategy.signal_frequency_seconds) == 60.0
+
+    asyncio.run(
+        manager.update_strategy(
+            strategy.name,
+            {"parameters": {"cooldown_seconds": 45, "signal_frequency_seconds": 120}},
+        )
+    )
+
+    assert pytest.approx(strategy.cooldown_seconds) == 45
+    assert pytest.approx(strategy.signal_frequency_seconds) == 120
+    assert manager.settings.get(f"{strategy.name}_param_cooldown_seconds") == 45
+
+    details = manager.get_strategy(strategy.name)
+    assert details
+    param_map = {item.get("name"): item.get("value") for item in details.get("parameters", [])}
+    assert pytest.approx(param_map["cooldown_seconds"]) == 45
+    assert pytest.approx(param_map["signal_frequency_seconds"]) == 120

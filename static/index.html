@@ -1457,6 +1457,15 @@
                       <ul id="summaryRiskParams" class="list-unstyled mb-0"></ul>
                     </div>
                     <div class="mb-3">
+                      <h6>Strategy Parameters</h6>
+                      <div class="table-responsive">
+                        <table class="table table-sm" id="summaryParameterTable">
+                          <thead><tr><th>Name</th><th>Current</th><th>Default</th><th>Range</th></tr></thead>
+                          <tbody><tr><td colspan="4" class="text-muted">Loading...</td></tr></tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div class="mb-3">
                       <h6>Data Subscription</h6>
                       <div class="row g-2 align-items-center">
                         <div class="col-sm-7">
@@ -2277,6 +2286,10 @@
                   </div>
                 </div>
               </div>
+            </div>
+            <div id="editParameterGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Strategy Parameters</label>
+              <div id="editParameterList" class="vstack gap-3"></div>
             </div>
           </div>
           <div class="modal-footer">
