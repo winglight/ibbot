@@ -254,6 +254,7 @@ class DomCacheManager:
         start_time: Optional[Any] = None,
         end_time: Optional[Any] = None,
         include_snapshots: bool = True,
+        copy: bool = True,
     ) -> Dict[str, Any]:
         if not symbol:
             return {
@@ -268,11 +269,28 @@ class DomCacheManager:
         with self._lock:
             container = self._load_locked(key)
             self._prune_locked(key, container, now_ms=now_ms)
-            snapshots = [dict(item) for item in container.get("snapshots", [])]
-            metrics = [dict(item) for item in container.get("metrics", [])]
+            snapshots_source = container.get("snapshots", [])
+            metrics_source = container.get("metrics", [])
+            if copy and include_snapshots:
+                snapshots = [dict(item) for item in snapshots_source]
+            else:
+                snapshots = list(snapshots_source)
+            if copy:
+                metrics = [dict(item) for item in metrics_source]
+            else:
+                metrics = list(metrics_source)
 
         start_ms = self._coerce_timestamp_ms(start_time)
         end_ms = self._coerce_timestamp_ms(end_time)
+
+        limit_value: Optional[int] = None
+        if limit is not None:
+            try:
+                limit_candidate = int(limit)
+            except (TypeError, ValueError):
+                limit_candidate = 0
+            if limit_candidate > 0:
+                limit_value = limit_candidate
 
         def _filter_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             filtered: List[Dict[str, Any]] = []
@@ -286,27 +304,30 @@ class DomCacheManager:
             filtered.sort(key=lambda payload: self._timestamp_ms(payload))
             return filtered
 
-        snapshots = _filter_items(snapshots)
         metrics = _filter_items(metrics)
-
-        total_snapshots = len(snapshots)
         total_metrics = len(metrics)
-
-        limit_value: Optional[int] = None
-        if limit is not None:
-            try:
-                limit_candidate = int(limit)
-            except (TypeError, ValueError):
-                limit_candidate = 0
-            if limit_candidate > 0:
-                limit_value = limit_candidate
-
         if limit_value is not None:
-            snapshots = snapshots[-limit_value:]
             metrics = metrics[-limit_value:]
 
+        process_snapshots = (
+            include_snapshots
+            or start_ms is not None
+            or end_ms is not None
+            or limit_value is not None
+        )
+
+        if process_snapshots:
+            snapshots = _filter_items(snapshots)
+            total_snapshots = len(snapshots)
+            if limit_value is not None:
+                snapshots = snapshots[-limit_value:]
+            result_snapshots = snapshots if include_snapshots else []
+        else:
+            total_snapshots = len(snapshots_source)
+            result_snapshots = [] if not include_snapshots else list(snapshots_source)
+
         result: Dict[str, Any] = {
-            "snapshots": snapshots if include_snapshots else [],
+            "snapshots": result_snapshots,
             "metrics": metrics,
             "total_snapshots": total_snapshots,
             "total_metrics": total_metrics,
