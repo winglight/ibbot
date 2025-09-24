@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Callable, Dict, List
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -39,6 +39,8 @@ class DepthSubscriber:
         symbol: str,
         callback: Callable[[Dict[str, Any]], None],
         num_rows: int = 5,
+        *,
+        force_restart: bool = False,
     ) -> bool:
         """Start market depth streaming for a symbol.
 
@@ -53,11 +55,54 @@ class DepthSubscriber:
             _depth_logger.error("IBKR connection not active for depth stream")
             return False
 
+        callbacks: List[Callable] = [callback]
+        prior_stream: Optional[_DepthStream] = None
+
         with self._lock:
-            if symbol in self._streams:
-                self._streams[symbol].callbacks.append(callback)
-                _depth_logger.debug(f"Added callback to existing stream for {symbol}")
+            existing = self._streams.get(symbol)
+            if existing and not force_restart:
+                if callback not in existing.callbacks:
+                    existing.callbacks.append(callback)
+                    _depth_logger.debug(
+                        f"Added callback to existing stream for {symbol}"
+                    )
+                else:
+                    _depth_logger.debug(
+                        f"Callback already registered for {symbol}; skipping duplicate"
+                    )
                 return True
+            if existing and force_restart:
+                callbacks = list(existing.callbacks)
+                if callback not in callbacks:
+                    callbacks.append(callback)
+                prior_stream = existing
+                self._streams.pop(symbol, None)
+            elif existing:
+                callbacks = list(existing.callbacks)
+                if callback not in callbacks:
+                    callbacks.append(callback)
+
+        if prior_stream:
+            def _cancel_previous():
+                ib = self.connection_manager.get_ib_instance()
+                if ib:
+                    try:
+                        ib.cancelMktDepth(prior_stream.contract)
+                    except Exception as e:
+                        _depth_logger.error(
+                            f"cancelMktDepth error while restarting {symbol}: {e}"
+                        )
+
+            try:
+                self.connection_manager.run_in_connection_thread(_cancel_previous)
+            except Exception as exc:
+                _depth_logger.warning(
+                    f"Failed to cancel previous depth stream for {symbol}: {exc}"
+                )
+            try:
+                prior_stream.ticker.updateEvent.clear()
+            except Exception:
+                pass
 
         def _subscribe():
             ib = self.connection_manager.get_ib_instance()
@@ -113,8 +158,14 @@ class DepthSubscriber:
         ticker.updateEvent += _on_update
         # _depth_logger.warning(f"After binding updateEvent for {symbol}, event handlers: {len(ticker.updateEvent)}")
         with self._lock:
-            self._streams[symbol] = _DepthStream(ticker=ticker, contract=contract, callbacks=[callback])
-        _depth_logger.info(f"Started depth stream for {symbol}")
+            self._streams[symbol] = _DepthStream(
+                ticker=ticker,
+                contract=contract,
+                callbacks=list(callbacks),
+            )
+        _depth_logger.info(
+            f"Started depth stream for {symbol}" + (" (forced restart)" if prior_stream else "")
+        )
         return True
 
     # ------------------------------------------------------------------

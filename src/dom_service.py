@@ -480,15 +480,46 @@ class DOMService:
         else:
             loop.call_soon_threadsafe(_schedule)
 
-    def _start_stream_blocking(self, symbol: str, num_rows: int = 5) -> bool:
+    def _start_stream_blocking(
+        self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
+    ) -> bool:
         symbol_key = (symbol or "").upper()
         if not connection_manager.is_connected():
-            logger.warning("DOM depth stream start rejected - not connected", symbol=symbol_key)
-            return False
+            logger.warning(
+                "DOM depth stream start rejected - not connected", symbol=symbol_key
+            )
+            try:
+                logger.info(
+                    "Attempting to reconnect IBKR before starting DOM stream",
+                    symbol=symbol_key,
+                )
+                reconnect_ok = connection_manager.connect()
+            except Exception as exc:
+                logger.error(
+                    "IBKR reconnection attempt failed", symbol=symbol_key, error=str(exc)
+                )
+                reconnect_ok = False
+
+            if reconnect_ok:
+                # Give connection thread a brief moment to finish handshake
+                for _ in range(20):
+                    if connection_manager.is_connected():
+                        break
+                    time.sleep(0.25)
+
+            if not connection_manager.is_connected():
+                logger.warning(
+                    "DOM depth stream start aborted - IBKR still disconnected",
+                    symbol=symbol_key,
+                )
+                return False
         self._active_symbol = symbol_key
         logger.info("Starting DOM depth stream", symbol=symbol_key, num_rows=num_rows)
         result = depth_subscriber.start_depth_stream(
-            symbol, lambda data, sym=symbol: self._on_depth_update(sym, data), num_rows=num_rows
+            symbol,
+            lambda data, sym=symbol: self._on_depth_update(sym, data),
+            num_rows=num_rows,
+            force_restart=force_restart,
         )
         if result:
             logger.info("DOM depth stream started", symbol=symbol_key)
@@ -496,13 +527,19 @@ class DOMService:
             logger.warning("Failed to start DOM depth stream", symbol=symbol_key)
         return result
 
-    async def start_stream(self, symbol: str, num_rows: int = 5) -> bool:
+    async def start_stream(
+        self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
+    ) -> bool:
         loop = asyncio.get_running_loop()
         self._loop = loop
         self._ensure_cleanup_task(loop)
-        return await asyncio.to_thread(self._start_stream_blocking, symbol, num_rows)
+        return await asyncio.to_thread(
+            self._start_stream_blocking, symbol, num_rows, force_restart=force_restart
+        )
 
-    def start(self, symbol: str, num_rows: int = 5) -> bool:
+    def start(
+        self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
+    ) -> bool:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -510,7 +547,7 @@ class DOMService:
         else:
             self._loop = loop
         self._ensure_cleanup_task(loop)
-        return self._start_stream_blocking(symbol, num_rows)
+        return self._start_stream_blocking(symbol, num_rows, force_restart=force_restart)
 
     def _stop_stream_blocking(self, symbol: str) -> bool:
         symbol_key = (symbol or "").upper()

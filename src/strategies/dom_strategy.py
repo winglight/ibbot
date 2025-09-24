@@ -284,11 +284,15 @@ class DOMStrategy(BaseStrategy):
     # ------------------------------------------------------------------
     def _execute_trade(self, symbol: str, direction: int, price: float, metrics: Dict[str, Any]) -> None:
         if self._processing:
+            self.logger.debug(
+                "Skip execute_trade because previous execution still in progress",
+            )
             return
         if not self.queue_manager:
             self.logger.warning("Queue manager not available; skip DOM strategy order")
             return
         if self.breaker_tripped:
+            self.logger.warning("Circuit breaker active; skip DOM strategy order")
             return
 
         now = time.time()
@@ -309,13 +313,28 @@ class DOMStrategy(BaseStrategy):
                 if not ok:
                     self._trip_breaker(reason)
                     return
+                self.logger.debug(
+                    "Risk manager circuit breaker check passed", reason=reason
+                )
 
             quantity = self._determine_quantity(symbol, direction, price)
             if quantity <= 0:
                 self.logger.warning("Computed quantity is zero; skip order")
                 return
+            self.logger.info(
+                "DOM strategy preparing order: direction=%s qty=%s price=%.2f",
+                "BUY" if direction > 0 else "SELL",
+                quantity,
+                price,
+            )
 
             exchange, sec_type = self._resolve_instrument(symbol)
+            self.logger.debug(
+                "Resolved instrument for order",
+                exchange=exchange,
+                sec_type=sec_type,
+                symbol=symbol,
+            )
             payload = {
                 "strategy": self.name,
                 "symbol": symbol,
@@ -326,7 +345,12 @@ class DOMStrategy(BaseStrategy):
                 "exchange": exchange,
                 "sec_type": sec_type,
             }
-            self.queue_manager.add_task("strategy_order", payload)
+            task_id = self.queue_manager.add_task("strategy_order", payload)
+            self.logger.info(
+                "Strategy order task queued",
+                task_id=task_id,
+                payload=payload,
+            )
             self._last_execution_time = now
         finally:
             self._processing = False

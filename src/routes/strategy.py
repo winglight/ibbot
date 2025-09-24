@@ -131,6 +131,7 @@ async def set_strategy_data_push_api(
         enabled=payload.enabled,
         subscription=payload.subscription,
         symbol=payload.symbol,
+        force_restart=bool(payload.force_restart),
     )
 
     state_snapshot = strategy_manager.get_data_push_state(name) or {}

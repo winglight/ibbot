@@ -20,7 +20,8 @@ class BaseStrategy:
         self.queue_manager: Optional[Any] = None
         self.risk_manager: Optional[Any] = None
         self.notification_manager: Optional[Any] = None
-        self.logger = logger.bind(strategy=name)
+        # 统一使用 internal_strategy 模块名称，便于在前端日志面板按策略链路过滤
+        self.logger = logger.bind(strategy=name, module="internal_strategy")
         self._parameter_definitions: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
