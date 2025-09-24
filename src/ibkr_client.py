@@ -1,12 +1,15 @@
 import asyncio
-from typing import List, Optional, Dict, Any
+import itertools
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
-from ib_insync import IB, Stock, Future, Order, MarketOrder, LimitOrder, Contract
+from ib_insync import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
 from loguru import logger
 from zoneinfo import ZoneInfo
 
-from src.utils import now_local, to_local_time
+from src.utils import is_trading_disabled, now_local, to_local_time
 
 # Module-specific logger for ibkr_client
 ibkr_logger = logger.bind(module="ibkr_client", request_id="-")
@@ -25,7 +28,7 @@ NY_TZ = ZoneInfo("America/New_York")
 class IBKRClient:
     def __init__(self):
         self.connection_manager = connection_manager
-        
+
         # 设置ConnectionManager对IBKRClient的弱引用，用于错误处理
         import weakref
         self.connection_manager._ibkr_client_ref = weakref.ref(self)
@@ -49,6 +52,9 @@ class IBKRClient:
         # Cache the last successful account snapshot for downstream fallbacks
         self._cached_account_info: Dict[str, Any] = {}
         self._cached_account_info_timestamp: Optional[datetime] = None
+
+        # Counter for simulated order identifiers when trading is disabled
+        self._simulated_order_id = itertools.count(start=-1, step=-1)
     
     def _sanitize_float(self, value):
         """清理无效的浮点数值，将NaN和Infinity转换为None"""
@@ -89,8 +95,17 @@ class IBKRClient:
             return dict(self._cached_account_info)
         return {}
     
-    def _place_order_in_thread(self, ib, symbol: str, quantity: int, action: str, 
-                              exchange: str, sec_type: str, order_type: str, price: float = None):
+    def _place_order_in_thread(
+        self,
+        ib,
+        symbol: str,
+        quantity: int,
+        action: str,
+        exchange: str,
+        sec_type: str,
+        order_type: str,
+        price: float = None,
+    ):
         """在连接管理器的事件循环中执行下单操作，避免事件循环冲突。
         使用连接管理器的 run_async_in_connection_thread 方法确保正确执行。
         """
@@ -99,6 +114,18 @@ class IBKRClient:
         ibkr_logger.info(f"_place_order_in_thread called for {symbol} in thread: {current_thread.name}")
 
         try:
+            if is_trading_disabled():
+                trade = self._simulate_trade(
+                    order_type=order_type,
+                    symbol=symbol,
+                    quantity=quantity,
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type,
+                    price=price,
+                )
+                return trade
+
             # 检查连接状态
             if not self.connection_manager.is_connected():
                 ibkr_logger.error("IBKR connection is not active")
@@ -154,6 +181,47 @@ class IBKRClient:
         except Exception as e:
             ibkr_logger.error(f"Failed to place {order_type.lower()} order in thread: {e}")
             return None
+
+    def _simulate_trade(
+        self,
+        order_type: str,
+        symbol: str,
+        quantity: int,
+        action: str,
+        exchange: str,
+        sec_type: str,
+        price: Optional[float] = None,
+    ) -> SimpleNamespace:
+        """Create a fake trade result when trading is disabled.
+
+        Tests rely on the returned object exposing ``order.orderId`` similarly
+        to an ``ib_insync`` ``Trade``.  We therefore mimic that minimal
+        structure using :class:`types.SimpleNamespace` instances.
+        """
+
+        order_id = next(self._simulated_order_id)
+        order = SimpleNamespace(
+            orderId=order_id,
+            action=action,
+            totalQuantity=quantity,
+            orderType=order_type,
+            lmtPrice=price,
+        )
+        status = SimpleNamespace(status="Simulated", filled=0, remaining=quantity)
+        contract = SimpleNamespace(symbol=symbol, exchange=exchange, secType=sec_type)
+        trade = SimpleNamespace(order=order, orderStatus=status, contract=contract)
+
+        display_price = price if price is not None else "MKT"
+        ibkr_logger.warning(
+            "Trading disabled; simulated %s order: %s %s %s @%s (order_id=%s)",
+            order_type,
+            action,
+            quantity,
+            symbol,
+            display_price,
+            order_id,
+        )
+        return trade
     
     def get_stock_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD') -> Stock:
         """获取股票合约"""
@@ -694,6 +762,13 @@ class IBKRClient:
         """取消指定订单"""
         # 规范化 order_id，内部与 IBKR 比较使用 int，外部广播/日志统一使用字符串
         order_id_str = str(order_id)
+        if is_trading_disabled():
+            ibkr_logger.warning(
+                "Trading disabled; simulated cancellation acknowledged for order %s",
+                order_id_str,
+            )
+            return True, "Cancelled (simulated)"
+
         try:
             order_id_int = int(order_id_str)
         except Exception:

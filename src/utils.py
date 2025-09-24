@@ -8,7 +8,9 @@ conversion before being surfaced to clients.
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 from datetime import datetime
 from typing import Any, Optional
 
@@ -95,4 +97,43 @@ def slugify_strategy_name(name: str) -> str:
     slug = re.sub(r"[^0-9a-zA-Z]+", "_", name.lower())
     slug = re.sub(r"_+", "_", slug)
     return slug.strip("_")
+
+
+# Environment helpers --------------------------------------------------------
+
+_ENABLED_VALUES = {"1", "true", "yes", "on"}
+
+
+def _flag_enabled(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in _ENABLED_VALUES
+
+
+def is_running_tests() -> bool:
+    """Detect whether the current process is executing under a test runner."""
+
+    # pytest sets PYTEST_CURRENT_TEST for each running test.
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+
+    # ``pytest`` or ``unittest`` being imported is a strong indicator that
+    # we're in a testing context (useful for subprocesses started by pytest).
+    modules = sys.modules
+    return "pytest" in modules or "unittest" in modules
+
+
+def is_trading_disabled() -> bool:
+    """Return ``True`` when order execution should be prevented.
+
+    Besides the explicit ``IBBOT_DISABLE_TRADING`` flag we also automatically
+    disable trading whenever the application is launched from a unit-testing
+    context.  This guards against accidental real-money executions triggered
+    by test suites.
+    """
+
+    if _flag_enabled(os.getenv("IBBOT_DISABLE_TRADING")):
+        return True
+
+    return is_running_tests()
 
