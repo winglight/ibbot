@@ -17,26 +17,11 @@ risk_logger = logger.bind(module="risk_manager", request_id="-")
 from dotenv import load_dotenv
 
 from .notification_manager import NotificationManager
-from .database import DatabaseManager, get_db_manager
-from .database import AutoOrder as DatabaseAutoOrder
+from .database import DatabaseManager, Order, get_db_manager
 from .database import RiskRule as DatabaseRiskRule
 from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
 load_dotenv()
-
-@dataclass
-class AutoOrder:
-    order_id: str
-    symbol: str
-    action: str
-    quantity: int
-    order_type: str
-    price: Optional[float]
-    status: str
-    created_at: datetime
-    executed_at: Optional[datetime] = None
-    rule_id: Optional[str] = None
-    order_source: str = "auto"  # "auto" or "manual"
 
 class OrderType(Enum):
     STOP_LOSS = "stop_loss"
@@ -89,7 +74,7 @@ class RiskManager:
         
         # 内存中的缓存，从数据库加载
         self.risk_rules: Dict[str, RiskRule] = {}
-        self.auto_orders: Dict[str, AutoOrder] = {}
+        self.auto_orders: Dict[str, Order] = {}
         
         # 订单队列
         self.order_queue = Queue()
@@ -236,9 +221,92 @@ class RiskManager:
                     created_at=parse_local_datetime(rule_db.timestamp) if rule_db.timestamp else now_local()
                 )
                 self.risk_rules[rule.symbol] = rule
-            
+
         except Exception as e:
             risk_logger.error(f"Error loading data from database: {e}")
+
+    def _create_order(
+        self,
+        *,
+        order_id: str,
+        symbol: str,
+        action: str,
+        quantity: int,
+        order_type: str,
+        price: Optional[float],
+        status: str,
+        rule_id: Optional[str],
+        order_source: str,
+        created_at: Optional[datetime] = None,
+        executed_at: Optional[datetime] = None,
+        exchange: Optional[str] = None,
+        sec_type: Optional[str] = None,
+    ) -> Order:
+        """构造统一的订单对象并补齐必需字段"""
+
+        created_dt = ensure_local_timezone(created_at) if created_at else None
+        if created_dt is None:
+            created_dt = now_local()
+
+        executed_dt: Optional[datetime]
+        if isinstance(executed_at, datetime):
+            executed_dt = ensure_local_timezone(executed_at)
+        else:
+            executed_dt = None
+
+        order = Order(
+            order_id=order_id,
+            symbol=symbol,
+            quantity=quantity,
+            action=action,
+            order_type=order_type,
+            price=price,
+            timestamp=to_local_iso(created_dt) or now_local().isoformat(),
+            exchange=exchange or "SMART",
+            sec_type=sec_type or "STK",
+            status=status,
+            executed_at=executed_dt,
+            rule_id=rule_id,
+            order_source=order_source,
+        )
+
+        order.created_at = created_dt
+        order.executed_at = executed_dt
+        return order
+
+    def _normalise_order(self, order: Order) -> Order:
+        """确保订单对象具备本地与数据库所需的字段格式"""
+
+        created_attr = getattr(order, "created_at", None)
+        if isinstance(created_attr, datetime):
+            created_dt = ensure_local_timezone(created_attr)
+        elif isinstance(created_attr, str):
+            created_dt = parse_local_datetime(created_attr)
+        else:
+            created_dt = None
+
+        if created_dt is None:
+            created_dt = parse_local_datetime(getattr(order, "timestamp", None))
+        if created_dt is None:
+            created_dt = now_local()
+
+        executed_attr = getattr(order, "executed_at", None)
+        if isinstance(executed_attr, datetime):
+            executed_dt = ensure_local_timezone(executed_attr)
+        elif isinstance(executed_attr, str):
+            executed_dt = parse_local_datetime(executed_attr)
+        else:
+            executed_dt = None
+
+        order.created_at = created_dt
+        order.executed_at = executed_dt
+        order.timestamp = getattr(order, "timestamp", None) or to_local_iso(created_dt) or now_local().isoformat()
+        order.status = getattr(order, "status", None) or "Submitted"
+        order.order_source = getattr(order, "order_source", None) or "auto"
+        order.exchange = getattr(order, "exchange", None) or "SMART"
+        order.sec_type = getattr(order, "sec_type", None) or "STK"
+
+        return order
 
     # 新增：从数据库加载风控运行时配置
     def _load_risk_config_from_db(self) -> None:
@@ -866,7 +934,7 @@ class RiskManager:
                         order_placed = True
                         
                         # 保存订单记录到auto_orders内存和数据库
-                        auto_order = AutoOrder(
+                        auto_order = self._create_order(
                             order_id=str(trade.order.orderId),
                             symbol=symbol,
                             action=action,
@@ -874,10 +942,8 @@ class RiskManager:
                             order_type="MKT",
                             price=current_price,  # 使用当前市价
                             status="Submitted",
-                            created_at=now_local(),
-                            executed_at=None,
                             rule_id=symbol,
-                            order_source="tp"
+                            order_source="tp",
                         )
                         self.auto_orders[str(trade.order.orderId)] = auto_order
                         # 保存到数据库，保证持久化
@@ -1022,7 +1088,7 @@ class RiskManager:
                         order_placed = True
                         
                         # 保存订单记录到auto_orders内存和数据库
-                        auto_order = AutoOrder(
+                        auto_order = self._create_order(
                             order_id=str(trade.order.orderId),
                             symbol=symbol,
                             action=action,
@@ -1030,10 +1096,8 @@ class RiskManager:
                             order_type="MKT",
                             price=current_price,  # 使用当前市价
                             status="Submitted",
-                            created_at=now_local(),
-                            executed_at=None,
                             rule_id=symbol,
-                            order_source="sl"
+                            order_source="sl",
                         )
                         self.auto_orders[str(trade.order.orderId)] = auto_order
                         self.save_auto_order_to_db(auto_order)
@@ -1345,7 +1409,7 @@ class RiskManager:
                 else:
                     order_source = "strategy"
                 
-                auto_order = AutoOrder(
+                auto_order = self._create_order(
                     order_id=str(order_id),
                     symbol=order_request.symbol,
                     action=action,
@@ -1353,10 +1417,8 @@ class RiskManager:
                     order_type="MKT",
                     price=position['current_price'],
                     status="Submitted",
-                    created_at=now_local(),
-                    executed_at=None,
                     rule_id=order_request.symbol,  # Use symbol as rule identifier
-                    order_source=order_source
+                    order_source=order_source,
                 )
                 
                 self.auto_orders[str(order_id)] = auto_order
@@ -1467,33 +1529,18 @@ class RiskManager:
                 break
         risk_logger.info("Order queue cleared")
     
-    def save_auto_order_to_db(self, order: AutoOrder):
+    def save_auto_order_to_db(self, order: Order):
         """保存单个订单到数据库并更新内存缓存"""
         try:
-            # 创建数据库的AutoOrder实例，映射字段
-            db_order = DatabaseAutoOrder(
-                order_id=order.order_id,
-                symbol=order.symbol,
-                quantity=order.quantity,
-                action=order.action,
-                order_type=order.order_type,
-                price=order.price,
-                timestamp=to_local_iso(order.created_at) or now_local().isoformat(),
-                exchange=getattr(order, 'exchange', 'SMART'),
-                sec_type=getattr(order, 'sec_type', 'STK'),
-                status=order.status if hasattr(order, 'status') else 'pending',
-                executed_at=to_local_iso(getattr(order, 'executed_at', None)),
-                rule_id=getattr(order, 'rule_id', None),
-                order_source=getattr(order, 'order_source', 'auto')
-            )
-            
+            normalised = self._normalise_order(order)
+
             # 保存到数据库
-            self.db_manager.save_order(db_order)
-            
+            self.db_manager.save_order(normalised)
+
             # 更新内存缓存
-            self.auto_orders[order.order_id] = order
-            
-            risk_logger.info(f"Order {order.order_id} saved to database")
+            self.auto_orders[normalised.order_id] = normalised
+
+            risk_logger.info(f"Order {normalised.order_id} saved to database")
         except Exception as e:
             risk_logger.error(f"Error saving order to database: {e}")
     
@@ -1690,18 +1737,18 @@ class RiskManager:
                     created_at = parse_local_datetime(row['created_at']) if row['created_at'] else None
                     executed_at = parse_local_datetime(row['executed_at']) if row['executed_at'] else None
                     
-                    auto_order = AutoOrder(
+                    auto_order = self._create_order(
                         order_id=row['order_id'],
                         symbol=row['symbol'],
                         action=row['action'],
                         quantity=int(row['quantity']) if row['quantity'] else 0,
                         order_type=row['order_type'],
                         price=float(row['price']) if row['price'] else 0.0,
-                        status=row['status'],
+                        status=row['status'] or "Submitted",
                         created_at=created_at,
                         executed_at=executed_at,
-                        rule_id=row['rule_id'],
-                        order_source=row['order_source']
+                        rule_id=row.get('rule_id') or None,
+                        order_source=row.get('order_source') or 'auto',
                     )
                     
                     self.auto_orders[row['order_id']] = auto_order

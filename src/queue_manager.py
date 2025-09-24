@@ -10,6 +10,7 @@ import json
 queue_logger = logger.bind(module="queue_manager", request_id="-")
 from pathlib import Path
 
+from .database import Order
 from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
 @dataclass
@@ -390,37 +391,41 @@ class QueueManager:
             except Exception as e:
                 queue_logger.warning(f"Failed to create order via OrderManager: {e}, falling back to RiskManager")
                 if self.risk_manager:
-                    from src.risk_manager import AutoOrder
-                    auto_order = AutoOrder(
+                    created_at = now_local()
+                    auto_order = Order(
                         order_id=order_id,
                         symbol=payload['symbol'],
                         action=action,
                         quantity=payload['qty'],
                         order_type=order_type_for_record,
                         price=payload.get('price', 0.0),
+                        timestamp=to_local_iso(created_at) or created_at.isoformat(),
                         status="Submitted",
-                        created_at=now_local(),
                         executed_at=None,
                         rule_id=payload['strategy'],
-                        order_source="strategy"
+                        order_source="strategy",
                     )
+                    auto_order.created_at = created_at
+                    auto_order.executed_at = None
                     self.risk_manager.auto_orders[order_id] = auto_order
                     self.risk_manager.save_auto_order_to_db(auto_order)
         elif self.risk_manager:
-            from src.risk_manager import AutoOrder
-            auto_order = AutoOrder(
+            created_at = now_local()
+            auto_order = Order(
                 order_id=order_id,
                 symbol=payload['symbol'],
                 action=action,
                 quantity=payload['qty'],
                 order_type=order_type_for_record,
                 price=payload.get('price', 0.0),
+                timestamp=to_local_iso(created_at) or created_at.isoformat(),
                 status="Submitted",
-                created_at=now_local(),
                 executed_at=None,
                 rule_id=payload['strategy'],
-                order_source="strategy"
+                order_source="strategy",
             )
+            auto_order.created_at = created_at
+            auto_order.executed_at = None
             self.risk_manager.auto_orders[order_id] = auto_order
             self.risk_manager.save_auto_order_to_db(auto_order)
         
