@@ -83,7 +83,9 @@ class QueueManager:
         # 持久化任务
         self._save_tasks()
         
-        queue_logger.info(f"Task {task_id} added to queue, type: {task_type}")
+        queue_logger.bind(task_type=task_type, payload=payload).info(
+            f"Task {task_id} added to queue, type: {task_type}"
+        )
         return task_id
     
     def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -216,7 +218,9 @@ class QueueManager:
         task.started_at = now_local()
         self._save_tasks()
         
-        queue_logger.info(f"Processing task {task.task_id}, type: {task.task_type}")
+        queue_logger.bind(payload=task.payload).info(
+            f"Processing task {task.task_id}, type: {task.task_type}"
+        )
         
         try:
             # 根据任务类型调用相应的处理器
@@ -279,6 +283,9 @@ class QueueManager:
             raise Exception("Dependencies not properly set")
         
         payload = task.payload
+        queue_logger.bind(task_id=task.task_id, payload=payload).debug(
+            "Start processing strategy order payload"
+        )
         
         # 检查连接状态（无需 ibkr_client）
         import core
@@ -313,6 +320,11 @@ class QueueManager:
                     action=action,
                     quantity=payload['qty'],
                 )
+                queue_logger.bind(
+                    task_id=task.task_id,
+                    strategy=strategy['name'],
+                    pre_trade_state=pre_trade_state,
+                ).debug("Internal strategy pre-trade state prepared")
             except ValueError as exc:
                 raise Exception(str(exc))
             except Exception as exc:
@@ -331,6 +343,17 @@ class QueueManager:
         
         # 真实IBKR路径：使用 ibkr_client
         import core  # 延迟导入避免循环导入
+        queue_logger.bind(
+            task_id=task.task_id,
+            strategy=strategy['name'],
+            order_type=order_type,
+            action=action,
+            symbol=payload['symbol'],
+            quantity=payload['qty'],
+            exchange=exchange,
+            sec_type=sec_type,
+        ).info("Placing strategy order via IBKR")
+
         if order_type == "MARKET":
             trade = await core.ibkr_client.place_market_order(
                 symbol=payload['symbol'],
@@ -445,7 +468,13 @@ class QueueManager:
         else:
             queue_logger.debug("websocket_manager 未注入，跳过广播")
         
-        queue_logger.info(f"Strategy order placed successfully: {order_id}")
+        queue_logger.bind(
+            task_id=task.task_id,
+            strategy=strategy['name'],
+            symbol=payload['symbol'],
+            action=action,
+            quantity=payload['qty'],
+        ).info(f"Strategy order placed successfully: {order_id}")
     
     def _save_tasks(self):
         """持久化任务到文件"""
