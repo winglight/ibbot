@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import re
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .engine import OptimizationEngine
 from .reporting import build_conclusion, compute_return_distribution, compute_runtime_summary
@@ -28,6 +29,7 @@ class TaskRecord:
     plan_id: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = None
+    runtime: Optional[Dict[str, Any]] = None
 
 
 class OptimizerTaskStore:
@@ -136,6 +138,7 @@ class OptimizerTaskStore:
                 if task.plan_id != plan_id:
                     continue
                 self._ensure_report_summary(task_id, task)
+                self._ensure_runtime_snapshot(task)
                 tasks.append((task_id, task))
             return tasks
 
@@ -252,13 +255,15 @@ class OptimizerTaskStore:
             elapsed = 0.0
             if started_at and completed_at:
                 elapsed = max((completed_at - started_at).total_seconds(), 0.0)
-            summary["runtime"] = compute_runtime_summary(
+            runtime_summary = compute_runtime_summary(
                 started_at or datetime.utcnow(),
                 completed_at,
                 elapsed,
                 estimated_total,
                 actual_total,
             )
+            runtime_summary["status"] = record.state.value
+            summary["runtime"] = runtime_summary
             changed = True
 
         if "conclusion" not in summary:
@@ -275,6 +280,55 @@ class OptimizerTaskStore:
         if changed:
             report.summary = summary
             self._persist(task_id)
+
+    def _ensure_runtime_snapshot(self, record: TaskRecord) -> None:
+        runtime: Optional[Dict[str, Any]] = None
+        summary = record.report.summary if record.report else None
+        if summary:
+            runtime_data = summary.get("runtime")
+            if isinstance(runtime_data, dict):
+                runtime = dict(runtime_data)
+                runtime.setdefault("status", record.state.value)
+        if runtime is None:
+            runtime = self._compute_active_runtime(record)
+        record.runtime = runtime
+
+    def _compute_active_runtime(self, record: TaskRecord) -> Optional[Dict[str, Any]]:
+        if record.state not in {TaskState.RUNNING, TaskState.FAILED}:
+            return None
+        try:
+            estimated_total = OptimizationEngine(record.request).estimated_total()
+        except Exception:  # pragma: no cover - defensive
+            estimated_total = 0
+        processed = self._extract_processed_count(record.message)
+        if not processed and estimated_total and record.progress:
+            processed = max(int(estimated_total * record.progress / 100), 0)
+        if record.state == TaskState.FAILED and processed == 0:
+            processed = estimated_total
+        now = datetime.utcnow()
+        elapsed = max((now - record.created_at).total_seconds(), 0.0)
+        runtime = compute_runtime_summary(
+            record.created_at,
+            now,
+            elapsed,
+            estimated_total,
+            processed,
+        )
+        runtime["status"] = record.state.value
+        runtime["actual_total_combinations"] = processed
+        return runtime
+
+    @staticmethod
+    def _extract_processed_count(message: Optional[str]) -> int:
+        if not message:
+            return 0
+        match = re.search(r"processed\s+(\d+)\/(\d+)", message)
+        if not match:
+            return 0
+        try:
+            return int(match.group(1))
+        except ValueError:  # pragma: no cover - defensive
+            return 0
 
 
 store = OptimizerTaskStore()

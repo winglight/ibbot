@@ -389,17 +389,24 @@ class OptimizerApp {
                 </div>
             `
             : '';
-        const runtime = summary?.runtime;
+        const runtime = summary?.runtime ?? report.runtime;
+        const runtimeStatus = runtime?.status || report.state;
+        const runtimeTitle = runtimeStatus === 'running' ? '运行进度' : '运行效率';
+        const expectedLabel = runtimeStatus === 'running' ? '预估总耗时' : '预期';
+        const actualLabel = runtimeStatus === 'running' ? '已用时' : '实际';
+        const rateLabel = runtimeStatus === 'running' ? '速度' : '速率';
+        const estimatedComboLabel = runtimeStatus === 'running' ? '预计组合' : '估算组合';
+        const actualComboLabel = runtimeStatus === 'running' ? '已测组合' : '实测组合';
         const runtimeHtml = runtime
             ? `
                 <div style="margin-top:1rem;">
-                    <h4 style="margin-bottom:0.5rem;">运行效率</h4>
+                    <h4 style="margin-bottom:0.5rem;">${runtimeTitle}</h4>
                     <div class="tag-list">
-                        <span class="tag">预期 ${this.formatDuration(runtime.expected_duration_seconds)}</span>
-                        <span class="tag">实际 ${this.formatDuration(runtime.actual_duration_seconds)}</span>
-                        <span class="tag">速率 ${this.formatNumber(runtime.tests_per_second)} 组/秒</span>
+                        <span class="tag">${expectedLabel} ${this.formatDuration(runtime.expected_duration_seconds)}</span>
+                        <span class="tag">${actualLabel} ${this.formatDuration(runtime.actual_duration_seconds)}</span>
+                        <span class="tag">${rateLabel} ${this.formatNumber(runtime.tests_per_second)} 组/秒</span>
                     </div>
-                    <p class="section-subtitle" style="margin-top:0.5rem;">估算组合 ${runtime.estimated_total_combinations ?? '-'} · 实测组合 ${runtime.actual_total_combinations ?? '-'}</p>
+                    <p class="section-subtitle" style="margin-top:0.5rem;">${estimatedComboLabel} ${runtime.estimated_total_combinations ?? '-'} · ${actualComboLabel} ${runtime.actual_total_combinations ?? '-'}</p>
                 </div>
             `
             : '';

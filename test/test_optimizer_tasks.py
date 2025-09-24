@@ -2,7 +2,7 @@ import os
 
 os.environ.setdefault("IBBOT_SKIP_SERVER", "1")
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from src.optimizer_service.db import OptimizerDatabase
 from src.optimizer_service.schemas import (
@@ -10,6 +10,7 @@ from src.optimizer_service.schemas import (
     OptimizationReportData,
     OptimizationRequest,
     OptimizationResultItem,
+    TaskState,
 )
 from src.optimizer_service.storage import OptimizerTaskStore
 from src.optimizer_service.tasks import run_optimization_task
@@ -63,6 +64,7 @@ def test_run_optimization_task_produces_runtime_summary():
     assert runtime["expected_duration_seconds"] >= 0
     assert runtime["tests_per_second"] is not None
     assert runtime["actual_total_combinations"] == summary["tested_combinations"]
+    assert runtime["status"] == "completed"
 
     distribution = summary.get("annual_return_distribution")
     assert distribution is not None
@@ -72,7 +74,8 @@ def test_run_optimization_task_produces_runtime_summary():
 
     conclusion = summary.get("conclusion")
     assert isinstance(conclusion, str)
-    assert conclusion
+    assert "共测试" in conclusion
+    assert "收益率" in conclusion
 
     assert summary["successful_combinations"] >= 1
 
@@ -125,3 +128,32 @@ def test_legacy_report_summary_is_enriched():
 
     distribution = enriched_summary["annual_return_distribution"]
     assert distribution["p25"] <= distribution["p75"]
+
+
+def test_running_task_runtime_snapshot():
+    db = OptimizerDatabase(":memory:")
+    store = OptimizerTaskStore(db)
+    request = make_request()
+    plan_id = "plan-runtime"
+    task_id = "task-runtime"
+
+    store.create_task(
+        task_id,
+        request,
+        plan_id=plan_id,
+        initial_state=TaskState.RUNNING,
+        message="starting",
+    )
+    store.update_state(task_id, TaskState.RUNNING, message="processed 3/10")
+    record = store.get_task(task_id)
+    assert record is not None
+    record.created_at = record.created_at - timedelta(seconds=2)
+
+    records = store.list_tasks_by_plan(plan_id)
+    assert records
+    _, running_record = records[0]
+    runtime = running_record.runtime
+    assert runtime is not None
+    assert runtime["status"] == "running"
+    assert runtime["actual_total_combinations"] >= 3
+    assert runtime["expected_duration_seconds"] >= runtime["actual_duration_seconds"]
