@@ -109,6 +109,61 @@ class OptimizerApp {
         return list.map((item) => this.formatMetricName(item)).join(', ');
     }
 
+    formatNumber(value, digits = 2) {
+        if (value === null || value === undefined) {
+            return '-';
+        }
+        const num = Number(value);
+        if (!Number.isFinite(num)) {
+            return '-';
+        }
+        return num.toFixed(digits);
+    }
+
+    formatDuration(seconds) {
+        if (seconds === null || seconds === undefined) {
+            return '-';
+        }
+        const value = Number(seconds);
+        if (!Number.isFinite(value) || value < 0) {
+            return '-';
+        }
+        if (value < 1) {
+            return `${value.toFixed(2)} 秒`;
+        }
+        if (value < 60) {
+            return `${value.toFixed(1)} 秒`;
+        }
+        const hours = Math.floor(value / 3600);
+        const minutes = Math.floor((value % 3600) / 60);
+        const secs = Math.round(value % 60);
+        const parts = [];
+        if (hours) {
+            parts.push(`${hours} 小时`);
+        }
+        if (minutes) {
+            parts.push(`${minutes} 分钟`);
+        }
+        if (secs && parts.length < 2) {
+            parts.push(`${secs} 秒`);
+        }
+        if (!parts.length) {
+            parts.push(`${secs || Math.round(value)} 秒`);
+        }
+        return parts.join(' ');
+    }
+
+    formatPercent(value, digits = 1) {
+        if (value === null || value === undefined) {
+            return '-';
+        }
+        const num = Number(value);
+        if (!Number.isFinite(num)) {
+            return '-';
+        }
+        return `${(num * 100).toFixed(digits)}%`;
+    }
+
     async init() {
         await Promise.all([this.loadMetadata(), this.loadPlans()]);
         this.renderMetadataTags();
@@ -334,6 +389,44 @@ class OptimizerApp {
                 </div>
             `
             : '';
+        const runtime = summary?.runtime;
+        const runtimeHtml = runtime
+            ? `
+                <div style="margin-top:1rem;">
+                    <h4 style="margin-bottom:0.5rem;">运行效率</h4>
+                    <div class="tag-list">
+                        <span class="tag">预期 ${this.formatDuration(runtime.expected_duration_seconds)}</span>
+                        <span class="tag">实际 ${this.formatDuration(runtime.actual_duration_seconds)}</span>
+                        <span class="tag">速率 ${this.formatNumber(runtime.tests_per_second)} 组/秒</span>
+                    </div>
+                    <p class="section-subtitle" style="margin-top:0.5rem;">估算组合 ${runtime.estimated_total_combinations ?? '-'} · 实测组合 ${runtime.actual_total_combinations ?? '-'}</p>
+                </div>
+            `
+            : '';
+        const distribution = summary?.annual_return_distribution;
+        const distributionHtml = distribution && Object.keys(distribution).length
+            ? `
+                <div style="margin-top:1rem;">
+                    <h4 style="margin-bottom:0.5rem;">收益率分布</h4>
+                    <div class="tag-list">
+                        <span class="tag">最小 ${this.formatPercent(distribution.min)}</span>
+                        <span class="tag">25分位 ${this.formatPercent(distribution.p25)}</span>
+                        <span class="tag">中位数 ${this.formatPercent(distribution.p50)}</span>
+                        <span class="tag">75分位 ${this.formatPercent(distribution.p75)}</span>
+                        <span class="tag">最大 ${this.formatPercent(distribution.max)}</span>
+                    </div>
+                    <p class="section-subtitle" style="margin-top:0.5rem;">平均收益 ${this.formatPercent(distribution.mean)}</p>
+                </div>
+            `
+            : '';
+        const conclusionHtml = summary?.conclusion
+            ? `
+                <div style="margin-top:1rem;">
+                    <h4 style="margin-bottom:0.5rem;">结论</h4>
+                    <p class="section-subtitle" style="margin-top:0;">${summary.conclusion}</p>
+                </div>
+            `
+            : '';
         return `
             <article class="opt-card">
                 <header class="section-header">
@@ -344,6 +437,9 @@ class OptimizerApp {
                     <span class="status-pill ${statusClass}">${statusLabel}</span>
                 </header>
                 ${metricsHtml}
+                ${runtimeHtml}
+                ${distributionHtml}
+                ${conclusionHtml}
                 ${report.message ? `<p class="section-subtitle" style="margin-top:0.8rem;">${report.message}</p>` : ''}
                 ${this.renderFailReasons(report)}
             </article>
