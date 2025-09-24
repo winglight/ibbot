@@ -486,33 +486,13 @@ class DOMService:
         symbol_key = (symbol or "").upper()
         if not connection_manager.is_connected():
             logger.warning(
-                "DOM depth stream start rejected - not connected", symbol=symbol_key
+                "DOM depth stream start rejected - IBKR is not connected",
+                symbol=symbol_key,
             )
-            try:
-                logger.info(
-                    "Attempting to reconnect IBKR before starting DOM stream",
-                    symbol=symbol_key,
-                )
-                reconnect_ok = connection_manager.connect()
-            except Exception as exc:
-                logger.error(
-                    "IBKR reconnection attempt failed", symbol=symbol_key, error=str(exc)
-                )
-                reconnect_ok = False
-
-            if reconnect_ok:
-                # Give connection thread a brief moment to finish handshake
-                for _ in range(20):
-                    if connection_manager.is_connected():
-                        break
-                    time.sleep(0.25)
-
-            if not connection_manager.is_connected():
-                logger.warning(
-                    "DOM depth stream start aborted - IBKR still disconnected",
-                    symbol=symbol_key,
-                )
-                return False
+            logger.info(
+                "Connect to IBKR manually before starting DOM stream", symbol=symbol_key
+            )
+            return False
         self._active_symbol = symbol_key
         logger.info("Starting DOM depth stream", symbol=symbol_key, num_rows=num_rows)
         result = depth_subscriber.start_depth_stream(

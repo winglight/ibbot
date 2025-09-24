@@ -602,7 +602,7 @@ class ConnectionManager:
             # 如果配置发生变化，需要重新连接
             current_host = getattr(self.ib, 'host', None)
             current_port = getattr(self.ib, 'port', None)
-            if (current_host == self.config.host and 
+            if (current_host == self.config.host and
                 current_port == self.config.port):
                 connection_logger.info("Already connected to IBKR with same configuration")
                 self._record_connect_result(True)
