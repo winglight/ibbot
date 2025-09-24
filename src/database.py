@@ -7,7 +7,7 @@ import sqlite3
 import json
 import pandas as pd
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Sequence
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from loguru import logger
@@ -564,6 +564,47 @@ class DatabaseManager:
                 orders.append(Order(*row))
             database_logger.debug(f"Loaded {len(orders)} orders for strategy {strategy_name}")
             return orders
+
+    def get_strategy_order_stats(
+        self,
+        strategy_names: Optional[Sequence[str]] = None,
+        order_source: str = 'strategy',
+    ) -> Dict[str, Dict[str, Any]]:
+        """获取策略订单的数量和最近触发时间"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            query = (
+                "SELECT strategy_name, COUNT(*) AS order_count, MAX(created_at) AS last_created_at "
+                "FROM orders WHERE order_source = ?"
+            )
+            params: List[Any] = [order_source]
+
+            if strategy_names:
+                placeholders = ",".join(["?"] * len(strategy_names))
+                query += f" AND strategy_name IN ({placeholders})"
+                params.extend(strategy_names)
+
+            query += " GROUP BY strategy_name"
+            cursor.execute(query, params)
+
+            stats: Dict[str, Dict[str, Any]] = {}
+            for name, count, last_created_at in cursor.fetchall():
+                stats[name] = {
+                    "order_count": int(count or 0),
+                    "last_created_at": last_created_at,
+                }
+
+            if strategy_names:
+                for name in strategy_names:
+                    stats.setdefault(
+                        name,
+                        {"order_count": 0, "last_created_at": None},
+                    )
+
+            database_logger.debug(
+                f"Loaded order stats for {len(stats)} strategies (source={order_source})"
+            )
+            return stats
 
     def delete_strategy_orders(self, strategy_name: str, order_source: str = 'strategy') -> int:
         """删除指定策略的订单记录"""

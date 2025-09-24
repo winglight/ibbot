@@ -1416,11 +1416,15 @@ class StrategyManager:
         if name in self.strategies:
             strategy = self.strategies[name]
             strategy_dict = asdict(strategy)
-            orders = self.db_manager.load_strategy_orders(strategy.name, 'strategy', limit=1000)
-            strategy_dict['trigger_count'] = len(orders)
-            times = [parse_local_datetime(o.timestamp) for o in orders if o.timestamp]
-            if times:
-                strategy_dict['last_triggered'] = max(times)
+            order_stats = self.db_manager.get_strategy_order_stats([strategy.name], 'strategy')
+            stats = order_stats.get(strategy.name, {})
+            strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
+            last_created_at = stats.get('last_created_at')
+            if last_created_at:
+                parsed_time = parse_local_datetime(last_created_at)
+                strategy_dict['last_triggered'] = parsed_time or last_created_at
+            else:
+                strategy_dict['last_triggered'] = None
             # Convert datetime objects to strings for JSON serialization
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
                 strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
@@ -2219,13 +2223,18 @@ if __name__ == "__main__":
     def get_strategies(self) -> List[Dict[str, Any]]:
         """Get all strategies"""
         result = []
+        order_stats = self.db_manager.get_strategy_order_stats(order_source='strategy')
+
         for strategy in self.strategies.values():
             strategy_dict = asdict(strategy)
-            orders = self.db_manager.load_strategy_orders(strategy.name, 'strategy', limit=1000)
-            strategy_dict['trigger_count'] = len(orders)
-            times = [parse_local_datetime(o.timestamp) for o in orders if o.timestamp]
-            if times:
-                strategy_dict['last_triggered'] = max(times)
+            stats = order_stats.get(strategy.name, {})
+            strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
+            last_created_at = stats.get('last_created_at')
+            if last_created_at:
+                parsed_time = parse_local_datetime(last_created_at)
+                strategy_dict['last_triggered'] = parsed_time or last_created_at
+            else:
+                strategy_dict['last_triggered'] = None
             # Convert datetime objects to strings for JSON serialization
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
                 strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
