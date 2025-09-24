@@ -7215,6 +7215,83 @@ class TradingApp {
             if (sltpGroup) sltpGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
             if (subscriptionGroup) subscriptionGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
             if (positionTimingGroup) positionTimingGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
+            const parameterGroup = document.getElementById('editParameterGroup');
+            const parameterList = document.getElementById('editParameterList');
+            this.strategyParameterInputs = {};
+            if (parameterGroup && parameterList) {
+                parameterList.innerHTML = '';
+                const schemaSource = Array.isArray(s.parameters) && s.parameters.length
+                    ? s.parameters
+                    : (Array.isArray(s.configurable_parameters) ? s.configurable_parameters : []);
+                const schema = Array.isArray(schemaSource) ? schemaSource : [];
+                if (s.strategy_type === 'internal' && schema.length) {
+                    parameterGroup.style.display = '';
+                    schema.forEach((param) => {
+                        if (!param?.name) return;
+                        const wrapper = document.createElement('div');
+                        wrapper.className = 'border rounded p-2';
+                        const controlId = `editParam-${param.name}`;
+                        const label = document.createElement('label');
+                        label.className = 'form-label small mb-1';
+                        label.setAttribute('for', controlId);
+                        label.textContent = param.label || param.name;
+                        wrapper.appendChild(label);
+
+                        let inputEl;
+                        if (param.type === 'bool') {
+                            const switchWrap = document.createElement('div');
+                            switchWrap.className = 'form-check form-switch';
+                            const checkbox = document.createElement('input');
+                            checkbox.className = 'form-check-input';
+                            checkbox.type = 'checkbox';
+                            checkbox.id = controlId;
+                            checkbox.checked = param.value !== undefined ? Boolean(param.value) : Boolean(param.default);
+                            const textLabel = document.createElement('label');
+                            textLabel.className = 'form-check-label';
+                            textLabel.setAttribute('for', controlId);
+                            textLabel.textContent = 'Enabled';
+                            switchWrap.appendChild(checkbox);
+                            switchWrap.appendChild(textLabel);
+                            wrapper.appendChild(switchWrap);
+                            inputEl = checkbox;
+                        } else {
+                            const input = document.createElement('input');
+                            input.className = 'form-control form-control-sm';
+                            input.type = 'number';
+                            input.id = controlId;
+                            const stepValue = param.step !== undefined ? param.step : (param.type === 'int' ? 1 : 0.1);
+                            if (stepValue !== undefined && stepValue !== null) input.step = stepValue;
+                            if (param.min !== undefined && param.min !== null) input.min = param.min;
+                            if (param.max !== undefined && param.max !== null) input.max = param.max;
+                            const initial = param.value !== undefined && param.value !== null
+                                ? param.value
+                                : (param.allow_null ? '' : (param.default ?? ''));
+                            input.value = initial !== null && initial !== undefined ? initial : '';
+                            input.required = !param.allow_null;
+                            wrapper.appendChild(input);
+                            inputEl = input;
+                        }
+
+                        const help = document.createElement('div');
+                        help.className = 'form-text';
+                        const helpParts = [];
+                        if (param.default !== undefined && param.default !== null) helpParts.push(`默认 ${param.default}`);
+                        const rangeParts = [];
+                        if (param.min !== undefined && param.min !== null) rangeParts.push(`≥ ${param.min}`);
+                        if (param.max !== undefined && param.max !== null) rangeParts.push(`≤ ${param.max}`);
+                        if (rangeParts.length) helpParts.push(rangeParts.join('，'));
+                        if (param.allow_null) helpParts.push('可留空');
+                        if (param.description) helpParts.push(param.description);
+                        help.textContent = helpParts.join('； ') || '可调整参数';
+                        wrapper.appendChild(help);
+
+                        parameterList.appendChild(wrapper);
+                        this.strategyParameterInputs[param.name] = { input: inputEl, meta: param };
+                    });
+                } else {
+                    parameterGroup.style.display = 'none';
+                }
+            }
             const slEnabled = document.getElementById('editSlEnabledSwitch');
             const tpEnabled = document.getElementById('editTpEnabledSwitch');
             const slPrice = document.getElementById('editSlPriceInput');
@@ -7263,6 +7340,49 @@ class TradingApp {
                         const closeVal = closeRaw !== undefined && closeRaw !== '' ? parseInt(closeRaw, 10) : null;
                         updates.position_add_cooldown_minutes = Number.isFinite(coolVal) ? coolVal : null;
                         updates.close_before_close_minutes = Number.isFinite(closeVal) ? closeVal : null;
+                        const parameterUpdates = {};
+                        let validationError = null;
+                        if (this.strategyParameterInputs) {
+                            Object.entries(this.strategyParameterInputs).forEach(([paramName, ctx]) => {
+                                if (validationError) return;
+                                const { input, meta } = ctx;
+                                let value;
+                                if (meta.type === 'bool') {
+                                    value = !!input.checked;
+                                } else {
+                                    const raw = input.value;
+                                    if (raw === '' || raw === null || raw === undefined) {
+                                        value = meta.allow_null ? null : (meta.default ?? null);
+                                    } else if (meta.type === 'int') {
+                                        value = parseInt(raw, 10);
+                                    } else if (meta.type === 'float') {
+                                        value = parseFloat(raw);
+                                    } else {
+                                        value = raw;
+                                    }
+                                    if ((meta.type === 'int' || meta.type === 'float')) {
+                                        if (value === null && meta.allow_null) {
+                                            // ok
+                                        } else if (!Number.isFinite(value)) {
+                                            validationError = `参数 ${meta.label || paramName} 无效`;
+                                            return;
+                                        }
+                                    }
+                                }
+                                if ((value === null || value === undefined) && !meta.allow_null && meta.type !== 'bool') {
+                                    validationError = `参数 ${meta.label || paramName} 必须填写`;
+                                    return;
+                                }
+                                parameterUpdates[paramName] = value;
+                            });
+                        }
+                        if (validationError) {
+                            this.showAlert('danger', validationError);
+                            return;
+                        }
+                        if (Object.keys(parameterUpdates).length) {
+                            updates.parameters = parameterUpdates;
+                        }
                     }
                     try {
                         await this.apiCall(`/strategies/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(updates) });
@@ -7378,7 +7498,8 @@ class TradingApp {
                                 trend_threshold: 'Trend Threshold',
                                 cooldown_seconds: 'Cooldown',
                                 max_loss_streak: 'Breaker (Max Loss Streak)',
-                                default_quantity: 'Base Quantity'
+                                default_quantity: 'Base Quantity',
+                                signal_frequency_seconds: 'Execution Frequency'
                             };
                             const entries = Object.entries(params).filter(([, value]) => value !== null && value !== undefined);
                             if (entries.length) {
@@ -7394,6 +7515,62 @@ class TradingApp {
                                 });
                             } else {
                                 riskParamEl.innerHTML = '<li class="text-muted">No dedicated parameters</li>';
+                            }
+                        }
+                        const paramTableBody = document.querySelector('#summaryParameterTable tbody');
+                        if (paramTableBody) {
+                            paramTableBody.innerHTML = '';
+                            const schemaSource = Array.isArray(info.configurable_parameters) && info.configurable_parameters.length
+                                ? info.configurable_parameters
+                                : (Array.isArray(info.parameters) ? info.parameters : []);
+                            const schema = Array.isArray(schemaSource) ? schemaSource : [];
+                            const formatValue = (param, key) => {
+                                const raw = param?.[key];
+                                if (raw === null || raw === undefined) return '-';
+                                if (param?.type === 'bool') {
+                                    return raw ? 'On' : 'Off';
+                                }
+                                if (typeof raw === 'number') {
+                                    return Number.isFinite(raw) ? raw : '-';
+                                }
+                                return raw;
+                            };
+                            const buildRangeText = (param) => {
+                                const parts = [];
+                                if (param?.min !== undefined && param.min !== null) parts.push(`≥ ${param.min}`);
+                                if (param?.max !== undefined && param.max !== null) parts.push(`≤ ${param.max}`);
+                                let range = parts.join(' / ');
+                                if (param?.allow_null) {
+                                    range = range ? `${range}; allow null` : 'Allow null';
+                                }
+                                return range || '-';
+                            };
+                            if (schema.length) {
+                                schema.forEach((param) => {
+                                    const tr = document.createElement('tr');
+                                    if (param?.description) tr.title = param.description;
+                                    const nameCell = document.createElement('td');
+                                    nameCell.textContent = param?.label || param?.name || '-';
+                                    const valueCell = document.createElement('td');
+                                    valueCell.textContent = formatValue(param, 'value');
+                                    const defaultCell = document.createElement('td');
+                                    defaultCell.textContent = formatValue(param, 'default');
+                                    const rangeCell = document.createElement('td');
+                                    rangeCell.textContent = buildRangeText(param);
+                                    tr.appendChild(nameCell);
+                                    tr.appendChild(valueCell);
+                                    tr.appendChild(defaultCell);
+                                    tr.appendChild(rangeCell);
+                                    paramTableBody.appendChild(tr);
+                                });
+                            } else {
+                                const row = document.createElement('tr');
+                                const cell = document.createElement('td');
+                                cell.colSpan = 4;
+                                cell.className = 'text-muted';
+                                cell.textContent = 'No configurable parameters';
+                                row.appendChild(cell);
+                                paramTableBody.appendChild(row);
                             }
                         }
                         const subKey = info.data_subscription || s?.data_subscription || '';

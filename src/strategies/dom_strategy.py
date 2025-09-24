@@ -35,21 +35,24 @@ class DOMStrategy(BaseStrategy):
         structure_window_seconds: float = 10.0,
         structure_tolerance_ticks: float = 2.0,
         min_signal_conditions: int = 3,
+        signal_frequency_seconds: float = 60.0,
     ) -> None:
         super().__init__(name=name, description=description)
         self.symbol = symbol.upper() if symbol else None
         self.trend_threshold = trend_threshold
-        self.cooldown_seconds = max(0, cooldown_seconds)
+        self.cooldown_seconds = max(0.0, float(cooldown_seconds))
         self.max_loss_streak = max(1, max_loss_streak)
         self.structure_window_seconds = max(0.0, float(structure_window_seconds))
         self.structure_tolerance_ticks = max(0.0, float(structure_tolerance_ticks))
         self.min_signal_conditions = max(1, int(min_signal_conditions))
+        self.signal_frequency_seconds = max(0.0, float(signal_frequency_seconds))
         self.dom_service: Optional[Any] = None
         self.breaker_tripped: bool = False
         self.loss_streak: int = 0
         self.default_quantity: int = 1
         self._last_signal_direction: int = 0
         self._last_signal_time: float = 0.0
+        self._last_execution_time: float = 0.0
         self._listener_attached: bool = False
         self._processing: bool = False
         self._started_at: Optional[float] = None
@@ -66,6 +69,80 @@ class DOMStrategy(BaseStrategy):
             "综合盘口堆叠、订单流偏向、扫单/吸收与价差变化过滤噪音",
             "配合冷却期与断路器，结合RiskManager执行仓位与风控管理"
         ]
+        self.set_parameter_definitions(
+            {
+                "trend_threshold": {
+                    "type": "float",
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 5.0,
+                    "allow_null": True,
+                    "label": "Trend Score Threshold",
+                    "description": "最小趋势分数，低于该阈值不触发趋势过滤。",
+                    "step": 0.05,
+                },
+                "cooldown_seconds": {
+                    "type": "float",
+                    "default": 15.0,
+                    "min": 0.0,
+                    "max": 600.0,
+                    "label": "Signal Cooldown (s)",
+                    "description": "同方向信号最短冷却时间，避免噪音重复触发。",
+                    "step": 1.0,
+                },
+                "signal_frequency_seconds": {
+                    "type": "float",
+                    "default": 60.0,
+                    "min": 0.0,
+                    "max": 1800.0,
+                    "label": "Execution Frequency (s)",
+                    "description": "最小成交间隔，限制真实下单频率。",
+                    "step": 5.0,
+                },
+                "max_loss_streak": {
+                    "type": "int",
+                    "default": 3,
+                    "min": 1,
+                    "max": 10,
+                    "label": "Max Loss Streak",
+                    "description": "连续亏损次数达到阈值后触发断路器。",
+                },
+                "structure_window_seconds": {
+                    "type": "float",
+                    "default": 10.0,
+                    "min": 0.0,
+                    "max": 120.0,
+                    "label": "Structure Window (s)",
+                    "description": "观察近期高低点的窗口长度。",
+                    "step": 1.0,
+                },
+                "structure_tolerance_ticks": {
+                    "type": "float",
+                    "default": 2.0,
+                    "min": 0.0,
+                    "max": 10.0,
+                    "label": "Zone Tolerance (ticks)",
+                    "description": "判定支撑/压力区的允许价差。",
+                    "step": 0.25,
+                },
+                "min_signal_conditions": {
+                    "type": "int",
+                    "default": 3,
+                    "min": 1,
+                    "max": 5,
+                    "label": "Confirmation Count",
+                    "description": "触发信号所需的最少确认条件数量。",
+                },
+                "default_quantity": {
+                    "type": "int",
+                    "default": 1,
+                    "min": 1,
+                    "max": 100,
+                    "label": "Fallback Quantity",
+                    "description": "风险管理无法计算仓位时使用的默认合约数。",
+                },
+            }
+        )
 
     # ------------------------------------------------------------------
     def set_dependencies(self, *, dom_service: Any = None, **kwargs: Any) -> None:
@@ -201,6 +278,17 @@ class DOMStrategy(BaseStrategy):
         if self.breaker_tripped:
             return
 
+        now = time.time()
+        if (
+            self.signal_frequency_seconds > 0
+            and (now - self._last_execution_time) < self.signal_frequency_seconds
+        ):
+            self.logger.info(
+                "Execution frequency limit active: %.2fs remaining",
+                self.signal_frequency_seconds - (now - self._last_execution_time),
+            )
+            return
+
         self._processing = True
         try:
             if self.risk_manager:
@@ -226,6 +314,7 @@ class DOMStrategy(BaseStrategy):
                 "sec_type": sec_type,
             }
             self.queue_manager.add_task("strategy_order", payload)
+            self._last_execution_time = now
         finally:
             self._processing = False
 
@@ -786,8 +875,10 @@ class DOMStrategy(BaseStrategy):
                 "structure_window_seconds": self.structure_window_seconds,
                 "structure_tolerance_ticks": self.structure_tolerance_ticks,
                 "min_signal_conditions": self.min_signal_conditions,
+                "signal_frequency_seconds": self.signal_frequency_seconds,
             },
             "summary_points": list(self.summary_points),
+            "configurable_parameters": self.describe_parameters(),
         }
 
         if self.symbol:
