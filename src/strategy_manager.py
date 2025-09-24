@@ -749,9 +749,26 @@ class StrategyManager:
         except RuntimeError:
             loop = None
 
+        log_subscription = subscription or self._get_strategy_setting(
+            strategy_name, "data_subscription"
+        )
+        log_symbol = symbol or self._get_strategy_setting(strategy_name, "primary_symbol")
+
         if loop and loop.is_running():
+            strategy_logger.info(
+                "Activating data push immediately",
+                strategy=strategy_name,
+                subscription=log_subscription,
+                symbol=log_symbol,
+            )
             loop.create_task(_activate())
         else:
+            strategy_logger.info(
+                "Deferring data push activation until loop available",
+                strategy=strategy_name,
+                subscription=log_subscription,
+                symbol=log_symbol,
+            )
             self._pending_data_push_requests.append((strategy_name, subscription, symbol))
 
     def get_data_push_state(self, strategy_name: str) -> Dict[str, Any]:
@@ -771,9 +788,16 @@ class StrategyManager:
             return {"success": False, "error": "Strategy not found or not internal"}
 
         state = self.data_push_state.setdefault(strategy_name, {})
+        prior_state = dict(state)
         stored_subscription = subscription or self._get_strategy_setting(strategy_name, "data_subscription")
         if not stored_subscription:
             state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
+            state.pop("_last_gap_warning_at", None)
+            strategy_logger.warning(
+                "Data push request rejected - subscription missing",
+                strategy=strategy_name,
+                requested_action="enable" if enabled else "disable",
+            )
             return {"success": False, "error": "No subscription configured"}
 
         # Determine target symbol
@@ -783,11 +807,26 @@ class StrategyManager:
         if target_symbol:
             target_symbol = str(target_symbol).strip().upper()
 
+        strategy_logger.info(
+            "Data push change requested",
+            strategy=strategy_name,
+            requested_action="enable" if enabled else "disable",
+            subscription=stored_subscription,
+            symbol=target_symbol,
+            prior_state=prior_state,
+        )
+
         dom_service = None
 
         if enabled:
             if not target_symbol:
                 state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
+                state.pop("_last_gap_warning_at", None)
+                strategy_logger.warning(
+                    "Data push enable failed - primary symbol missing",
+                    strategy=strategy_name,
+                    subscription=stored_subscription,
+                )
                 return {"success": False, "error": "Primary symbol required"}
 
             ok = False
@@ -797,6 +836,11 @@ class StrategyManager:
                     from src.dom_service import get_dom_service
 
                     dom_service = get_dom_service()
+                    strategy_logger.info(
+                        "Starting DOM stream for strategy",
+                        strategy=strategy_name,
+                        symbol=target_symbol,
+                    )
                     ok = await dom_service.start_stream(target_symbol)
                 elif stored_subscription == "market_data":
                     try:
@@ -828,6 +872,14 @@ class StrategyManager:
                     "awaiting_data": False,
                     "last_data_timestamp": None,
                 })
+                state.pop("_last_gap_warning_at", None)
+                strategy_logger.error(
+                    "Failed to enable data push",
+                    strategy=strategy_name,
+                    subscription=stored_subscription,
+                    symbol=target_symbol,
+                    error=error or "Failed to start data push",
+                )
                 payload = {"success": False, "error": error or "Failed to start data push"}
                 return payload
 
@@ -864,6 +916,13 @@ class StrategyManager:
                 "awaiting_data": True,
                 "last_data_timestamp": None,
             })
+            state.pop("_last_gap_warning_at", None)
+            strategy_logger.info(
+                "Data push enabled",
+                strategy=strategy_name,
+                subscription=stored_subscription,
+                symbol=target_symbol,
+            )
             return {
                 "success": True,
                 "active": True,
@@ -891,6 +950,13 @@ class StrategyManager:
             "awaiting_data": False,
             "last_data_timestamp": None,
         })
+        state.pop("_last_gap_warning_at", None)
+        strategy_logger.info(
+            "Data push disabled",
+            strategy=strategy_name,
+            subscription=stored_subscription,
+            symbol=target_symbol,
+        )
         return {
             "success": True,
             "active": False,
@@ -906,8 +972,20 @@ class StrategyManager:
         pending_requests = list(self._pending_data_push_requests)
         self._pending_data_push_requests.clear()
 
+        if pending_requests:
+            strategy_logger.info(
+                "Processing deferred data push activations",
+                count=len(pending_requests),
+            )
+
         for strategy_name, subscription, symbol in pending_requests:
             try:
+                strategy_logger.info(
+                    "Replaying deferred data push request",
+                    strategy=strategy_name,
+                    subscription=subscription,
+                    symbol=symbol,
+                )
                 await self.set_data_push(
                     strategy_name,
                     True,
@@ -940,6 +1018,12 @@ class StrategyManager:
                 continue
 
             try:
+                strategy_logger.info(
+                    "Restoring stored data push",
+                    strategy=record.name,
+                    subscription=subscription,
+                    symbol=target_symbol,
+                )
                 result = await self.set_data_push(
                     record.name,
                     True,
@@ -1364,19 +1448,38 @@ class StrategyManager:
 
         push_state = self.data_push_state.get(name)
         if push_state:
-            awaiting_data = bool(push_state.get("awaiting_data"))
-            if status.get("is_receiving_data") or not push_state.get("active"):
+            was_awaiting = bool(push_state.get("awaiting_data"))
+            is_receiving = bool(status.get("is_receiving_data"))
+            active_flag = bool(push_state.get("active"))
+            if is_receiving and was_awaiting:
+                strategy_logger.info(
+                    "Data push is now receiving data",
+                    strategy=name,
+                    subscription=push_state.get("subscription"),
+                    symbol=push_state.get("symbol"),
+                )
+
+            awaiting_data = was_awaiting
+            if is_receiving or not active_flag:
                 if awaiting_data:
                     push_state["awaiting_data"] = False
                 awaiting_data = False
+                push_state.pop("_last_gap_warning_at", None)
 
             last_data_ts = status.get("last_data_timestamp")
             last_data_iso: Optional[str] = None
+            numeric_last: Optional[float] = None
             if isinstance(last_data_ts, (int, float)) and last_data_ts > 0:
+                numeric_last = float(last_data_ts)
                 try:
-                    last_data_iso = to_local_iso(ensure_local_timezone(datetime.fromtimestamp(last_data_ts)))
+                    last_data_iso = to_local_iso(ensure_local_timezone(datetime.fromtimestamp(numeric_last)))
                 except Exception:  # pragma: no cover - defensive guard
                     last_data_iso = None
+            elif isinstance(last_data_ts, str):
+                try:
+                    numeric_last = float(last_data_ts)
+                except (TypeError, ValueError):
+                    numeric_last = None
 
             payload = {
                 "enabled": bool(push_state.get("enabled")),
@@ -1391,6 +1494,30 @@ class StrategyManager:
                 push_state["last_data_timestamp"] = last_data_iso
             elif "last_data_timestamp" not in push_state:
                 push_state["last_data_timestamp"] = None
+
+            if active_flag and not is_receiving:
+                now_ts = time.time()
+                last_warning_at = float(push_state.get("_last_gap_warning_at", 0.0) or 0.0)
+                if numeric_last is not None and numeric_last > 0:
+                    elapsed = max(0.0, now_ts - numeric_last)
+                    if elapsed >= 15.0 and (now_ts - last_warning_at) >= 30.0:
+                        strategy_logger.warning(
+                            "Data push stalled",
+                            strategy=name,
+                            subscription=push_state.get("subscription"),
+                            symbol=push_state.get("symbol"),
+                            seconds_since_last=round(elapsed, 1),
+                            processed=status.get("processed_count"),
+                        )
+                        push_state["_last_gap_warning_at"] = now_ts
+                elif not awaiting_data and (now_ts - last_warning_at) >= 30.0:
+                    strategy_logger.warning(
+                        "Data push active but no last data timestamp",
+                        strategy=name,
+                        subscription=push_state.get("subscription"),
+                        symbol=push_state.get("symbol"),
+                    )
+                    push_state["_last_gap_warning_at"] = now_ts
 
             status["data_push"] = payload
 
