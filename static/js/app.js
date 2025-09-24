@@ -5661,7 +5661,8 @@ class TradingApp {
             const volume = Number(payload.volume ?? payload.vol ?? payload.lastVolume ?? 0) || 0;
 
             const qty = Number(this.currentMonitor.positionQty || 0);
-            const avgCost = Number(this.currentMonitor.avgCost || 0);
+            const avgCostRaw = Number(this.currentMonitor.avgCost || 0);
+            const avgCostForCalc = qty >= 0 ? avgCostRaw : Math.abs(avgCostRaw);
             const storedMultiplier = Number(this.currentMonitor.contractMultiplier || 0);
             const multiplierSymbol = (this.currentMonitor.symbol || symbol || '').toString().toUpperCase();
             const contractMultiplier = (Number.isFinite(storedMultiplier) && storedMultiplier > 0)
@@ -5685,10 +5686,10 @@ class TradingApp {
             let pnl = 0;
             if (qty > 0) {  // 多头
                 // 多头盈亏 = (当前价格 - 成本价) * 持仓数量
-                pnl = (price - avgCost) * qty * (contractMultiplier || 1);
-            } else {  // 空头
+                pnl = (price - avgCostForCalc) * qty * (contractMultiplier || 1);
+            } else if (qty < 0) {  // 空头
                 // 空头盈亏 = (成本价 - 当前价格) * 持仓数量的绝对值
-                pnl = (avgCost - price) * Math.abs(qty) * (contractMultiplier || 1);
+                pnl = (avgCostForCalc - price) * Math.abs(qty) * (contractMultiplier || 1);
             }
 
             const pnlEl = document.getElementById('monitorPnL');
@@ -5700,7 +5701,7 @@ class TradingApp {
 
             const denom = Math.max(
                 1e-9,
-                Math.abs(avgCost)
+                Math.abs(avgCostForCalc)
                     * Math.max(1, Math.abs(qty))
                     * Math.max(Math.abs(contractMultiplier) || 0, 1e-9)
             );
