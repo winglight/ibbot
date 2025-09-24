@@ -566,6 +566,9 @@
                 history: null,
             };
             this._readOnlyWrapped = false;
+            this._wsUnsubscribeFns = [];
+            this._pendingStatusInitial = false;
+            this._pendingStatsRequest = null;
             if (document.readyState === 'loading') {
                 document.addEventListener('DOMContentLoaded', () => this.init(), { once: true });
             } else {
@@ -937,6 +940,16 @@
         attachApp(appInstance) {
             if (!appInstance || this.app) return;
             this.app = appInstance;
+            if (typeof this.app.registerWebSocketHandler === 'function') {
+                this._wsUnsubscribeFns.forEach(unsub => { try { if (typeof unsub === 'function') unsub(); } catch (e) { console.warn('Failed to unsubscribe DOM optimizer handler', e); } });
+                this._wsUnsubscribeFns = [];
+                this._wsUnsubscribeFns.push(
+                    this.app.registerWebSocketHandler('dom_automation_status', (payload) => this.onAutomationStatusMessage(payload)),
+                );
+                this._wsUnsubscribeFns.push(
+                    this.app.registerWebSocketHandler('dom_stats', (payload) => this.onDomStatsMessage(payload)),
+                );
+            }
             this.wrapReadOnlyHandler();
             this.syncReadOnlyState(this.app?.isReadOnly);
             this.bootstrap();
@@ -1191,36 +1204,17 @@
         async refreshAutomationStatus({ initial = false, force = false } = {}) {
             if (!this.elements.section) return;
             if (!force && this.state.loading.status) return;
-            try {
-                this.setLoading('status', true);
-                this.setButtonLoading(this.elements.refreshStatusBtn, true, '刷新中');
-                let response = null;
-                try {
-                    response = await this.apiCall('/dom/automation/status', {
-                        allowReadOnly: true,
-                        useCache: false
-                    });
-                } catch (error) {
-                    const message = String(error?.message || '').toLowerCase();
-                    if (message.includes('not found')) {
-                        this.renderAutomationStatus(null);
-                        return;
-                    }
-                    throw error;
-                }
-
-                if (response && response.success === false) {
-                    throw new Error(response.detail || '获取自动化状态失败');
-                }
-                this.renderAutomationStatus(response || {});
-                if (initial) {
-                    this.notify('success', '已加载 DOM 自动化状态');
-                }
-            } catch (error) {
-                this.notify('error', `无法获取自动化状态: ${error?.message || error}`);
-            } finally {
+            this.setLoading('status', true);
+            this.setButtonLoading(this.elements.refreshStatusBtn, true, '刷新中');
+            this._pendingStatusInitial = Boolean(initial);
+            const result = this.app?.ibkrManager && typeof this.app.ibkrManager.requestDomAutomationStatus === 'function'
+                ? this.app.ibkrManager.requestDomAutomationStatus({ force })
+                : 'failed';
+            if (result === 'failed') {
                 this.setLoading('status', false);
                 this.setButtonLoading(this.elements.refreshStatusBtn, false);
+                this._pendingStatusInitial = false;
+                this.notify('error', '无法请求自动化状态，请检查WebSocket连接');
             }
         }
 
@@ -1347,51 +1341,113 @@
 
         async refreshStatistics({ silent = false } = {}) {
             if (!this.elements.section) return;
-            const symbol = this.elements.symbolInput?.value?.trim();
-            if (!symbol) {
+            const rawSymbol = this.elements.symbolInput?.value?.trim();
+            if (!rawSymbol) {
                 if (!silent) this.notify('warning', '请先输入交易标的后再刷新统计');
                 return;
             }
+            const symbol = rawSymbol.toUpperCase();
+            this.setLoading('stats', true);
+            if (!silent) this.setButtonLoading(this.elements.refreshStatsBtn, true, '刷新中');
             try {
-                this.setLoading('stats', true);
-                if (!silent) this.setButtonLoading(this.elements.refreshStatsBtn, true, '刷新中');
                 await this.ensureDomStream(symbol);
-                const lookbackSeconds = this.resolveLookbackSeconds();
-                const params = new URLSearchParams();
-                if (Number.isFinite(lookbackSeconds) && lookbackSeconds > 0) {
-                    params.set('lookback_seconds', String(Math.round(lookbackSeconds)));
-                }
-                params.set('max_points', String(DOM_STATS_MAX_POINTS));
-                const query = params.toString();
-                const endpoint = query
-                    ? `/dom/stats/${encodeURIComponent(symbol)}?${query}`
-                    : `/dom/stats/${encodeURIComponent(symbol)}`;
-                const response = await this.apiCall(endpoint, {
-                    allowReadOnly: true,
-                    useCache: false
-                });
-                if (!response || response.success === false) {
-                    throw new Error(response?.detail || '获取统计数据失败');
-                }
-                const stats = response.stats || {};
-                const metrics = Array.isArray(response.chart_metrics) ? response.chart_metrics : [];
-                this.state.lastStats = stats;
-                this.state.statsWindow = response.window || null;
-                this.state.statsMetadata = response.metadata || null;
-                this.state.latestSignal = response.latest_signal || null;
-                this.updateStatsIndicators(stats);
-                this.updateSummary(stats, metrics, {
-                    latestSignal: response.latest_signal,
-                    avgDelaySeconds: stats?.avg_delay_seconds ?? null,
-                    window: response.window || null,
-                });
-                this.setHistoryMetrics(metrics);
             } catch (error) {
-                this.notify('error', `刷新统计失败: ${error?.message || error}`);
-            } finally {
+                if (!silent) {
+                    this.notify('warning', `尝试启动 DOM 流失败: ${error?.message || error}`);
+                }
+            }
+            const lookbackSeconds = this.resolveLookbackSeconds();
+            const payload = {
+                symbol,
+                lookbackSeconds: Number.isFinite(lookbackSeconds) && lookbackSeconds > 0
+                    ? Math.round(Number(lookbackSeconds))
+                    : undefined,
+                maxPoints: DOM_STATS_MAX_POINTS,
+            };
+            const result = this.app?.ibkrManager && typeof this.app.ibkrManager.requestDomStats === 'function'
+                ? this.app.ibkrManager.requestDomStats(payload)
+                : 'failed';
+            if (result !== 'failed') {
+                this._pendingStatsRequest = { symbol, silent: Boolean(silent) };
+            } else {
                 this.setLoading('stats', false);
                 this.setButtonLoading(this.elements.refreshStatsBtn, false);
+                if (!silent) {
+                    this.notify('error', '无法请求统计数据，请检查WebSocket连接');
+                }
             }
+        }
+
+        applyStatisticsPayload(payload) {
+            if (!payload || payload.success === false) return;
+            const stats = payload.stats || {};
+            const metrics = Array.isArray(payload.chart_metrics) ? payload.chart_metrics : [];
+            this.state.lastStats = stats;
+            this.state.statsWindow = payload.window || null;
+            this.state.statsMetadata = payload.metadata || null;
+            this.state.latestSignal = payload.latest_signal || null;
+            this.updateStatsIndicators(stats);
+            this.updateSummary(stats, metrics, {
+                latestSignal: payload.latest_signal,
+                avgDelaySeconds: stats?.avg_delay_seconds ?? null,
+                window: payload.window || null,
+            });
+            this.setHistoryMetrics(metrics);
+        }
+
+        onAutomationStatusMessage(message) {
+            if (!this.elements.section) return true;
+            this.setLoading('status', false);
+            this.setButtonLoading(this.elements.refreshStatusBtn, false);
+            const initial = this._pendingStatusInitial;
+            this._pendingStatusInitial = false;
+            if (!message || message.success === false) {
+                const errorText = message?.error || message?.detail || '无法获取自动化状态';
+                if (typeof errorText === 'string' && errorText.toLowerCase().includes('rate')) {
+                    console.debug('DOM automation status request rate limited');
+                } else {
+                    this.notify('error', errorText);
+                }
+                return true;
+            }
+            const statusPayload = message.status && typeof message.status === 'object'
+                ? message.status
+                : message;
+            this.renderAutomationStatus(statusPayload || {});
+            if (initial) {
+                this.notify('success', '已加载 DOM 自动化状态');
+            }
+            return true;
+        }
+
+        onDomStatsMessage(message) {
+            if (!this.elements.section) return true;
+            const currentSymbol = this.elements.symbolInput?.value?.trim()?.toUpperCase() || '';
+            const payloadSymbol = (message?.symbol || '').toUpperCase();
+            if (payloadSymbol && currentSymbol && payloadSymbol !== currentSymbol) {
+                return true;
+            }
+            const pending = this._pendingStatsRequest;
+            const silent = pending?.silent ?? true;
+            if (pending && pending.symbol && payloadSymbol && pending.symbol !== payloadSymbol) {
+                return true;
+            }
+            this._pendingStatsRequest = null;
+            this.setLoading('stats', false);
+            this.setButtonLoading(this.elements.refreshStatsBtn, false);
+            if (!message || message.success === false) {
+                if (!silent) {
+                    const errorText = message?.error || message?.detail || '获取统计数据失败';
+                    if (typeof errorText === 'string' && errorText.toLowerCase().includes('rate')) {
+                        console.debug('DOM stats request rate limited');
+                    } else {
+                        this.notify('error', errorText);
+                    }
+                }
+                return true;
+            }
+            this.applyStatisticsPayload(message);
+            return true;
         }
 
         updateStatsIndicators(stats) {

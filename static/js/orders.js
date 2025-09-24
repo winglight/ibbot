@@ -9,6 +9,8 @@ class OrderManager {
         this.ordersCache = {};
         this.debouncedLoadOrders = null;
         this.initOrdersDebounce();
+        this.wsSubscriptions = [];
+        this.registerWebSocketHandlers();
     }
 
     /**
@@ -36,46 +38,87 @@ class OrderManager {
     /**
      * 加载订单列表（带防抖）
      */
-    async loadOrders() {
+    registerWebSocketHandlers() {
+        if (!this.app || typeof this.app.registerWebSocketHandler !== 'function') return;
+        const unsubscribe = this.app.registerWebSocketHandler('orders_snapshot', (payload) => this.handleOrdersSnapshot(payload));
+        this.wsSubscriptions.push(unsubscribe);
+    }
+
+    async loadOrders(options = {}) {
         console.log('🔄 loadOrders called');
-        
+
         // 显示加载状态
         const tbody = document.querySelector('#ordersTable tbody');
         if (tbody) {
             tbody.innerHTML = '<tr><td colspan="10" class="text-center"><i class="fas fa-spinner fa-spin"></i> Loading orders...</td></tr>';
         }
-        
+
         // 调用防抖函数
-        this.debouncedLoadOrders();
+        this.debouncedLoadOrders(options);
     }
 
     /**
      * 实际加载订单的函数
      */
-    async _loadOrders() {
+    async _loadOrders(options = {}) {
         try {
             console.log('🔄 _loadOrders executing');
-            
+
             const cacheKey = 'orders_main';
-            
+
             // 只获取当天订单，减少数据传输量
             const today = new Date();
             const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
-            console.log('🌐 Fetching today\'s orders data (no cache)');
-            const data = await this.app.apiCall(`/orders?limit=50&start_date=${startOfDay}&use_cache=false`, {
-                method: 'GET',
-                useCache: false,
-                cacheTime: 0
-            });
-            this.orders = data.orders || [];
-            
-            // 仅显示当天订单（本地时区）
+            console.log('🌐 Requesting today\'s orders snapshot via WebSocket');
+            if (this.app && this.app.ibkrManager && typeof this.app.ibkrManager.requestOrdersSnapshot === 'function') {
+                this.app.ibkrManager.requestOrdersSnapshot({
+                    limit: options.limit ?? 50,
+                    startDate: startOfDay,
+                    force: Boolean(options.force),
+                });
+            }
+
+        } catch (error) {
+            console.error('Failed to load orders:', error);
+            const tbody = document.querySelector('#ordersTable tbody');
+            if (tbody) {
+                tbody.innerHTML = '<tr><td colspan="10" class="text-center text-danger">Failed to load orders</td></tr>';
+            }
+        }
+    }
+
+    handleOrdersSnapshot(message) {
+        try {
+            if (!message || message.success === false) {
+                const errorText = message?.error || message?.detail || 'Failed to fetch orders via websocket';
+                console.warn('orders_snapshot error:', errorText);
+                const tbody = document.querySelector('#ordersTable tbody');
+                const isRateLimited = typeof errorText === 'string' && errorText.toLowerCase().includes('rate');
+                if (tbody) {
+                    if (isRateLimited) {
+                        const previous = Array.isArray(this.app?.orders) ? this.app.orders : [];
+                        if (previous.length) {
+                            this.updateOrdersTableSmart(previous, tbody);
+                        } else {
+                            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No orders available</td></tr>';
+                        }
+                    } else {
+                        tbody.innerHTML = `<tr><td colspan="10" class="text-center text-danger">${errorText}</td></tr>`;
+                    }
+                }
+                return true;
+            }
+
+            const orders = Array.isArray(message?.orders) ? message.orders : [];
+            this.orders = orders;
+
+            const tbody = document.querySelector('#ordersTable tbody');
+            if (!tbody) return true;
+
             const now = new Date();
             const startOfDayMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
             const endOfDayMs = startOfDayMs + 24 * 60 * 60 * 1000;
-            
-            // 过滤和排序
-            const filteredOrders = this.orders.filter(order => {
+            const filteredOrders = orders.filter(order => {
                 if (!order || order.order_id === 0) return false;
                 if (!order.submit_time) return false;
                 const ts = new Date(order.submit_time).getTime();
@@ -84,25 +127,20 @@ class OrderManager {
             const sortedOrders = filteredOrders.sort((a, b) => {
                 const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
                 const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;
-                if (bt !== at) return bt - at; // 按创建时间降序
+                if (bt !== at) return bt - at;
                 const aid = Number(a.order_id) || 0;
                 const bid = Number(b.order_id) || 0;
-                return bid - aid; // 次级按ID降序
+                return bid - aid;
             });
-            
-            // 更新表格
-            const tbody = document.querySelector('#ordersTable tbody');
-            if (tbody) {
-                this.updateOrdersTableSmart(sortedOrders, tbody);
+
+            if (this.app) {
+                this.app.orders = sortedOrders.slice();
             }
-            
+            this.updateOrdersTableSmart(sortedOrders, tbody);
         } catch (error) {
-            console.error('Failed to load orders:', error);
-            const tbody = document.querySelector('#ordersTable tbody');
-            if (tbody) {
-                tbody.innerHTML = '<tr><td colspan="10" class="text-center text-danger">Failed to load orders</td></tr>';
-            }
+            console.error('Failed to process orders_snapshot:', error);
         }
+        return true;
     }
 
     /**
