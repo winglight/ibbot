@@ -228,7 +228,7 @@ class OrderManager {
                 existingOrderIds.delete(orderId);
             } else {
                 // 新订单，需要插入
-                console.log(`➕ Adding new row for order ${orderId}`);
+                // console.log(`➕ Adding new row for order ${orderId}`);
                 const insertPosition = this.findInsertPosition(tbody, index);
                 if (insertPosition) {
                     tbody.insertBefore(newRowContent, insertPosition);
