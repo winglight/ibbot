@@ -1,13 +1,14 @@
 """Background task implementations for optimizer module."""
 
 from __future__ import annotations
-
 from datetime import datetime, timedelta
+from time import perf_counter
 from typing import Any, Dict, List, Tuple
 
 from loguru import logger
 
 from .engine import OptimizationEngine
+from .reporting import build_conclusion, compute_return_distribution, compute_runtime_summary
 from .schemas import (
     OptimizationReportData,
     OptimizationRequest,
@@ -35,6 +36,8 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
         results: List[OptimizationResultItem] = []
         fail_reasons: List[str] = []
         best_result: Tuple[float, OptimizationResultItem] | None = None
+        started_at = datetime.utcnow()
+        start_perf = perf_counter()
 
         for idx, outcome in enumerate(engine.run(), start=1):
             progress = min(95, max(10, int(idx / total * 90)))
@@ -60,6 +63,9 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
             logger.warning(message)
             return
 
+        completed_at = datetime.utcnow()
+        elapsed_seconds = max(perf_counter() - start_perf, 0.0)
+
         best_item = best_result[1] if best_result else results[0]
         best_metrics = best_item.metrics
         equity_curve = _build_equity_curve(
@@ -68,6 +74,15 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
             best_metrics.get("max_drawdown", 0.0),
         )
         sorted_results = sorted(results, key=lambda r: r.metrics.get("sharpe", 0.0), reverse=True)
+        actual_total = len(results) + len(fail_reasons)
+        runtime_summary = compute_runtime_summary(
+            started_at,
+            completed_at,
+            elapsed_seconds,
+            total,
+            actual_total,
+        )
+        return_distribution = compute_return_distribution(sorted_results)
         report = OptimizationReportData(
             task_id=task_id,
             results=sorted_results,
@@ -75,10 +90,20 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
                 "best_sharpe": round(best_metrics.get("sharpe", 0.0), 3),
                 "best_max_drawdown": round(best_metrics.get("max_drawdown", 0.0), 4),
                 "best_annual_return": round(best_metrics.get("annual_return", 0.0), 4),
-                "tested_combinations": len(results) + len(fail_reasons),
+                "tested_combinations": actual_total,
                 "successful_combinations": len(results),
                 "failed_combinations": len(fail_reasons),
                 "generated_at": datetime.utcnow().isoformat() + "Z",
+                "runtime": runtime_summary,
+                "annual_return_distribution": return_distribution,
+                "conclusion": build_conclusion(
+                    actual_total,
+                    len(results),
+                    len(fail_reasons),
+                    best_metrics.get("sharpe"),
+                    best_metrics.get("max_drawdown"),
+                    return_distribution,
+                ),
             },
             equity_curve=equity_curve,
             fail_reasons=fail_reasons,
