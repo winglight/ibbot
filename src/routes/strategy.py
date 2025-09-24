@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import asdict
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -61,7 +62,16 @@ async def list_strategy_files(user: Optional[str] = Depends(get_current_user)):
 async def list_strategies(user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    return {"success": True, "strategies": strategy_manager.get_strategies()}
+    loop = asyncio.get_event_loop()
+    try:
+        strategies = await asyncio.wait_for(
+            loop.run_in_executor(None, strategy_manager.get_strategies),
+            timeout=6.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("list_strategies timed out; returning cached result")
+        strategies = strategy_manager.get_strategies()
+    return {"success": True, "strategies": strategies}
 
 @router.post("/api/strategies")
 async def add_strategy_api(strategy: StrategyRequest, user: Optional[str] = Depends(get_current_user)):
@@ -95,7 +105,15 @@ async def get_internal_strategy_info_api(name: str, user: Optional[str] = Depend
 async def get_internal_strategy_status_api(name: str, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    status = strategy_manager.get_internal_strategy_status(name)
+    loop = asyncio.get_event_loop()
+    try:
+        status = await asyncio.wait_for(
+            loop.run_in_executor(None, strategy_manager.get_internal_strategy_status, name),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"get_internal_strategy_status timed out for {name}; returning cached state")
+        status = strategy_manager.get_internal_strategy_status(name)
     if status is None:
         raise HTTPException(status_code=404, detail="Strategy status unavailable")
     return {"success": True, "status": status}

@@ -423,10 +423,14 @@ class TradingApp {
         this.summaryPushAwaitingData = false;
         this.summaryPushAwaitingTimer = null;
         this.summaryStatusLoading = false;
+        this.summaryStatusTarget = null;
         this.summaryDataFeedCurrent = null;
         this.wsHandlers = new Map();
         this.strategyPerformanceCells = new Map();
         this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
+        this.registerWebSocketHandler('risk_rules', (payload) => this.handleRiskRulesMessage(payload));
+        this.registerWebSocketHandler('strategies_snapshot', (payload) => this.handleStrategiesSnapshot(payload));
+        this.registerWebSocketHandler('strategy_status', (payload) => this.handleStrategyStatusMessage(payload));
 
         this.data_push_state = {};
         this.sidePanelManagerInitialized = false;
@@ -511,6 +515,137 @@ class TradingApp {
         const totalExec = Number(metrics.total_executions ?? 0);
         pnlCell.textContent = `$${(Number.isFinite(totalPnL) ? totalPnL : 0).toFixed(2)}`;
         tradesCell.textContent = `${Math.max(0, Math.floor((Number.isFinite(totalExec) ? totalExec : 0) / 2))}`;
+        return true;
+    }
+
+    handleRiskRulesMessage(payload) {
+        if (!payload || payload.type !== 'risk_rules') return false;
+        if (this.riskRulesManager && typeof this.riskRulesManager.applySnapshot === 'function') {
+            return this.riskRulesManager.applySnapshot(payload);
+        }
+        return false;
+    }
+
+    handleStrategiesSnapshot(payload) {
+        if (!payload || payload.type !== 'strategies_snapshot') return false;
+        if (!payload.success) {
+            console.warn('Strategies snapshot failed:', payload.error || 'unknown');
+            return true;
+        }
+        const strategies = Array.isArray(payload.strategies) ? payload.strategies : [];
+        this.strategies = strategies;
+        this.strategiesLoaded = true;
+        if (this.strategiesManager && typeof this.strategiesManager.displayStrategies === 'function') {
+            this.strategiesManager.displayStrategies(strategies);
+        }
+        return true;
+    }
+
+    handleStrategyStatusMessage(payload) {
+        return this.applyStrategyStatusPayload(payload);
+    }
+
+    applyStrategyStatusPayload(payload) {
+        if (!payload || payload.type !== 'strategy_status') {
+            return false;
+        }
+
+        const targetName = payload.name || this.summaryStatusTarget || this.currentStrategyDetails;
+        if (!targetName) {
+            return false;
+        }
+        if (this.summaryStatusTarget && payload.name && payload.name !== this.summaryStatusTarget) {
+            return false;
+        }
+
+        const receivingEl = document.getElementById('summaryStatusReceiving');
+        if (!receivingEl) {
+            return false;
+        }
+
+        const runtimeEl = document.getElementById('summaryStatusRuntime');
+        const processedEl = document.getElementById('summaryStatusProcessed');
+        const thresholdEl = document.getElementById('summaryStatusThresholdHits');
+        const buyEl = document.getElementById('summaryStatusBuySignals');
+        const sellEl = document.getElementById('summaryStatusSellSignals');
+        const statusPush = document.getElementById('summaryDataPushStatus');
+        const pushSwitch = document.getElementById('summaryDataPushSwitch');
+
+        this.summaryStatusLoading = false;
+        this.summaryStatusTarget = targetName;
+
+        if (!payload.success) {
+            receivingEl.textContent = '-';
+            runtimeEl && (runtimeEl.textContent = '-');
+            processedEl && (processedEl.textContent = '-');
+            thresholdEl && (thresholdEl.textContent = '-');
+            buyEl && (buyEl.textContent = '-');
+            sellEl && (sellEl.textContent = '-');
+            if (statusPush) statusPush.textContent = '未推送';
+            this.summaryPushAwaitingData = false;
+            this.data_push_state = {};
+            if (this.summaryPushAwaitingTimer) {
+                clearTimeout(this.summaryPushAwaitingTimer);
+                this.summaryPushAwaitingTimer = null;
+            }
+            return true;
+        }
+
+        const status = payload.status || {};
+        receivingEl.textContent = status.is_receiving_data ? 'Yes' : 'No';
+        runtimeEl && (runtimeEl.textContent =
+            typeof status.runtime_seconds === 'number'
+                ? this.formatRuntimeDuration(status.runtime_seconds)
+                : '-');
+        processedEl && (processedEl.textContent = status.processed_count ?? '-');
+        thresholdEl && (thresholdEl.textContent = status.threshold_hits ?? '-');
+        buyEl && (buyEl.textContent = status.buy_signals ?? '-');
+        sellEl && (sellEl.textContent = status.sell_signals ?? '-');
+
+        const pushState = status.data_push || {};
+        let awaitingData = !!pushState.awaiting_data;
+        if (status.is_receiving_data) {
+            awaitingData = false;
+        }
+        if (!pushState.active) {
+            awaitingData = false;
+        }
+
+        this.summaryPushAwaitingData = awaitingData;
+        if (awaitingData) {
+            if (!this.summaryPushAwaitingTimer) {
+                this.summaryPushAwaitingTimer = setTimeout(() => {
+                    this.summaryPushAwaitingTimer = null;
+                    if (this.currentStrategyDetails === targetName) {
+                        this.loadStrategyStatus(targetName, { force: true });
+                    }
+                }, 1500);
+            }
+        } else if (this.summaryPushAwaitingTimer) {
+            clearTimeout(this.summaryPushAwaitingTimer);
+            this.summaryPushAwaitingTimer = null;
+        }
+
+        if (pushSwitch && !this.summaryPushUpdating) {
+            pushSwitch.checked = !!pushState.active;
+        }
+        if (statusPush) {
+            if (pushState.active) {
+                statusPush.textContent = awaitingData ? '等待DOM数据…' : '已推送';
+            } else {
+                statusPush.textContent = '未推送';
+            }
+        }
+
+        this.data_push_state = {
+            enabled: !!pushState.active,
+            active: !!pushState.active,
+            subscription: pushState.subscription,
+            symbol: pushState.symbol,
+            awaiting_data: awaitingData,
+            last_data_timestamp: pushState.last_data_timestamp || null,
+        };
+
         return true;
     }
 
@@ -6540,7 +6675,7 @@ class TradingApp {
         }
     }
 
-    async loadRiskRules() { return this.riskRulesManager.loadRiskRules(); }
+    async loadRiskRules(options = {}) { return this.riskRulesManager.loadRiskRules(options); }
 
 
 
@@ -6804,89 +6939,54 @@ class TradingApp {
         const receivingEl = document.getElementById('summaryStatusReceiving');
         if (!receivingEl) return;
         this.summaryStatusLoading = true;
+        this.summaryStatusTarget = name;
         const runtimeEl = document.getElementById('summaryStatusRuntime');
         const processedEl = document.getElementById('summaryStatusProcessed');
         const thresholdEl = document.getElementById('summaryStatusThresholdHits');
         const buyEl = document.getElementById('summaryStatusBuySignals');
         const sellEl = document.getElementById('summaryStatusSellSignals');
-        const statusPush = document.getElementById('summaryDataPushStatus');
-        const pushSwitch = document.getElementById('summaryDataPushSwitch');
+
+        receivingEl.textContent = '…';
+        runtimeEl && (runtimeEl.textContent = '…');
+        processedEl && (processedEl.textContent = '…');
+        thresholdEl && (thresholdEl.textContent = '…');
+        buyEl && (buyEl.textContent = '…');
+        sellEl && (sellEl.textContent = '…');
+
+        if (this.ibkrManager && typeof this.ibkrManager.requestStrategyStatus === 'function') {
+            const result = this.ibkrManager.requestStrategyStatus({
+                name,
+                force: Boolean(force),
+                minInterval: 15000,
+            });
+            if (result !== 'failed') {
+                return result;
+            }
+        }
+
         try {
-            receivingEl.textContent = '…';
-            runtimeEl && (runtimeEl.textContent = '…');
-            processedEl && (processedEl.textContent = '…');
-            thresholdEl && (thresholdEl.textContent = '…');
-            buyEl && (buyEl.textContent = '…');
-            sellEl && (sellEl.textContent = '…');
             const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/status`);
-            if (!res?.success) throw new Error('Failed to fetch status');
-            const status = res.status || {};
-            receivingEl.textContent = status.is_receiving_data ? 'Yes' : 'No';
-            runtimeEl && (runtimeEl.textContent =
-                typeof status.runtime_seconds === 'number'
-                    ? this.formatRuntimeDuration(status.runtime_seconds)
-                    : '-');
-            processedEl && (processedEl.textContent = status.processed_count ?? '-');
-            thresholdEl && (thresholdEl.textContent = status.threshold_hits ?? '-');
-            buyEl && (buyEl.textContent = status.buy_signals ?? '-');
-            sellEl && (sellEl.textContent = status.sell_signals ?? '-');
-            const pushState = status.data_push || {};
-            let awaitingData = !!pushState.awaiting_data;
-            if (status.is_receiving_data) {
-                awaitingData = false;
-            }
-            if (!pushState.active) {
-                awaitingData = false;
-            }
-            this.summaryPushAwaitingData = awaitingData;
-            if (awaitingData) {
-                if (!this.summaryPushAwaitingTimer) {
-                    this.summaryPushAwaitingTimer = setTimeout(() => {
-                        this.summaryPushAwaitingTimer = null;
-                        if (this.currentStrategyDetails === name) {
-                            this.loadStrategyStatus(name, { force: true });
-                        }
-                    }, 1500);
-                }
-            } else if (this.summaryPushAwaitingTimer) {
-                clearTimeout(this.summaryPushAwaitingTimer);
-                this.summaryPushAwaitingTimer = null;
-            }
-            if (pushSwitch && !this.summaryPushUpdating) {
-                pushSwitch.checked = !!pushState.active;
-            }
-            if (statusPush) {
-                if (pushState.active) {
-                    statusPush.textContent = awaitingData ? '等待DOM数据…' : '已推送';
-                } else {
-                    statusPush.textContent = '未推送';
-                }
-            }
-            this.data_push_state = {
-                enabled: !!pushState.active,
-                active: !!pushState.active,
-                subscription: pushState.subscription,
-                symbol: pushState.symbol,
-                awaiting_data: awaitingData,
-                last_data_timestamp: pushState.last_data_timestamp || null,
+            const payload = {
+                type: 'strategy_status',
+                name,
+                success: !!res?.success,
+                status: res?.status || {},
+                source: 'http',
             };
+            if (!payload.success) {
+                payload.error = res?.error || 'Failed to fetch status';
+            }
+            this.applyStrategyStatusPayload(payload);
+            return payload;
         } catch (error) {
             console.error('Failed to load strategy status', error);
-            receivingEl.textContent = '-';
-            runtimeEl && (runtimeEl.textContent = '-');
-            processedEl && (processedEl.textContent = '-');
-            thresholdEl && (thresholdEl.textContent = '-');
-            buyEl && (buyEl.textContent = '-');
-            sellEl && (sellEl.textContent = '-');
-            if (statusPush) statusPush.textContent = '未推送';
-            this.summaryPushAwaitingData = false;
-            this.data_push_state = {};
-            if (this.summaryPushAwaitingTimer) {
-                clearTimeout(this.summaryPushAwaitingTimer);
-                this.summaryPushAwaitingTimer = null;
-            }
-        } finally {
-            this.summaryStatusLoading = false;
+            this.applyStrategyStatusPayload({
+                type: 'strategy_status',
+                name,
+                success: false,
+                error: error?.message || 'request_failed',
+            });
+            return { error: error?.message || 'request_failed' };
         }
     }
 
@@ -7168,12 +7268,26 @@ class TradingApp {
         
         this.showAlert('info', `正在编辑订单 ${orderId}，请修改后重新提交`);
     }
-    async loadStrategies() {
+    async loadStrategies(options = {}) {
         try {
+            if (this.ibkrManager && typeof this.ibkrManager.requestStrategies === 'function') {
+                const result = this.ibkrManager.requestStrategies({
+                    force: Boolean(options.force),
+                    minInterval: options.minInterval ?? 15000,
+                });
+                if (result !== 'failed') {
+                    return result;
+                }
+            }
+
             const data = await this.apiCall('/strategies');
             if (data.success) {
-                this.strategiesManager.displayStrategies(data.strategies);
-                this.strategiesLoaded = true;
+                this.handleStrategiesSnapshot({
+                    type: 'strategies_snapshot',
+                    success: true,
+                    strategies: data.strategies,
+                    source: 'http',
+                });
             }
         } catch (error) {
             console.error('Failed to load strategies:', error);

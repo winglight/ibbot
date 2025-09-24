@@ -15,8 +15,8 @@ class StrategiesManager {
     return null;
   }
 
-  async loadStrategies() {
-    return await this._delegate('loadStrategies');
+  async loadStrategies(options = {}) {
+    return await this._delegate('loadStrategies', options);
   }
 
   displayStrategies(strategies) {

@@ -59,7 +59,15 @@ async def get_risk_rules(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
     try:
-        rules = risk_manager.get_risk_rules()
+        loop = asyncio.get_event_loop()
+        try:
+            rules = await asyncio.wait_for(
+                loop.run_in_executor(None, risk_manager.get_risk_rules),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("get_risk_rules timed out; returning cached state")
+            rules = risk_manager.get_risk_rules()
         # Convert to serializable format
         serializable_rules = {}
         for symbol, rule in rules.items():
