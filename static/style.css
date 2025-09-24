@@ -128,6 +128,19 @@
     color: #ffffff !important;
 }
 
+/* Make the add strategy modal take half of the viewport width on large screens */
+#addStrategyModal .modal-dialog {
+    width: min(50vw, 960px);
+    max-width: min(50vw, 960px);
+}
+
+@media (max-width: 992px) {
+    #addStrategyModal .modal-dialog {
+        width: calc(100vw - 2rem);
+        max-width: calc(100vw - 2rem);
+    }
+}
+
 /* 统一面板标题栏按钮样式 - 蓝底白字 */
 .card-header .btn,
 .modal-header .btn:not(.btn-close),
