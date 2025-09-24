@@ -21,6 +21,8 @@ from .schemas import (
     OptimizationPlanResponse,
     OptimizationPlanRunResponse,
     OptimizationPlanUpdate,
+    StrategyGenerationRequest,
+    StrategyGenerationResponse,
     OptimizerDataRangeResponse,
     OptimizerMetadataResponse,
     TaskState,
@@ -33,6 +35,7 @@ from .metadata import (
     get_symbol_data_range,
 )
 from .storage import store
+from .strategy_generator import StrategyGenerationError, generate_strategy_file
 from .tasks import run_optimization_task
 
 router = APIRouter(prefix="/api/optimize", tags=["optimizer"])
@@ -246,3 +249,23 @@ async def list_plan_reports(plan_id: str) -> OptimizationPlanReportList:
         for task_id, record in records
     ]
     return OptimizationPlanReportList(plan_id=plan_id, reports=reports_payload)
+
+
+@router.post(
+    "/strategies",
+    status_code=status.HTTP_201_CREATED,
+    response_model=StrategyGenerationResponse,
+    responses={status.HTTP_400_BAD_REQUEST: {"model": ErrorResponse}},
+)
+async def generate_strategy(payload: StrategyGenerationRequest) -> StrategyGenerationResponse:
+    try:
+        file_path, class_name = generate_strategy_file(
+            strategy_name=payload.strategy_name,
+            base_parameters=payload.base_parameters,
+            feature_parameters=payload.feature_parameters,
+            plan_id=payload.plan_id,
+            task_id=payload.task_id,
+        )
+    except StrategyGenerationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return StrategyGenerationResponse(file_path=file_path, class_name=class_name)

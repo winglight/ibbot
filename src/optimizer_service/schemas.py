@@ -405,6 +405,52 @@ class OptimizationPlanReportList(BaseModel):
     reports: List[OptimizationPlanReportEntry]
 
 
+class StrategyGenerationRequest(BaseModel):
+    strategy_name: str = Field(..., min_length=1, max_length=80)
+    base_parameters: Dict[str, Any]
+    feature_parameters: Dict[str, Any] = Field(default_factory=dict)
+    plan_id: Optional[str] = None
+    task_id: Optional[str] = None
+
+    if PYDANTIC_V2:  # pragma: no branch
+
+        @field_validator("base_parameters")
+        def validate_base_parameters(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+            if not isinstance(value, dict) or not value:
+                raise ValueError("base_parameters must be a non-empty mapping")
+            return value
+
+        @field_validator("feature_parameters", mode="before")
+        def validate_feature_parameters(cls, value: Any) -> Dict[str, Any]:
+            if value in (None, {}):
+                return {}
+            if not isinstance(value, dict):
+                raise ValueError("feature_parameters must be a mapping")
+            return value
+
+    else:
+
+        @validator("base_parameters")  # type: ignore[misc]
+        def validate_base_parameters(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+            if not isinstance(value, dict) or not value:
+                raise ValueError("base_parameters must be a non-empty mapping")
+            return value
+
+        @validator("feature_parameters", pre=True, always=True)  # type: ignore[misc]
+        def validate_feature_parameters(cls, value: Any) -> Dict[str, Any]:
+            if value in (None, {}):
+                return {}
+            if not isinstance(value, dict):
+                raise ValueError("feature_parameters must be a mapping")
+            return value
+
+
+class StrategyGenerationResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    file_path: str
+    class_name: str
+
+
 class OptimizerMetadataResponse(BaseModel):
     base_metrics: List[str]
     feature_metrics: List[str]
