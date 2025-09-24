@@ -370,7 +370,7 @@ class TradingApp {
         this.charts = {}; // Store chart instances
         this.executionsPagination = {
             currentPage: 1,
-            pageSize: 25,
+            pageSize: 20,
             totalItems: 0,
             allExecutions: []
         };
@@ -380,6 +380,8 @@ class TradingApp {
         this.endReminderTimeout = null;
         this.currentStrategyDetails = null;
         this.internalStrategyOrders = [];
+        this.strategyExecutionsCache = new Map();
+        this.strategyExecutionsDefaultLimit = 20;
         // 当前订阅实时行情的合约符号，null 表示未订阅
         this.monitorRealtimeSymbol = null;
         // 记录用户是否希望在重新打开时自动恢复实时行情
@@ -6640,15 +6642,17 @@ class TradingApp {
         tbody.appendChild(frag);
     }
 
-    async loadInternalStrategyOrders(name, limit = 200) {
+    async loadInternalStrategyOrders(name, { executions = null, limit = this.strategyExecutionsDefaultLimit, force = false } = {}) {
         try {
-            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/executions?limit=${limit}`);
-            if (!res.success) {
+            const rawExecutions = Array.isArray(executions)
+                ? executions
+                : await this.fetchStrategyExecutions(name, { limit, force });
+            if (!Array.isArray(rawExecutions)) {
                 this.internalStrategyOrders = [];
                 this.renderInternalOrders(name, []);
                 return [];
             }
-            const orders = Array.isArray(res.executions) ? res.executions.slice() : [];
+            const orders = rawExecutions.slice();
             orders.sort((a, b) => {
                 const at = a?.timestamp ? new Date(a.timestamp).getTime() : 0;
                 const bt = b?.timestamp ? new Date(b.timestamp).getTime() : 0;
@@ -8157,11 +8161,28 @@ class TradingApp {
             const pageSizeSelect = document.getElementById('executionsPageSize');
             if (pageSizeSelect) {
                 pageSizeSelect.value = String(this.executionsPagination.pageSize);
-                pageSizeSelect.onchange = () => {
-                    this.executionsPagination.pageSize = parseInt(pageSizeSelect.value, 10) || 25;
+                pageSizeSelect.onchange = async () => {
+                    const newSize = parseInt(pageSizeSelect.value, 10) || this.strategyExecutionsDefaultLimit;
+                    this.executionsPagination.pageSize = newSize;
                     this.executionsPagination.currentPage = 1;
-                    this.renderExecutionsTable();
-                    this.renderExecutionsPagination();
+                    await this.loadStrategyExecutions(name, { limit: newSize, force: true });
+                    const currentRange = rangeSel ? rangeSel.value : '1d';
+                    if (currentRange === 'custom') {
+                        const startInput = document.getElementById('perfStart');
+                        const endInput = document.getElementById('perfEnd');
+                        const startVal = startInput?.value;
+                        const endVal = endInput?.value;
+                        if (startVal && endVal) {
+                            this.loadStrategyPerformance(name, { range: 'custom', start: startVal, end: endVal });
+                        } else {
+                            this.loadStrategyPerformance(name, { range: '1d' });
+                        }
+                    } else {
+                        this.loadStrategyPerformance(name, { range: currentRange });
+                    }
+                    if (isInternal) {
+                        this.loadInternalStrategyOrders(name, { limit: newSize });
+                    }
                 };
             }
             const exportBtn = document.getElementById('exportExecutionsBtn');
@@ -8203,6 +8224,7 @@ class TradingApp {
                             return;
                         }
                         await this.apiCall(`/strategies/${encodeURIComponent(strategy)}/executions`, { method: 'DELETE' });
+                        this.clearStrategyExecutionsCache(strategy);
                         this.executionsPagination.allExecutions = [];
                         this.executionsPagination.totalItems = 0;
                         this.executionsPagination.currentPage = 1;
@@ -8216,13 +8238,22 @@ class TradingApp {
                 };
             }
 
+            const calendarPromise = this.loadPnLCalendar(name);
+            const executionLimit = Math.max(this.strategyExecutionsDefaultLimit, this.executionsPagination.pageSize || 0);
+            let executionData = [];
+            try {
+                executionData = await this.fetchStrategyExecutions(name, { limit: executionLimit, force: true });
+            } catch (err) {
+                console.error('Prefetch strategy executions error:', err);
+                executionData = [];
+            }
             const loaders = [
-                this.loadStrategyPerformance(name, { range: '1d' }),
-                this.loadStrategyExecutions(name),
-                this.loadPnLCalendar(name)
+                this.loadStrategyPerformance(name, { range: '1d', executions: executionData }),
+                this.loadStrategyExecutions(name, { executions: executionData }),
+                calendarPromise
             ];
             if (isInternal) {
-                loaders.push(this.loadInternalStrategyOrders(name));
+                loaders.push(this.loadInternalStrategyOrders(name, { executions: executionData }));
             }
             await Promise.all(loaders);
         } catch (e) {
@@ -8231,7 +8262,55 @@ class TradingApp {
         }
     }
 
-    async loadStrategyPerformance(name, { range = '1d', start = null, end = null } = {}) {
+    getStrategyExecutionsCacheKey(name, limit) {
+        return `${name}::${limit}`;
+    }
+
+    clearStrategyExecutionsCache(name) {
+        if (!this.strategyExecutionsCache) return;
+        if (!name) {
+            this.strategyExecutionsCache.clear();
+            return;
+        }
+        const prefix = `${name}::`;
+        for (const key of Array.from(this.strategyExecutionsCache.keys())) {
+            if (key.startsWith(prefix)) {
+                this.strategyExecutionsCache.delete(key);
+            }
+        }
+    }
+
+    async fetchStrategyExecutions(name, { limit = this.strategyExecutionsDefaultLimit, force = false } = {}) {
+        if (!name) return [];
+        const effectiveLimit = Math.max(1, Number(limit) || this.strategyExecutionsDefaultLimit);
+        const cacheKey = this.getStrategyExecutionsCacheKey(name, effectiveLimit);
+        const cached = !force && this.strategyExecutionsCache.get(cacheKey);
+        if (cached) {
+            if (cached.data) return cached.data;
+            if (cached.promise) return await cached.promise;
+        }
+
+        const fetchPromise = (async () => {
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/executions?limit=${effectiveLimit}`);
+            if (!res || !res.success) {
+                throw new Error('Failed to load strategy executions');
+            }
+            return Array.isArray(res.executions) ? res.executions.slice() : [];
+        })();
+
+        this.strategyExecutionsCache.set(cacheKey, { promise: fetchPromise });
+
+        try {
+            const data = await fetchPromise;
+            this.strategyExecutionsCache.set(cacheKey, { data, timestamp: Date.now() });
+            return data;
+        } catch (error) {
+            this.strategyExecutionsCache.delete(cacheKey);
+            throw error;
+        }
+    }
+
+    async loadStrategyPerformance(name, { range = '1d', start = null, end = null, executions = null } = {}) {
         try {
             const params = new URLSearchParams();
             if (range) params.set('range', range);
@@ -8249,12 +8328,17 @@ class TradingApp {
             el('kpiAvgDur').textContent = `${m.avg_trade_duration ?? 0}`;
 
             // Charts from executions over selected range
-            const execRes = await this.apiCall(`/strategies/${encodeURIComponent(name)}/executions?limit=1000`);
-            const executions = (execRes.success ? (execRes.executions || []) : []).slice().sort((a,b)=> new Date(a.execution_time) - new Date(b.execution_time));
+            const executionLimit = Math.max(this.strategyExecutionsDefaultLimit, this.executionsPagination.pageSize || 0);
+            const rawExecutions = Array.isArray(executions)
+                ? executions
+                : await this.fetchStrategyExecutions(name, { limit: executionLimit }).catch(() => []);
+            const sortedExecutions = Array.isArray(rawExecutions)
+                ? rawExecutions.slice().sort((a, b) => new Date(a.execution_time) - new Date(b.execution_time))
+                : [];
             const labels = [];
             const cumData = [];
             let cum = 0;
-            executions.forEach(ex => {
+            sortedExecutions.forEach(ex => {
                 const pnl = Number(ex.pnl || 0);
                 cum += pnl;
                 labels.push(ex.execution_time ? new Date(ex.execution_time).toLocaleString() : '');
@@ -8264,13 +8348,13 @@ class TradingApp {
             const ddData = [];
             let peak = -Infinity;
             cum = 0;
-            executions.forEach(ex => {
+            sortedExecutions.forEach(ex => {
                 cum += Number(ex.pnl || 0);
                 peak = Math.max(peak, cum);
                 ddData.push(cum - peak);
             });
             this.renderLineChart('drawdownChart', 'Drawdown', labels, ddData, 'rgba(255, 99, 132, 1)');
-            const pnls = executions.map(ex => Number(ex.pnl || 0));
+            const pnls = sortedExecutions.map(ex => Number(ex.pnl || 0));
             const bins = this.makeHistogram(pnls, 20);
             this.renderBarChart('pnlDistributionChart', 'PnL Distribution', bins.labels, bins.counts, 'rgba(75, 192, 192, 0.7)');
             const wins = pnls.filter(v => v > 0).length;
@@ -8281,12 +8365,12 @@ class TradingApp {
         }
     }
 
-    async loadStrategyExecutions(name, limit = 100) {
+    async loadStrategyExecutions(name, { executions = null, limit = this.strategyExecutionsDefaultLimit, force = false } = {}) {
         try {
-            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/executions?limit=${limit}`);
-            if (!res.success) return;
-            const all = res.executions || [];
-            const filled = all.filter(ex => String(ex.status || '').toLowerCase() === 'filled');
+            const rawExecutions = Array.isArray(executions)
+                ? executions
+                : await this.fetchStrategyExecutions(name, { limit, force });
+            const filled = rawExecutions.filter(ex => String(ex.status || '').toLowerCase() === 'filled');
             this.executionsPagination.allExecutions = filled;
             this.executionsPagination.totalItems = filled.length;
             this.executionsPagination.currentPage = 1;
