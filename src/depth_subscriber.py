@@ -32,6 +32,12 @@ class DepthSubscriber:
         self.connection_manager = connection_manager
         self._streams: Dict[str, _DepthStream] = {}
         self._lock = Lock()
+        self._last_error: Optional[str] = None
+        self._last_error_status: int = 200
+
+    def _set_last_error(self, message: Optional[str], status: int = 200) -> None:
+        self._last_error = message
+        self._last_error_status = status
 
     # ------------------------------------------------------------------
     def start_depth_stream(
@@ -51,8 +57,12 @@ class DepthSubscriber:
         Returns:
             True if subscription succeeded.
         """
+        self._set_last_error(None, 200)
+
         if not self.connection_manager.is_connected():
-            _depth_logger.error("IBKR connection not active for depth stream")
+            reason = "IBKR connection not active for depth stream"
+            self._set_last_error(reason, 400)
+            _depth_logger.error(reason)
             return False
 
         callbacks: List[Callable] = [callback]
@@ -70,6 +80,7 @@ class DepthSubscriber:
                     _depth_logger.debug(
                         f"Callback already registered for {symbol}; skipping duplicate"
                     )
+                self._set_last_error(None, 200)
                 return True
             if existing and force_restart:
                 callbacks = list(existing.callbacks)
@@ -111,7 +122,9 @@ class DepthSubscriber:
 
             ibkr_client = self._resolve_ibkr_client()
             if not ibkr_client:
-                _depth_logger.error(f"IBKR client unavailable when building contract for {symbol}")
+                reason = f"IBKR client unavailable when building contract for {symbol}"
+                self._set_last_error(reason, 500)
+                _depth_logger.error(reason)
                 return None
 
             # Choose contract helper from IBKR client when available
@@ -122,7 +135,9 @@ class DepthSubscriber:
                 else:
                     contract = ibkr_client.get_stock_contract(symbol)
             except Exception as e:
-                _depth_logger.error(f"Contract build failed for {symbol}: {e}")
+                reason = f"Contract build failed for {symbol}: {e}"
+                self._set_last_error(reason, 500)
+                _depth_logger.error(reason)
                 return None
             ticker = ib.reqMktDepth(contract, numRows=num_rows, isSmartDepth=False)
             _depth_logger.warning(f"Created ticker for {symbol}: {ticker}, contract: {contract}")
@@ -131,7 +146,9 @@ class DepthSubscriber:
 
         result = self.connection_manager.run_in_connection_thread(_subscribe)
         if not result:
-            _depth_logger.error(f"Failed to subscribe market depth for {symbol}")
+            reason = f"Failed to subscribe market depth for {symbol}"
+            self._set_last_error(reason, 500)
+            _depth_logger.error(reason)
             return False
         ticker, contract = result
 
@@ -166,6 +183,7 @@ class DepthSubscriber:
         _depth_logger.info(
             f"Started depth stream for {symbol}" + (" (forced restart)" if prior_stream else "")
         )
+        self._set_last_error(None, 200)
         return True
 
     # ------------------------------------------------------------------
@@ -192,6 +210,9 @@ class DepthSubscriber:
             pass
         _depth_logger.info(f"Stopped depth stream for {symbol}")
         return True
+
+    def get_last_error(self) -> tuple[Optional[str], int]:
+        return self._last_error, self._last_error_status
 
     # ------------------------------------------------------------------
     def _resolve_ibkr_client(self):
