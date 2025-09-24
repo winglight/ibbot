@@ -7545,6 +7545,249 @@ class TradingApp {
                                 }
                                 return range || '-';
                             };
+                            const startInlineEdit = (cell, param) => {
+                                if (!param?.name) return;
+                                if (cell.dataset.editing === '1') return;
+                                cell.dataset.editing = '1';
+                                const originalValue = param.value;
+                                const originalDisplay = formatValue(param, 'value');
+                                let isSaving = false;
+                                const cleanup = () => {
+                                    cell.dataset.editing = '0';
+                                    cell.classList.remove('opacity-75');
+                                };
+                                const revert = () => {
+                                    param.value = originalValue;
+                                    cell.innerHTML = '';
+                                    cell.textContent = originalDisplay;
+                                    cleanup();
+                                };
+
+                                let editor;
+                                const choices = Array.isArray(param?.choices) ? param.choices : null;
+                                if (param?.type === 'bool' || (choices && choices.length)) {
+                                    const select = document.createElement('select');
+                                    select.className = 'form-select form-select-sm';
+                                    if (choices && choices.length) {
+                                        choices.forEach((choice) => {
+                                            const opt = document.createElement('option');
+                                            const hasValue = choice && typeof choice === 'object' && 'value' in choice;
+                                            const rawValue = hasValue ? choice.value : choice;
+                                            const label = choice && typeof choice === 'object' && 'label' in choice
+                                                ? (choice.label ?? rawValue)
+                                                : rawValue;
+                                            const normalizedValue = rawValue === null || rawValue === undefined ? '' : String(rawValue);
+                                            opt.value = normalizedValue;
+                                            opt.textContent = label === null || label === undefined ? normalizedValue : String(label);
+                                            select.appendChild(opt);
+                                        });
+                                        if (param.allow_null) {
+                                            const opt = document.createElement('option');
+                                            opt.value = '';
+                                            opt.textContent = '（留空）';
+                                            select.appendChild(opt);
+                                        }
+                                        const current = param.value;
+                                        if (current === null || current === undefined) {
+                                            select.value = '';
+                                        } else {
+                                            const currentStr = typeof current === 'object' ? current?.value : String(current);
+                                            if (Array.from(select.options).some(opt => opt.value == currentStr)) {
+                                                select.value = currentStr;
+                                            }
+                                        }
+                                    } else {
+                                        const trueOpt = document.createElement('option');
+                                        trueOpt.value = 'true';
+                                        trueOpt.textContent = 'On';
+                                        const falseOpt = document.createElement('option');
+                                        falseOpt.value = 'false';
+                                        falseOpt.textContent = 'Off';
+                                        select.appendChild(trueOpt);
+                                        select.appendChild(falseOpt);
+                                        if (param.allow_null) {
+                                            const nullOpt = document.createElement('option');
+                                            nullOpt.value = 'null';
+                                            nullOpt.textContent = '（留空）';
+                                            select.appendChild(nullOpt);
+                                        }
+                                        const current = param.value;
+                                        if (current === null || current === undefined) {
+                                            select.value = 'null';
+                                        } else {
+                                            select.value = current ? 'true' : 'false';
+                                        }
+                                    }
+                                    editor = select;
+                                } else {
+                                    const input = document.createElement('input');
+                                    input.className = 'form-control form-control-sm';
+                                    input.type = (param?.type === 'int' || param?.type === 'float') ? 'number' : 'text';
+                                    if (param?.step !== undefined && param.step !== null) input.step = param.step;
+                                    if (param?.min !== undefined && param.min !== null) input.min = param.min;
+                                    if (param?.max !== undefined && param.max !== null) input.max = param.max;
+                                    if (param?.allow_null) {
+                                        input.placeholder = '（留空）';
+                                    }
+                                    const current = param.value;
+                                    input.value = (current === null || current === undefined) ? '' : current;
+                                    editor = input;
+                                }
+
+                                cell.innerHTML = '';
+                                cell.appendChild(editor);
+                                cell.classList.add('opacity-75');
+                                editor.focus();
+                                if (editor.select) {
+                                    editor.select();
+                                }
+
+                                const handleBlur = () => {
+                                    revert();
+                                };
+                                editor.addEventListener('blur', handleBlur);
+
+                                const commit = async () => {
+                                    if (isSaving) return;
+                                    editor.removeEventListener('blur', handleBlur);
+                                    let raw;
+                                    let newValue;
+                                    if (param?.type === 'bool' && editor instanceof HTMLSelectElement) {
+                                        raw = editor.value;
+                                        if (raw === 'null') {
+                                            if (param.allow_null) {
+                                                newValue = null;
+                                            } else {
+                                                this.showAlert('danger', `${param.label || param.name} 不允许为空`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                        } else {
+                                            newValue = raw === 'true' || raw === '1';
+                                        }
+                                    } else if (choices && editor instanceof HTMLSelectElement) {
+                                        raw = editor.value;
+                                        if ((raw === '' || raw === null) && param.allow_null) {
+                                            newValue = null;
+                                        } else if (param?.type === 'int') {
+                                            const parsed = parseInt(raw, 10);
+                                            if (!Number.isFinite(parsed)) {
+                                                this.showAlert('danger', `${param.label || param.name} 需要整数数值`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                            newValue = parsed;
+                                        } else if (param?.type === 'float') {
+                                            const parsed = parseFloat(raw);
+                                            if (!Number.isFinite(parsed)) {
+                                                this.showAlert('danger', `${param.label || param.name} 需要数值`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                            newValue = parsed;
+                                        } else {
+                                            newValue = raw;
+                                        }
+                                    } else {
+                                        raw = editor.value;
+                                        if ((raw === '' || raw === null || raw === undefined)) {
+                                            if (param?.allow_null) {
+                                                newValue = null;
+                                            } else {
+                                                this.showAlert('danger', `${param.label || param.name} 不能为空`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                        } else if (param?.type === 'int') {
+                                            const parsed = parseInt(raw, 10);
+                                            if (!Number.isFinite(parsed)) {
+                                                this.showAlert('danger', `${param.label || param.name} 需要整数数值`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                            newValue = parsed;
+                                        } else if (param?.type === 'float') {
+                                            const parsed = parseFloat(raw);
+                                            if (!Number.isFinite(parsed)) {
+                                                this.showAlert('danger', `${param.label || param.name} 需要数值`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                            newValue = parsed;
+                                        } else {
+                                            newValue = raw;
+                                        }
+                                    }
+
+                                    if ((param?.type === 'int' || param?.type === 'float') && newValue !== null && newValue !== undefined) {
+                                        if (param?.min !== undefined && param.min !== null && newValue < param.min) {
+                                            this.showAlert('danger', `${param.label || param.name} 需 ≥ ${param.min}`);
+                                            editor.addEventListener('blur', handleBlur);
+                                            editor.focus();
+                                            return;
+                                        }
+                                        if (param?.max !== undefined && param.max !== null && newValue > param.max) {
+                                            this.showAlert('danger', `${param.label || param.name} 需 ≤ ${param.max}`);
+                                            editor.addEventListener('blur', handleBlur);
+                                            editor.focus();
+                                            return;
+                                        }
+                                    }
+
+                                    const unchanged = (originalValue === null || originalValue === undefined)
+                                        ? (newValue === null || newValue === undefined)
+                                        : (newValue === originalValue);
+                                    if (unchanged) {
+                                        revert();
+                                        return;
+                                    }
+
+                                    try {
+                                        isSaving = true;
+                                        if ('disabled' in editor) editor.disabled = true;
+                                        const payload = { parameters: { [param.name]: newValue } };
+                                        const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}`, {
+                                            method: 'PUT',
+                                            body: JSON.stringify(payload)
+                                        });
+                                        if (!res?.success) {
+                                            throw new Error('Update failed');
+                                        }
+                                        param.value = newValue;
+                                        cell.innerHTML = '';
+                                        cell.textContent = formatValue(param, 'value');
+                                        cleanup();
+                                        this.showAlert('success', `${param.label || param.name} 已更新`);
+                                    } catch (err) {
+                                        console.error('Failed to update parameter', err);
+                                        this.showAlert('danger', `${param.label || param.name} 更新失败`);
+                                        revert();
+                                    } finally {
+                                        isSaving = false;
+                                    }
+                                };
+
+                                if (editor instanceof HTMLSelectElement) {
+                                    editor.addEventListener('change', () => commit());
+                                }
+
+                                editor.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter') {
+                                        ev.preventDefault();
+                                        commit();
+                                    } else if (ev.key === 'Escape') {
+                                        ev.preventDefault();
+                                        editor.removeEventListener('blur', handleBlur);
+                                        revert();
+                                    }
+                                });
+                            };
                             if (schema.length) {
                                 schema.forEach((param) => {
                                     const tr = document.createElement('tr');
@@ -7553,6 +7796,12 @@ class TradingApp {
                                     nameCell.textContent = param?.label || param?.name || '-';
                                     const valueCell = document.createElement('td');
                                     valueCell.textContent = formatValue(param, 'value');
+                                    if (param?.name) {
+                                        valueCell.title = '双击编辑，回车保存';
+                                        valueCell.style.cursor = 'text';
+                                        valueCell.classList.add('align-middle');
+                                        valueCell.addEventListener('dblclick', () => startInlineEdit(valueCell, param));
+                                    }
                                     const defaultCell = document.createElement('td');
                                     defaultCell.textContent = formatValue(param, 'default');
                                     const rangeCell = document.createElement('td');
