@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from optimizer_main import app
 from src.optimizer_service import strategy_generator
+from src.optimizer_service import routes as optimizer_routes
 
 
 def wait_for_report(client: TestClient, task_id: str, timeout: float = 2.0):
@@ -137,6 +138,14 @@ def test_bayesian_algorithm_respects_iterations():
 
 def test_generate_strategy_endpoint(monkeypatch, tmp_path):
     monkeypatch.setattr(strategy_generator, "STRATEGY_DIR", tmp_path)
+
+    saved_records = []
+
+    class DummyDB:
+        def save_strategy(self, record):
+            saved_records.append(record)
+
+    monkeypatch.setattr(optimizer_routes, "get_db_manager", lambda: DummyDB())
     payload = {
         "strategy_name": "Auto Strategy",
         "base_parameters": {"long_thresholds": 0.8},
@@ -154,3 +163,9 @@ def test_generate_strategy_endpoint(monkeypatch, tmp_path):
         content = generated_path.read_text(encoding="utf-8")
         assert "Auto Strategy" in content
         assert "BASE_PARAMETERS" in content
+        assert saved_records, "strategy should be persisted to the database"
+        record = saved_records[0]
+        assert record.name == payload["strategy_name"]
+        assert record.strategy_type == "internal"
+        assert record.file_path.replace("\\", "/") == data["file_path"]
+        assert "计划: plan-1" in record.description

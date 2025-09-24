@@ -474,6 +474,7 @@ class OptimizerApp {
         const results = report.report?.results ?? [];
         if (!results.length) return '';
         const items = results
+            .slice(0, 3)
             .map((result, index) => this.renderCombinationItem(result, index, report, planId))
             .join('');
         return `

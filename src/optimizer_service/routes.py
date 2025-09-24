@@ -7,6 +7,8 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status, Query
 from fastapi.responses import JSONResponse
 
+from src.database import Strategy as DatabaseStrategy, get_db_manager
+
 from .schemas import (
     ErrorResponse,
     OptimizationReportResponse,
@@ -268,4 +270,33 @@ async def generate_strategy(payload: StrategyGenerationRequest) -> StrategyGener
         )
     except StrategyGenerationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    return StrategyGenerationResponse(file_path=file_path, class_name=class_name)
+
+    normalized_path = file_path.replace("\\", "/")
+    description_parts = ["DOM优化器自动生成策略"]
+    metadata = []
+    if payload.plan_id:
+        metadata.append(f"计划: {payload.plan_id}")
+    if payload.task_id:
+        metadata.append(f"任务: {payload.task_id}")
+    if metadata:
+        description_parts.append(f"（{'，'.join(metadata)}）")
+    description = "".join(description_parts)
+
+    db_manager = get_db_manager()
+    db_record = DatabaseStrategy(
+        name=payload.strategy_name,
+        strategy_type="internal",
+        enabled=True,
+        api_endpoint=None,
+        file_path=normalized_path,
+        description=description,
+    )
+    try:
+        db_manager.save_strategy(db_record)
+    except Exception as exc:  # pragma: no cover - safety net
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"failed to persist strategy: {exc}",
+        )
+
+    return StrategyGenerationResponse(file_path=normalized_path, class_name=class_name)
