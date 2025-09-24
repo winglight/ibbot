@@ -432,6 +432,7 @@ class DomStatsAggregator:
             safe_symbol,
             limit=None,
             include_snapshots=False,
+            copy=False,
         ).get("metrics") or []
 
         if not raw_metrics:
@@ -454,19 +455,21 @@ class DomStatsAggregator:
             self._store_payload(safe_symbol, payload)
             return
 
-        raw_timestamps = np.array([
-            _extract_timestamp_ms(item) or np.nan for item in raw_metrics
-        ], dtype=np.float64)
-
-        order = np.argsort(raw_timestamps, kind="mergesort")
-        sorted_ts = raw_timestamps[order]
-        metrics_sorted_all = [raw_metrics[i] for i in order]
-
         clean_pairs: List[Tuple[float, Dict[str, Any]]] = []
-        for ts_value, metric in zip(sorted_ts, metrics_sorted_all):
-            if not np.isfinite(ts_value) or ts_value <= 0:
+        monotonic = True
+        last_ts = float("-inf")
+        for metric in raw_metrics:
+            ts_value = _extract_timestamp_ms(metric)
+            if ts_value is None or not np.isfinite(ts_value) or ts_value <= 0:
                 continue
-            clean_pairs.append((float(ts_value), metric))
+            ts_float = float(ts_value)
+            if clean_pairs and ts_float < last_ts:
+                monotonic = False
+            clean_pairs.append((ts_float, metric))
+            last_ts = ts_float
+
+        if not monotonic and clean_pairs:
+            clean_pairs.sort(key=lambda pair: pair[0])
 
         if not clean_pairs:
             payload = DomStatsPayload(

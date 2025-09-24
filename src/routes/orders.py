@@ -751,10 +751,13 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
         loop = asyncio.get_event_loop()
         try:
             orders = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: order_manager.get_orders(limit=limit)),
+                loop.run_in_executor(
+                    None,
+                    lambda: order_manager.get_orders(limit=limit, start_date=start_dt)
+                ),
                 timeout=5.0  # 5秒超时
             )
-            
+
             # 根据start_date进行服务端过滤，确保只返回当天（或指定起始时间之后）的订单
             if start_dt:
                 orders = [

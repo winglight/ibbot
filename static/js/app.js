@@ -7215,6 +7215,83 @@ class TradingApp {
             if (sltpGroup) sltpGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
             if (subscriptionGroup) subscriptionGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
             if (positionTimingGroup) positionTimingGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
+            const parameterGroup = document.getElementById('editParameterGroup');
+            const parameterList = document.getElementById('editParameterList');
+            this.strategyParameterInputs = {};
+            if (parameterGroup && parameterList) {
+                parameterList.innerHTML = '';
+                const schemaSource = Array.isArray(s.parameters) && s.parameters.length
+                    ? s.parameters
+                    : (Array.isArray(s.configurable_parameters) ? s.configurable_parameters : []);
+                const schema = Array.isArray(schemaSource) ? schemaSource : [];
+                if (s.strategy_type === 'internal' && schema.length) {
+                    parameterGroup.style.display = '';
+                    schema.forEach((param) => {
+                        if (!param?.name) return;
+                        const wrapper = document.createElement('div');
+                        wrapper.className = 'border rounded p-2';
+                        const controlId = `editParam-${param.name}`;
+                        const label = document.createElement('label');
+                        label.className = 'form-label small mb-1';
+                        label.setAttribute('for', controlId);
+                        label.textContent = param.label || param.name;
+                        wrapper.appendChild(label);
+
+                        let inputEl;
+                        if (param.type === 'bool') {
+                            const switchWrap = document.createElement('div');
+                            switchWrap.className = 'form-check form-switch';
+                            const checkbox = document.createElement('input');
+                            checkbox.className = 'form-check-input';
+                            checkbox.type = 'checkbox';
+                            checkbox.id = controlId;
+                            checkbox.checked = param.value !== undefined ? Boolean(param.value) : Boolean(param.default);
+                            const textLabel = document.createElement('label');
+                            textLabel.className = 'form-check-label';
+                            textLabel.setAttribute('for', controlId);
+                            textLabel.textContent = 'Enabled';
+                            switchWrap.appendChild(checkbox);
+                            switchWrap.appendChild(textLabel);
+                            wrapper.appendChild(switchWrap);
+                            inputEl = checkbox;
+                        } else {
+                            const input = document.createElement('input');
+                            input.className = 'form-control form-control-sm';
+                            input.type = 'number';
+                            input.id = controlId;
+                            const stepValue = param.step !== undefined ? param.step : (param.type === 'int' ? 1 : 0.1);
+                            if (stepValue !== undefined && stepValue !== null) input.step = stepValue;
+                            if (param.min !== undefined && param.min !== null) input.min = param.min;
+                            if (param.max !== undefined && param.max !== null) input.max = param.max;
+                            const initial = param.value !== undefined && param.value !== null
+                                ? param.value
+                                : (param.allow_null ? '' : (param.default ?? ''));
+                            input.value = initial !== null && initial !== undefined ? initial : '';
+                            input.required = !param.allow_null;
+                            wrapper.appendChild(input);
+                            inputEl = input;
+                        }
+
+                        const help = document.createElement('div');
+                        help.className = 'form-text';
+                        const helpParts = [];
+                        if (param.default !== undefined && param.default !== null) helpParts.push(`默认 ${param.default}`);
+                        const rangeParts = [];
+                        if (param.min !== undefined && param.min !== null) rangeParts.push(`≥ ${param.min}`);
+                        if (param.max !== undefined && param.max !== null) rangeParts.push(`≤ ${param.max}`);
+                        if (rangeParts.length) helpParts.push(rangeParts.join('，'));
+                        if (param.allow_null) helpParts.push('可留空');
+                        if (param.description) helpParts.push(param.description);
+                        help.textContent = helpParts.join('； ') || '可调整参数';
+                        wrapper.appendChild(help);
+
+                        parameterList.appendChild(wrapper);
+                        this.strategyParameterInputs[param.name] = { input: inputEl, meta: param };
+                    });
+                } else {
+                    parameterGroup.style.display = 'none';
+                }
+            }
             const slEnabled = document.getElementById('editSlEnabledSwitch');
             const tpEnabled = document.getElementById('editTpEnabledSwitch');
             const slPrice = document.getElementById('editSlPriceInput');
@@ -7263,6 +7340,49 @@ class TradingApp {
                         const closeVal = closeRaw !== undefined && closeRaw !== '' ? parseInt(closeRaw, 10) : null;
                         updates.position_add_cooldown_minutes = Number.isFinite(coolVal) ? coolVal : null;
                         updates.close_before_close_minutes = Number.isFinite(closeVal) ? closeVal : null;
+                        const parameterUpdates = {};
+                        let validationError = null;
+                        if (this.strategyParameterInputs) {
+                            Object.entries(this.strategyParameterInputs).forEach(([paramName, ctx]) => {
+                                if (validationError) return;
+                                const { input, meta } = ctx;
+                                let value;
+                                if (meta.type === 'bool') {
+                                    value = !!input.checked;
+                                } else {
+                                    const raw = input.value;
+                                    if (raw === '' || raw === null || raw === undefined) {
+                                        value = meta.allow_null ? null : (meta.default ?? null);
+                                    } else if (meta.type === 'int') {
+                                        value = parseInt(raw, 10);
+                                    } else if (meta.type === 'float') {
+                                        value = parseFloat(raw);
+                                    } else {
+                                        value = raw;
+                                    }
+                                    if ((meta.type === 'int' || meta.type === 'float')) {
+                                        if (value === null && meta.allow_null) {
+                                            // ok
+                                        } else if (!Number.isFinite(value)) {
+                                            validationError = `参数 ${meta.label || paramName} 无效`;
+                                            return;
+                                        }
+                                    }
+                                }
+                                if ((value === null || value === undefined) && !meta.allow_null && meta.type !== 'bool') {
+                                    validationError = `参数 ${meta.label || paramName} 必须填写`;
+                                    return;
+                                }
+                                parameterUpdates[paramName] = value;
+                            });
+                        }
+                        if (validationError) {
+                            this.showAlert('danger', validationError);
+                            return;
+                        }
+                        if (Object.keys(parameterUpdates).length) {
+                            updates.parameters = parameterUpdates;
+                        }
                     }
                     try {
                         await this.apiCall(`/strategies/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(updates) });
@@ -7378,7 +7498,8 @@ class TradingApp {
                                 trend_threshold: 'Trend Threshold',
                                 cooldown_seconds: 'Cooldown',
                                 max_loss_streak: 'Breaker (Max Loss Streak)',
-                                default_quantity: 'Base Quantity'
+                                default_quantity: 'Base Quantity',
+                                signal_frequency_seconds: 'Execution Frequency'
                             };
                             const entries = Object.entries(params).filter(([, value]) => value !== null && value !== undefined);
                             if (entries.length) {
@@ -7394,6 +7515,311 @@ class TradingApp {
                                 });
                             } else {
                                 riskParamEl.innerHTML = '<li class="text-muted">No dedicated parameters</li>';
+                            }
+                        }
+                        const paramTableBody = document.querySelector('#summaryParameterTable tbody');
+                        if (paramTableBody) {
+                            paramTableBody.innerHTML = '';
+                            const schemaSource = Array.isArray(info.configurable_parameters) && info.configurable_parameters.length
+                                ? info.configurable_parameters
+                                : (Array.isArray(info.parameters) ? info.parameters : []);
+                            const schema = Array.isArray(schemaSource) ? schemaSource : [];
+                            const formatValue = (param, key) => {
+                                const raw = param?.[key];
+                                if (raw === null || raw === undefined) return '-';
+                                if (param?.type === 'bool') {
+                                    return raw ? 'On' : 'Off';
+                                }
+                                if (typeof raw === 'number') {
+                                    return Number.isFinite(raw) ? raw : '-';
+                                }
+                                return raw;
+                            };
+                            const buildRangeText = (param) => {
+                                const parts = [];
+                                if (param?.min !== undefined && param.min !== null) parts.push(`≥ ${param.min}`);
+                                if (param?.max !== undefined && param.max !== null) parts.push(`≤ ${param.max}`);
+                                let range = parts.join(' / ');
+                                if (param?.allow_null) {
+                                    range = range ? `${range}; allow null` : 'Allow null';
+                                }
+                                return range || '-';
+                            };
+                            const startInlineEdit = (cell, param) => {
+                                if (!param?.name) return;
+                                if (cell.dataset.editing === '1') return;
+                                cell.dataset.editing = '1';
+                                const originalValue = param.value;
+                                const originalDisplay = formatValue(param, 'value');
+                                let isSaving = false;
+                                const cleanup = () => {
+                                    cell.dataset.editing = '0';
+                                    cell.classList.remove('opacity-75');
+                                };
+                                const revert = () => {
+                                    param.value = originalValue;
+                                    cell.innerHTML = '';
+                                    cell.textContent = originalDisplay;
+                                    cleanup();
+                                };
+
+                                let editor;
+                                const choices = Array.isArray(param?.choices) ? param.choices : null;
+                                if (param?.type === 'bool' || (choices && choices.length)) {
+                                    const select = document.createElement('select');
+                                    select.className = 'form-select form-select-sm';
+                                    if (choices && choices.length) {
+                                        choices.forEach((choice) => {
+                                            const opt = document.createElement('option');
+                                            const hasValue = choice && typeof choice === 'object' && 'value' in choice;
+                                            const rawValue = hasValue ? choice.value : choice;
+                                            const label = choice && typeof choice === 'object' && 'label' in choice
+                                                ? (choice.label ?? rawValue)
+                                                : rawValue;
+                                            const normalizedValue = rawValue === null || rawValue === undefined ? '' : String(rawValue);
+                                            opt.value = normalizedValue;
+                                            opt.textContent = label === null || label === undefined ? normalizedValue : String(label);
+                                            select.appendChild(opt);
+                                        });
+                                        if (param.allow_null) {
+                                            const opt = document.createElement('option');
+                                            opt.value = '';
+                                            opt.textContent = '（留空）';
+                                            select.appendChild(opt);
+                                        }
+                                        const current = param.value;
+                                        if (current === null || current === undefined) {
+                                            select.value = '';
+                                        } else {
+                                            const currentStr = typeof current === 'object' ? current?.value : String(current);
+                                            if (Array.from(select.options).some(opt => opt.value == currentStr)) {
+                                                select.value = currentStr;
+                                            }
+                                        }
+                                    } else {
+                                        const trueOpt = document.createElement('option');
+                                        trueOpt.value = 'true';
+                                        trueOpt.textContent = 'On';
+                                        const falseOpt = document.createElement('option');
+                                        falseOpt.value = 'false';
+                                        falseOpt.textContent = 'Off';
+                                        select.appendChild(trueOpt);
+                                        select.appendChild(falseOpt);
+                                        if (param.allow_null) {
+                                            const nullOpt = document.createElement('option');
+                                            nullOpt.value = 'null';
+                                            nullOpt.textContent = '（留空）';
+                                            select.appendChild(nullOpt);
+                                        }
+                                        const current = param.value;
+                                        if (current === null || current === undefined) {
+                                            select.value = 'null';
+                                        } else {
+                                            select.value = current ? 'true' : 'false';
+                                        }
+                                    }
+                                    editor = select;
+                                } else {
+                                    const input = document.createElement('input');
+                                    input.className = 'form-control form-control-sm';
+                                    input.type = (param?.type === 'int' || param?.type === 'float') ? 'number' : 'text';
+                                    if (param?.step !== undefined && param.step !== null) input.step = param.step;
+                                    if (param?.min !== undefined && param.min !== null) input.min = param.min;
+                                    if (param?.max !== undefined && param.max !== null) input.max = param.max;
+                                    if (param?.allow_null) {
+                                        input.placeholder = '（留空）';
+                                    }
+                                    const current = param.value;
+                                    input.value = (current === null || current === undefined) ? '' : current;
+                                    editor = input;
+                                }
+
+                                cell.innerHTML = '';
+                                cell.appendChild(editor);
+                                cell.classList.add('opacity-75');
+                                editor.focus();
+                                if (editor.select) {
+                                    editor.select();
+                                }
+
+                                const handleBlur = () => {
+                                    revert();
+                                };
+                                editor.addEventListener('blur', handleBlur);
+
+                                const commit = async () => {
+                                    if (isSaving) return;
+                                    editor.removeEventListener('blur', handleBlur);
+                                    let raw;
+                                    let newValue;
+                                    if (param?.type === 'bool' && editor instanceof HTMLSelectElement) {
+                                        raw = editor.value;
+                                        if (raw === 'null') {
+                                            if (param.allow_null) {
+                                                newValue = null;
+                                            } else {
+                                                this.showAlert('danger', `${param.label || param.name} 不允许为空`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                        } else {
+                                            newValue = raw === 'true' || raw === '1';
+                                        }
+                                    } else if (choices && editor instanceof HTMLSelectElement) {
+                                        raw = editor.value;
+                                        if ((raw === '' || raw === null) && param.allow_null) {
+                                            newValue = null;
+                                        } else if (param?.type === 'int') {
+                                            const parsed = parseInt(raw, 10);
+                                            if (!Number.isFinite(parsed)) {
+                                                this.showAlert('danger', `${param.label || param.name} 需要整数数值`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                            newValue = parsed;
+                                        } else if (param?.type === 'float') {
+                                            const parsed = parseFloat(raw);
+                                            if (!Number.isFinite(parsed)) {
+                                                this.showAlert('danger', `${param.label || param.name} 需要数值`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                            newValue = parsed;
+                                        } else {
+                                            newValue = raw;
+                                        }
+                                    } else {
+                                        raw = editor.value;
+                                        if ((raw === '' || raw === null || raw === undefined)) {
+                                            if (param?.allow_null) {
+                                                newValue = null;
+                                            } else {
+                                                this.showAlert('danger', `${param.label || param.name} 不能为空`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                        } else if (param?.type === 'int') {
+                                            const parsed = parseInt(raw, 10);
+                                            if (!Number.isFinite(parsed)) {
+                                                this.showAlert('danger', `${param.label || param.name} 需要整数数值`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                            newValue = parsed;
+                                        } else if (param?.type === 'float') {
+                                            const parsed = parseFloat(raw);
+                                            if (!Number.isFinite(parsed)) {
+                                                this.showAlert('danger', `${param.label || param.name} 需要数值`);
+                                                editor.addEventListener('blur', handleBlur);
+                                                editor.focus();
+                                                return;
+                                            }
+                                            newValue = parsed;
+                                        } else {
+                                            newValue = raw;
+                                        }
+                                    }
+
+                                    if ((param?.type === 'int' || param?.type === 'float') && newValue !== null && newValue !== undefined) {
+                                        if (param?.min !== undefined && param.min !== null && newValue < param.min) {
+                                            this.showAlert('danger', `${param.label || param.name} 需 ≥ ${param.min}`);
+                                            editor.addEventListener('blur', handleBlur);
+                                            editor.focus();
+                                            return;
+                                        }
+                                        if (param?.max !== undefined && param.max !== null && newValue > param.max) {
+                                            this.showAlert('danger', `${param.label || param.name} 需 ≤ ${param.max}`);
+                                            editor.addEventListener('blur', handleBlur);
+                                            editor.focus();
+                                            return;
+                                        }
+                                    }
+
+                                    const unchanged = (originalValue === null || originalValue === undefined)
+                                        ? (newValue === null || newValue === undefined)
+                                        : (newValue === originalValue);
+                                    if (unchanged) {
+                                        revert();
+                                        return;
+                                    }
+
+                                    try {
+                                        isSaving = true;
+                                        if ('disabled' in editor) editor.disabled = true;
+                                        const payload = { parameters: { [param.name]: newValue } };
+                                        const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}`, {
+                                            method: 'PUT',
+                                            body: JSON.stringify(payload)
+                                        });
+                                        if (!res?.success) {
+                                            throw new Error('Update failed');
+                                        }
+                                        param.value = newValue;
+                                        cell.innerHTML = '';
+                                        cell.textContent = formatValue(param, 'value');
+                                        cleanup();
+                                        this.showAlert('success', `${param.label || param.name} 已更新`);
+                                    } catch (err) {
+                                        console.error('Failed to update parameter', err);
+                                        this.showAlert('danger', `${param.label || param.name} 更新失败`);
+                                        revert();
+                                    } finally {
+                                        isSaving = false;
+                                    }
+                                };
+
+                                if (editor instanceof HTMLSelectElement) {
+                                    editor.addEventListener('change', () => commit());
+                                }
+
+                                editor.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter') {
+                                        ev.preventDefault();
+                                        commit();
+                                    } else if (ev.key === 'Escape') {
+                                        ev.preventDefault();
+                                        editor.removeEventListener('blur', handleBlur);
+                                        revert();
+                                    }
+                                });
+                            };
+                            if (schema.length) {
+                                schema.forEach((param) => {
+                                    const tr = document.createElement('tr');
+                                    if (param?.description) tr.title = param.description;
+                                    const nameCell = document.createElement('td');
+                                    nameCell.textContent = param?.label || param?.name || '-';
+                                    const valueCell = document.createElement('td');
+                                    valueCell.textContent = formatValue(param, 'value');
+                                    if (param?.name) {
+                                        valueCell.title = '双击编辑，回车保存';
+                                        valueCell.style.cursor = 'text';
+                                        valueCell.classList.add('align-middle');
+                                        valueCell.addEventListener('dblclick', () => startInlineEdit(valueCell, param));
+                                    }
+                                    const defaultCell = document.createElement('td');
+                                    defaultCell.textContent = formatValue(param, 'default');
+                                    const rangeCell = document.createElement('td');
+                                    rangeCell.textContent = buildRangeText(param);
+                                    tr.appendChild(nameCell);
+                                    tr.appendChild(valueCell);
+                                    tr.appendChild(defaultCell);
+                                    tr.appendChild(rangeCell);
+                                    paramTableBody.appendChild(tr);
+                                });
+                            } else {
+                                const row = document.createElement('tr');
+                                const cell = document.createElement('td');
+                                cell.colSpan = 4;
+                                cell.className = 'text-muted';
+                                cell.textContent = 'No configurable parameters';
+                                row.appendChild(cell);
+                                paramTableBody.appendChild(row);
                             }
                         }
                         const subKey = info.data_subscription || s?.data_subscription || '';

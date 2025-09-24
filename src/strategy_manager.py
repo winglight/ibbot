@@ -249,6 +249,8 @@ class StrategyManager:
         except Exception as exc:  # pragma: no cover - defensive guard
             strategy_logger.warning(f"Failed to set dependencies for {name}: {exc}")
 
+        self._apply_persisted_parameters(name, strategy_instance)
+
         record = self.strategies.get(name)
         if not record:
             record = Strategy(
@@ -345,7 +347,7 @@ class StrategyManager:
             
             # 确保策略目录存在
             self.strategy_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # 加载策略
             db_strategies = self.db_manager.load_strategies()
             for strategy_data in db_strategies:
@@ -405,7 +407,7 @@ class StrategyManager:
 
         except Exception as e:
             strategy_logger.error(f"Error migrating data to database: {e}")
-        
+
     def _load_settings(self):
         """Load strategy settings - 兼容性方法，现在从数据库加载"""
         if self.settings_file.exists():
@@ -496,6 +498,56 @@ class StrategyManager:
     def _get_strategy_setting(self, strategy_name: str, suffix: str, default: Any = None) -> Any:
         key = f"{strategy_name}_{suffix}"
         return (self.settings or {}).get(key, default)
+
+    def _apply_persisted_parameters(self, name: str, runtime: "BaseStrategy") -> None:
+        """Load persisted parameter overrides for a runtime strategy instance."""
+
+        getter = getattr(runtime, "get_parameter_definitions", None)
+        updater = getattr(runtime, "apply_parameter_updates", None)
+        if not callable(getter) or not callable(updater):
+            return
+
+        definitions = getter()
+        if not definitions:
+            return
+
+        overrides: Dict[str, Any] = {}
+        settings = self.settings or {}
+        for param_name in definitions.keys():
+            key = f"{name}_param_{param_name}"
+            if key in settings:
+                overrides[param_name] = settings[key]
+
+        if not overrides:
+            return
+
+        try:
+            updater(overrides)
+            strategy_logger.info(
+                f"Applied persisted parameters for {name}: {', '.join(sorted(overrides.keys()))}"
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            strategy_logger.warning(
+                f"Failed to apply persisted parameters for {name}: {exc}"
+            )
+
+    def _attach_parameter_schema(
+        self, name: str, payload: Dict[str, Any], runtime: Optional["BaseStrategy"]
+    ) -> None:
+        """Populate parameter metadata for API responses."""
+
+        describer = getattr(runtime, "describe_parameters", None) if runtime else None
+        schema: List[Dict[str, Any]] = []
+        if callable(describer):
+            try:
+                schema = describer() or []
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(f"Failed to describe parameters for {name}: {exc}")
+                schema = []
+
+        payload["parameters"] = schema
+        if "configurable_parameters" not in payload or not payload["configurable_parameters"]:
+            payload["configurable_parameters"] = schema
 
     def get_data_push_state(self, strategy_name: str) -> Dict[str, Any]:
         return dict(self.data_push_state.get(strategy_name, {}))
@@ -918,6 +970,13 @@ class StrategyManager:
                 strategy_dict['close_before_close_minutes'] = int(close_val) if close_val is not None else None
             except (TypeError, ValueError):
                 strategy_dict['close_before_close_minutes'] = None
+
+            runtime = self.internal_strategies_runtime.get(name)
+            if runtime:
+                self._attach_parameter_schema(name, strategy_dict, runtime)
+            else:
+                strategy_dict.setdefault("parameters", [])
+                strategy_dict.setdefault("configurable_parameters", [])
             return strategy_dict
         return None
 
@@ -964,6 +1023,8 @@ class StrategyManager:
                         if value is None:
                             continue
                         strategy[key] = value
+
+            self._attach_parameter_schema(name, strategy, runtime)
 
         combined_rules: Dict[str, Any] = {}
         if runtime_risk_rules:
@@ -1053,8 +1114,12 @@ class StrategyManager:
         try:
             if name not in self.strategies:
                 return False
-                
+
             strategy = self.strategies[name]
+            runtime = self.internal_strategies_runtime.get(name)
+            param_definitions = (
+                runtime.get_parameter_definitions() if runtime else {}
+            )
             # 将SL/TP更新与常规字段分离
             sl_tp_keys = {"sl_enabled", "sl_price", "sl_type", "tp_enabled", "tp_price", "tp_type"}
             position_setting_map = {
@@ -1066,6 +1131,7 @@ class StrategyManager:
             settings_to_remove: Set[str] = set()
             position_settings_changed = False
             restart_data_push = False
+            parameter_updates: Dict[str, Any] = {}
             for key, value in updates.items():
                 if key in sl_tp_keys:
                     # 构造持久化键
@@ -1110,11 +1176,28 @@ class StrategyManager:
                             settings_to_save[storage_key] = minutes_value
                         else:
                             settings_to_remove.add(storage_key)
+                elif key == 'parameters' and isinstance(value, dict):
+                    parameter_updates.update(value)
+                elif runtime and key in param_definitions:
+                    parameter_updates[key] = value
                 elif hasattr(strategy, key):
                     setattr(strategy, key, value)
 
             # 先保存策略实体（常规字段）
             self._save_strategies()
+
+            if parameter_updates and runtime:
+                try:
+                    applied = runtime.apply_parameter_updates(parameter_updates)
+                except ValueError as exc:
+                    strategy_logger.error(f"Parameter update failed for {name}: {exc}")
+                    return False
+                for param_name, param_value in applied.items():
+                    storage_key = f"{name}_param_{param_name}"
+                    if param_value is None:
+                        settings_to_remove.add(storage_key)
+                    else:
+                        settings_to_save[storage_key] = param_value
 
             # 持久化SL/TP设置
             self._persist_strategy_settings(settings_to_save, settings_to_remove)
@@ -1172,6 +1255,29 @@ class StrategyManager:
                 raise ValueError(
                     f"Add-position cooldown active for {symbol_code}: remaining"
                     f" {round((timedelta(minutes=cooldown_minutes) - (now_local() - last_time)).total_seconds() / 60, 2)} min"
+                )
+
+        max_position: Optional[float] = None
+        if self.risk_manager:
+            limit_getter = getattr(self.risk_manager, "get_position_limit", None)
+            if callable(limit_getter):
+                try:
+                    max_position = limit_getter(symbol_code)
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(
+                        f"Failed to obtain position limit for {symbol_code}: {exc}"
+                    )
+        if max_position is not None and max_position >= 0:
+            try:
+                numeric_new_position = float(new_position)
+            except (TypeError, ValueError):
+                numeric_new_position = None
+            if (
+                numeric_new_position is not None
+                and abs(numeric_new_position) - max_position > 1e-9
+            ):
+                raise ValueError(
+                    f"Position limit exceeded for {symbol_code}: {numeric_new_position} > {max_position}"
                 )
 
         return {

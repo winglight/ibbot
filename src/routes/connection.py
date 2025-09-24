@@ -139,7 +139,53 @@ async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
 
 @router.get("/api/connection_status")
 async def get_connection_status(user: Optional[str] = Depends(get_current_user)):
-    return {
-        "connected": connection_manager.is_connected(),
-        "account_type": "Paper" if connection_manager.config.paper_trading else "Live",
-    }
+    """Return the current IBKR connection status with a guarded timeout.
+
+    In production we have observed rare cases where the low level IB client can
+    block when checking the connection state (for example when the background
+    connection thread is stuck).  Previously this would cause the whole HTTP
+    request to hang until the frontend aborted it after several seconds,
+    resulting in a timeout error.  To keep the API responsive we perform the
+    status check in a worker thread and cap the wait time; if the check cannot
+    finish in time we fall back to the last known state instead of hanging the
+    request.
+    """
+
+    try:
+        try:
+            # Guard against rare blocking behaviour inside the IB client by
+            # executing the check in a worker thread with a small timeout.
+            is_connected = await asyncio.wait_for(
+                asyncio.to_thread(connection_manager.is_connected),
+                timeout=1.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Connection status check timed out; using cached state")
+            is_connected = getattr(connection_manager, "connected", False)
+        except Exception as exc:
+            logger.warning(f"Connection status check failed: {exc}")
+            is_connected = getattr(connection_manager, "connected", False)
+
+        account_type = "Paper"
+        try:
+            if not connection_manager.config.paper_trading:
+                account_type = "Live"
+        except Exception as exc:
+            logger.debug(f"Failed to resolve account type: {exc}")
+
+        response = {
+            "connected": bool(is_connected),
+            "account_type": account_type,
+        }
+
+        try:
+            last_error = connection_manager.get_last_connect_error()
+            if last_error:
+                response["last_error"] = last_error
+        except Exception:
+            pass
+
+        return response
+    except Exception as e:
+        logger.error(f"Failed to get connection status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get connection status")
