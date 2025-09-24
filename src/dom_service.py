@@ -56,6 +56,7 @@ class DOMService:
         self._max_alerts = 100
         self._retention_sec = 300
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         # Store last raw depth update for monitoring
         self._last_depth: Dict[str, Any] = {}
         self._last_depth_by_symbol: Dict[str, Dict[str, Any]] = {}
@@ -209,6 +210,24 @@ class DOMService:
             lookback_seconds=lookback_seconds,
             start=start_time,
             end=end_time,
+            max_points=max_points,
+        )
+
+    async def get_stats_async(
+        self,
+        symbol: str,
+        *,
+        lookback_seconds: Optional[int] = None,
+        start_time: Optional[Any] = None,
+        end_time: Optional[Any] = None,
+        max_points: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(
+            self.get_stats,
+            symbol,
+            lookback_seconds=lookback_seconds,
+            start_time=start_time,
+            end_time=end_time,
             max_points=max_points,
         )
 
@@ -439,18 +458,35 @@ class DOMService:
             self._perform_cleanup()
 
     # --------------------------------------------------------------
-    def start(self, symbol: str, num_rows: int = 5) -> bool:
+    def _ensure_cleanup_task(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            return
+
+        loop = loop or self._loop
+        if loop is None or loop.is_closed():
+            return
+
+        def _schedule() -> None:
+            if self._cleanup_task is None or self._cleanup_task.done():
+                self._cleanup_task = loop.create_task(self._cleanup_loop())
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            _schedule()
+        else:
+            loop.call_soon_threadsafe(_schedule)
+
+    def _start_stream_blocking(self, symbol: str, num_rows: int = 5) -> bool:
         symbol_key = (symbol or "").upper()
         if not connection_manager.is_connected():
             logger.warning("DOM depth stream start rejected - not connected", symbol=symbol_key)
             return False
         self._active_symbol = symbol_key
         logger.info("Starting DOM depth stream", symbol=symbol_key, num_rows=num_rows)
-        if self._cleanup_task is None or self._cleanup_task.done():
-            try:
-                self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-            except RuntimeError:
-                self._cleanup_task = None
         result = depth_subscriber.start_depth_stream(
             symbol, lambda data, sym=symbol: self._on_depth_update(sym, data), num_rows=num_rows
         )
@@ -460,8 +496,23 @@ class DOMService:
             logger.warning("Failed to start DOM depth stream", symbol=symbol_key)
         return result
 
-    # --------------------------------------------------------------
-    def stop(self, symbol: str) -> bool:
+    async def start_stream(self, symbol: str, num_rows: int = 5) -> bool:
+        loop = asyncio.get_running_loop()
+        self._loop = loop
+        self._ensure_cleanup_task(loop)
+        return await asyncio.to_thread(self._start_stream_blocking, symbol, num_rows)
+
+    def start(self, symbol: str, num_rows: int = 5) -> bool:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self._loop
+        else:
+            self._loop = loop
+        self._ensure_cleanup_task(loop)
+        return self._start_stream_blocking(symbol, num_rows)
+
+    def _stop_stream_blocking(self, symbol: str) -> bool:
         symbol_key = (symbol or "").upper()
         if self._active_symbol and symbol_key == self._active_symbol:
             self._active_symbol = None
@@ -471,6 +522,17 @@ class DOMService:
         else:
             logger.warning("No active DOM depth stream to stop", symbol=symbol_key)
         return result
+
+    async def stop_stream(self, symbol: str) -> bool:
+        if not self._loop or self._loop.is_closed():
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+        return await asyncio.to_thread(self._stop_stream_blocking, symbol)
+
+    def stop(self, symbol: str) -> bool:
+        return self._stop_stream_blocking(symbol)
 
     # --------------------------------------------------------------
     def get_metrics(self, symbol: Optional[str] = None) -> Dict[str, Any]:

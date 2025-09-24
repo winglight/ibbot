@@ -540,7 +540,7 @@ class StrategyManager:
                     from src.dom_service import get_dom_service
 
                     dom_service = get_dom_service()
-                    ok = dom_service.start(target_symbol)
+                    ok = await dom_service.start_stream(target_symbol)
                 elif stored_subscription == "market_data":
                     try:
                         import core
@@ -620,7 +620,7 @@ class StrategyManager:
                 from src.dom_service import get_dom_service
 
                 dom_service = get_dom_service()
-                dom_service.stop(state.get("symbol"))
+                await dom_service.stop_stream(state.get("symbol") or "")
         except Exception:  # pragma: no cover - defensive guard
             pass
 
