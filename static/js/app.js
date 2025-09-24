@@ -3447,7 +3447,7 @@ class TradingApp {
                             if (response.success) {
                                 this.showAlert('success', `平仓订单已提交: ${response.action} ${response.quantity} ${symbol} (订单ID: ${response.order_id})`);
                                 // 刷新持仓和订单数据
-                                this.loadPortfolio();
+                                await this.loadPortfolio();
                                 this.loadOrders();
                                 // 刷新监控弹窗数据
                                 await this.syncMonitorModalData(symbol);
@@ -3482,9 +3482,9 @@ class TradingApp {
                             if (response.success) {
                                 this.showAlert('success', `反向订单已提交: ${response.action} ${response.quantity} ${symbol} (订单ID: ${response.order_id})`);
                                 // 刷新持仓和订单数据
-                                this.loadPortfolio();
+                                await this.loadPortfolio();
                                 this.loadOrders();
-                                
+
                                 // 同步弹窗右侧区域数据
                                 await this.syncMonitorModalData(symbol);
                             } else {
@@ -6672,12 +6672,19 @@ class TradingApp {
         }
     }
 
-    async loadPortfolio() {
+    async loadPortfolio(options = {}) {
+        const { refresh = true } = options || {};
         try {
-            return this.portfolioManager.loadPortfolio();
+            if (refresh && this.dataManager?.loadPortfolio) {
+                await this.dataManager.loadPortfolio();
+            }
+            if (this.portfolioManager?.loadPortfolio) {
+                return this.portfolioManager.loadPortfolio();
+            }
         } catch (error) {
             console.error('Failed to load portfolio:', error);
         }
+        return [];
     }
 
     async loadRiskRules(options = {}) { return this.riskRulesManager.loadRiskRules(options); }
