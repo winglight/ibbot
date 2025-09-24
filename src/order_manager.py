@@ -210,6 +210,80 @@ class OrderManager:
             order_logger.error(f"Error initializing orders database: {e}")
             raise
 
+    def _row_to_order(self, row: tuple) -> Optional[Order]:
+        """将数据库行转换为 ``Order`` 对象并更新内存缓存。"""
+        if row[20]:
+            # 软删除的订单，记录其ID用于去重，避免IBKR重新创建
+            self.deleted_order_ids.add(row[0])
+            return None
+
+        order = Order(
+            order_id=row[0],
+            symbol=row[1],
+            action=row[2],
+            quantity=row[3],
+            order_type=row[4],
+            price=row[5],
+            status=row[6] or OrderStatus.SUBMITTED.value,
+            created_at=parse_local_datetime(row[7]) or now_local(),
+            updated_at=parse_local_datetime(row[8]) or None,
+            executed_at=parse_local_datetime(row[9]),
+            fill_price=row[10],
+            order_source=row[11] or OrderSource.MANUAL.value,
+            strategy_name=row[12],
+            rule_id=row[13],
+            parent_order_id=row[14],
+            exchange=row[15] or "SMART",
+            sec_type=row[16] or "STK",
+            notes=row[17],
+            commission=row[18],
+            pnl=row[19],
+            is_deleted=0
+        )
+        self.orders[order.order_id] = order
+        return order
+
+    def _fetch_orders_from_database(self,
+                                    limit: Optional[int] = None,
+                                    start_date: Optional[datetime] = None) -> List[Order]:
+        """按需从数据库获取订单，避免全量加载导致的性能问题。"""
+        try:
+            with sqlite3.connect(self.db_manager.db_path) as conn:
+                cursor = conn.cursor()
+                query = """
+                    SELECT order_id, symbol, action, quantity, order_type, price,
+                           status, created_at, updated_at, executed_at, fill_price,
+                           order_source, strategy_name, rule_id, parent_order_id,
+                           exchange, sec_type, notes, commission, pnl, is_deleted
+                    FROM orders
+                    WHERE is_deleted = 0
+                """
+                params: List[Any] = []
+
+                if start_date:
+                    start_dt = ensure_local_timezone(start_date)
+                    query += " AND created_at >= ?"
+                    params.append(start_dt.isoformat())
+
+                query += " ORDER BY created_at DESC"
+
+                if limit:
+                    query += " LIMIT ?"
+                    params.append(limit)
+
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+
+            orders: List[Order] = []
+            for row in rows:
+                order = self._row_to_order(row)
+                if order:
+                    orders.append(order)
+            return orders
+        except Exception as e:
+            order_logger.error(f"Error fetching orders from database: {e}")
+            raise
+
     def _load_orders_from_database(self):
         """从数据库加载订单到内存"""
         try:
@@ -223,43 +297,16 @@ class OrderManager:
                     FROM orders
                     ORDER BY created_at DESC
                 """)
-                
+
                 rows = cursor.fetchall()
-                
+
                 for row in rows:
-                    if row[20]:  # is_deleted字段现在是第20个（索引19）
-                        # 软删除的订单，记录其ID用于去重，避免IBKR重新创建
-                        self.deleted_order_ids.add(row[0])
-                        continue
-                    order = Order(
-                        order_id=row[0],
-                        symbol=row[1],
-                        action=row[2],
-                        quantity=row[3],
-                        order_type=row[4],
-                        price=row[5],
-                        status=row[6] or OrderStatus.SUBMITTED.value,
-                        created_at=parse_local_datetime(row[7]) or now_local(),
-                        updated_at=parse_local_datetime(row[8]) or None,
-                        executed_at=parse_local_datetime(row[9]),
-                        fill_price=row[10],
-                        order_source=row[11] or OrderSource.MANUAL.value,
-                        strategy_name=row[12],
-                        rule_id=row[13],
-                        parent_order_id=row[14],
-                        exchange=row[15] or "SMART",
-                        sec_type=row[16] or "STK",
-                        notes=row[17],
-                        commission=row[18],
-                        pnl=row[19],
-                        is_deleted=0
-                    )
-                    self.orders[order.order_id] = order
-                
+                    self._row_to_order(row)
+
                 order_logger.info(f"Loaded {len(self.orders)} orders from database")
-                
+
         except Exception as e:
-                    order_logger.error(f"Error loading orders from database: {e}")
+            order_logger.error(f"Error loading orders from database: {e}")
 
     def create_order(self,
                     order_id: str,
@@ -740,16 +787,27 @@ class OrderManager:
         """获取单个订单"""
         return self.orders.get(order_id)
 
-    def get_orders(self, 
+    def get_orders(self,
                   symbol: Optional[str] = None,
                   status: Optional[str] = None,
                   order_source: Optional[str] = None,
                   strategy_name: Optional[str] = None,
-                  limit: Optional[int] = None) -> List[Order]:
+                  limit: Optional[int] = None,
+                  start_date: Optional[datetime] = None) -> List[Order]:
         """获取订单列表"""
+        simple_filter = not any([symbol, status, order_source, strategy_name])
+
+        # 对于常见的“近期订单”请求（仅限制数量或起始时间）直接从数据库分页读取，避免全量加载。
+        if simple_filter and (limit is not None or start_date is not None):
+            return self._fetch_orders_from_database(limit=limit, start_date=start_date)
+
         self._load_orders_from_database()
         orders = list(self.orders.values())
-        
+
+        if start_date:
+            start_dt = ensure_local_timezone(start_date)
+            orders = [o for o in orders if ensure_local_timezone(o.created_at) >= start_dt]
+
         # 过滤条件
         if symbol:
             orders = [o for o in orders if o.symbol == symbol]
