@@ -241,14 +241,49 @@ class StrategyManager:
         self.internal_strategies_runtime[name] = strategy_instance
         strategy_instance.strategy_manager = self
 
+        dependency_kwargs = {
+            "strategy_manager": self,
+            "risk_manager": self.risk_manager,
+            "queue_manager": self.queue_manager,
+        }
+
+        core_module = None
+        try:  # pragma: no cover - lazy import to avoid circular reference at module load
+            import core as core_module  # type: ignore
+        except Exception:
+            core_module = None
+
+        if core_module is not None:
+            order_mgr = getattr(core_module, "order_manager", None)
+            if order_mgr is not None:
+                dependency_kwargs["order_manager"] = order_mgr
+            notifier = getattr(core_module, "notification_manager", None)
+            if notifier is not None:
+                dependency_kwargs["notification_manager"] = notifier
+
         try:
-            strategy_instance.set_dependencies(
-                strategy_manager=self,
-                risk_manager=self.risk_manager,
-                queue_manager=self.queue_manager,
-            )
+            strategy_instance.set_dependencies(**dependency_kwargs)
+        except TypeError:
+            # Fall back to minimal dependency injection for custom signatures
+            try:
+                strategy_instance.set_dependencies(strategy_manager=self)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(f"Failed to set dependencies for {name}: {exc}")
         except Exception as exc:  # pragma: no cover - defensive guard
             strategy_logger.warning(f"Failed to set dependencies for {name}: {exc}")
+
+        if getattr(strategy_instance, "dom_service", None) is None:
+            try:
+                from src.dom_service import get_dom_service
+
+                strategy_instance.set_dependencies(dom_service=get_dom_service())
+            except TypeError:
+                # Strategy does not accept DOM dependency; ignore silently
+                pass
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Failed to inject DOM service dependency for {name}: {exc}"
+                )
 
         self._apply_persisted_parameters(name, strategy_instance)
 
