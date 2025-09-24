@@ -63,14 +63,19 @@ class DepthSubscriber:
             ib = self.connection_manager.get_ib_instance()
             if not ib:
                 return None
+
+            ibkr_client = self._resolve_ibkr_client()
+            if not ibkr_client:
+                _depth_logger.error(f"IBKR client unavailable when building contract for {symbol}")
+                return None
+
             # Choose contract helper from IBKR client when available
             contract = None
             try:
-                import core  # 延迟导入避免循环导入
                 if symbol in ["MNQ", "NQ", "ES", "MES"]:
-                    contract = core.ibkr_client.get_future_contract(symbol, exchange="CME")
+                    contract = ibkr_client.get_future_contract(symbol, exchange="CME")
                 else:
-                    contract = core.ibkr_client.get_stock_contract(symbol)
+                    contract = ibkr_client.get_stock_contract(symbol)
             except Exception as e:
                 _depth_logger.error(f"Contract build failed for {symbol}: {e}")
                 return None
@@ -136,6 +141,48 @@ class DepthSubscriber:
             pass
         _depth_logger.info(f"Stopped depth stream for {symbol}")
         return True
+
+    # ------------------------------------------------------------------
+    def _resolve_ibkr_client(self):
+        """Return an IBKR client instance, creating it lazily when required."""
+
+        try:
+            from importlib import import_module
+
+            core = import_module("core")
+        except Exception as exc:  # pragma: no cover - defensive guard
+            _depth_logger.error(f"Unable to import core module for depth stream: {exc}")
+            return None
+
+        client = getattr(core, "ibkr_client", None)
+        if client is not None:
+            return client
+
+        client_cls = getattr(core, "IBKRClient", None)
+        if client_cls is None:  # pragma: no cover - compatibility fallback
+            try:
+                from src.ibkr_client import IBKRClient as client_cls
+            except Exception as exc:
+                _depth_logger.error(f"Unable to import IBKRClient class: {exc}")
+                return None
+
+        try:
+            client = client_cls()
+        except Exception as exc:
+            _depth_logger.error(f"Failed to instantiate IBKR client: {exc}")
+            return None
+
+        setattr(core, "ibkr_client", client)
+
+        # Best effort: update risk manager reference when available
+        try:
+            risk_manager = getattr(core, "risk_manager", None)
+            if risk_manager and hasattr(risk_manager, "ibkr_client"):
+                risk_manager.ibkr_client = client
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        return client
 
 
 __all__ = ["DepthSubscriber"]
