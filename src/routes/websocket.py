@@ -13,6 +13,7 @@ from core import (
     websocket_manager,
     order_manager,
     strategy_manager,
+    risk_manager,
 )
 from src.dom_optimizer import get_dom_optimization_orchestrator
 from src.dom_service import get_dom_service
@@ -219,6 +220,63 @@ async def websocket_endpoint(websocket: WebSocket):
             msg_type = message.get("type")
             if msg_type == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
+            elif msg_type == "request_connection_status":
+                key = "connection_status"
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "connection_status",
+                                    "success": False,
+                                    "error": "Rate limited",
+                                }
+                            )
+                        )
+                    continue
+
+                try:
+                    is_connected = await asyncio.wait_for(
+                        asyncio.to_thread(connection_manager.is_connected),
+                        timeout=1.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Connection status request timed out; using cached state")
+                    is_connected = getattr(connection_manager, "connected", False)
+                except Exception as exc:
+                    logger.warning(f"Connection status request failed: {exc}")
+                    is_connected = getattr(connection_manager, "connected", False)
+
+                account_type = "Paper"
+                try:
+                    if not connection_manager.config.paper_trading:
+                        account_type = "Live"
+                except Exception:
+                    account_type = "Paper"
+
+                payload = {
+                    "type": "connection_status",
+                    "connected": bool(is_connected),
+                    "account_type": account_type,
+                    "success": True,
+                    "source": "websocket",
+                }
+
+                try:
+                    last_error = connection_manager.get_last_connect_error()
+                    if last_error:
+                        payload["last_error"] = last_error
+                except Exception:
+                    pass
+
+                last_responses[key] = payload
+                await websocket.send_text(json.dumps(payload))
             elif msg_type == "subscribe_realtime":
                 symbol = message.get("symbol")
                 if symbol and symbol not in realtime_tasks:
@@ -397,6 +455,211 @@ async def websocket_endpoint(websocket: WebSocket):
                         "symbol": symbol,
                         "error": str(exc),
                     }))
+            elif msg_type == "request_risk_rules":
+                if 'risk_manager' not in globals() or risk_manager is None:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "risk_rules",
+                                "success": False,
+                                "error": "Risk manager unavailable",
+                            }
+                        )
+                    )
+                    continue
+
+                key = "risk_rules"
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "risk_rules",
+                                    "success": False,
+                                    "error": "Rate limited",
+                                }
+                            )
+                        )
+                    continue
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    rules = await asyncio.wait_for(
+                        loop.run_in_executor(None, risk_manager.get_risk_rules),
+                        timeout=5.0,
+                    )
+                    serialisable = {}
+                    for symbol, rule in (rules or {}).items():
+                        serialisable[symbol] = {
+                            "symbol": getattr(rule, "symbol", symbol),
+                            "stop_loss_price": getattr(rule, "stop_loss_price", None),
+                            "take_profit_price": getattr(rule, "take_profit_price", None),
+                            "max_loss_percent": getattr(rule, "max_loss_percent", None),
+                            "max_time_span": getattr(rule, "max_time_span", None),
+                            "enabled": getattr(rule, "enabled", False),
+                            "created_at": getattr(rule, "created_at", None).isoformat()
+                            if getattr(rule, "created_at", None)
+                            else None,
+                        }
+                    payload = {
+                        "type": "risk_rules",
+                        "success": True,
+                        "rules": serialisable,
+                        "source": "websocket",
+                    }
+                    last_responses[key] = payload
+                    await websocket.send_text(json.dumps(payload))
+                except Exception as exc:
+                    logger.warning(f"Failed to stream risk rules: {exc}")
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "risk_rules",
+                                "success": False,
+                                "error": str(exc),
+                            }
+                        )
+                    )
+            elif msg_type == "request_strategies":
+                if 'strategy_manager' not in globals() or strategy_manager is None:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "strategies_snapshot",
+                                "success": False,
+                                "error": "Strategy manager unavailable",
+                            }
+                        )
+                    )
+                    continue
+
+                key = "strategies_snapshot"
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "strategies_snapshot",
+                                    "success": False,
+                                    "error": "Rate limited",
+                                }
+                            )
+                        )
+                    continue
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    strategies = await asyncio.wait_for(
+                        loop.run_in_executor(None, strategy_manager.get_strategies),
+                        timeout=6.0,
+                    )
+                    payload = {
+                        "type": "strategies_snapshot",
+                        "success": True,
+                        "strategies": strategies or [],
+                        "source": "websocket",
+                    }
+                    last_responses[key] = payload
+                    await websocket.send_text(json.dumps(payload))
+                except Exception as exc:
+                    logger.warning(f"Failed to stream strategies: {exc}")
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "strategies_snapshot",
+                                "success": False,
+                                "error": str(exc),
+                            }
+                        )
+                    )
+            elif msg_type == "request_strategy_status":
+                if 'strategy_manager' not in globals() or strategy_manager is None:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "strategy_status",
+                                "success": False,
+                                "error": "Strategy manager unavailable",
+                            }
+                        )
+                    )
+                    continue
+
+                name = (message.get("name") or "").strip()
+                if not name:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "strategy_status",
+                                "success": False,
+                                "error": "Strategy name is required",
+                            }
+                        )
+                    )
+                    continue
+
+                key = f"strategy_status:{name}"
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "strategy_status",
+                                    "success": False,
+                                    "name": name,
+                                    "error": "Rate limited",
+                                }
+                            )
+                        )
+                    continue
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    status = await asyncio.wait_for(
+                        loop.run_in_executor(None, strategy_manager.get_internal_strategy_status, name),
+                        timeout=5.0,
+                    )
+                    if status is None:
+                        raise ValueError("Strategy status unavailable")
+                    payload = {
+                        "type": "strategy_status",
+                        "success": True,
+                        "name": name,
+                        "status": status,
+                        "source": "websocket",
+                    }
+                    last_responses[key] = payload
+                    await websocket.send_text(json.dumps(payload))
+                except Exception as exc:
+                    logger.warning(f"Failed to fetch strategy status for {name}: {exc}")
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "strategy_status",
+                                "success": False,
+                                "name": name,
+                                "error": str(exc),
+                            }
+                        )
+                    )
             elif msg_type == "request_strategy_performance":
                 name = (message.get("name") or "").strip()
                 if not name:

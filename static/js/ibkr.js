@@ -9,6 +9,8 @@ class IBKRConnectionManager {
         this.ws = null;
         this.statusCheckInterval = null;
         this._wsThrottle = {};
+        this._lastConnectionStatus = null;
+        this._pendingStatusResolvers = new Set();
         this.setupEventListeners();
         this.startPeriodicStatusCheck();
     }
@@ -72,6 +74,28 @@ class IBKRConnectionManager {
             }
         });
         this._wsThrottle = {};
+    }
+
+    _notifyConnectionStatus(payload = {}) {
+        this._lastConnectionStatus = {
+            connected: !!payload.connected,
+            account_type: payload.account_type || '',
+            last_error: payload.last_error,
+            received_at: Date.now(),
+            source: payload.source || 'websocket'
+        };
+        if (!this._pendingStatusResolvers || this._pendingStatusResolvers.size === 0) {
+            return;
+        }
+        const resolvers = Array.from(this._pendingStatusResolvers);
+        this._pendingStatusResolvers.clear();
+        resolvers.forEach(resolver => {
+            try {
+                resolver(this._lastConnectionStatus);
+            } catch (error) {
+                console.error('[ws] connection status resolver error', error);
+            }
+        });
     }
 
     sendMessage(payload) {
@@ -178,6 +202,48 @@ class IBKRConnectionManager {
         if (options.end) payload.end = options.end;
         if (options.force) payload.force = true;
         const key = `strategy_performance:${name}:${payload.range}`;
+        return this._sendThrottled(key, payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 15000,
+        });
+    }
+
+    requestConnectionStatus(options = {}) {
+        const payload = { type: 'request_connection_status' };
+        if (options.force) payload.force = true;
+        return this._sendThrottled('connection_status', payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 15000,
+        });
+    }
+
+    requestRiskRules(options = {}) {
+        const payload = { type: 'request_risk_rules' };
+        if (options.force) payload.force = true;
+        return this._sendThrottled('risk_rules', payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 15000,
+        });
+    }
+
+    requestStrategies(options = {}) {
+        const payload = { type: 'request_strategies' };
+        if (options.force) payload.force = true;
+        return this._sendThrottled('strategies_snapshot', payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 15000,
+        });
+    }
+
+    requestStrategyStatus(options = {}) {
+        const name = options.name || options.strategyName || '';
+        if (!name) {
+            console.warn('[ws] requestStrategyStatus requires name');
+            return 'failed';
+        }
+        const payload = { type: 'request_strategy_status', name };
+        if (options.force) payload.force = true;
+        const key = `strategy_status:${name}`;
         return this._sendThrottled(key, payload, {
             force: Boolean(options.force),
             minInterval: options.minInterval ?? 15000,
@@ -306,19 +372,29 @@ class IBKRConnectionManager {
             // 未登录则跳过，避免产生401以及触发登录弹窗循环
             const token = localStorage.getItem('access_token');
             if (!token) return;
-            
+
+            const wsReady = this.ws && this.ws.readyState === WebSocket.OPEN;
+            if (wsReady) {
+                const result = this.requestConnectionStatus({
+                    force: Boolean(options.force),
+                    minInterval: options.minInterval ?? 15000,
+                });
+                if (result !== 'failed') {
+                    return result;
+                }
+            }
+
             const data = await this.app.apiCall('/connection_status', {
                 timeout: options.timeout ?? 4000,
                 maxRetries: options.maxRetries ?? 0,
                 useCache: false
             });
-            
+
             this.updateConnectionStatus(data.connected, data.account_type);
-            
+
             if (data.connected) {
                 // Load data asynchronously to avoid blocking
                 setTimeout(() => {
-                    // this.app.dataManager.loadAccountInfo();
                     this.app.loadOrders();
                     this.app.loadPortfolio();
                     this.app.riskRulesManager.loadRiskRules();
@@ -396,7 +472,51 @@ class IBKRConnectionManager {
         console.log('前端状态:');
         console.log('  this.connected:', this.connected);
         console.log('  this.app.connected:', this.app.connected);
-        
+
+        const waitForStatus = () => new Promise(resolve => {
+            let resolver;
+            const timeout = setTimeout(() => {
+                if (this._pendingStatusResolvers && this._pendingStatusResolvers.has(resolver)) {
+                    this._pendingStatusResolvers.delete(resolver);
+                }
+                resolve(this._lastConnectionStatus);
+            }, 1500);
+            resolver = (payload) => {
+                clearTimeout(timeout);
+                resolve(payload || this._lastConnectionStatus);
+            };
+            if (this._pendingStatusResolvers) {
+                this._pendingStatusResolvers.add(resolver);
+            }
+        });
+
+        const wsReady = this.ws && this.ws.readyState === WebSocket.OPEN;
+        if (wsReady) {
+            const sendResult = this.requestConnectionStatus({ force: true });
+            if (sendResult !== 'failed') {
+                const backendStatus = await waitForStatus();
+                if (backendStatus) {
+                    console.log('后端状态:');
+                    console.log('  connected:', backendStatus.connected);
+                    console.log('  account_type:', backendStatus.account_type);
+                } else {
+                    console.log('后端状态: 未收到最新状态，使用缓存');
+                }
+                const backendConnected = backendStatus ? !!backendStatus.connected : this.connected;
+                const statusMatch = this.connected === backendConnected;
+                console.log('状态一致性:', statusMatch ? '✓ 一致' : '✗ 不一致');
+                if (!statusMatch && backendStatus) {
+                    console.log('正在同步状态...');
+                    this.updateConnectionStatus(backendStatus.connected, backendStatus.account_type);
+                }
+                return {
+                    frontend: { connected: this.connected, app_connected: this.app.connected },
+                    backend: backendStatus || { note: 'no_response' },
+                    consistent: statusMatch
+                };
+            }
+        }
+
         try {
             const backendStatus = await this.app.apiCall('/connection_status', {
                 timeout: 3000,
@@ -406,15 +526,15 @@ class IBKRConnectionManager {
             console.log('后端状态:');
             console.log('  connected:', backendStatus.connected);
             console.log('  account_type:', backendStatus.account_type);
-            
+
             const statusMatch = this.connected === backendStatus.connected;
             console.log('状态一致性:', statusMatch ? '✓ 一致' : '✗ 不一致');
-            
+
             if (!statusMatch) {
                 console.log('正在同步状态...');
                 this.updateConnectionStatus(backendStatus.connected, backendStatus.account_type);
             }
-            
+
             return {
                 frontend: { connected: this.connected, app_connected: this.app.connected },
                 backend: backendStatus,
@@ -443,6 +563,12 @@ class IBKRConnectionManager {
         this.ws.onopen = () => {
             console.log('[ws] connected');
             this._resetThrottleState();
+            this.requestConnectionStatus({ force: true });
+            this.requestRiskRules({ force: true });
+            this.requestStrategies({ force: true });
+            if (this.app && this.app.currentStrategyDetails) {
+                this.requestStrategyStatus({ name: this.app.currentStrategyDetails, force: true });
+            }
         };
         
         this.ws.onmessage = (event) => {
@@ -477,6 +603,7 @@ class IBKRConnectionManager {
                 // 同步连接状态到主应用
                 this.connected = data.connected;
                 this.app.connected = data.connected;
+                this._notifyConnectionStatus(data);
                 break;
             case 'order_placed':
                 // 清除订单缓存以强制刷新
