@@ -233,8 +233,21 @@ class DOMStrategy(BaseStrategy):
         price = metrics.get("mid_price")
         if price is None:
             return
+        previous_timestamp = self._last_data_timestamp
+        first_tick = self._processed_count == 0
         now = time.time()
         self._last_data_timestamp = now
+        if first_tick:
+            self.logger.info("Received first DOM metrics tick", symbol=symbol_code)
+        elif previous_timestamp:
+            gap = now - previous_timestamp
+            if gap >= 10.0:
+                self.logger.warning(
+                    "DOM metrics gap detected",
+                    symbol=symbol_code,
+                    seconds_since_last=round(gap, 1),
+                    processed=self._processed_count,
+                )
         self._processed_count += 1
         tick_size = self._resolve_tick_size(symbol_code, metrics)
         price_float = self._safe_float(price)

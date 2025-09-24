@@ -152,7 +152,14 @@ async def lifespan(app: FastAPI):
         main_logger.info("Risk manager started during application startup")
     except Exception as e:
         main_logger.warning(f"Risk manager startup warning: {e}")
-    
+
+    try:
+        strategy_manager.start()
+        await strategy_manager.restore_data_push_states()
+        main_logger.info("Strategy manager initialized during application startup")
+    except Exception as e:
+        main_logger.warning(f"Strategy manager startup warning: {e}")
+
     yield
     # Shutdown
     main_logger.info("Application shutting down...")

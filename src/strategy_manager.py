@@ -9,6 +9,7 @@ import csv
 import hashlib
 import hmac
 import time
+import importlib
 import importlib.util
 import sys
 import asyncio
@@ -90,6 +91,7 @@ class StrategyManager:
         self._last_position_add: Dict[Tuple[str, str, str], datetime] = {}
         self._auto_close_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
         self.data_push_state: Dict[str, Dict[str, Any]] = {}
+        self._pending_data_push_requests: List[Tuple[str, Optional[str], Optional[str]]] = []
 
         # 认证token（用于外部策略访问）
         self.auth_token = None
@@ -336,6 +338,17 @@ class StrategyManager:
 
         strategy_logger.info(f"Internal strategy registered: {name}")
 
+        if record and record.enabled:
+            subscription = self._get_strategy_setting(name, "data_subscription")
+            target_symbol = (
+                self._get_strategy_setting(name, "primary_symbol")
+                or getattr(record, "primary_symbol", None)
+            )
+            if subscription and target_symbol:
+                self._request_data_push_activation(
+                    name, subscription=subscription, symbol=target_symbol
+                )
+
     def _load_from_database(self):
         """从数据库加载策略设置、策略和执行记录"""
         try:
@@ -576,28 +589,49 @@ class StrategyManager:
             return None
 
         module_key = str(module_path)
+        import_name, package_name = self._infer_module_import_context(module_path)
         module_name = self._loaded_internal_modules.get(module_key)
 
         module = None
         if module_name and module_name in sys.modules:
             module = sys.modules[module_name]
         else:
-            module_name = f"internal_strategy_{hashlib.md5(module_key.encode()).hexdigest()}"
-            try:
-                spec = importlib.util.spec_from_file_location(module_name, module_path)
-                if not spec or not spec.loader:
-                    raise ImportError("Unable to resolve module specification")
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = module
-                spec.loader.exec_module(module)  # type: ignore[arg-type]
-                self._loaded_internal_modules[module_key] = module_name
-            except Exception as exc:
-                strategy_logger.error(
-                    f"Failed to load internal strategy module {module_path}: {exc}"
-                )
-                if module_name in sys.modules:
-                    sys.modules.pop(module_name, None)
-                return None
+            if import_name:
+                try:
+                    module = importlib.import_module(import_name)
+                    module_name = import_name
+                    self._loaded_internal_modules[module_key] = module_name
+                except Exception as exc:
+                    strategy_logger.error(
+                        f"Failed to import internal strategy module {import_name}: {exc}"
+                    )
+                    module = None
+
+            if module is None:
+                module_name = f"internal_strategy_{hashlib.md5(module_key.encode()).hexdigest()}"
+                try:
+                    spec = importlib.util.spec_from_file_location(module_name, module_path)
+                    if not spec or not spec.loader:
+                        raise ImportError("Unable to resolve module specification")
+                    module = importlib.util.module_from_spec(spec)
+                    if package_name:
+                        module.__package__ = package_name
+                        parent_pkg = package_name
+                        if parent_pkg not in sys.modules:
+                            try:
+                                importlib.import_module(parent_pkg)
+                            except Exception:
+                                pass
+                    sys.modules[module_name] = module
+                    spec.loader.exec_module(module)  # type: ignore[arg-type]
+                    self._loaded_internal_modules[module_key] = module_name
+                except Exception as exc:
+                    strategy_logger.error(
+                        f"Failed to load internal strategy module {module_path}: {exc}"
+                    )
+                    if module_name in sys.modules:
+                        sys.modules.pop(module_name, None)
+                    return None
 
         if not module:
             return None
@@ -655,6 +689,42 @@ class StrategyManager:
 
         return instance
 
+    def _infer_module_import_context(self, module_path: Path) -> Tuple[Optional[str], Optional[str]]:
+        """Determine the import and package names for a strategy module path."""
+
+        try:
+            resolved = module_path.resolve()
+        except FileNotFoundError:
+            return None, None
+
+        import_name: Optional[str] = None
+        package_name: Optional[str] = None
+
+        try:
+            src_root = Path(__file__).resolve().parent
+            relative = resolved.relative_to(src_root)
+        except ValueError:
+            return None, None
+
+        parts = list(relative.parts)
+        if not parts:
+            return None, None
+
+        module_stem = resolved.stem
+        parent_parts = parts[:-1]
+
+        if parent_parts:
+            candidate_parent = ["src", *parent_parts]
+            if all(part.isidentifier() for part in candidate_parent):
+                package_name = ".".join(candidate_parent)
+        else:
+            package_name = "src"
+
+        if module_stem.isidentifier() and package_name:
+            import_name = f"{package_name}.{module_stem}"
+
+        return import_name, package_name
+
     def _apply_persisted_parameters(self, name: str, runtime: "BaseStrategy") -> None:
         """Load persisted parameter overrides for a runtime strategy instance."""
 
@@ -705,6 +775,60 @@ class StrategyManager:
         if "configurable_parameters" not in payload or not payload["configurable_parameters"]:
             payload["configurable_parameters"] = schema
 
+    def _request_data_push_activation(
+        self,
+        strategy_name: str,
+        *,
+        subscription: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> None:
+        """Schedule asynchronous activation of a strategy's data push."""
+
+        async def _activate() -> None:
+            try:
+                result = await self.set_data_push(
+                    strategy_name,
+                    True,
+                    subscription=subscription,
+                    symbol=symbol,
+                )
+                if not result.get("success"):
+                    error_msg = result.get("error") or "unknown error"
+                    strategy_logger.warning(
+                        f"Auto data push enable failed for {strategy_name}: {error_msg}"
+                    )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Failed to auto-start data push for {strategy_name}: {exc}"
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        log_subscription = subscription or self._get_strategy_setting(
+            strategy_name, "data_subscription"
+        )
+        log_symbol = symbol or self._get_strategy_setting(strategy_name, "primary_symbol")
+
+        if loop and loop.is_running():
+            strategy_logger.info(
+                "Activating data push immediately",
+                strategy=strategy_name,
+                subscription=log_subscription,
+                symbol=log_symbol,
+            )
+            loop.create_task(_activate())
+        else:
+            strategy_logger.info(
+                "Deferring data push activation until loop available",
+                strategy=strategy_name,
+                subscription=log_subscription,
+                symbol=log_symbol,
+            )
+            self._pending_data_push_requests.append((strategy_name, subscription, symbol))
+
     def get_data_push_state(self, strategy_name: str) -> Dict[str, Any]:
         return dict(self.data_push_state.get(strategy_name, {}))
 
@@ -722,9 +846,16 @@ class StrategyManager:
             return {"success": False, "error": "Strategy not found or not internal"}
 
         state = self.data_push_state.setdefault(strategy_name, {})
+        prior_state = dict(state)
         stored_subscription = subscription or self._get_strategy_setting(strategy_name, "data_subscription")
         if not stored_subscription:
             state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
+            state.pop("_last_gap_warning_at", None)
+            strategy_logger.warning(
+                "Data push request rejected - subscription missing",
+                strategy=strategy_name,
+                requested_action="enable" if enabled else "disable",
+            )
             return {"success": False, "error": "No subscription configured"}
 
         # Determine target symbol
@@ -734,11 +865,26 @@ class StrategyManager:
         if target_symbol:
             target_symbol = str(target_symbol).strip().upper()
 
+        strategy_logger.info(
+            "Data push change requested",
+            strategy=strategy_name,
+            requested_action="enable" if enabled else "disable",
+            subscription=stored_subscription,
+            symbol=target_symbol,
+            prior_state=prior_state,
+        )
+
         dom_service = None
 
         if enabled:
             if not target_symbol:
                 state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
+                state.pop("_last_gap_warning_at", None)
+                strategy_logger.warning(
+                    "Data push enable failed - primary symbol missing",
+                    strategy=strategy_name,
+                    subscription=stored_subscription,
+                )
                 return {"success": False, "error": "Primary symbol required"}
 
             ok = False
@@ -748,6 +894,11 @@ class StrategyManager:
                     from src.dom_service import get_dom_service
 
                     dom_service = get_dom_service()
+                    strategy_logger.info(
+                        "Starting DOM stream for strategy",
+                        strategy=strategy_name,
+                        symbol=target_symbol,
+                    )
                     ok = await dom_service.start_stream(target_symbol)
                 elif stored_subscription == "market_data":
                     try:
@@ -779,6 +930,14 @@ class StrategyManager:
                     "awaiting_data": False,
                     "last_data_timestamp": None,
                 })
+                state.pop("_last_gap_warning_at", None)
+                strategy_logger.error(
+                    "Failed to enable data push",
+                    strategy=strategy_name,
+                    subscription=stored_subscription,
+                    symbol=target_symbol,
+                    error=error or "Failed to start data push",
+                )
                 payload = {"success": False, "error": error or "Failed to start data push"}
                 return payload
 
@@ -815,6 +974,13 @@ class StrategyManager:
                 "awaiting_data": True,
                 "last_data_timestamp": None,
             })
+            state.pop("_last_gap_warning_at", None)
+            strategy_logger.info(
+                "Data push enabled",
+                strategy=strategy_name,
+                subscription=stored_subscription,
+                symbol=target_symbol,
+            )
             return {
                 "success": True,
                 "active": True,
@@ -842,6 +1008,13 @@ class StrategyManager:
             "awaiting_data": False,
             "last_data_timestamp": None,
         })
+        state.pop("_last_gap_warning_at", None)
+        strategy_logger.info(
+            "Data push disabled",
+            strategy=strategy_name,
+            subscription=stored_subscription,
+            symbol=target_symbol,
+        )
         return {
             "success": True,
             "active": False,
@@ -850,6 +1023,80 @@ class StrategyManager:
             "awaiting_data": False,
             "last_data_timestamp": None,
         }
+
+    async def restore_data_push_states(self) -> None:
+        """Attempt to enable stored data push subscriptions for internal strategies."""
+
+        pending_requests = list(self._pending_data_push_requests)
+        self._pending_data_push_requests.clear()
+
+        if pending_requests:
+            strategy_logger.info(
+                "Processing deferred data push activations",
+                count=len(pending_requests),
+            )
+
+        for strategy_name, subscription, symbol in pending_requests:
+            try:
+                strategy_logger.info(
+                    "Replaying deferred data push request",
+                    strategy=strategy_name,
+                    subscription=subscription,
+                    symbol=symbol,
+                )
+                await self.set_data_push(
+                    strategy_name,
+                    True,
+                    subscription=subscription,
+                    symbol=symbol,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Deferred data push activation failed for {strategy_name}: {exc}"
+                )
+
+        for record in list(self.strategies.values()):
+            if record.strategy_type != "internal" or not record.enabled:
+                continue
+
+            state = self.data_push_state.get(record.name)
+            if state and state.get("active"):
+                continue
+
+            subscription = self._get_strategy_setting(record.name, "data_subscription")
+            if not subscription:
+                continue
+
+            target_symbol = (
+                self._get_strategy_setting(record.name, "primary_symbol")
+                or getattr(record, "primary_symbol", None)
+            )
+
+            if not target_symbol:
+                continue
+
+            try:
+                strategy_logger.info(
+                    "Restoring stored data push",
+                    strategy=record.name,
+                    subscription=subscription,
+                    symbol=target_symbol,
+                )
+                result = await self.set_data_push(
+                    record.name,
+                    True,
+                    subscription=subscription,
+                    symbol=target_symbol,
+                )
+                if not result.get("success"):
+                    error_msg = result.get("error") or "unknown error"
+                    strategy_logger.warning(
+                        f"Failed to restore data push for {record.name}: {error_msg}"
+                    )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Exception while restoring data push for {record.name}: {exc}"
+                )
 
     def _handle_position_setting_change(self, strategy_name: str) -> None:
         """Adjust runtime helpers when position-related settings are updated."""
@@ -1074,6 +1321,22 @@ class StrategyManager:
                 if position_updates:
                     self._persist_strategy_settings(position_updates)
 
+                if strategy.enabled:
+                    stored_subscription = data_subscription or self._get_strategy_setting(
+                        name, "data_subscription"
+                    )
+                    stored_symbol = (
+                        primary_symbol
+                        or getattr(strategy, "primary_symbol", None)
+                        or self._get_strategy_setting(name, "primary_symbol")
+                    )
+                    if stored_subscription and stored_symbol:
+                        self._request_data_push_activation(
+                            name,
+                            subscription=stored_subscription,
+                            symbol=stored_symbol,
+                        )
+
             strategy_logger.info(f"Strategy {name} added successfully")
             # 重新启动调度器以应用新的调度配置
             self.restart_scheduler()
@@ -1243,19 +1506,38 @@ class StrategyManager:
 
         push_state = self.data_push_state.get(name)
         if push_state:
-            awaiting_data = bool(push_state.get("awaiting_data"))
-            if status.get("is_receiving_data") or not push_state.get("active"):
+            was_awaiting = bool(push_state.get("awaiting_data"))
+            is_receiving = bool(status.get("is_receiving_data"))
+            active_flag = bool(push_state.get("active"))
+            if is_receiving and was_awaiting:
+                strategy_logger.info(
+                    "Data push is now receiving data",
+                    strategy=name,
+                    subscription=push_state.get("subscription"),
+                    symbol=push_state.get("symbol"),
+                )
+
+            awaiting_data = was_awaiting
+            if is_receiving or not active_flag:
                 if awaiting_data:
                     push_state["awaiting_data"] = False
                 awaiting_data = False
+                push_state.pop("_last_gap_warning_at", None)
 
             last_data_ts = status.get("last_data_timestamp")
             last_data_iso: Optional[str] = None
+            numeric_last: Optional[float] = None
             if isinstance(last_data_ts, (int, float)) and last_data_ts > 0:
+                numeric_last = float(last_data_ts)
                 try:
-                    last_data_iso = to_local_iso(ensure_local_timezone(datetime.fromtimestamp(last_data_ts)))
+                    last_data_iso = to_local_iso(ensure_local_timezone(datetime.fromtimestamp(numeric_last)))
                 except Exception:  # pragma: no cover - defensive guard
                     last_data_iso = None
+            elif isinstance(last_data_ts, str):
+                try:
+                    numeric_last = float(last_data_ts)
+                except (TypeError, ValueError):
+                    numeric_last = None
 
             payload = {
                 "enabled": bool(push_state.get("enabled")),
@@ -1270,6 +1552,30 @@ class StrategyManager:
                 push_state["last_data_timestamp"] = last_data_iso
             elif "last_data_timestamp" not in push_state:
                 push_state["last_data_timestamp"] = None
+
+            if active_flag and not is_receiving:
+                now_ts = time.time()
+                last_warning_at = float(push_state.get("_last_gap_warning_at", 0.0) or 0.0)
+                if numeric_last is not None and numeric_last > 0:
+                    elapsed = max(0.0, now_ts - numeric_last)
+                    if elapsed >= 15.0 and (now_ts - last_warning_at) >= 30.0:
+                        strategy_logger.warning(
+                            "Data push stalled",
+                            strategy=name,
+                            subscription=push_state.get("subscription"),
+                            symbol=push_state.get("symbol"),
+                            seconds_since_last=round(elapsed, 1),
+                            processed=status.get("processed_count"),
+                        )
+                        push_state["_last_gap_warning_at"] = now_ts
+                elif not awaiting_data and (now_ts - last_warning_at) >= 30.0:
+                    strategy_logger.warning(
+                        "Data push active but no last data timestamp",
+                        strategy=name,
+                        subscription=push_state.get("subscription"),
+                        symbol=push_state.get("symbol"),
+                    )
+                    push_state["_last_gap_warning_at"] = now_ts
 
             status["data_push"] = payload
 
@@ -1376,9 +1682,23 @@ class StrategyManager:
             if position_settings_changed:
                 self._handle_position_setting_change(name)
 
-            if restart_data_push and self.data_push_state.get(name, {}).get('enabled'):
+            stored_subscription = self._get_strategy_setting(name, "data_subscription")
+            stored_symbol = (
+                self._get_strategy_setting(name, "primary_symbol")
+                or getattr(strategy, "primary_symbol", None)
+            )
+
+            if restart_data_push:
                 try:
-                    await self.set_data_push(name, True)
+                    push_state = self.data_push_state.get(name, {})
+                    if push_state.get('enabled'):
+                        await self.set_data_push(name, True)
+                    elif strategy.enabled and stored_subscription and stored_symbol:
+                        self._request_data_push_activation(
+                            name,
+                            subscription=stored_subscription,
+                            symbol=stored_symbol,
+                        )
                 except Exception as exc:  # pragma: no cover - defensive guard
                     strategy_logger.warning(f"Failed to restart data push for {name}: {exc}")
 
