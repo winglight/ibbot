@@ -212,6 +212,70 @@
     gap: 0.6rem;
 }
 
+.combo-section {
+    margin-top: 1rem;
+}
+
+.combo-title {
+    margin-bottom: 0.75rem;
+    font-size: 1rem;
+}
+
+.combo-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.combo-card {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 0.75rem;
+    padding: 1rem;
+}
+
+.combo-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+}
+
+.combo-card-header h5 {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.combo-params {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.combo-params-block h5 {
+    margin: 0 0 0.5rem;
+    font-size: 0.9rem;
+    color: #cbd5f5;
+}
+
+.combo-params pre {
+    background: #020617;
+    border-radius: 0.5rem;
+    padding: 0.75rem;
+    color: #94a3b8;
+    font-size: 0.85rem;
+    line-height: 1.35;
+    overflow-x: auto;
+}
+
+.combo-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+
 .btn-ghost {
     background: transparent;
     border: 1px solid #334155;

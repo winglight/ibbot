@@ -7,6 +7,8 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status, Query
 from fastapi.responses import JSONResponse
 
+from src.database import Strategy as DatabaseStrategy, get_db_manager
+
 from .schemas import (
     ErrorResponse,
     OptimizationReportResponse,
@@ -21,6 +23,8 @@ from .schemas import (
     OptimizationPlanResponse,
     OptimizationPlanRunResponse,
     OptimizationPlanUpdate,
+    StrategyGenerationRequest,
+    StrategyGenerationResponse,
     OptimizerDataRangeResponse,
     OptimizerMetadataResponse,
     TaskState,
@@ -33,6 +37,7 @@ from .metadata import (
     get_symbol_data_range,
 )
 from .storage import store
+from .strategy_generator import StrategyGenerationError, generate_strategy_file
 from .tasks import run_optimization_task
 
 router = APIRouter(prefix="/api/optimize", tags=["optimizer"])
@@ -246,3 +251,52 @@ async def list_plan_reports(plan_id: str) -> OptimizationPlanReportList:
         for task_id, record in records
     ]
     return OptimizationPlanReportList(plan_id=plan_id, reports=reports_payload)
+
+
+@router.post(
+    "/strategies",
+    status_code=status.HTTP_201_CREATED,
+    response_model=StrategyGenerationResponse,
+    responses={status.HTTP_400_BAD_REQUEST: {"model": ErrorResponse}},
+)
+async def generate_strategy(payload: StrategyGenerationRequest) -> StrategyGenerationResponse:
+    try:
+        file_path, class_name = generate_strategy_file(
+            strategy_name=payload.strategy_name,
+            base_parameters=payload.base_parameters,
+            feature_parameters=payload.feature_parameters,
+            plan_id=payload.plan_id,
+            task_id=payload.task_id,
+        )
+    except StrategyGenerationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    normalized_path = file_path.replace("\\", "/")
+    description_parts = ["DOM优化器自动生成策略"]
+    metadata = []
+    if payload.plan_id:
+        metadata.append(f"计划: {payload.plan_id}")
+    if payload.task_id:
+        metadata.append(f"任务: {payload.task_id}")
+    if metadata:
+        description_parts.append(f"（{'，'.join(metadata)}）")
+    description = "".join(description_parts)
+
+    db_manager = get_db_manager()
+    db_record = DatabaseStrategy(
+        name=payload.strategy_name,
+        strategy_type="internal",
+        enabled=True,
+        api_endpoint=None,
+        file_path=normalized_path,
+        description=description,
+    )
+    try:
+        db_manager.save_strategy(db_record)
+    except Exception as exc:  # pragma: no cover - safety net
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"failed to persist strategy: {exc}",
+        )
+
+    return StrategyGenerationResponse(file_path=normalized_path, class_name=class_name)
