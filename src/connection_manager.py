@@ -600,37 +600,19 @@ class ConnectionManager:
 
     def connect(self) -> bool:
         """连接到IBKR服务器"""
-        need_reconnect = False
-
-        with self._connect_state_cond:
-            while self._connect_in_progress:
-                connection_logger.info("Connection attempt already in progress; waiting for completion")
-                self._connect_state_cond.wait(timeout=0.5)
-                if self.connected and self.ib and self.ib.isConnected():
-                    current_host = getattr(self.ib, 'host', None)
-                    current_port = getattr(self.ib, 'port', None)
-                    if (current_host == self.config.host and
-                        current_port == self.config.port):
-                        connection_logger.info("Connection established while waiting for in-progress attempt")
-                        self._record_connect_result(True)
-                        return True
-
-            if self.connected and self.ib and self.ib.isConnected():
-                current_host = getattr(self.ib, 'host', None)
-                current_port = getattr(self.ib, 'port', None)
-                if (current_host == self.config.host and
-                    current_port == self.config.port):
-                    connection_logger.info("Already connected to IBKR with same configuration")
-                    self._record_connect_result(True)
-                    return True
-                else:
-                    connection_logger.info("Configuration changed, reconnecting...")
-                    need_reconnect = True
-
-            self._connect_in_progress = True
-
-        if need_reconnect:
-            self.disconnect()
+        # 检查当前连接是否使用相同配置
+        if self.connected and self.ib and self.ib.isConnected():
+            # 如果配置发生变化，需要重新连接
+            current_host = getattr(self.ib, 'host', None)
+            current_port = getattr(self.ib, 'port', None)
+            if (current_host == self.config.host and
+                current_port == self.config.port):
+                connection_logger.info("Already connected to IBKR with same configuration")
+                self._record_connect_result(True)
+                return True
+            else:
+                connection_logger.info("Configuration changed, reconnecting...")
+                self.disconnect()
 
         connection_logger.info("Connecting to IBKR...")
         success = False

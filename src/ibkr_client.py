@@ -510,10 +510,8 @@ class IBKRClient:
             # 2. 确保连接
             ibkr_logger.debug(f"Checking IBKR connection for {symbol}")
             if not self.is_connected():
-                ibkr_logger.warning(f"IBKR not connected, attempting to connect for {symbol}")
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for real-time data: {symbol}")
-                    return None
+                ibkr_logger.warning(f"IBKR not connected; skipping real-time data request for {symbol}")
+                return None
             
             # 3. 获取IB实例
             ib = self.ib
@@ -781,9 +779,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for cancel order: {order_id}")
-                    return False, "Connection failed"
+                ibkr_logger.error(f"Cannot cancel order {order_id}: IBKR is not connected")
+                return False, "Not connected"
 
             # 刷新订单数据，使用异步API避免事件循环冲突
             try:
@@ -1040,9 +1037,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for cancel all orders")
-                    return 0
+                ibkr_logger.error("Cannot cancel orders: IBKR is not connected")
+                return 0
 
             # 刷新订单，使用异步API避免事件循环冲突
             try:
@@ -1070,9 +1066,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for get orders")
-                    return []
+                ibkr_logger.error("Cannot retrieve orders: IBKR is not connected")
+                return []
             
             ib = self.ib
             if not ib or not ib.isConnected():
@@ -1420,9 +1415,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for get account info")
-                    return self._return_cached_account_info()
+                ibkr_logger.error("Cannot retrieve account info: IBKR is not connected")
+                return self._return_cached_account_info()
 
             # 获取IB实例
             ib = self.ib
@@ -1480,9 +1474,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error("Cannot connect to IBKR for get_account_summary")
-                    return []
+                ibkr_logger.error("Cannot retrieve account summary: IBKR is not connected")
+                return []
 
             ib = self.ib
             if not ib or not ib.isConnected():
@@ -1514,9 +1507,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for get positions")
-                    return []
+                ibkr_logger.error("Cannot retrieve positions: IBKR is not connected")
+                return []
             
             # 获取IB实例
             ib = self.ib
