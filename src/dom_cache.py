@@ -271,14 +271,9 @@ class DomCacheManager:
             self._prune_locked(key, container, now_ms=now_ms)
             snapshots_source = container.get("snapshots", [])
             metrics_source = container.get("metrics", [])
-            if copy and include_snapshots:
-                snapshots = [dict(item) for item in snapshots_source]
-            else:
-                snapshots = list(snapshots_source)
-            if copy:
-                metrics = [dict(item) for item in metrics_source]
-            else:
-                metrics = list(metrics_source)
+
+        metrics_view: List[Dict[str, Any]] = metrics_source
+        snapshots_view: List[Dict[str, Any]] = snapshots_source
 
         start_ms = self._coerce_timestamp_ms(start_time)
         end_ms = self._coerce_timestamp_ms(end_time)
@@ -293,21 +288,28 @@ class DomCacheManager:
                 limit_value = limit_candidate
 
         def _filter_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if not items:
+                return []
+
+            if start_ms is None and end_ms is None:
+                return items
+
             filtered: List[Dict[str, Any]] = []
+            append = filtered.append
+            ts_resolver = self._timestamp_ms
             for item in items:
-                ts = self._timestamp_ms(item)
+                ts = ts_resolver(item)
                 if start_ms is not None and ts < start_ms:
                     continue
                 if end_ms is not None and ts > end_ms:
                     continue
-                filtered.append(item)
-            filtered.sort(key=lambda payload: self._timestamp_ms(payload))
+                append(item)
             return filtered
 
-        metrics = _filter_items(metrics)
-        total_metrics = len(metrics)
-        if limit_value is not None:
-            metrics = metrics[-limit_value:]
+        metrics_filtered = _filter_items(metrics_view)
+        total_metrics = len(metrics_filtered)
+        if limit_value is not None and total_metrics > limit_value:
+            metrics_filtered = metrics_filtered[-limit_value:]
 
         process_snapshots = (
             include_snapshots
@@ -317,18 +319,35 @@ class DomCacheManager:
         )
 
         if process_snapshots:
-            snapshots = _filter_items(snapshots)
-            total_snapshots = len(snapshots)
-            if limit_value is not None:
-                snapshots = snapshots[-limit_value:]
-            result_snapshots = snapshots if include_snapshots else []
+            snapshots_filtered = _filter_items(snapshots_view)
+            total_snapshots = len(snapshots_filtered)
+            if limit_value is not None and total_snapshots > limit_value:
+                snapshots_filtered = snapshots_filtered[-limit_value:]
+            if include_snapshots:
+                result_snapshots = (
+                    [dict(item) for item in snapshots_filtered]
+                    if copy
+                    else list(snapshots_filtered)
+                )
+            else:
+                result_snapshots = []
         else:
-            total_snapshots = len(snapshots_source)
-            result_snapshots = [] if not include_snapshots else list(snapshots_source)
+            total_snapshots = len(snapshots_view)
+            result_snapshots = (
+                [dict(item) for item in snapshots_view]
+                if include_snapshots and copy
+                else (list(snapshots_view) if include_snapshots else [])
+            )
+
+        result_metrics = (
+            [dict(item) for item in metrics_filtered]
+            if copy
+            else list(metrics_filtered)
+        )
 
         result: Dict[str, Any] = {
             "snapshots": result_snapshots,
-            "metrics": metrics,
+            "metrics": result_metrics,
             "total_snapshots": total_snapshots,
             "total_metrics": total_metrics,
         }
