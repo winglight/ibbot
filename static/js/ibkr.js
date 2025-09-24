@@ -8,6 +8,7 @@ class IBKRConnectionManager {
         this.connected = false;
         this.ws = null;
         this.statusCheckInterval = null;
+        this._wsThrottle = {};
         this.setupEventListeners();
         this.startPeriodicStatusCheck();
     }
@@ -21,7 +22,7 @@ class IBKRConnectionManager {
         // Connection buttons
         document.getElementById('connectBtn').addEventListener('click', () => this.connect());
         document.getElementById('disconnectBtn').addEventListener('click', () => this.disconnect());
-        
+
         // Connection settings
         document.getElementById('connectionSettingsBtn').addEventListener('click', async () => {
             await this.ensureDefaultConnectionConfig();
@@ -61,6 +62,126 @@ class IBKRConnectionManager {
                 if (modal) modal.hide();
             });
         }
+    }
+
+    _resetThrottleState() {
+        if (!this._wsThrottle) return;
+        Object.values(this._wsThrottle).forEach(state => {
+            if (state && state.timer) {
+                clearTimeout(state.timer);
+            }
+        });
+        this._wsThrottle = {};
+    }
+
+    sendMessage(payload) {
+        if (!payload || typeof payload !== 'object') return false;
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.warn('[ws] unable to send message, socket not open', payload?.type);
+            return false;
+        }
+        try {
+            this.ws.send(JSON.stringify(payload));
+            return true;
+        } catch (error) {
+            console.error('[ws] failed to send message', error, payload);
+            return false;
+        }
+    }
+
+    _sendThrottled(key, payload, options = {}) {
+        if (!key) return 'failed';
+        const minInterval = Math.max(0, Number(options.minInterval ?? 15000));
+        if (!this._wsThrottle[key]) {
+            this._wsThrottle[key] = { lastSent: 0, timer: null, queued: null };
+        }
+        const state = this._wsThrottle[key];
+        const now = Date.now();
+        const allowNow = options.force || (now - state.lastSent >= minInterval);
+        if (allowNow) {
+            if (state.timer) {
+                clearTimeout(state.timer);
+                state.timer = null;
+            }
+            state.lastSent = now;
+            state.queued = null;
+            return this.sendMessage(payload) ? 'sent' : 'failed';
+        }
+
+        state.queued = payload;
+        if (!state.timer) {
+            const delay = Math.max(minInterval - (now - state.lastSent), 0) + 50;
+            state.timer = setTimeout(() => {
+                state.timer = null;
+                if (state.queued) {
+                    const queuedPayload = state.queued;
+                    state.queued = null;
+                    this._sendThrottled(key, queuedPayload, { force: true, minInterval });
+                }
+            }, delay);
+        }
+        return 'queued';
+    }
+
+    requestOrdersSnapshot(options = {}) {
+        const now = new Date();
+        const defaultStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+        const payload = {
+            type: 'request_orders_snapshot',
+            limit: Number.isFinite(options.limit) ? Number(options.limit) : 50,
+            start_date: options.startDate || defaultStart,
+        };
+        if (options.force) payload.force = true;
+        if (options.useCache === false) payload.use_cache = false;
+        return this._sendThrottled('orders_snapshot', payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 15000,
+        });
+    }
+
+    requestDomAutomationStatus(options = {}) {
+        const payload = { type: 'request_dom_automation_status' };
+        if (options.force) payload.force = true;
+        return this._sendThrottled('dom_automation_status', payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 15000,
+        });
+    }
+
+    requestDomStats(options = {}) {
+        const symbol = options.symbol || '';
+        const payload = { type: 'request_dom_stats', symbol };
+        if (options.lookbackSeconds != null) payload.lookback_seconds = options.lookbackSeconds;
+        if (options.maxPoints != null) payload.max_points = options.maxPoints;
+        if (options.start) payload.start = options.start;
+        if (options.end) payload.end = options.end;
+        if (options.force) payload.force = true;
+        const key = `dom_stats:${symbol || 'unknown'}`;
+        return this._sendThrottled(key, payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 15000,
+        });
+    }
+
+    requestStrategyPerformance(options = {}) {
+        const name = options.name || '';
+        if (!name) {
+            console.warn('[ws] requestStrategyPerformance requires name');
+            return false;
+        }
+        const payload = {
+            type: 'request_strategy_performance',
+            name,
+            range: options.range || '1d',
+        };
+        if (options.start) payload.start = options.start;
+        if (options.end) payload.end = options.end;
+        if (options.force) payload.force = true;
+        const key = `strategy_performance:${name}:${payload.range}`;
+        return this._sendThrottled(key, payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 15000,
+        });
     }
 
     /**
@@ -318,9 +439,10 @@ class IBKRConnectionManager {
         
         console.log('[ws] preparing to connect', { wsUrl });
         this.ws = new WebSocket(wsUrl);
-        
+
         this.ws.onopen = () => {
             console.log('[ws] connected');
+            this._resetThrottleState();
         };
         
         this.ws.onmessage = (event) => {
@@ -335,6 +457,7 @@ class IBKRConnectionManager {
         
         this.ws.onclose = (ev) => {
             console.log('[ws] disconnected', { code: ev?.code, reason: ev?.reason });
+            this._resetThrottleState();
             // Reconnect after 5 seconds
             setTimeout(() => this.connectWebSocket(), 5000);
         };
@@ -360,7 +483,7 @@ class IBKRConnectionManager {
                 if (this.app.ordersCache) {
                     delete this.app.ordersCache['orders_main'];
                 }
-                this.app.loadOrders();
+                this.requestOrdersSnapshot({ force: true, reason: 'order_placed' });
                 this.app.showAlert('success', `订单${data.order_id ? ' ' + data.order_id : ''} 下单成功`);
                 break;
             case 'order_cancelled':
@@ -368,7 +491,7 @@ class IBKRConnectionManager {
                 if (this.app.ordersCache) {
                     delete this.app.ordersCache['orders_main'];
                 }
-                this.app.loadOrders();
+                this.requestOrdersSnapshot({ force: true, reason: 'order_cancelled' });
                 this.app.showAlert('success', `订单 ${data.order_id} 已取消`);
                 break;
             case 'all_orders_cancelled':
@@ -376,7 +499,7 @@ class IBKRConnectionManager {
                 if (this.app.ordersCache) {
                     delete this.app.ordersCache['orders_main'];
                 }
-                this.app.loadOrders();
+                this.requestOrdersSnapshot({ force: true, reason: 'all_orders_cancelled' });
                 this.app.showAlert('success', `已取消 ${typeof data.count === 'number' ? data.count : ''} 个订单`);
                 break;
             case 'account_update':
@@ -394,36 +517,11 @@ class IBKRConnectionManager {
                 if (this.app.ordersCache) {
                     delete this.app.ordersCache['orders_main'];
                 }
-                this.app.loadOrders();
+                this.requestOrdersSnapshot({ reason: 'order_update' });
                 break;
             case 'orders_snapshot':
-                // 首次连接后的订单快照，直接渲染避免额外请求
-                if (Array.isArray(data.orders) && this.app.orderManager && typeof this.app.orderManager.updateOrdersTableSmart === 'function') {
-                    try {
-                        const tbody = document.querySelector('#ordersTable tbody');
-                        // 仅显示当天订单（本地时区），并按 submit_time 与 order_id 排序（与 _loadOrders 一致）
-                        const now = new Date();
-                        const startOfDayMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-                        const endOfDayMs = startOfDayMs + 24 * 60 * 60 * 1000;
-                        const sorted = data.orders
-                            .filter(o => {
-                                if (!o || o.order_id === 0) return false;
-                                if (!o.submit_time) return false;
-                                const ts = new Date(o.submit_time).getTime();
-                                return ts >= startOfDayMs && ts < endOfDayMs;
-                            })
-                            .sort((a, b) => {
-                                const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
-                                const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;
-                                if (bt !== at) return bt - at;
-                                const aid = Number(a.order_id) || 0;
-                                const bid = Number(b.order_id) || 0;
-                                return bid - aid;
-                            });
-                        this.app.orderManager.updateOrdersTableSmart(sorted, tbody);
-                    } catch (e) {
-                        console.error('Failed to render orders_snapshot:', e);
-                    }
+                if (this.app && typeof this.app.handleWebSocketPayload === 'function') {
+                    this.app.handleWebSocketPayload(data);
                 }
                 break;
             case 'position_update':
@@ -452,14 +550,21 @@ class IBKRConnectionManager {
                         console.log('Clearing orders cache before refresh');
                         delete this.app.ordersCache['orders_main'];
                     }
-                    console.log('Calling loadOrders after order_filled');
-                    this.app.loadOrders();
+                    console.log('Requesting orders snapshot after order_filled');
+                    this.requestOrdersSnapshot({ force: true, reason: 'order_filled' });
                 } else {
                     console.error('loadOrders method not available');
                 }
                 break;
             default:
-                console.log('Unknown WebSocket message type:', data.type);
+                if (this.app && typeof this.app.handleWebSocketPayload === 'function') {
+                    const handled = this.app.handleWebSocketPayload(data);
+                    if (!handled) {
+                        console.log('Unknown WebSocket message type:', data.type);
+                    }
+                } else {
+                    console.log('Unknown WebSocket message type:', data.type);
+                }
         }
     }
 

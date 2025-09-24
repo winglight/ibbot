@@ -1,14 +1,117 @@
 import asyncio
 import json
-from typing import Dict
+import time
+from datetime import timedelta
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 import core
-from core import connection_manager, websocket_manager, order_manager
+from core import (
+    connection_manager,
+    websocket_manager,
+    order_manager,
+    strategy_manager,
+)
+from src.dom_optimizer import get_dom_optimization_orchestrator
+from src.dom_service import get_dom_service
+from src.utils import now_local, parse_local_datetime, to_local_iso
 
 router = APIRouter()
+
+RATE_LIMIT_SECONDS = 15.0
+
+
+def _serialise_order(order: Any) -> Dict[str, Any]:
+    raw_type = (getattr(order, "order_type", "") or "").upper()
+    if raw_type in ("MARKET", "MKT"):
+        order_type = "MKT"
+    elif raw_type in ("LIMIT", "LMT"):
+        order_type = "LMT"
+    else:
+        order_type = raw_type or "MKT"
+
+    price_val = 0.0
+    try:
+        price = getattr(order, "price", None)
+        if price is not None:
+            price_val = float(price)
+    except Exception:
+        price_val = 0.0
+
+    trigger_type = None
+    try:
+        if getattr(order, "order_source", "manual") == "auto":
+            rule_id = getattr(order, "rule_id", None)
+            symbol = getattr(order, "symbol", None)
+            if rule_id and rule_id != symbol:
+                trigger_type = "strategy"
+            else:
+                trigger_type = "risk_rule"
+    except Exception:
+        trigger_type = None
+
+    created_at = getattr(order, "created_at", None)
+    created_iso = None
+    try:
+        created_iso = to_local_iso(created_at)
+    except Exception:
+        if created_at is not None:
+            try:
+                created_iso = created_at.isoformat()
+            except Exception:
+                created_iso = None
+
+    avg_fill_price = getattr(order, "fill_price", None)
+    if avg_fill_price is None and order_type == "MKT" and price_val > 0:
+        avg_fill_price = price_val
+
+    return {
+        "order_id": getattr(order, "order_id", None),
+        "symbol": getattr(order, "symbol", None),
+        "action": getattr(order, "action", None),
+        "quantity": getattr(order, "quantity", None),
+        "order_type": order_type,
+        "limit_price": price_val if order_type == "LMT" and price_val > 0 else None,
+        "avg_fill_price": avg_fill_price,
+        "status": getattr(order, "status", None),
+        "filled": getattr(order, "quantity", 0) if getattr(order, "status", None) == "Filled" else 0,
+        "remaining": 0 if getattr(order, "status", None) == "Filled" else getattr(order, "quantity", 0),
+        "submit_time": created_iso,
+        "order_source": getattr(order, "order_source", "manual"),
+        "trigger_type": trigger_type,
+        "commission": getattr(order, "commission", None),
+        "pnl": getattr(order, "pnl", None),
+    }
+
+
+def _orders_payload(
+    orders: List[Any], *, limit: Optional[int] = None, start_date: Optional[str] = None
+) -> Dict[str, Any]:
+    return {
+        "type": "orders_snapshot",
+        "success": True,
+        "orders": [_serialise_order(order) for order in orders],
+        "meta": {
+            "limit": limit,
+            "start_date": start_date,
+            "generated_at": to_local_iso(now_local()),
+            "source": "websocket",
+        },
+    }
+
+
+def _allow_request(tracker: Dict[str, float], key: str, *, force: bool = False) -> bool:
+    now = time.monotonic()
+    if force:
+        tracker[key] = now
+        return True
+    last = tracker.get(key, 0.0)
+    if now - last >= RATE_LIMIT_SECONDS:
+        tracker[key] = now
+        return True
+    return False
 
 async def _realtime_price_sender(ws: WebSocket, symbol: str, interval: float = 2.0):
     try:
@@ -83,51 +186,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 loop.run_in_executor(None, lambda: order_manager.get_orders(limit=300)),
                 timeout=5.0
             )
-            converted_orders = []
-            for o in orders:
-                raw_type = (o.order_type or '').upper()
-                if raw_type in ('MARKET', 'MKT'):
-                    order_type = 'MKT'
-                elif raw_type in ('LIMIT', 'LMT'):
-                    order_type = 'LMT'
-                else:
-                    order_type = raw_type or 'MKT'
-                price_val = 0.0
-                try:
-                    if o.price is not None:
-                        price_val = float(o.price)
-                except Exception:
-                    price_val = 0.0
-                trigger_type = None
-                try:
-                    if getattr(o, 'order_source', 'manual') == 'auto':
-                        rule_id = getattr(o, 'rule_id', None)
-                        symbol = getattr(o, 'symbol', None)
-                        if rule_id and rule_id != symbol:
-                            trigger_type = 'strategy'
-                        else:
-                            trigger_type = 'risk_rule'
-                except Exception:
-                    trigger_type = None
-                converted_order = {
-                    'order_id': o.order_id,
-                    'symbol': o.symbol,
-                    'action': o.action,
-                    'quantity': o.quantity,
-                    'order_type': order_type,
-                    'limit_price': price_val if order_type == 'LMT' and price_val > 0 else None,
-                    'avg_fill_price': (o.fill_price if o.fill_price is not None else (price_val if order_type == 'MKT' and price_val > 0 else 0)),
-                    'status': o.status,
-                    'filled': o.quantity if o.status == 'Filled' else 0,
-                    'remaining': 0 if o.status == 'Filled' else o.quantity,
-                    'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
-                    'order_source': getattr(o, 'order_source', 'manual'),
-                    'trigger_type': trigger_type,
-                    'commission': getattr(o, 'commission', None),
-                    'pnl': getattr(o, 'pnl', None)
-                }
-                converted_orders.append(converted_order)
-            await websocket.send_text(json.dumps({'type': 'orders_snapshot', 'orders': converted_orders}))
+            payload = _orders_payload(orders, limit=300)
+            await websocket.send_text(json.dumps(payload))
     except Exception as e:
         logger.warning(f"Failed to send initial orders snapshot: {e}")
     
@@ -148,6 +208,10 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.debug(f"Failed to send initial positions snapshot: {e}")
     
     realtime_tasks: Dict[str, asyncio.Task] = {}
+    request_tracker: Dict[str, float] = {}
+    last_responses: Dict[str, Dict[str, Any]] = {}
+    dom_service = get_dom_service()
+    orchestrator = None
     try:
         while True:
             data = await websocket.receive_text()
@@ -164,6 +228,257 @@ async def websocket_endpoint(websocket: WebSocket):
                 task = realtime_tasks.pop(symbol, None)
                 if task:
                     task.cancel()
+            elif msg_type == "request_orders_snapshot":
+                if 'order_manager' not in globals() or not order_manager:
+                    await websocket.send_text(json.dumps({
+                        "type": "orders_snapshot",
+                        "success": False,
+                        "error": "Order manager unavailable",
+                    }))
+                    continue
+
+                try:
+                    limit = int(message.get("limit", 50))
+                except (TypeError, ValueError):
+                    limit = 50
+                start_date_raw = message.get("start_date")
+                start_dt = parse_local_datetime(start_date_raw)
+                key = f"orders_snapshot:{limit}:{start_date_raw}"
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "orders_snapshot",
+                            "success": False,
+                            "error": "Rate limited",
+                        }))
+                    continue
+
+                loop = asyncio.get_event_loop()
+
+                try:
+                    orders = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            lambda: order_manager.get_orders(
+                                limit=limit,
+                                start_date=start_dt,
+                            ),
+                        ),
+                        timeout=6.0,
+                    )
+                    payload = _orders_payload(
+                        orders,
+                        limit=limit,
+                        start_date=start_date_raw,
+                    )
+                    last_responses[key] = payload
+                    await websocket.send_text(json.dumps(payload))
+                except Exception as exc:
+                    logger.warning(f"Failed to stream orders snapshot: {exc}")
+                    await websocket.send_text(json.dumps({
+                        "type": "orders_snapshot",
+                        "success": False,
+                        "error": str(exc),
+                    }))
+            elif msg_type == "request_dom_automation_status":
+                if orchestrator is None:
+                    try:
+                        orchestrator = get_dom_optimization_orchestrator()
+                    except Exception as exc:
+                        logger.warning(f"Failed to init DOM orchestrator: {exc}")
+                        orchestrator = None
+                if orchestrator is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "dom_automation_status",
+                        "success": False,
+                        "error": "DOM orchestrator unavailable",
+                    }))
+                    continue
+
+                force = bool(message.get("force"))
+                key = "dom_automation_status"
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "dom_automation_status",
+                            "success": False,
+                            "error": "Rate limited",
+                        }))
+                    continue
+
+                try:
+                    status = await asyncio.to_thread(orchestrator.get_status)
+                    payload = {
+                        "type": "dom_automation_status",
+                        "success": True,
+                        "status": status,
+                    }
+                    if isinstance(status, dict):
+                        payload.update(status)
+                    last_responses[key] = payload
+                    await websocket.send_text(json.dumps(payload))
+                except Exception as exc:
+                    logger.warning(f"Failed to fetch DOM automation status: {exc}")
+                    await websocket.send_text(json.dumps({
+                        "type": "dom_automation_status",
+                        "success": False,
+                        "error": str(exc),
+                    }))
+            elif msg_type == "request_dom_stats":
+                symbol = (message.get("symbol") or "").strip().upper()
+                if not symbol:
+                    await websocket.send_text(json.dumps({
+                        "type": "dom_stats",
+                        "success": False,
+                        "error": "Symbol is required",
+                    }))
+                    continue
+
+                try:
+                    lookback_seconds = message.get("lookback_seconds")
+                    lookback_val = int(lookback_seconds) if lookback_seconds is not None else None
+                except (TypeError, ValueError):
+                    lookback_val = None
+
+                try:
+                    max_points_raw = message.get("max_points")
+                    max_points = int(max_points_raw) if max_points_raw is not None else None
+                except (TypeError, ValueError):
+                    max_points = None
+
+                start_param = message.get("start")
+                end_param = message.get("end")
+                key = f"dom_stats:{symbol}:{lookback_val}:{max_points}:{start_param}:{end_param}"
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "dom_stats",
+                            "success": False,
+                            "symbol": symbol,
+                            "error": "Rate limited",
+                        }))
+                    continue
+
+                try:
+                    result = await dom_service.get_stats_async(
+                        symbol,
+                        lookback_seconds=lookback_val,
+                        start_time=start_param,
+                        end_time=end_param,
+                        max_points=max_points,
+                    )
+                    payload = {"type": "dom_stats", "success": True, "symbol": symbol}
+                    if isinstance(result, dict):
+                        payload.update(result)
+                    last_responses[key] = payload
+                    await websocket.send_text(json.dumps(payload))
+                except Exception as exc:
+                    logger.warning(f"Failed to fetch DOM stats: {exc}")
+                    await websocket.send_text(json.dumps({
+                        "type": "dom_stats",
+                        "success": False,
+                        "symbol": symbol,
+                        "error": str(exc),
+                    }))
+            elif msg_type == "request_strategy_performance":
+                name = (message.get("name") or "").strip()
+                if not name:
+                    await websocket.send_text(json.dumps({
+                        "type": "strategy_performance",
+                        "success": False,
+                        "error": "Strategy name is required",
+                    }))
+                    continue
+
+                range_value = (message.get("range") or "1d").strip()
+                start_raw = message.get("start")
+                end_raw = message.get("end")
+                start_date = parse_local_datetime(start_raw)
+                end_date = parse_local_datetime(end_raw)
+
+                if range_value:
+                    try:
+                        now = now_local()
+                        if range_value == "1d":
+                            start_date = now - timedelta(days=1)
+                        elif range_value == "1w":
+                            start_date = now - timedelta(weeks=1)
+                        elif range_value == "1m":
+                            start_date = now - timedelta(days=30)
+                        elif range_value == "wtd":
+                            start_date = now - timedelta(days=now.weekday())
+                        elif range_value == "mtd":
+                            start_date = now.replace(day=1)
+                        elif range_value == "ytd":
+                            start_date = now.replace(month=1, day=1)
+                    except Exception:
+                        pass
+
+                key = f"strategy_performance:{name}:{range_value}:{start_raw}:{end_raw}"
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "strategy_performance",
+                            "success": False,
+                            "name": name,
+                            "range": range_value,
+                            "error": "Rate limited",
+                        }))
+                    continue
+
+                loop = asyncio.get_event_loop()
+                try:
+                    metrics = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            lambda: strategy_manager.get_strategy_performance(
+                                name,
+                                start_date=start_date,
+                                end_date=end_date,
+                            ),
+                        ),
+                        timeout=6.0,
+                    )
+                    payload = {
+                        "type": "strategy_performance",
+                        "success": True,
+                        "name": name,
+                        "range": range_value,
+                        "metrics": metrics,
+                    }
+                    last_responses[key] = payload
+                    await websocket.send_text(json.dumps(payload))
+                except Exception as exc:
+                    logger.warning(f"Failed to fetch strategy performance: {exc}")
+                    await websocket.send_text(json.dumps({
+                        "type": "strategy_performance",
+                        "success": False,
+                        "name": name,
+                        "error": str(exc),
+                    }))
     except WebSocketDisconnect:
         for task in realtime_tasks.values():
             task.cancel()

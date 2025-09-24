@@ -442,8 +442,75 @@ class TradingApp {
         this.summaryDataFeedCurrent = null;
         this.data_push_state = {};
         this.sidePanelManagerInitialized = false;
+        this.wsHandlers = new Map();
+        this.strategyPerformanceCells = new Map();
+        this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
 
         this.init();
+    }
+
+    registerWebSocketHandler(type, handler) {
+        if (!type || typeof handler !== 'function') {
+            return () => {};
+        }
+        if (!this.wsHandlers.has(type)) {
+            this.wsHandlers.set(type, new Set());
+        }
+        const handlers = this.wsHandlers.get(type);
+        handlers.add(handler);
+        return () => {
+            this.unregisterWebSocketHandler(type, handler);
+        };
+    }
+
+    unregisterWebSocketHandler(type, handler) {
+        const handlers = this.wsHandlers.get(type);
+        if (!handlers) return;
+        handlers.delete(handler);
+        if (handlers.size === 0) {
+            this.wsHandlers.delete(type);
+        }
+    }
+
+    handleWebSocketPayload(payload) {
+        if (!payload || !payload.type) return false;
+        const handlers = this.wsHandlers.get(payload.type);
+        if (!handlers || handlers.size === 0) {
+            return false;
+        }
+        let handled = false;
+        [...handlers].forEach(handler => {
+            try {
+                const result = handler(payload);
+                if (result) handled = true;
+            } catch (error) {
+                console.error('WebSocket handler error:', payload.type, error);
+            }
+        });
+        return handled;
+    }
+
+    handleStrategyPerformanceMessage(message) {
+        if (!message || !message.name) return false;
+        const entry = this.strategyPerformanceCells.get(message.name);
+        if (!entry) return false;
+        const { pnlCell, tradesCell } = entry;
+        if (!pnlCell || !tradesCell) return true;
+        if (!message.success) {
+            const err = message?.error || '';
+            if (typeof err === 'string' && err.toLowerCase().includes('rate')) {
+                return true;
+            }
+            pnlCell.textContent = '-';
+            tradesCell.textContent = '-';
+            return true;
+        }
+        const metrics = message.metrics || {};
+        const totalPnL = Number(metrics.total_pnl ?? 0);
+        const totalExec = Number(metrics.total_executions ?? 0);
+        pnlCell.textContent = `$${(Number.isFinite(totalPnL) ? totalPnL : 0).toFixed(2)}`;
+        tradesCell.textContent = `${Math.max(0, Math.floor((Number.isFinite(totalExec) ? totalExec : 0) / 2))}`;
+        return true;
     }
 
     addDomSignal(signal) {
@@ -7116,9 +7183,9 @@ class TradingApp {
     displayStrategies(strategies) {
         const tbody = document.querySelector('#strategiesTable tbody');
         if (!tbody) return;
-        
+
         tbody.innerHTML = '';
-        const requests = [];
+        this.strategyPerformanceCells.clear();
         strategies.forEach(strategy => {
             const row = document.createElement('tr');
             
@@ -7157,31 +7224,14 @@ class TradingApp {
             row.appendChild(statusCell);
             row.appendChild(pnlCell);
             row.appendChild(tradesCell);
-            
+
             tbody.appendChild(row);
-            
-            // 异步获取 1m 性能数据
-            const req = this.apiCall(`/strategies/${encodeURIComponent(strategy.name)}/performance?range=1m`)
-                .then(res => {
-                    if (!res || !res.success) {
-                        pnlCell.textContent = '-';
-                        tradesCell.textContent = '-';
-                        return;
-                    }
-                    const m = res.metrics || {};
-                    const totalPnL = Number(m.total_pnl ?? 0);
-                    const totalExec = Number(m.total_executions ?? 0);
-                    pnlCell.textContent = `$${(isFinite(totalPnL) ? totalPnL : 0).toFixed(2)}`;
-                    tradesCell.textContent = `${Math.max(0, Math.floor((isFinite(totalExec) ? totalExec : 0) / 2))}`;
-                })
-                .catch(() => {
-                    pnlCell.textContent = '-';
-                    tradesCell.textContent = '-';
-                });
-            requests.push(req);
+
+            this.strategyPerformanceCells.set(strategy.name, { pnlCell, tradesCell });
+            if (this.ibkrManager && typeof this.ibkrManager.requestStrategyPerformance === 'function') {
+                this.ibkrManager.requestStrategyPerformance({ name: strategy.name, range: '1m' });
+            }
         });
-        
-        Promise.allSettled(requests).catch(() => {});
     }
 
     async toggleStrategy(name, enabled) {
