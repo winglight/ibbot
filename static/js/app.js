@@ -6905,14 +6905,14 @@ class TradingApp {
         // 同时添加到通知面板
         this.notificationsManager.addNotification(type, message);
         
-        // Auto-dismiss after 5 seconds
+        // Auto-dismiss after 3 seconds
         setTimeout(() => {
             const alert = document.getElementById(alertId);
             if (alert) {
                 const bsAlert = new bootstrap.Alert(alert);
                 bsAlert.close();
             }
-        }, 5000);
+        }, 3000);
     }
 
     // Symbol combobox functionality
