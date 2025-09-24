@@ -9,7 +9,7 @@ import pandas as pd
 try:  # pragma: no cover - fallback used when ib_insync is unavailable
     from ib_insync import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
 except ImportError:  # pragma: no cover - exercised only in minimal environments
-    from .ib_insync_stub import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
+    from test.ib_insync_stub import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
 from loguru import logger
 from zoneinfo import ZoneInfo
 
