@@ -45,7 +45,10 @@ async def dom_start(
     _ensure_not_read_only(request)
     ok = await dom_service.start_stream(req.symbol, num_rows=req.num_rows)
     if not ok:
-        raise HTTPException(status_code=500, detail="Failed to start depth stream")
+        error_message, status_code = dom_service.get_last_start_error()
+        detail = error_message or "Failed to start depth stream"
+        status = status_code if isinstance(status_code, int) and 400 <= status_code < 600 else 500
+        raise HTTPException(status_code=status, detail=detail)
     return {"success": True}
 
 

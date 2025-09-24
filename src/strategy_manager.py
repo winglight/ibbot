@@ -948,6 +948,13 @@ class StrategyManager:
                         except Exception as exc:
                             error = str(exc)
                             ok = False
+                    if dom_service and not ok and not error:
+                        try:
+                            dom_error, _status = dom_service.get_last_start_error()
+                        except Exception:
+                            dom_error = None
+                        if dom_error:
+                            error = dom_error
                 elif stored_subscription == "market_data":
                     try:
                         import core

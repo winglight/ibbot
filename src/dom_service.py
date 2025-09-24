@@ -79,6 +79,8 @@ class DOMService:
         self._previous_signal_flags: DefaultDict[str, Dict[str, bool]] = defaultdict(
             lambda: {"long": False, "short": False}
         )
+        self._last_start_error: Optional[str] = None
+        self._last_start_error_status: int = 200
 
         persisted_config = self._load_persisted_config()
         if persisted_config:
@@ -483,6 +485,8 @@ class DOMService:
     def _start_stream_blocking(
         self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
     ) -> bool:
+        self._last_start_error = None
+        self._last_start_error_status = 200
         symbol_key = (symbol or "").upper()
         if not connection_manager.is_connected():
             logger.warning(
@@ -492,6 +496,15 @@ class DOMService:
             logger.info(
                 "Connect to IBKR manually before starting DOM stream", symbol=symbol_key
             )
+            reason = "IBKR connection not active"
+            try:
+                last_error = connection_manager.get_last_connect_error()
+                if last_error:
+                    reason = f"{reason}: {last_error}"
+            except Exception:
+                pass
+            self._last_start_error = reason
+            self._last_start_error_status = 400
             return False
         self._active_symbol = symbol_key
         logger.info("Starting DOM depth stream", symbol=symbol_key, num_rows=num_rows)
@@ -503,8 +516,19 @@ class DOMService:
         )
         if result:
             logger.info("DOM depth stream started", symbol=symbol_key)
+            self._last_start_error = None
+            self._last_start_error_status = 200
         else:
             logger.warning("Failed to start DOM depth stream", symbol=symbol_key)
+            try:
+                last_error, status = depth_subscriber.get_last_error()
+            except Exception:
+                last_error, status = None, None
+            self._last_start_error = last_error or "Failed to start DOM depth stream"
+            if isinstance(status, int) and 100 <= status < 600:
+                self._last_start_error_status = status if status >= 400 else 500
+            else:
+                self._last_start_error_status = 500
         return result
 
     async def start_stream(
@@ -528,6 +552,9 @@ class DOMService:
             self._loop = loop
         self._ensure_cleanup_task(loop)
         return self._start_stream_blocking(symbol, num_rows, force_restart=force_restart)
+
+    def get_last_start_error(self) -> tuple[Optional[str], int]:
+        return self._last_start_error, self._last_start_error_status
 
     def _stop_stream_blocking(self, symbol: str) -> bool:
         symbol_key = (symbol or "").upper()
