@@ -668,26 +668,48 @@ class ConnectionManager:
         if not self.ib:
             self.connected = False
             return False
-            
+
+        try:
+            # 优先使用 ib_insync 提供的 isConnected 方法，避免 connState 出现短暂不同步导致误判
+            if hasattr(self.ib, "isConnected") and self.ib.isConnected():
+                self.connected = True
+                return True
+        except Exception as exc:  # pragma: no cover - 容错保护
+            connection_logger.debug(f"ib.isConnected() check failed: {exc}")
+
         try:
             # 直接检查client的连接状态，避免调用可能阻塞的方法
             # ib_insync的client对象有connState属性：DISCONNECTED=0, CONNECTING=1, CONNECTED=2
-            if hasattr(self.ib, 'client') and self.ib.client:
-                # 直接检查连接状态常量，不调用任何方法
-                conn_state = getattr(self.ib.client, 'connState', 0)
-                is_connected = (conn_state == self.ib.client.CONNECTED)  # CONNECTED = 2
-                self.connected = is_connected
-                return is_connected
-            else:
-                # 如果没有client属性，说明未连接
-                self.connected = False
-                return False
-                
-        except Exception as e:
-            connection_logger.warning(f"Connection check failed: {e}")
+            client = getattr(self.ib, "client", None)
+            if client:
+                conn_state = getattr(client, "connState", 0)
+                connected_state = getattr(client, "CONNECTED", 2)
+                if conn_state == connected_state:  # CONNECTED = 2
+                    self.connected = True
+                    return True
+
+                # 如果处于连接中状态且之前判定为已连接，则保持连接状态，减少抖动
+                connecting_state = getattr(client, "CONNECTING", 1)
+                if conn_state == connecting_state and self.connected:
+                    return True
+
+                disconnected_state = getattr(client, "DISCONNECTED", 0)
+                if conn_state == disconnected_state:
+                    self.connected = False
+                    return False
+
+            # client 不存在时视为未连接
             self.connected = False
             return False
-    
+
+        except Exception as e:
+            connection_logger.warning(f"Connection check failed: {e}")
+            # 如果之前判定为已连接，保持结果，避免短暂错误导致的误判
+            if self.connected:
+                return True
+            self.connected = False
+            return False
+
     def get_last_connect_error(self) -> Optional[str]:
         """获取最近一次连接错误原因，便于对外展示更具体的失败信息"""
         try:
