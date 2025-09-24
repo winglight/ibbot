@@ -76,13 +76,13 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from src.strategies.base import BaseStrategy
+from src.strategies.dom_strategy import DOMStrategy
 
 BASE_PARAMETERS: Dict[str, Any] = {base_json}
 FEATURE_PARAMETERS: Dict[str, Any] = {feature_json}
 
 
-class {class_name}(BaseStrategy):
+class {class_name}(DOMStrategy):
     """Auto-generated on {timestamp} via DOM optimizer."""
 
     source_plan_id: str | None = {plan_id!r}
