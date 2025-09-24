@@ -21,16 +21,26 @@ router = APIRouter()
 
 NY_TZ = ZoneInfo("America/New_York")
 
+
+def _require_ib_client():
+    """Return the active IBKR client or raise a consistent not-connected error."""
+    ib_client = getattr(core, "ibkr_client", None)
+    if ib_client is None:
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    return ib_client
+
 @router.post("/api/place_order")
 async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_current_user)):
     """下单"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         # 直接调用下单方法，避免嵌套的事件循环调用
         if order.order_type.upper() == "MARKET":
-            trade = await core.ibkr_client.place_market_order(
+            trade = await ib_client.place_market_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 action=order.action,
@@ -40,7 +50,7 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
         elif order.order_type.upper() == "LIMIT":
             if not order.price:
                 raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = core.ibkr_client.place_limit_order(
+            trade = ib_client.place_limit_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 price=order.price,
@@ -131,7 +141,9 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
     """取消订单"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         # Run in executor to avoid blocking event loop with timeout
         loop = asyncio.get_event_loop()
@@ -139,7 +151,7 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
             success, message = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: core.ibkr_client.cancel_order(order_id)
+                    lambda: ib_client.cancel_order(order_id)
                 ),
                 timeout=35.0  # 35-second timeout for order cancellation
             )
@@ -180,19 +192,21 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
     """取消订单 (POST方法)"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         order_id = request.get('order_id')
         if not order_id:
             raise HTTPException(status_code=400, detail="order_id is required")
-            
+
         # Run in executor to avoid blocking event loop
         loop = asyncio.get_event_loop()
         try:
             success, message = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: core.ibkr_client.cancel_order(int(order_id))
+                    lambda: ib_client.cancel_order(int(order_id))
                 ),
                 timeout=35.0  # 35-second timeout for order cancellation
             )
@@ -234,10 +248,12 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
     
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         # 获取当前持仓
-        positions = await core.ibkr_client.get_positions()
+        positions = await ib_client.get_positions()
         target_position = None
         
         for pos in positions:
@@ -257,7 +273,7 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
         quantity = abs(int(position_qty))
         
         # 执行平仓市价单
-        trade = await core.ibkr_client.place_market_order(
+        trade = await ib_client.place_market_order(
             symbol=symbol,
             quantity=quantity,
             action=action,
@@ -481,25 +497,29 @@ async def _validate_g3_position_limits(order: OrderRequest) -> dict:
     
     try:
         if connection_manager.is_connected():
-            # 获取当前持仓
-            positions = await core.ibkr_client.get_positions()
-            current_position = 0
-            
-            for pos in positions:
-                if pos.get('symbol') == order.symbol:
-                    current_position = float(pos.get('position', 0))
-                    break
-            
-            # 计算订单执行后的持仓
-            if order.action.upper() == "BUY":
-                new_position = current_position + order.quantity
+            ib_client = getattr(core, "ibkr_client", None)
+            if ib_client is None:
+                errors.append("Not connected to IBKR")
             else:
-                new_position = current_position - order.quantity
-            
-            # 检查持仓限制（示例：单个股票持仓不超过 10,000 股）
-            if abs(new_position) > 10000:
-                errors.append(f"Position limit exceeded: new position would be {new_position} shares (limit: 10,000)")
-        
+                # 获取当前持仓
+                positions = await ib_client.get_positions()
+                current_position = 0
+
+                for pos in positions:
+                    if pos.get('symbol') == order.symbol:
+                        current_position = float(pos.get('position', 0))
+                        break
+
+                # 计算订单执行后的持仓
+                if order.action.upper() == "BUY":
+                    new_position = current_position + order.quantity
+                else:
+                    new_position = current_position - order.quantity
+
+                # 检查持仓限制（示例：单个股票持仓不超过 10,000 股）
+                if abs(new_position) > 10000:
+                    errors.append(f"Position limit exceeded: new position would be {new_position} shares (limit: 10,000)")
+
     except Exception as e:
         errors.append(f"Position limit check failed: {str(e)}")
     
@@ -516,24 +536,28 @@ async def _validate_g2_capital_adequacy(order: OrderRequest) -> dict:
     
     try:
         if connection_manager.is_connected():
-            # 获取账户信息
-            account_info = await core.ibkr_client.get_account_summary()
-            
-            if account_info:
-                # 检查可用资金
-                available_funds = 0
-                for item in account_info:
-                    if item.get('tag') == 'AvailableFunds':
-                        available_funds = float(item.get('value', 0))
-                        break
-                
-                # 计算订单所需资金
-                if order.action.upper() == "BUY" and order.price and order.quantity:
-                    required_funds = order.price * order.quantity
-                    
-                    if required_funds > available_funds:
-                        errors.append(f"Insufficient funds: required ${required_funds:,.2f}, available ${available_funds:,.2f}")
-        
+            ib_client = getattr(core, "ibkr_client", None)
+            if ib_client is None:
+                errors.append("Not connected to IBKR")
+            else:
+                # 获取账户信息
+                account_info = await ib_client.get_account_summary()
+
+                if account_info:
+                    # 检查可用资金
+                    available_funds = 0
+                    for item in account_info:
+                        if item.get('tag') == 'AvailableFunds':
+                            available_funds = float(item.get('value', 0))
+                            break
+
+                    # 计算订单所需资金
+                    if order.action.upper() == "BUY" and order.price and order.quantity:
+                        required_funds = order.price * order.quantity
+
+                        if required_funds > available_funds:
+                            errors.append(f"Insufficient funds: required ${required_funds:,.2f}, available ${available_funds:,.2f}")
+
     except Exception as e:
         errors.append(f"Capital adequacy check failed: {str(e)}")
     
@@ -576,10 +600,12 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
     
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         # 获取当前持仓
-        positions = await core.ibkr_client.get_positions()
+        positions = await ib_client.get_positions()
         target_position = None
         
         for pos in positions:
@@ -630,7 +656,7 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
             logger.warning(f"反向下单前停用风险规则失败: {e}")
         
         # 执行反向市价单
-        trade = await core.ibkr_client.place_market_order(
+        trade = await ib_client.place_market_order(
             symbol=symbol,
             quantity=quantity,
             action=action,
@@ -691,10 +717,12 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
     """取消所有订单"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         # 直接调用取消所有订单方法，避免嵌套的事件循环调用
-        cancelled_count = core.ibkr_client.cancel_all_orders()
+        cancelled_count = ib_client.cancel_all_orders()
         
         await websocket_manager.broadcast({  # 替换 manager
             "type": "all_orders_cancelled",
@@ -925,7 +953,9 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
     """手动同步订单状态和价格字段从IB"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
@@ -935,7 +965,7 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
         await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                lambda: core.ibkr_client.get_orders(risk_manager, getattr(core, 'strategy_manager', None), order_manager)
+                lambda: ib_client.get_orders(risk_manager, getattr(core, 'strategy_manager', None), order_manager)
             ),
             timeout=10.0
         )
@@ -955,6 +985,8 @@ async def sync_single_order(order_id: str, user: Optional[str] = Depends(get_cur
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
+    ib_client = _require_ib_client()
+
     try:
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
@@ -968,7 +1000,7 @@ async def sync_single_order(order_id: str, user: Optional[str] = Depends(get_cur
         await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                lambda: core.ibkr_client.get_orders(risk_manager, getattr(core, 'strategy_manager', None), order_manager)
+                lambda: ib_client.get_orders(risk_manager, getattr(core, 'strategy_manager', None), order_manager)
             ),
             timeout=10.0
         )
