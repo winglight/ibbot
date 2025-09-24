@@ -2,9 +2,16 @@ import os
 
 os.environ.setdefault("IBBOT_SKIP_SERVER", "1")
 
-from datetime import date
+from datetime import date, datetime
 
-from src.optimizer_service.schemas import OptimizationAlgorithm, OptimizationRequest
+from src.optimizer_service.db import OptimizerDatabase
+from src.optimizer_service.schemas import (
+    OptimizationAlgorithm,
+    OptimizationReportData,
+    OptimizationRequest,
+    OptimizationResultItem,
+)
+from src.optimizer_service.storage import OptimizerTaskStore
 from src.optimizer_service.tasks import run_optimization_task
 
 
@@ -68,3 +75,53 @@ def test_run_optimization_task_produces_runtime_summary():
     assert conclusion
 
     assert summary["successful_combinations"] >= 1
+
+
+def test_legacy_report_summary_is_enriched():
+    db = OptimizerDatabase(":memory:")
+    store = OptimizerTaskStore(db)
+    request = make_request()
+    plan_id = "plan-1"
+    task_id = "legacy-task"
+
+    store.create_task(task_id, request, plan_id=plan_id)
+    legacy_report = OptimizationReportData(
+        task_id=task_id,
+        results=[
+            OptimizationResultItem(
+                parameters={"window": 5},
+                metrics={"sharpe": 1.25, "max_drawdown": 0.12, "annual_return": 0.2},
+            ),
+            OptimizationResultItem(
+                parameters={"window": 10},
+                metrics={"sharpe": 0.9, "max_drawdown": 0.18, "annual_return": 0.11},
+            ),
+        ],
+        summary={
+            "best_sharpe": 1.25,
+            "best_max_drawdown": 0.12,
+            "best_annual_return": 0.2,
+            "tested_combinations": 2,
+            "successful_combinations": 2,
+            "failed_combinations": 0,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+        },
+        equity_curve=[],
+        fail_reasons=[],
+    )
+    store.complete_task(task_id, legacy_report)
+
+    records = store.list_tasks_by_plan(plan_id)
+    assert records
+    _, task_record = records[0]
+    enriched_summary = task_record.report.summary
+
+    assert "runtime" in enriched_summary
+    assert "annual_return_distribution" in enriched_summary
+    assert "conclusion" in enriched_summary
+
+    runtime = enriched_summary["runtime"]
+    assert runtime["actual_total_combinations"] == enriched_summary["tested_combinations"]
+
+    distribution = enriched_summary["annual_return_distribution"]
+    assert distribution["p25"] <= distribution["p75"]

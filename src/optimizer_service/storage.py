@@ -7,6 +7,8 @@ from datetime import datetime
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
+from .engine import OptimizationEngine
+from .reporting import build_conclusion, compute_return_distribution, compute_runtime_summary
 from .schemas import (
     OptimizationReportData,
     OptimizationRequest,
@@ -129,11 +131,13 @@ class OptimizerTaskStore:
 
     def list_tasks_by_plan(self, plan_id: str) -> List[Tuple[str, TaskRecord]]:
         with self._lock:
-            return [
-                (task_id, task)
-                for task_id, task in self._tasks.items()
-                if task.plan_id == plan_id
-            ]
+            tasks = []
+            for task_id, task in self._tasks.items():
+                if task.plan_id != plan_id:
+                    continue
+                self._ensure_report_summary(task_id, task)
+                tasks.append((task_id, task))
+            return tasks
 
     def delete_tasks_for_plan(self, plan_id: str) -> None:
         with self._lock:
@@ -184,6 +188,93 @@ class OptimizerTaskStore:
             "completed_at": record.completed_at.isoformat() if record.completed_at else None,
         }
         self._db.save_task(task_payload)
+
+    def _ensure_report_summary(self, task_id: str, record: TaskRecord) -> None:
+        report = record.report
+        if not report or not report.summary:
+            return
+
+        summary = dict(report.summary)
+        changed = False
+
+        tested = summary.get("tested_combinations")
+        if tested is None:
+            tested = len(report.results) + len(report.fail_reasons or [])
+            summary["tested_combinations"] = tested
+            changed = True
+
+        success = summary.get("successful_combinations")
+        if success is None:
+            success = len(report.results)
+            summary["successful_combinations"] = success
+            changed = True
+
+        failed = summary.get("failed_combinations")
+        if failed is None:
+            failed = len(report.fail_reasons or [])
+            summary["failed_combinations"] = failed
+            changed = True
+
+        if "best_sharpe" not in summary and report.results:
+            best_sharpe = report.results[0].metrics.get("sharpe")
+            if best_sharpe is not None:
+                summary["best_sharpe"] = round(best_sharpe, 3)
+                changed = True
+
+        if "best_max_drawdown" not in summary and report.results:
+            max_drawdown = report.results[0].metrics.get("max_drawdown")
+            if max_drawdown is not None:
+                summary["best_max_drawdown"] = round(max_drawdown, 4)
+                changed = True
+
+        if "best_annual_return" not in summary and report.results:
+            annual_return = report.results[0].metrics.get("annual_return")
+            if annual_return is not None:
+                summary["best_annual_return"] = round(annual_return, 4)
+                changed = True
+
+        if "annual_return_distribution" not in summary:
+            distribution = compute_return_distribution(report.results)
+            summary["annual_return_distribution"] = distribution
+            changed = True
+        else:
+            distribution = summary.get("annual_return_distribution") or {}
+
+        if "runtime" not in summary and record.completed_at:
+            actual_total = tested or (len(report.results) + len(report.fail_reasons or []))
+            estimated_total = actual_total
+            try:
+                estimated_total = OptimizationEngine(record.request).estimated_total()
+            except Exception:  # pragma: no cover - defensive
+                estimated_total = actual_total
+            started_at = record.created_at
+            completed_at = record.completed_at
+            elapsed = 0.0
+            if started_at and completed_at:
+                elapsed = max((completed_at - started_at).total_seconds(), 0.0)
+            summary["runtime"] = compute_runtime_summary(
+                started_at or datetime.utcnow(),
+                completed_at,
+                elapsed,
+                estimated_total,
+                actual_total,
+            )
+            changed = True
+
+        if "conclusion" not in summary:
+            summary["conclusion"] = build_conclusion(
+                tested or 0,
+                success or 0,
+                failed or 0,
+                summary.get("best_sharpe"),
+                summary.get("best_max_drawdown"),
+                distribution,
+            )
+            changed = True
+
+        if changed:
+            report.summary = summary
+            self._persist(task_id)
 
 
 store = OptimizerTaskStore()

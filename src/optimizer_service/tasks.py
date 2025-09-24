@@ -1,8 +1,6 @@
 """Background task implementations for optimizer module."""
 
 from __future__ import annotations
-
-import math
 from datetime import datetime, timedelta
 from time import perf_counter
 from typing import Any, Dict, List, Tuple
@@ -10,6 +8,7 @@ from typing import Any, Dict, List, Tuple
 from loguru import logger
 
 from .engine import OptimizationEngine
+from .reporting import build_conclusion, compute_return_distribution, compute_runtime_summary
 from .schemas import (
     OptimizationReportData,
     OptimizationRequest,
@@ -76,14 +75,14 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
         )
         sorted_results = sorted(results, key=lambda r: r.metrics.get("sharpe", 0.0), reverse=True)
         actual_total = len(results) + len(fail_reasons)
-        runtime_summary = _compute_runtime_summary(
+        runtime_summary = compute_runtime_summary(
             started_at,
             completed_at,
             elapsed_seconds,
             total,
             actual_total,
         )
-        return_distribution = _compute_return_distribution(sorted_results)
+        return_distribution = compute_return_distribution(sorted_results)
         report = OptimizationReportData(
             task_id=task_id,
             results=sorted_results,
@@ -97,7 +96,7 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
                 "generated_at": datetime.utcnow().isoformat() + "Z",
                 "runtime": runtime_summary,
                 "annual_return_distribution": return_distribution,
-                "conclusion": _build_conclusion(
+                "conclusion": build_conclusion(
                     actual_total,
                     len(results),
                     len(fail_reasons),
