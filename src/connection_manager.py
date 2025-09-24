@@ -105,6 +105,9 @@ class ConnectionManager:
         self._restart_delay_sec: float = max(0.0, _get_env_float('IBKR_RESTART_DELAY_SEC', 0.0))
         self._restart_pending: bool = False
         self._connect_attempt_lock = threading.Lock()
+        self._connect_state_lock = threading.Lock()
+        self._connect_state_cond = threading.Condition(self._connect_state_lock)
+        self._connect_in_progress = False
         self._project_root = Path(__file__).resolve().parents[1]
         self._pre_restart_script = self._project_root / "vps-setup" / "quick-start.sh"
         self._pre_restart_attempted = False
@@ -597,24 +600,48 @@ class ConnectionManager:
 
     def connect(self) -> bool:
         """连接到IBKR服务器"""
-        # 检查当前连接是否使用相同配置
-        if self.connected and self.ib and self.ib.isConnected():
-            # 如果配置发生变化，需要重新连接
-            current_host = getattr(self.ib, 'host', None)
-            current_port = getattr(self.ib, 'port', None)
-            if (current_host == self.config.host and 
-                current_port == self.config.port):
-                connection_logger.info("Already connected to IBKR with same configuration")
-                self._record_connect_result(True)
-                return True
-            else:
-                connection_logger.info("Configuration changed, reconnecting...")
-                self.disconnect()
+        need_reconnect = False
+
+        with self._connect_state_cond:
+            while self._connect_in_progress:
+                connection_logger.info("Connection attempt already in progress; waiting for completion")
+                self._connect_state_cond.wait(timeout=0.5)
+                if self.connected and self.ib and self.ib.isConnected():
+                    current_host = getattr(self.ib, 'host', None)
+                    current_port = getattr(self.ib, 'port', None)
+                    if (current_host == self.config.host and
+                        current_port == self.config.port):
+                        connection_logger.info("Connection established while waiting for in-progress attempt")
+                        self._record_connect_result(True)
+                        return True
+
+            if self.connected and self.ib and self.ib.isConnected():
+                current_host = getattr(self.ib, 'host', None)
+                current_port = getattr(self.ib, 'port', None)
+                if (current_host == self.config.host and
+                    current_port == self.config.port):
+                    connection_logger.info("Already connected to IBKR with same configuration")
+                    self._record_connect_result(True)
+                    return True
+                else:
+                    connection_logger.info("Configuration changed, reconnecting...")
+                    need_reconnect = True
+
+            self._connect_in_progress = True
+
+        if need_reconnect:
+            self.disconnect()
 
         connection_logger.info("Connecting to IBKR...")
-        success = self._connect_in_thread()
-        self._record_connect_result(success)
-        return success
+        success = False
+        try:
+            success = self._connect_in_thread()
+            return success
+        finally:
+            self._record_connect_result(success)
+            with self._connect_state_cond:
+                self._connect_in_progress = False
+                self._connect_state_cond.notify_all()
     
     def disconnect(self) -> None:
         """断开与IBKR服务器的连接，并停止事件循环"""
