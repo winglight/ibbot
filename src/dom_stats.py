@@ -387,11 +387,19 @@ class DomStatsAggregator:
     def _ensure_payload(self, safe_symbol: str) -> Optional[DomStatsPayload]:
         with self._lock:
             payload = self._payloads.get(safe_symbol)
-            if payload is not None and safe_symbol not in self._dirty:
+            is_dirty = safe_symbol in self._dirty
+            if payload is not None:
+                # When a payload already exists, return the latest cached
+                # values even if the symbol is marked as dirty. A background
+                # worker will rebuild the payload shortly, and avoiding a
+                # synchronous rebuild here prevents expensive blocking calls
+                # that can cause request timeouts for symbols with large
+                # histories.
                 return payload
 
-        if safe_symbol in self._dirty:
-            # Perform a synchronous rebuild to avoid stale reads
+        if is_dirty:
+            # A payload may not exist yet (for example during start-up).
+            # Perform a synchronous rebuild only when we have nothing cached.
             try:
                 self._rebuild_symbol(safe_symbol)
             except Exception:
