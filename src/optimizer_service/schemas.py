@@ -397,6 +397,7 @@ class OptimizationPlanReportEntry(BaseModel):
     completed_at: Optional[datetime]
     message: Optional[str]
     report: Optional[OptimizationReportData]
+    runtime: Optional[Dict[str, Any]] = None
 
 
 class OptimizationPlanReportList(BaseModel):

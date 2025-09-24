@@ -241,6 +241,7 @@ async def list_plan_reports(plan_id: str) -> OptimizationPlanReportList:
             completed_at=record.completed_at,
             message=record.message,
             report=record.report,
+            runtime=record.runtime,
         )
         for task_id, record in records
     ]

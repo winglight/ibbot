@@ -77,14 +77,70 @@ def build_conclusion(
 
     if total <= 0:
         return "未运行任何组合，无法得出结论。"
+
+    summary_parts = []
+    base_text = f"共测试 {total} 组组合，其中成功 {success} 组"
+    if failed:
+        base_text += f"，失败 {failed} 组"
+    summary_parts.append(base_text + "。")
+
+    distribution_text = _format_distribution_sentence(distribution)
+    if distribution_text:
+        summary_parts.append(distribution_text)
+
+    decision = _build_decision_sentence(
+        total,
+        success,
+        failed,
+        best_sharpe,
+        best_drawdown,
+        distribution,
+    )
+    if decision:
+        summary_parts.append(decision)
+
+    return " ".join(part for part in summary_parts if part)
+
+
+def _format_distribution_sentence(distribution: Dict[str, float]) -> str:
+    if not distribution:
+        return "收益率分布信息不足，建议补充更多历史样本。"
+    minimum = distribution.get("min")
+    maximum = distribution.get("max")
+    median = distribution.get("p50")
+    mean = distribution.get("mean")
+    pieces = []
+    if minimum is not None and maximum is not None:
+        pieces.append(
+            f"收益率区间 {_format_percentage(minimum)} ~ {_format_percentage(maximum)}"
+        )
+    if median is not None:
+        pieces.append(f"中位数 {_format_percentage(median)}")
+    if mean is not None:
+        pieces.append(f"平均值 {_format_percentage(mean)}")
+    if not pieces:
+        return "收益率分布信息不足，建议补充更多历史样本。"
+    return "，".join(pieces) + "。"
+
+
+def _build_decision_sentence(
+    total: int,
+    success: int,
+    failed: int,
+    best_sharpe: float | None,
+    best_drawdown: float | None,
+    distribution: Dict[str, float],
+) -> str:
     if success <= 1:
-        return f"测试样本偏少（共 {total} 组，成功 {success} 组），建议扩充组合数量。"
+        return (
+            f"当前样本偏少，仅 {success} 组组合成功，建议扩充参数范围或延长运行时间。"
+        )
 
     if failed:
         failure_ratio = failed / total if total else 0.0
         if failure_ratio >= 0.4:
             return (
-                f"共有 {failed} 组组合执行失败，占比 {failure_ratio:.0%}，需排查失败原因或过滤不稳定的参数组合。"
+                f"共有 {failed} 组组合执行失败，占比 {failure_ratio:.0%}，需排查失败原因或过滤不稳定参数。"
             )
 
     if best_sharpe is not None and best_sharpe < 1.0:
@@ -106,7 +162,7 @@ def build_conclusion(
         p75 = distribution.get("p75")
         p25 = distribution.get("p25")
         if p75 is not None and p25 is not None and (p75 - p25) < 0.05:
-            return "收益率分布集中且波动较小，可重点关注收益与回撤均衡表现的前列组合。"
+            return "收益率分布分散度较小，可重点关注收益与回撤均衡表现的前列组合。"
 
     if failed:
         return f"整体表现稳定，但仍有 {failed} 组组合未通过，建议复核失败组合的触发条件。"

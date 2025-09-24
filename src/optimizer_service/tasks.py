@@ -82,6 +82,7 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
             total,
             actual_total,
         )
+        runtime_summary["status"] = TaskState.COMPLETED.value
         return_distribution = compute_return_distribution(sorted_results)
         report = OptimizationReportData(
             task_id=task_id,
