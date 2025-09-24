@@ -486,7 +486,7 @@ class RiskManager:
             replace_existing=True,
             coalesce=True,
             misfire_grace_time=10,
-            max_instances=2
+            max_instances=1
         )
         
         # 添加处理订单队列任务
