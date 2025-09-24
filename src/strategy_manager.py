@@ -91,7 +91,10 @@ class StrategyManager:
         self._last_position_add: Dict[Tuple[str, str, str], datetime] = {}
         self._auto_close_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
         self.data_push_state: Dict[str, Dict[str, Any]] = {}
-        self._pending_data_push_requests: List[Tuple[str, Optional[str], Optional[str]]] = []
+        self._pending_data_push_requests: List[
+            Tuple[str, Optional[str], Optional[str], bool]
+        ] = []
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # 认证token（用于外部策略访问）
         self.auth_token = None
@@ -125,12 +128,12 @@ class StrategyManager:
     def start(self):
         """Start strategy manager scheduler"""
         try:
-            asyncio.get_running_loop()
-            self._start_scheduler()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            self._start_scheduler()
+        self._event_loop = loop
+        self._start_scheduler()
         strategy_logger.info("Strategy manager started")
 
     def stop(self):
@@ -781,6 +784,7 @@ class StrategyManager:
         *,
         subscription: Optional[str] = None,
         symbol: Optional[str] = None,
+        force_restart: bool = False,
     ) -> None:
         """Schedule asynchronous activation of a strategy's data push."""
 
@@ -791,6 +795,7 @@ class StrategyManager:
                     True,
                     subscription=subscription,
                     symbol=symbol,
+                    force_restart=force_restart,
                 )
                 if not result.get("success"):
                     error_msg = result.get("error") or "unknown error"
@@ -802,32 +807,50 @@ class StrategyManager:
                     f"Failed to auto-start data push for {strategy_name}: {exc}"
                 )
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
         log_subscription = subscription or self._get_strategy_setting(
             strategy_name, "data_subscription"
         )
         log_symbol = symbol or self._get_strategy_setting(strategy_name, "primary_symbol")
 
-        if loop and loop.is_running():
+        immediate_loop: Optional[asyncio.AbstractEventLoop]
+        try:
+            immediate_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            immediate_loop = None
+
+        if immediate_loop and immediate_loop.is_running():
             strategy_logger.info(
                 "Activating data push immediately",
                 strategy=strategy_name,
                 subscription=log_subscription,
                 symbol=log_symbol,
+                force_restart=force_restart,
             )
-            loop.create_task(_activate())
-        else:
+            immediate_loop.create_task(_activate())
+            return
+
+        target_loop = self._event_loop if self._event_loop and self._event_loop.is_running() else None
+        if target_loop:
             strategy_logger.info(
-                "Deferring data push activation until loop available",
+                "Scheduling data push activation on manager loop",
                 strategy=strategy_name,
                 subscription=log_subscription,
                 symbol=log_symbol,
+                force_restart=force_restart,
             )
-            self._pending_data_push_requests.append((strategy_name, subscription, symbol))
+            asyncio.run_coroutine_threadsafe(_activate(), target_loop)
+            return
+
+        strategy_logger.info(
+            "Deferring data push activation until loop available",
+            strategy=strategy_name,
+            subscription=log_subscription,
+            symbol=log_symbol,
+            force_restart=force_restart,
+        )
+        self._pending_data_push_requests.append(
+            (strategy_name, subscription, symbol, force_restart)
+        )
 
     def get_data_push_state(self, strategy_name: str) -> Dict[str, Any]:
         return dict(self.data_push_state.get(strategy_name, {}))
@@ -838,6 +861,7 @@ class StrategyManager:
         enabled: bool,
         subscription: Optional[str] = None,
         symbol: Optional[str] = None,
+        force_restart: bool = False,
     ) -> Dict[str, Any]:
         """Control live data push for an internal strategy."""
 
@@ -899,7 +923,31 @@ class StrategyManager:
                         strategy=strategy_name,
                         symbol=target_symbol,
                     )
-                    ok = await dom_service.start_stream(target_symbol)
+                    restart_requested = force_restart or bool(state.get("restart_requested"))
+                    try:
+                        ok = await dom_service.start_stream(
+                            target_symbol,
+                            force_restart=restart_requested,
+                        )
+                    except Exception as exc:
+                        error = str(exc)
+                        ok = False
+                    if not ok and not restart_requested:
+                        strategy_logger.info(
+                            "Retrying DOM stream start with forced restart",
+                            strategy=strategy_name,
+                            symbol=target_symbol,
+                        )
+                        try:
+                            ok = await dom_service.start_stream(
+                                target_symbol,
+                                force_restart=True,
+                            )
+                            if ok:
+                                restart_requested = True
+                        except Exception as exc:
+                            error = str(exc)
+                            ok = False
                 elif stored_subscription == "market_data":
                     try:
                         import core
@@ -931,6 +979,7 @@ class StrategyManager:
                     "last_data_timestamp": None,
                 })
                 state.pop("_last_gap_warning_at", None)
+                state.pop("restart_requested", None)
                 strategy_logger.error(
                     "Failed to enable data push",
                     strategy=strategy_name,
@@ -974,6 +1023,11 @@ class StrategyManager:
                 "awaiting_data": True,
                 "last_data_timestamp": None,
             })
+            if force_restart:
+                state["_last_restart_attempt"] = time.time()
+            else:
+                state.pop("_last_restart_attempt", None)
+            state.pop("restart_requested", None)
             state.pop("_last_gap_warning_at", None)
             strategy_logger.info(
                 "Data push enabled",
@@ -1009,6 +1063,8 @@ class StrategyManager:
             "last_data_timestamp": None,
         })
         state.pop("_last_gap_warning_at", None)
+        state.pop("_last_restart_attempt", None)
+        state.pop("restart_requested", None)
         strategy_logger.info(
             "Data push disabled",
             strategy=strategy_name,
@@ -1036,19 +1092,21 @@ class StrategyManager:
                 count=len(pending_requests),
             )
 
-        for strategy_name, subscription, symbol in pending_requests:
+        for strategy_name, subscription, symbol, force_restart in pending_requests:
             try:
                 strategy_logger.info(
                     "Replaying deferred data push request",
                     strategy=strategy_name,
                     subscription=subscription,
                     symbol=symbol,
+                    force_restart=force_restart,
                 )
                 await self.set_data_push(
                     strategy_name,
                     True,
                     subscription=subscription,
                     symbol=symbol,
+                    force_restart=force_restart,
                 )
             except Exception as exc:  # pragma: no cover - defensive guard
                 strategy_logger.warning(
@@ -1509,6 +1567,12 @@ class StrategyManager:
             was_awaiting = bool(push_state.get("awaiting_data"))
             is_receiving = bool(status.get("is_receiving_data"))
             active_flag = bool(push_state.get("active"))
+            subscription_value = push_state.get("subscription") or self._get_strategy_setting(
+                name, "data_subscription"
+            )
+            symbol_value = push_state.get("symbol") or self._get_strategy_setting(
+                name, "primary_symbol"
+            )
             if is_receiving and was_awaiting:
                 strategy_logger.info(
                     "Data push is now receiving data",
@@ -1516,6 +1580,8 @@ class StrategyManager:
                     subscription=push_state.get("subscription"),
                     symbol=push_state.get("symbol"),
                 )
+            if is_receiving:
+                push_state.pop("restart_requested", None)
 
             awaiting_data = was_awaiting
             if is_receiving or not active_flag:
@@ -1558,16 +1624,46 @@ class StrategyManager:
                 last_warning_at = float(push_state.get("_last_gap_warning_at", 0.0) or 0.0)
                 if numeric_last is not None and numeric_last > 0:
                     elapsed = max(0.0, now_ts - numeric_last)
-                    if elapsed >= 15.0 and (now_ts - last_warning_at) >= 30.0:
-                        strategy_logger.warning(
-                            "Data push stalled",
-                            strategy=name,
-                            subscription=push_state.get("subscription"),
-                            symbol=push_state.get("symbol"),
-                            seconds_since_last=round(elapsed, 1),
-                            processed=status.get("processed_count"),
-                        )
-                        push_state["_last_gap_warning_at"] = now_ts
+                    if elapsed >= 15.0:
+                        if (now_ts - last_warning_at) >= 30.0:
+                            strategy_logger.warning(
+                                "Data push stalled",
+                                strategy=name,
+                                subscription=push_state.get("subscription"),
+                                symbol=push_state.get("symbol"),
+                                seconds_since_last=round(elapsed, 1),
+                                processed=status.get("processed_count"),
+                            )
+                            push_state["_last_gap_warning_at"] = now_ts
+
+                        restart_ts = float(push_state.get("_last_restart_attempt", 0.0) or 0.0)
+                        restart_setting = self.settings.get("data_push_restart_cooldown", 90)
+                        try:
+                            restart_cooldown = float(restart_setting)
+                        except (TypeError, ValueError):
+                            restart_cooldown = 90.0
+                        restart_cooldown = max(30.0, restart_cooldown)
+                        if (
+                            subscription_value == "dom_trend"
+                            and symbol_value
+                            and (now_ts - restart_ts) >= restart_cooldown
+                        ):
+                            strategy_logger.info(
+                                "Scheduling DOM data push restart after stall",
+                                strategy=name,
+                                subscription=subscription_value,
+                                symbol=symbol_value,
+                                seconds_since_last=round(elapsed, 1),
+                            )
+                            push_state["_last_restart_attempt"] = now_ts
+                            push_state["awaiting_data"] = True
+                            push_state["restart_requested"] = True
+                            self._request_data_push_activation(
+                                name,
+                                subscription=subscription_value,
+                                symbol=symbol_value,
+                                force_restart=True,
+                            )
                 elif not awaiting_data and (now_ts - last_warning_at) >= 30.0:
                     strategy_logger.warning(
                         "Data push active but no last data timestamp",
@@ -1692,12 +1788,13 @@ class StrategyManager:
                 try:
                     push_state = self.data_push_state.get(name, {})
                     if push_state.get('enabled'):
-                        await self.set_data_push(name, True)
+                        await self.set_data_push(name, True, force_restart=True)
                     elif strategy.enabled and stored_subscription and stored_symbol:
                         self._request_data_push_activation(
                             name,
                             subscription=stored_subscription,
                             symbol=stored_symbol,
+                            force_restart=True,
                         )
                 except Exception as exc:  # pragma: no cover - defensive guard
                     strategy_logger.warning(f"Failed to restart data push for {name}: {exc}")

@@ -144,6 +144,7 @@ class StrategyDataPushRequest(BaseModel):
     enabled: bool
     subscription: Optional[str] = None
     symbol: Optional[str] = None
+    force_restart: Optional[bool] = False
 
     @field_validator('subscription')
     def validate_subscription(cls, value: Optional[str]):

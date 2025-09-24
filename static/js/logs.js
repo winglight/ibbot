@@ -19,18 +19,42 @@ class LogsManager {
             const moduleSelect = document.getElementById('logModule');
             if (moduleSelect && res?.modules) {
                 const currentValue = moduleSelect.value;
-                // Clear existing options except "All Modules"
-                moduleSelect.innerHTML = '<option value="all">All Modules</option>';
-                // Add dynamic modules from logs
-                res.modules.forEach(module => {
+                const presetOptions = [
+                    { value: 'all', label: 'All Modules' },
+                    { value: 'internal_strategy,queue_manager', label: '策略信号链路' },
+                    { value: 'internal_strategy', label: '内部策略' },
+                    { value: 'queue_manager', label: '队列管理器' },
+                    { value: 'external_strategy', label: '外部策略' },
+                    { value: 'risk_rule', label: 'risk rule' },
+                    { value: 'orders', label: 'orders' },
+                    { value: 'portfolio', label: 'portfolio' },
+                    { value: 'connection', label: 'connection' },
+                ];
+
+                moduleSelect.innerHTML = '';
+                const existingValues = new Set();
+
+                const appendOption = ({ value, label }) => {
+                    if (existingValues.has(value)) return;
                     const option = document.createElement('option');
-                    option.value = module;
-                    option.textContent = module;
+                    option.value = value;
+                    option.textContent = label;
                     moduleSelect.appendChild(option);
+                    existingValues.add(value);
+                };
+
+                presetOptions.forEach(appendOption);
+
+                // Add dynamic modules from logs, avoid duplicates with presets
+                res.modules.forEach(moduleName => {
+                    appendOption({ value: moduleName, label: moduleName });
                 });
-                // Restore previous selection if it still exists
-                if (currentValue && [...moduleSelect.options].some(opt => opt.value === currentValue)) {
+
+                const availableValues = [...moduleSelect.options].map(opt => opt.value);
+                if (currentValue && availableValues.includes(currentValue)) {
                     moduleSelect.value = currentValue;
+                } else if (availableValues.includes('internal_strategy,queue_manager')) {
+                    moduleSelect.value = 'internal_strategy,queue_manager';
                 }
             }
         } catch (e) {
@@ -50,7 +74,7 @@ class LogsManager {
             const requestId = document.getElementById('logRequestId')?.value.trim();
             let url = `/logs?lines=200&range=${range}`;
             if (level !== 'all') url += `&level=${encodeURIComponent(level)}`;
-            if (module !== 'all') url += `&module=${module}`;
+            if (module !== 'all') url += `&module=${encodeURIComponent(module)}`;
             if (requestId) url += `&request_id=${encodeURIComponent(requestId)}`;
             const res = await this.apiCall(url);
             if (res?.logs) {
