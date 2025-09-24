@@ -4,9 +4,12 @@ import time
 os.environ.setdefault("IBBOT_SKIP_SERVER", "1")
 os.environ.setdefault("OPTIMIZER_DB_PATH", ":memory:")
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from optimizer_main import app
+from src.optimizer_service import routes as optimizer_routes
 
 
 def wait_for_report(client: TestClient, task_id: str, timeout: float = 2.0):
@@ -130,3 +133,40 @@ def test_bayesian_algorithm_respects_iterations():
         report = wait_for_report(client, response.json()["task_id"])
         summary = report["summary"]
         assert summary["tested_combinations"] == payload["iterations"]
+
+
+def test_generate_strategy_endpoint(monkeypatch, tmp_path):
+    saved_records = []
+
+    class DummyDB:
+        def save_strategy(self, record):
+            saved_records.append(record)
+
+        def load_strategy_config(self):
+            return {"strategy_path": str(tmp_path)}
+
+    monkeypatch.setattr(optimizer_routes, "get_db_manager", lambda: DummyDB())
+    payload = {
+        "strategy_name": "Auto Strategy",
+        "base_parameters": {"long_thresholds": 0.8},
+        "feature_parameters": {"stacking": {"intensity": 0.3}},
+        "plan_id": "plan-1",
+        "task_id": "task-1",
+    }
+    with TestClient(app) as client:
+        response = client.post("/api/optimize/strategies", json=payload)
+        assert response.status_code == 201
+        data = response.json()
+        assert data["status"] == "ok"
+        generated_path = Path(data["file_path"])
+        assert generated_path.exists()
+        content = generated_path.read_text(encoding="utf-8")
+        assert "Auto Strategy" in content
+        assert "BASE_PARAMETERS" in content
+        assert saved_records, "strategy should be persisted to the database"
+        record = saved_records[0]
+        assert record.name == payload["strategy_name"]
+        assert record.strategy_type == "internal"
+        assert Path(record.file_path).name == generated_path.name
+        assert generated_path.parent == tmp_path
+        assert "计划: plan-1" in record.description

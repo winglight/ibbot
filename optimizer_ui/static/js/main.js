@@ -361,20 +361,20 @@ class OptimizerApp {
                         <button class="btn btn-ghost" data-modal-close>关闭</button>
                     </header>
                     <main>
-                                                ${reports.length
-                            ? reports.map((report) => this.renderReportCard(report)).join('')
+                        ${reports.length
+                            ? reports.map((report) => this.renderReportCard(report, planId)).join('')
                             : '<div class="empty-state">暂无报告</div>'}
                     </main>
                 </div>
             `;
-            this.showModal(content);
+            this.showModal(content, (backdrop) => this.setupReportModalEvents(backdrop));
         } catch (err) {
             console.error(err);
             alert('加载报告列表失败');
         }
     }
 
-    renderReportCard(report) {
+    renderReportCard(report, planId) {
         const statusClass = report.state === 'completed' ? 'success' : report.state === 'failed' ? 'failed' : 'running';
         const statusLabel = report.state === 'completed' ? '完成' : report.state === 'failed' ? '失败' : '进行中';
         const created = report.created_at ? new Date(report.created_at).toLocaleString() : '-';
@@ -434,6 +434,9 @@ class OptimizerApp {
                 </div>
             `
             : '';
+        const combinationHtml = report.state === 'completed'
+            ? this.renderSuccessfulCombinations(report, planId)
+            : '';
         return `
             <article class="opt-card">
                 <header class="section-header">
@@ -444,6 +447,7 @@ class OptimizerApp {
                     <span class="status-pill ${statusClass}">${statusLabel}</span>
                 </header>
                 ${metricsHtml}
+                ${combinationHtml}
                 ${runtimeHtml}
                 ${distributionHtml}
                 ${conclusionHtml}
@@ -464,6 +468,204 @@ class OptimizerApp {
                 </ul>
             </div>
         `;
+    }
+
+    renderSuccessfulCombinations(report, planId) {
+        const results = report.report?.results ?? [];
+        if (!results.length) return '';
+        const items = results
+            .slice(0, 3)
+            .map((result, index) => this.renderCombinationItem(result, index, report, planId))
+            .join('');
+        return `
+            <div class="combo-section">
+                <h4 class="combo-title">成功组合</h4>
+                <div class="combo-list">${items}</div>
+            </div>
+        `;
+    }
+
+    renderCombinationItem(result, index, report, planId) {
+        const { base, features } = this.splitCombinationParameters(result.parameters || {});
+        const metrics = result.metrics || {};
+        const metricsTags = this.buildComboMetricTags(metrics);
+        const baseJson = this.escapeHtml(JSON.stringify(base, null, 2));
+        const featureJson = this.escapeHtml(JSON.stringify(features, null, 2));
+        const featureCount = Object.keys(features || {}).length;
+        const basePayload = this.encodePayload(base);
+        const featurePayload = this.encodePayload(features);
+        const defaultName = `${report.task_id || 'strategy'}-${index + 1}`;
+        const disabledAttr = featureCount ? '' : 'disabled';
+        return `
+            <div class="combo-card" data-combo-index="${index}">
+                <div class="combo-card-header">
+                    <h5>组合 #${index + 1}</h5>
+                    ${metricsTags}
+                </div>
+                <div class="combo-params">
+                    <div class="combo-params-block">
+                        <h5>基础参数</h5>
+                        <pre>${baseJson}</pre>
+                    </div>
+                    <div class="combo-params-block">
+                        <h5>特征参数</h5>
+                        <pre>${featureCount ? featureJson : this.escapeHtml('{}')}</pre>
+                    </div>
+                </div>
+                <div class="combo-card-actions">
+                    <button class="btn btn-ghost" data-report-action="copy-base" data-payload="${basePayload}">复制基础参数</button>
+                    <button class="btn btn-ghost" data-report-action="copy-feature" data-payload="${featurePayload}" ${disabledAttr}>复制特征参数</button>
+                    <button class="btn btn-ghost" data-report-action="generate-strategy" data-plan-id="${planId}" data-task-id="${report.task_id}" data-base="${basePayload}" data-features="${featurePayload}" data-strategy-name="${defaultName}">生成策略</button>
+                </div>
+            </div>
+        `;
+    }
+
+    buildComboMetricTags(metrics) {
+        if (!metrics || typeof metrics !== 'object') {
+            return '';
+        }
+        const tags = [];
+        if (metrics.sharpe !== undefined) {
+            tags.push(`<span class="tag">Sharpe ${this.formatNumber(metrics.sharpe, 3)}</span>`);
+        }
+        if (metrics.max_drawdown !== undefined) {
+            tags.push(`<span class="tag">回撤 ${this.formatNumber(metrics.max_drawdown, 3)}</span>`);
+        }
+        if (metrics.annual_return !== undefined) {
+            tags.push(`<span class="tag">收益 ${this.formatPercent(metrics.annual_return, 2)}</span>`);
+        }
+        if (!tags.length) {
+            return '';
+        }
+        return `<div class="tag-list">${tags.join('')}</div>`;
+    }
+
+    splitCombinationParameters(parameters) {
+        const base = {};
+        const features = {};
+        Object.entries(parameters || {}).forEach(([key, value]) => {
+            if (key.includes('__')) {
+                const [metric, param] = key.split('__');
+                if (!features[metric]) {
+                    features[metric] = {};
+                }
+                features[metric][param] = value;
+            } else {
+                base[key] = value;
+            }
+        });
+        return { base, features };
+    }
+
+    encodePayload(payload) {
+        try {
+            return encodeURIComponent(JSON.stringify(payload ?? {}));
+        } catch (err) {
+            console.warn('Failed to encode payload', err);
+            return '';
+        }
+    }
+
+    decodePayload(encoded, fallback = {}) {
+        if (!encoded) return fallback;
+        try {
+            const raw = decodeURIComponent(encoded);
+            return JSON.parse(raw);
+        } catch (err) {
+            console.warn('Failed to decode payload', err);
+            return fallback;
+        }
+    }
+
+    escapeHtml(value) {
+        return (value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    setupReportModalEvents(backdrop) {
+        if (!backdrop) return;
+        const main = backdrop.querySelector('main');
+        if (!main) return;
+        main.addEventListener('click', async (event) => {
+            const button = event.target.closest('button[data-report-action]');
+            if (!button) return;
+            const action = button.dataset.reportAction;
+            if (!action) return;
+            event.preventDefault();
+            if (action === 'copy-base' || action === 'copy-feature') {
+                const payload = this.decodePayload(button.dataset.payload);
+                if (!payload || !Object.keys(payload).length) {
+                    alert('无可复制的参数');
+                    return;
+                }
+                try {
+                    await this.copyToClipboard(JSON.stringify(payload, null, 2));
+                    this.flashButtonFeedback(button, '已复制');
+                } catch (err) {
+                    console.error(err);
+                    alert('复制失败，请手动复制。');
+                }
+                return;
+            }
+            if (action === 'generate-strategy') {
+                const base = this.decodePayload(button.dataset.base);
+                const features = this.decodePayload(button.dataset.features);
+                const planId = button.dataset.planId || undefined;
+                const taskId = button.dataset.taskId || undefined;
+                const suggested = button.dataset.strategyName || '';
+                const strategyName = window.prompt('请输入策略名称', suggested);
+                if (!strategyName) return;
+                try {
+                    const response = await this.postJson('/api/optimize/strategies', {
+                        strategy_name: strategyName,
+                        plan_id: planId,
+                        task_id: taskId,
+                        base_parameters: base,
+                        feature_parameters: features,
+                    });
+                    const filePath = response.file_path || '策略已生成';
+                    alert(`策略已生成：${filePath}`);
+                } catch (err) {
+                    console.error(err);
+                    alert('策略生成失败，请稍后重试。');
+                }
+            }
+        });
+    }
+
+    flashButtonFeedback(button, message) {
+        if (!button) return;
+        const original = button.dataset.originalLabel || button.textContent;
+        button.dataset.originalLabel = original;
+        button.disabled = true;
+        button.textContent = message;
+        setTimeout(() => {
+            button.disabled = false;
+            button.textContent = button.dataset.originalLabel || original;
+        }, 1200);
+    }
+
+    async copyToClipboard(text) {
+        if (!text) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+            return;
+        }
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try {
+            document.execCommand('copy');
+        } finally {
+            document.body.removeChild(textarea);
+        }
     }
 
     openPlanDialog(existingPlan = null) {
