@@ -43,7 +43,7 @@ async def dom_start(
     user: Optional[str] = Depends(get_current_user),
 ):
     _ensure_not_read_only(request)
-    ok = dom_service.start(req.symbol, num_rows=req.num_rows)
+    ok = await dom_service.start_stream(req.symbol, num_rows=req.num_rows)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to start depth stream")
     return {"success": True}
@@ -60,7 +60,7 @@ async def dom_stop(
     user: Optional[str] = Depends(get_current_user),
 ):
     _ensure_not_read_only(request)
-    ok = dom_service.stop(req.symbol)
+    ok = await dom_service.stop_stream(req.symbol)
     if not ok:
         raise HTTPException(status_code=400, detail="No active depth stream for symbol")
     return {"success": True}
@@ -212,7 +212,7 @@ async def get_dom_stats(
     max_points: Optional[int] = Query(None, ge=10, le=5000),
     user: Optional[str] = Depends(get_current_user),
 ):
-    response = dom_service.get_stats(
+    response = await dom_service.get_stats_async(
         symbol,
         lookback_seconds=lookback_seconds,
         start_time=start,
