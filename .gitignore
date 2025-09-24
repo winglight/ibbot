@@ -8,3 +8,4 @@ test/src
 test/data
 test/strategy
 test/.*
+test*
