@@ -262,90 +262,99 @@ class ConnectionManager:
                     # 添加订单状态变化事件监听器
                     def order_status_handler(trade):
                         """处理订单状态变化事件"""
-                        try:
-                            order_id = str(trade.order.orderId)
-                            status = trade.orderStatus.status
-                            connection_logger.info(f"Order status update: {order_id} -> {status}")
 
-                            # 更新本地订单状态，确保手动市价单等及时同步
+                        async def _process_order_status():
                             try:
-                                from .order_manager import get_order_manager
-                                om = get_order_manager()
-                                fill_price = getattr(trade.orderStatus, 'avgFillPrice', None)
-                                executed_at = now_local() if status in ('Filled', 'PartiallyFilled') else None
-                                updated = om.update_order_status(
-                                    order_id=order_id,
-                                    status=status,
-                                    fill_price=fill_price,
-                                    executed_at=executed_at,
-                                )
+                                order_id = str(trade.order.orderId)
+                                status = trade.orderStatus.status
+                                connection_logger.info(f"Order status update: {order_id} -> {status}")
 
-                                if not updated:
-                                    try:
-                                        contract = getattr(trade, 'contract', None)
-                                        order_obj = getattr(trade, 'order', None)
-                                        symbol = (
-                                            getattr(contract, 'symbol', None)
-                                            or getattr(contract, 'localSymbol', None)
-                                            or getattr(order_obj, 'symbol', None)
-                                            or getattr(order_obj, 'localSymbol', '')
-                                        )
-                                        action = (getattr(order_obj, 'action', None) or '').upper()
-                                        quantity = getattr(order_obj, 'totalQuantity', 0) or 0
-                                        order_type = str(getattr(order_obj, 'orderType', None) or 'MKT').upper()
-                                        lmt_price = getattr(order_obj, 'lmtPrice', None)
-                                        aux_price = getattr(order_obj, 'auxPrice', None)
-                                        price_value = None
-                                        for candidate in (lmt_price, aux_price):
-                                            if isinstance(candidate, (int, float)) and candidate != 0:
-                                                price_value = float(candidate)
-                                                break
+                                # 更新本地订单状态，确保手动市价单等及时同步
+                                try:
+                                    from .order_manager import get_order_manager
+                                    om = get_order_manager()
+                                    fill_price = getattr(trade.orderStatus, 'avgFillPrice', None)
+                                    executed_at = now_local() if status in ('Filled', 'PartiallyFilled') else None
+                                    updated = await asyncio.to_thread(
+                                        om.update_order_status,
+                                        order_id=order_id,
+                                        status=status,
+                                        fill_price=fill_price,
+                                        executed_at=executed_at,
+                                    )
 
-                                        order_source = 'manual'
-                                        order_ref = getattr(order_obj, 'orderRef', '')
-                                        if isinstance(order_ref, str) and order_ref:
-                                            lower_ref = order_ref.lower()
-                                            if 'tp' in lower_ref:
-                                                order_source = 'tp'
-                                            elif 'sl' in lower_ref:
-                                                order_source = 'sl'
-                                            elif 'auto' in lower_ref or 'strategy' in lower_ref or 'risk' in lower_ref:
-                                                order_source = 'auto'
+                                    if not updated:
+                                        try:
+                                            contract = getattr(trade, 'contract', None)
+                                            order_obj = getattr(trade, 'order', None)
+                                            symbol = (
+                                                getattr(contract, 'symbol', None)
+                                                or getattr(contract, 'localSymbol', None)
+                                                or getattr(order_obj, 'symbol', None)
+                                                or getattr(order_obj, 'localSymbol', '')
+                                            )
+                                            action = (getattr(order_obj, 'action', None) or '').upper()
+                                            quantity = getattr(order_obj, 'totalQuantity', 0) or 0
+                                            order_type = str(getattr(order_obj, 'orderType', None) or 'MKT').upper()
+                                            lmt_price = getattr(order_obj, 'lmtPrice', None)
+                                            aux_price = getattr(order_obj, 'auxPrice', None)
+                                            price_value = None
+                                            for candidate in (lmt_price, aux_price):
+                                                if isinstance(candidate, (int, float)) and candidate != 0:
+                                                    price_value = float(candidate)
+                                                    break
 
-                                        om.add_order({
-                                            'order_id': order_id,
-                                            'symbol': str(symbol or ''),
-                                            'action': action,
-                                            'quantity': int(quantity),
-                                            'order_type': order_type,
-                                            'price': price_value,
-                                            'status': status or 'Submitted',
-                                            'order_source': order_source,
-                                            'exchange': str(getattr(contract, 'exchange', 'SMART') or 'SMART'),
-                                            'sec_type': str(getattr(contract, 'secType', 'STK') or 'STK'),
-                                            'fill_price': fill_price,
-                                        })
+                                            order_source = 'manual'
+                                            order_ref = getattr(order_obj, 'orderRef', '')
+                                            if isinstance(order_ref, str) and order_ref:
+                                                lower_ref = order_ref.lower()
+                                                if 'tp' in lower_ref:
+                                                    order_source = 'tp'
+                                                elif 'sl' in lower_ref:
+                                                    order_source = 'sl'
+                                                elif 'auto' in lower_ref or 'strategy' in lower_ref or 'risk' in lower_ref:
+                                                    order_source = 'auto'
 
-                                        om.update_order_status(
-                                            order_id=order_id,
-                                            status=status,
-                                            fill_price=fill_price,
-                                            executed_at=executed_at,
-                                        )
-                                    except Exception as add_err:
-                                        connection_logger.warning(
-                                            f"Failed to record order {order_id} from status event: {add_err}"
-                                        )
+                                            await asyncio.to_thread(
+                                                om.add_order,
+                                                {
+                                                    'order_id': order_id,
+                                                    'symbol': str(symbol or ''),
+                                                    'action': action,
+                                                    'quantity': int(quantity),
+                                                    'order_type': order_type,
+                                                    'price': price_value,
+                                                    'status': status or 'Submitted',
+                                                    'order_source': order_source,
+                                                    'exchange': str(getattr(contract, 'exchange', 'SMART') or 'SMART'),
+                                                    'sec_type': str(getattr(contract, 'secType', 'STK') or 'STK'),
+                                                    'fill_price': fill_price,
+                                                },
+                                            )
+
+                                            await asyncio.to_thread(
+                                                om.update_order_status,
+                                                order_id=order_id,
+                                                status=status,
+                                                fill_price=fill_price,
+                                                executed_at=executed_at,
+                                            )
+                                        except Exception as add_err:
+                                            connection_logger.warning(
+                                                f"Failed to record order {order_id} from status event: {add_err}"
+                                            )
+                                except Exception as e:
+                                    connection_logger.warning(f"OrderManager status update failed for {order_id}: {e}")
+
+                                # 如果订单已成交，处理佣金和PnL
+                                if status == 'Filled':
+                                    import core
+                                    asyncio.create_task(core.ibkr_client._handle_order_filled(trade))
                             except Exception as e:
-                                connection_logger.warning(f"OrderManager status update failed for {order_id}: {e}")
+                                connection_logger.error(f"Error in order status handler: {e}")
 
-                            # 如果订单已成交，处理佣金和PnL
-                            if status == 'Filled':
-                                import core
-                                asyncio.create_task(core.ibkr_client._handle_order_filled(trade))
-                        except Exception as e:
-                            connection_logger.error(f"Error in order status handler: {e}")
-                    
+                        asyncio.create_task(_process_order_status())
+
                     # 添加成交细节事件监听器（ib_insync: execDetailsEvent）
                     def exec_details_handler(trade, fill):
                         """处理订单成交明细事件（不含佣金报告）"""
