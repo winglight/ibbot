@@ -12,6 +12,12 @@ except ImportError:
     import http_client as requests
 
 
+# Prevent real order placement whenever the pytest suite is executed.  The
+# production server can opt-in to real trading by explicitly setting
+# ``IBBOT_DISABLE_TRADING=0`` before starting.
+os.environ.setdefault("IBBOT_DISABLE_TRADING", "1")
+
+
 def _base_url() -> str:
     return os.getenv("API_BASE_URL", "http://localhost:8000")
 
@@ -40,6 +46,7 @@ def server():
     env = os.environ.copy()
     env.setdefault("ADMIN_USERNAME", "admin")
     env.setdefault("ADMIN_PASSWORD", "change_me")
+    env.setdefault("IBBOT_DISABLE_TRADING", "1")
 
     cmd = [
         sys.executable,
