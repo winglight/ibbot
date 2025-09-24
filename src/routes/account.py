@@ -24,6 +24,36 @@ positions_cache_timestamp = None
 POSITIONS_CACHE_TTL = 5  # seconds
 
 
+def _get_active_ib_client():
+    """Return an initialized IBKR client if available, creating one on-demand."""
+    ib_client = getattr(core, "ibkr_client", None)
+    if ib_client is not None:
+        return ib_client
+
+    factory = getattr(core, "IBKRClient", None)
+    if factory is None:
+        logger.error("IBKRClient factory is not available on core module")
+        return None
+
+    try:
+        ib_client = factory()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.error(f"Failed to initialize IBKR client: {exc}")
+        return None
+
+    core.ibkr_client = ib_client
+
+    # Best effort to keep risk manager dependency in sync when available.
+    try:
+        risk_manager = getattr(core, "risk_manager", None)
+        if risk_manager is not None:
+            setattr(risk_manager, "ibkr_client", ib_client)
+    except Exception as dep_err:  # pragma: no cover - defensive guard
+        logger.debug(f"Failed to sync risk_manager IBKR client dependency: {dep_err}")
+
+    return ib_client
+
+
 @router.post("/api/orders/backfill_commissions")
 async def backfill_commissions(
     days: int = 7, user: Optional[str] = Depends(get_current_user)
@@ -77,10 +107,15 @@ async def get_account_info(user: Optional[str] = Depends(get_current_user)):
             },
         )
 
+    ib_client = _get_active_ib_client()
+    if ib_client is None:
+        logger.error("IBKR client unavailable while connection manager reports connected")
+        raise HTTPException(status_code=503, detail="IBKR client unavailable")
+
     try:
         try:
             info = await asyncio.wait_for(
-                core.ibkr_client.get_account_info(), timeout=10.0
+                ib_client.get_account_info(), timeout=10.0
             )
         except asyncio.TimeoutError:
             logger.warning("Account info request timed out")
@@ -100,7 +135,7 @@ async def get_positions(
     """Retrieve current positions with optional caching."""
     global positions_cache, positions_cache_timestamp
 
-    if not connection_manager.is_connected():
+    if not connection_manager or not connection_manager.is_connected():
         logger.warning("Not connected to IBKR, returning empty positions list")
         return {
             "success": True,
@@ -108,6 +143,11 @@ async def get_positions(
             "from_cache": False,
             "warning": "Not connected to IBKR",
         }
+
+    ib_client = _get_active_ib_client()
+    if ib_client is None:
+        logger.error("IBKR client unavailable while fetching positions")
+        raise HTTPException(status_code=503, detail="IBKR client unavailable")
 
     try:
         current_time = now_local()
@@ -123,7 +163,7 @@ async def get_positions(
 
         try:
             positions = await asyncio.wait_for(
-                core.ibkr_client.get_positions(fast=fast), timeout=5.0
+                ib_client.get_positions(fast=fast), timeout=5.0
             )
             positions_cache = positions
             positions_cache_timestamp = current_time
