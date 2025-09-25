@@ -13,6 +13,8 @@ import importlib
 import importlib.util
 import sys
 import asyncio
+from copy import deepcopy
+from threading import RLock
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -95,6 +97,13 @@ class StrategyManager:
             Tuple[str, Optional[str], Optional[str], bool]
         ] = []
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._strategies_cache: Dict[str, Any] = {
+            "data": None,
+            "expires_at": 0.0,
+            "names": (),
+        }
+        self._strategies_cache_lock = RLock()
+        self._strategies_cache_ttl = 5.0
 
         # 认证token（用于外部策略访问）
         self.auth_token = None
@@ -174,6 +183,14 @@ class StrategyManager:
             self.scheduler.start()
             strategy_logger.info("Strategy manager scheduler started")
         self.schedule_strategy_orders()
+
+    def _invalidate_strategies_cache(self) -> None:
+        with self._strategies_cache_lock:
+            self._strategies_cache = {
+                "data": None,
+                "expires_at": 0.0,
+                "names": (),
+            }
 
     def _enqueue_strategy_order(self, payload: Dict[str, Any]):
         """Helper to add strategy order task to queue"""
@@ -376,6 +393,8 @@ class StrategyManager:
                     name, subscription=subscription, symbol=target_symbol
                 )
 
+        self._invalidate_strategies_cache()
+
     def _load_from_database(self):
         """从数据库加载策略设置、策略和执行记录"""
         try:
@@ -450,6 +469,8 @@ class StrategyManager:
         except Exception as e:
             strategy_logger.error(f"Error loading from database: {e}")
             self._load_from_files_and_migrate()
+        finally:
+            self._invalidate_strategies_cache()
     
     def _load_from_files_and_migrate(self):
         """从文件加载数据并迁移到数据库（向后兼容）"""
@@ -483,6 +504,8 @@ class StrategyManager:
 
         except Exception as e:
             strategy_logger.error(f"Error migrating data to database: {e}")
+        finally:
+            self._invalidate_strategies_cache()
 
     def _load_settings(self):
         """Load strategy settings - 兼容性方法，现在从数据库加载"""
@@ -1343,6 +1366,7 @@ class StrategyManager:
                 )
                 self.db_manager.save_strategy(db_strategy)
             strategy_logger.info("Strategies saved to database")
+            self._invalidate_strategies_cache()
         except Exception as e:
             strategy_logger.error(f"Failed to save strategies to database: {e}")
             
@@ -1496,6 +1520,7 @@ class StrategyManager:
 
             strategy_logger.info(f"Strategy {name} added successfully")
             # 重新启动调度器以应用新的调度配置
+            self._invalidate_strategies_cache()
             self.restart_scheduler()
             return True
             
@@ -2011,6 +2036,7 @@ class StrategyManager:
                         runtime.enable()
                     else:
                         runtime.disable()
+            self._invalidate_strategies_cache()
             self.restart_scheduler()
             return True
         except Exception as e:
@@ -2335,6 +2361,7 @@ class StrategyManager:
                 strategy_logger.warning(f"Update orders.strategy_name failed: {oe}")
 
             strategy_logger.info(f"Renamed strategy: {old_name} -> {normalized_new}")
+            self._invalidate_strategies_cache()
             self.restart_scheduler()
             return True
         except Exception as e:
@@ -2415,9 +2442,31 @@ if __name__ == "__main__":
 
     def get_strategies(self) -> List[Dict[str, Any]]:
         """Get all strategies"""
-        result = []
-        order_stats = self.db_manager.get_strategy_order_stats(order_source='strategy')
+        strategy_names = tuple(sorted(self.strategies.keys()))
+        now = time.monotonic()
+        with self._strategies_cache_lock:
+            cache = self._strategies_cache
+            if (
+                cache.get("data") is not None
+                and cache.get("names") == strategy_names
+                and now < cache.get("expires_at", 0.0)
+            ):
+                return deepcopy(cache["data"])
 
+        if strategy_names:
+            try:
+                order_stats = self.db_manager.get_strategy_order_stats(
+                    strategy_names, order_source='strategy'
+                )
+            except Exception as exc:
+                strategy_logger.warning(
+                    f"Failed to load strategy order stats: {exc}"
+                )
+                order_stats = {}
+        else:
+            order_stats = {}
+
+        result: List[Dict[str, Any]] = []
         for strategy in self.strategies.values():
             strategy_dict = asdict(strategy)
             stats = order_stats.get(strategy.name, {})
@@ -2428,12 +2477,19 @@ if __name__ == "__main__":
                 strategy_dict['last_triggered'] = parsed_time or last_created_at
             else:
                 strategy_dict['last_triggered'] = None
-            # Convert datetime objects to strings for JSON serialization
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
                 strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
             if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
                 strategy_dict['last_triggered'] = to_local_iso(strategy_dict['last_triggered'])
             result.append(strategy_dict)
+
+        generated_at = time.monotonic()
+        with self._strategies_cache_lock:
+            self._strategies_cache = {
+                "data": deepcopy(result),
+                "expires_at": generated_at + self._strategies_cache_ttl,
+                "names": strategy_names,
+            }
         return result
         
 
@@ -2453,8 +2509,9 @@ if __name__ == "__main__":
 
             # Also clean strategy orders from database
             self.db_manager.delete_strategy_orders(name)
-            
+
             strategy_logger.info(f"Deleted strategy: {name}")
+            self._invalidate_strategies_cache()
             return True
         except Exception as e:
             strategy_logger.error(f"Failed to delete strategy {name}: {e}")
@@ -2479,6 +2536,7 @@ if __name__ == "__main__":
         strategy_logger.info(
             f"Strategy data reset: {name}, removed {deleted} persisted orders"
         )
+        self._invalidate_strategies_cache()
         return {"deleted_orders": int(deleted or 0)}
 
             

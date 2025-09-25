@@ -2,10 +2,12 @@
 // This class delegates strategy-related calls to the existing app methods.
 // Gradually migrate full strategy logic here to match the RiskRulesManager pattern.
 
+const STRATEGY_REFRESH_INTERVAL_MS = 15000;
+
 class StrategiesManager {
   constructor(app) {
     this.app = app;
-    this.refreshIntervalMs = 15000;
+    this.refreshIntervalMs = STRATEGY_REFRESH_INTERVAL_MS;
     this.refreshTimer = null;
     this._visibilityHandler = null;
     this.startAutoRefresh();
@@ -29,8 +31,11 @@ class StrategiesManager {
 
   startAutoRefresh() {
     this.stopAutoRefresh();
-    const interval = Math.max(1000, this.app?.strategyRefreshIntervalMs || this.refreshIntervalMs);
+    const interval = STRATEGY_REFRESH_INTERVAL_MS;
     this.refreshIntervalMs = interval;
+    if (this.app && typeof this.app === 'object') {
+      this.app.strategyRefreshIntervalMs = interval;
+    }
 
     if (typeof document !== 'undefined') {
       this._visibilityHandler = () => {
