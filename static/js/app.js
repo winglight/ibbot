@@ -8096,6 +8096,34 @@ class TradingApp {
             cloned.addEventListener('click', () => this.toggleStrategyChartPlayback());
         }
 
+        const tabTriggerEl = document.getElementById('strategy-chart-tab');
+        if (tabTriggerEl) {
+            const cloned = tabTriggerEl.cloneNode(true);
+            tabTriggerEl.parentNode.replaceChild(cloned, tabTriggerEl);
+            cloned.addEventListener('shown.bs.tab', () => {
+                const chartState = this.getStrategyChartState();
+                if (!chartState.currentStrategy) return;
+                if (!chartState.symbol) {
+                    this.updateStrategyChartStatus('缺少标的');
+                    return;
+                }
+                if (chartState.loading) {
+                    this.updateStrategyChartStatus('加载中...');
+                    return;
+                }
+                const hasBars = Array.isArray(chartState.fullBars) && chartState.fullBars.length > 0;
+                if (!hasBars) {
+                    this.loadStrategyChart(chartState.currentStrategy, {
+                        symbol: chartState.symbol,
+                        forceExecutions: !Array.isArray(chartState.orders) || !chartState.orders.length
+                    }).catch((err) => console.warn('Failed to load strategy chart on tab show:', err));
+                } else {
+                    this.renderStrategyChart({ redraw: false });
+                    this.updateStrategyChartStatus();
+                }
+            });
+        }
+
         const modalEl = document.getElementById('strategyDetailsModal');
         if (modalEl && modalEl.dataset.strategyChartCleanup !== 'true') {
             modalEl.addEventListener('hidden.bs.modal', () => {
