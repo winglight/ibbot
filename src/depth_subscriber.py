@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
+from .ibkr_client import INDEX_FUTURE_SYMBOLS
 from .utils import now_local
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checking
@@ -130,7 +131,7 @@ class DepthSubscriber:
             # Choose contract helper from IBKR client when available
             contract = None
             try:
-                if symbol in ["MNQ", "NQ", "ES", "MES"]:
+                if symbol.upper() in INDEX_FUTURE_SYMBOLS:
                     contract = ibkr_client.get_future_contract(symbol, exchange="CME")
                 else:
                     contract = ibkr_client.get_stock_contract(symbol)
