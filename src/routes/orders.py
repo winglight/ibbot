@@ -841,6 +841,7 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                     # 兼容字段，等同于submit_time
                     'created_at': to_local_iso(getattr(o, 'created_at', None)),
                     'order_source': getattr(o, 'order_source', 'manual'),
+                    'strategy_name': getattr(o, 'strategy_name', None),
                     'trigger_type': trigger_type,
                     'commission': getattr(o, 'commission', None),
                     'pnl': getattr(o, 'pnl', None)

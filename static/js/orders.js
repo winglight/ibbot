@@ -359,24 +359,7 @@ class OrderManager {
         const canEdit = order.status === 'Submitted' || order.status === 'PreSubmitted';
         const canCancel = order.status === 'Submitted' || order.status === 'PreSubmitted';
         
-        // 来源显示逻辑
-        let sourceDisplay = '—';
-        const rawSource = (order.order_source || '').toString();
-        if (rawSource) {
-            if (rawSource === 'manual' || rawSource.startsWith('manual_') || rawSource === '人工') {
-                sourceDisplay = rawSource;
-            } else if (rawSource === 'sl') {
-                sourceDisplay = '<span class="badge bg-danger">止损</span>';
-            } else if (rawSource === 'tp') {
-                sourceDisplay = '<span class="badge bg-success">止盈</span>';
-            } else if (rawSource === 'strategy') {
-                sourceDisplay = '<span class="badge bg-info">策略</span>';
-            } else if (rawSource === '机器人' || rawSource === 'auto') {
-                sourceDisplay = '<span class="badge bg-secondary">自动</span>';
-            } else {
-                sourceDisplay = rawSource;
-            }
-        }
+        const sourceDisplay = this.formatOrderSource(order);
         
         // 处理notes字段，转义HTML特殊字符
         const notesText = (order.notes || '').toString().replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -421,6 +404,79 @@ class OrderManager {
         
         // 返回标准化后的TR元素
         return trElement;
+    }
+
+    formatOrderSource(order) {
+        const escapeHtml = (value) => {
+            if (value === null || value === undefined) return '';
+            if (this.app && typeof this.app.escapeHtml === 'function') {
+                return this.app.escapeHtml(value);
+            }
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        };
+
+        const rawSource = order?.order_source;
+        const sources = Array.isArray(rawSource)
+            ? rawSource.filter(src => src !== null && src !== undefined)
+            : (rawSource ? [rawSource] : []);
+
+        if (!sources.length) {
+            return '—';
+        }
+
+        const displays = [];
+        sources.forEach((sourceItem) => {
+            if (sourceItem === null || sourceItem === undefined) return;
+            const text = String(sourceItem).trim();
+            if (!text) return;
+
+            const lower = text.toLowerCase();
+            if (lower === 'manual' || lower.startsWith('manual_') || text === '人工') {
+                displays.push(escapeHtml(text));
+                return;
+            }
+
+            if (lower === 'sl') {
+                displays.push('<span class="badge bg-danger">止损</span>');
+                return;
+            }
+
+            if (lower === 'tp') {
+                displays.push('<span class="badge bg-success">止盈</span>');
+                return;
+            }
+
+            if (lower === 'auto' || text === '机器人') {
+                displays.push('<span class="badge bg-secondary">自动</span>');
+                return;
+            }
+
+            if (lower === 'strategy' || lower.startsWith('strategy:')) {
+                let strategyName = '';
+                if (lower.startsWith('strategy:')) {
+                    strategyName = text.slice(text.indexOf(':') + 1).trim();
+                } else {
+                    strategyName = (order?.strategy_name || order?.strategy || '').toString().trim();
+                }
+                const safeName = strategyName ? escapeHtml(strategyName) : '';
+                const suffix = safeName ? `<span class="ms-1 text-nowrap">${safeName}</span>` : '';
+                displays.push(`<span class="badge bg-info">策略</span>${suffix}`);
+                return;
+            }
+
+            displays.push(escapeHtml(text));
+        });
+
+        if (!displays.length) {
+            return '—';
+        }
+
+        return displays.join('<span class="text-muted mx-1">/</span>');
     }
 
     /**

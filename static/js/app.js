@@ -3960,12 +3960,61 @@ class TradingApp {
                     return dateStr;
                 }
             };
-            
+
             // 格式化价格显示
             const formatPrice = (price) => {
                 return price && price > 0 ? `$${this.formatNumber(price)}` : '—';
             };
-            
+
+            const escapeText = (value) => {
+                if (typeof this.escapeHtml === 'function') {
+                    return this.escapeHtml(value);
+                }
+                if (value === null || value === undefined) return '';
+                return String(value)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            };
+
+            const formatText = (value) => {
+                if (value === null || value === undefined) return '—';
+                const str = String(value).trim();
+                return str ? escapeText(str) : '—';
+            };
+
+            const formatTriggerType = (value) => {
+                if (!value && value !== 0) return '—';
+                const str = String(value).trim();
+                if (!str) return '—';
+                switch (str) {
+                    case 'strategy':
+                        return '策略';
+                    case 'risk_rule':
+                        return '风控';
+                    case 'manual':
+                        return '手动';
+                    default:
+                        return escapeText(str);
+                }
+            };
+
+            const sourceHtml = (this.orderManager && typeof this.orderManager.formatOrderSource === 'function')
+                ? this.orderManager.formatOrderSource(orderData)
+                : (orderData.order_source ? escapeText(orderData.order_source) : '—');
+
+            const rawStrategyName = orderData.strategy_name ?? orderData.strategy;
+            const strategyHtml = formatText(rawStrategyName);
+
+            const notesHtml = (() => {
+                if (orderData.notes === null || orderData.notes === undefined) return '—';
+                const str = String(orderData.notes);
+                if (!str.trim()) return '—';
+                return escapeText(str).replace(/\n/g, '<br>');
+            })();
+
             // 构建详情HTML
             modalBody.innerHTML = `
                 <div class="row g-3">
@@ -3998,11 +4047,23 @@ class TradingApp {
                         <div class="card">
                             <div class="card-header"><strong>其他信息</strong></div>
                             <div class="card-body">
-                                <p><strong>提交时间:</strong> ${formatDateTime(orderData.submit_time)}</p>
-                                <p><strong>执行时间:</strong> ${formatDateTime(orderData.executed_at)}</p>
-                                <p><strong>订单来源:</strong> ${orderData.order_source || '—'}</p>
-                                <p><strong>备注:</strong> ${orderData.notes || '—'}</p>
-                                <p><strong>策略:</strong> ${orderData.strategy || '—'}</p>
+                                <div class="row row-cols-1 row-cols-md-2 g-2">
+                                    <div class="col">
+                                        <p><strong>提交时间:</strong> ${formatDateTime(orderData.submit_time)}</p>
+                                        <p><strong>更新时间:</strong> ${formatDateTime(orderData.updated_at)}</p>
+                                        <p><strong>执行时间:</strong> ${formatDateTime(orderData.executed_at)}</p>
+                                        <p><strong>订单来源:</strong> ${sourceHtml}</p>
+                                        <p><strong>触发类型:</strong> ${formatTriggerType(orderData.trigger_type)}</p>
+                                    </div>
+                                    <div class="col">
+                                        <p><strong>策略:</strong> ${strategyHtml}</p>
+                                        <p><strong>规则ID:</strong> ${formatText(orderData.rule_id)}</p>
+                                        <p><strong>父订单ID:</strong> ${formatText(orderData.parent_order_id)}</p>
+                                        <p><strong>交易所:</strong> ${formatText(orderData.exchange)}</p>
+                                        <p><strong>证券类型:</strong> ${formatText(orderData.sec_type)}</p>
+                                    </div>
+                                </div>
+                                <p class="mt-3"><strong>备注:</strong> ${notesHtml}</p>
                             </div>
                         </div>
                     </div>
@@ -7147,6 +7208,18 @@ class TradingApp {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2
         });
+    }
+
+    escapeHtml(value) {
+        if (value === null || value === undefined) {
+            return '';
+        }
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     formatDuration(seconds) {
