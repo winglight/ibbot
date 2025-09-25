@@ -164,6 +164,34 @@ class OptimizerApp {
         return `${(num * 100).toFixed(digits)}%`;
     }
 
+    formatDrawdown(value, digits = 2) {
+        if (value === null || value === undefined) {
+            return '-';
+        }
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (!trimmed) {
+                return '-';
+            }
+            if (trimmed.endsWith('%')) {
+                return trimmed;
+            }
+            const parsed = Number(trimmed);
+            if (!Number.isFinite(parsed)) {
+                return trimmed;
+            }
+            return this.formatDrawdown(parsed, digits);
+        }
+        const num = Number(value);
+        if (!Number.isFinite(num)) {
+            return '-';
+        }
+        if (Math.abs(num) <= 1) {
+            return `${(num * 100).toFixed(digits)}%`;
+        }
+        return num.toFixed(digits);
+    }
+
     async init() {
         await Promise.all([this.loadMetadata(), this.loadPlans()]);
         this.renderMetadataTags();
@@ -380,11 +408,12 @@ class OptimizerApp {
         const created = report.created_at ? new Date(report.created_at).toLocaleString() : '-';
         const completed = report.completed_at ? new Date(report.completed_at).toLocaleString() : '-';
         const summary = report.report?.summary;
+        const bestDrawdown = this.formatDrawdown(summary?.best_max_drawdown, 2);
         const metricsHtml = summary
             ? `
                 <div class="tag-list">
                     <span class="tag">Sharpe ${summary.best_sharpe ?? '-'}</span>
-                    <span class="tag">回撤 ${summary.best_max_drawdown ?? '-'}</span>
+                    <span class="tag">回撤 ${bestDrawdown}</span>
                     <span class="tag">组合 ${summary.successful_combinations ?? '-'}/${summary.tested_combinations ?? '-'}</span>
                 </div>
             `
@@ -473,7 +502,44 @@ class OptimizerApp {
     renderSuccessfulCombinations(report, planId) {
         const results = report.report?.results ?? [];
         if (!results.length) return '';
-        const items = results
+        const ranked = [...results].sort((a, b) => {
+            const toNumeric = (value) => {
+                if (value === null || value === undefined) {
+                    return null;
+                }
+                if (typeof value === 'string') {
+                    const trimmed = value.trim();
+                    if (!trimmed) {
+                        return null;
+                    }
+                    if (trimmed.endsWith('%')) {
+                        const numeric = Number(trimmed.slice(0, -1));
+                        return Number.isFinite(numeric) ? numeric / 100 : null;
+                    }
+                    const numeric = Number(trimmed);
+                    return Number.isFinite(numeric) ? numeric : null;
+                }
+                const numeric = Number(value);
+                return Number.isFinite(numeric) ? numeric : null;
+            };
+            const score = (item) => {
+                if (!item || typeof item !== 'object') {
+                    return Number.NEGATIVE_INFINITY;
+                }
+                const metrics = item.metrics || {};
+                const annual = toNumeric(metrics.annual_return);
+                if (annual !== null) {
+                    return annual;
+                }
+                const sharpe = toNumeric(metrics.sharpe);
+                if (sharpe !== null) {
+                    return sharpe;
+                }
+                return Number.NEGATIVE_INFINITY;
+            };
+            return score(b) - score(a);
+        });
+        const items = ranked
             .slice(0, 3)
             .map((result, index) => this.renderCombinationItem(result, index, report, planId))
             .join('');
@@ -530,7 +596,7 @@ class OptimizerApp {
             tags.push(`<span class="tag">Sharpe ${this.formatNumber(metrics.sharpe, 3)}</span>`);
         }
         if (metrics.max_drawdown !== undefined) {
-            tags.push(`<span class="tag">回撤 ${this.formatNumber(metrics.max_drawdown, 3)}</span>`);
+            tags.push(`<span class="tag">回撤 ${this.formatDrawdown(metrics.max_drawdown, 2)}</span>`);
         }
         if (metrics.annual_return !== undefined) {
             tags.push(`<span class="tag">收益 ${this.formatPercent(metrics.annual_return, 2)}</span>`);
@@ -799,8 +865,9 @@ class OptimizerApp {
                 </div>
             </div>
         `;
+        const defaults = isEdit ? null : this.getHistoricalPlanDefaults();
         this.showModal(formHtml, () => this.handlePlanFormSubmit(existingPlan?.id || null));
-        this.initializePlanForm(existingPlan);
+        this.initializePlanForm(existingPlan, defaults);
         this.setupParameterAutofill(existingPlan);
         this.prefillDataRange(!isEdit);
     }
@@ -947,16 +1014,72 @@ class OptimizerApp {
         return payload;
     }
 
-    initializePlanForm(existingPlan) {
+    normalizeDateInput(value) {
+        if (!value) return '';
+        if (value instanceof Date) {
+            return value.toISOString().slice(0, 10);
+        }
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (!trimmed) {
+                return '';
+            }
+            if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+                return trimmed;
+            }
+            const date = new Date(trimmed);
+            if (Number.isFinite(date.getTime())) {
+                return date.toISOString().slice(0, 10);
+            }
+            const [head] = trimmed.split('T');
+            if (/^\d{4}-\d{2}-\d{2}$/.test(head)) {
+                return head;
+            }
+            return '';
+        }
+        if (typeof value.toISOString === 'function') {
+            return value.toISOString().slice(0, 10);
+        }
+        return '';
+    }
+
+    getHistoricalPlanDefaults() {
+        if (!Array.isArray(this.state?.plans) || !this.state.plans.length) {
+            return null;
+        }
+        const toTimestamp = (raw) => {
+            if (!raw) return 0;
+            const date = raw instanceof Date ? raw : new Date(raw);
+            const time = date.getTime();
+            return Number.isFinite(time) ? time : 0;
+        };
+        const latestPlan = this.state.plans.reduce((latest, plan) => {
+            if (!latest) return plan;
+            const latestTs = toTimestamp(latest.updated_at || latest.created_at);
+            const currentTs = toTimestamp(plan.updated_at || plan.created_at);
+            return currentTs > latestTs ? plan : latest;
+        }, null);
+        if (!latestPlan) {
+            return null;
+        }
+        return {
+            symbol: latestPlan.symbol || '',
+            start_date: this.normalizeDateInput(latestPlan.start_date),
+            end_date: this.normalizeDateInput(latestPlan.end_date),
+        };
+    }
+
+    initializePlanForm(existingPlan, defaults = null) {
         const form = document.getElementById('plan-form');
         if (!form) return;
+        const history = defaults || {};
         const setters = {
             name: existingPlan?.name ?? '',
             strategy: existingPlan?.strategy ?? '',
-            symbol: existingPlan?.symbol ?? '',
+            symbol: existingPlan?.symbol ?? history.symbol ?? '',
             frequency_minutes: existingPlan?.frequency_minutes ?? 0,
-            start_date: existingPlan?.start_date ?? '',
-            end_date: existingPlan?.end_date ?? '',
+            start_date: this.normalizeDateInput(existingPlan?.start_date) || history.start_date || '',
+            end_date: this.normalizeDateInput(existingPlan?.end_date) || history.end_date || '',
             iterations: existingPlan?.iterations ?? '',
         };
         Object.entries(setters).forEach(([key, value]) => {
