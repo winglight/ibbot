@@ -2502,11 +2502,22 @@ if __name__ == "__main__":
             if end_date:
                 orders = [o for o in orders if o.timestamp and parse_local_datetime(o.timestamp) <= end_date]
             pnl_values = [o.pnl for o in orders if o.pnl is not None]
+            commission_values: List[float] = []
+            for order in orders:
+                commission_raw = getattr(order, 'commission', None)
+                if commission_raw is None:
+                    continue
+                try:
+                    commission_values.append(float(commission_raw))
+                except (TypeError, ValueError):
+                    continue
+            total_commission = sum(commission_values) if commission_values else 0
             total_executions = len(orders)
             if total_executions == 0:
                 return {'total_executions': 0, 'total_pnl': 0, 'avg_pnl': 0,
                         'winning_trades': 0, 'losing_trades': 0, 'win_rate': 0,
-                        'max_drawdown': 0, 'sharpe_ratio': 0, 'avg_trade_duration': 0}
+                        'max_drawdown': 0, 'sharpe_ratio': 0, 'avg_trade_duration': 0,
+                        'total_commission': 0}
             total_pnl = sum(pnl_values)
             avg_pnl = total_pnl / len(pnl_values) if pnl_values else 0
             winning_trades = len([p for p in pnl_values if p > 0])
@@ -2564,7 +2575,8 @@ if __name__ == "__main__":
                     'win_rate': win_rate,
                     'max_drawdown': max_drawdown,
                     'sharpe_ratio': sharpe_ratio,
-                    'avg_trade_duration': avg_trade_duration}
+                    'avg_trade_duration': avg_trade_duration,
+                    'total_commission': total_commission}
         except Exception as e:
             strategy_logger.error(f"Failed to get strategy performance for {strategy_name}: {e}")
             return {}
