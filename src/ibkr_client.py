@@ -63,16 +63,22 @@ def _front_quarter_contract(now: datetime) -> Tuple[int, int]:
     year = ny_now.year
     month = ny_now.month
 
-    # Pick the first quarterly month that hasn't completed expiration.
-    for candidate in _QUARTERLY_CONTRACT_MONTHS:
-        candidate_year = year
-        if month > candidate:
-            candidate_year += 1
-        expiry = _third_friday_datetime(candidate_year, candidate)
-        if ny_now < expiry:
-            return candidate_year, candidate
+    # Evaluate the remaining quarterly contracts for the current year first,
+    # then fall back to the next year's cycle.  This avoids skipping the
+    # current-year contracts when ``month`` is greater than the candidate
+    # (e.g. October should still select December, not next March).
+    for year_offset in (0, 1):
+        candidate_year = year + year_offset
+        for candidate_month in _QUARTERLY_CONTRACT_MONTHS:
+            if year_offset == 0 and candidate_month < month:
+                continue
 
-    # If all contracts for this calendar year have expired, roll to March next year.
+            expiry = _third_friday_datetime(candidate_year, candidate_month)
+            if ny_now < expiry:
+                return candidate_year, candidate_month
+
+    # Fallback – should not be hit because the loop above covers current and
+    # next year, but keep a defensive default.
     return year + 1, _QUARTERLY_CONTRACT_MONTHS[0]
 
 class IBKRClient:
