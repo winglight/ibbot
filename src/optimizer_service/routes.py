@@ -234,14 +234,30 @@ async def stop_plan(plan_id: str) -> OptimizationPlanActionResponse:
 @router.post(
     "/plans/{plan_id}/run",
     response_model=OptimizationPlanRunResponse,
-    responses={status.HTTP_404_NOT_FOUND: {"model": ErrorResponse}},
+    responses={
+        status.HTTP_404_NOT_FOUND: {"model": ErrorResponse},
+        status.HTTP_409_CONFLICT: {"model": ErrorResponse},
+    },
 )
-async def run_plan(plan_id: str) -> OptimizationPlanRunResponse:
+async def run_plan(
+    plan_id: str,
+    terminate_existing: bool = Query(
+        False,
+        description="Whether to stop any running task for the plan before starting a new one",
+    ),
+) -> OptimizationPlanRunResponse:
     try:
-        task_id = await plan_manager.run_plan_once(plan_id)
+        task_id = await plan_manager.run_plan_once(plan_id, terminate_existing=terminate_existing)
         plan = plan_manager.get_plan(plan_id)
     except KeyError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="plan not found")
+    except RuntimeError as exc:
+        if str(exc) == "plan_has_active_task":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="plan has an active task",
+            )
+        raise
     return OptimizationPlanRunResponse(task_id=task_id, plan=plan_manager.to_response(plan))
 
 
