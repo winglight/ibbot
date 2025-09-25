@@ -63,6 +63,7 @@ class DOMService:
         self._last_depth_by_symbol: Dict[str, Dict[str, Any]] = {}
         self._last_metrics_by_symbol: Dict[str, Dict[str, Any]] = {}
         self._active_symbol: Optional[str] = None
+        self._active_symbol_original: Optional[str] = None
         self._cache = DomCacheManager()
         self._stats = DomStatsAggregator(self._cache)
         self.db_manager = get_db_manager()
@@ -510,6 +511,7 @@ class DOMService:
             self._last_start_error_status = 400
             return False
         self._active_symbol = symbol_key
+        self._active_symbol_original = symbol
         logger.info("Starting DOM depth stream", symbol=symbol_key, num_rows=num_rows)
         callback = lambda data, sym=symbol: self._on_depth_update(sym, data)
         start_kwargs: Dict[str, Any] = {"num_rows": num_rows}
@@ -548,6 +550,9 @@ class DOMService:
                 self._last_start_error_status = status if status >= 400 else 500
             else:
                 self._last_start_error_status = 500
+            if self._active_symbol == symbol_key:
+                self._active_symbol = None
+                self._active_symbol_original = None
         return result
 
     async def start_stream(
@@ -576,15 +581,19 @@ class DOMService:
 
         self._ensure_cleanup_task(loop)
 
-        task = loop.create_task(
-            self.start_stream(symbol, num_rows, force_restart=force_restart)
-        )
         symbol_key = (symbol or "").upper()
 
         with self._start_tasks_lock:
-            previous = self._start_tasks.get(symbol_key)
-            if previous and not previous.done():
-                previous.cancel()
+            existing = self._start_tasks.get(symbol_key)
+            if existing and not existing.done():
+                if force_restart:
+                    existing.cancel()
+                else:
+                    return existing
+
+            task = loop.create_task(
+                self.start_stream(symbol, num_rows, force_restart=force_restart)
+            )
             self._start_tasks[symbol_key] = task
 
         task.add_done_callback(lambda fut, sym=symbol_key: self._on_start_task_done(sym, fut))
@@ -609,6 +618,7 @@ class DOMService:
         symbol_key = (symbol or "").upper()
         if self._active_symbol and symbol_key == self._active_symbol:
             self._active_symbol = None
+            self._active_symbol_original = None
         result = depth_subscriber.stop_depth_stream(symbol)
         if result:
             logger.info("Stopped DOM depth stream", symbol=symbol_key)
@@ -617,15 +627,52 @@ class DOMService:
         return result
 
     async def stop_stream(self, symbol: str) -> bool:
+        symbol_key = (symbol or "").upper()
+        had_pending = False
+        with self._start_tasks_lock:
+            task = self._start_tasks.get(symbol_key)
+            if task and not task.done():
+                task.cancel()
+                had_pending = True
+            self._start_tasks.pop(symbol_key, None)
+
+        if self._active_symbol and symbol_key == self._active_symbol:
+            self._active_symbol = None
+            self._active_symbol_original = None
+
         if not self._loop or self._loop.is_closed():
             try:
                 self._loop = asyncio.get_running_loop()
             except RuntimeError:
                 pass
-        return await asyncio.to_thread(self._stop_stream_blocking, symbol)
+        result = await asyncio.to_thread(self._stop_stream_blocking, symbol)
+        return bool(result or had_pending)
 
     def stop(self, symbol: str) -> bool:
         return self._stop_stream_blocking(symbol)
+
+    def is_start_in_progress(self, symbol: Optional[str] = None) -> bool:
+        symbol_key = (symbol or "").upper()
+        with self._start_tasks_lock:
+            if symbol_key:
+                task = self._start_tasks.get(symbol_key)
+                return bool(task and not task.done())
+            return any(task and not task.done() for task in self._start_tasks.values())
+
+    def is_stream_active(self, symbol: Optional[str] = None) -> bool:
+        candidate = symbol or self._active_symbol_original
+        if candidate:
+            try:
+                if depth_subscriber.is_depth_stream_active(candidate):
+                    return True
+            except Exception:
+                pass
+
+        symbol_key = (symbol or "").upper()
+        if not symbol_key and self._active_symbol:
+            symbol_key = self._active_symbol
+
+        return bool(symbol_key and self._active_symbol == symbol_key)
 
     def _on_start_task_done(self, symbol: str, fut: "asyncio.Future[bool]") -> None:
         with self._start_tasks_lock:
@@ -633,8 +680,11 @@ class DOMService:
             if current is fut:
                 self._start_tasks.pop(symbol, None)
         try:
-            fut.result()
+            result = fut.result()
         except asyncio.CancelledError:
+            if self._active_symbol == symbol:
+                self._active_symbol = None
+                self._active_symbol_original = None
             return
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.error(
@@ -642,6 +692,13 @@ class DOMService:
             )
             self._last_start_error = str(exc) or "Failed to start DOM depth stream"
             self._last_start_error_status = 500
+            if self._active_symbol == symbol:
+                self._active_symbol = None
+                self._active_symbol_original = None
+        else:
+            if not result and self._active_symbol == symbol:
+                self._active_symbol = None
+                self._active_symbol_original = None
 
     # --------------------------------------------------------------
     def get_metrics(self, symbol: Optional[str] = None) -> Dict[str, Any]:
