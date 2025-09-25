@@ -252,8 +252,15 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
     ib_client = _require_ib_client()
 
     try:
-        # 获取当前持仓
-        positions = await ib_client.get_positions()
+        # 获取当前持仓。使用 fast 模式并设置超时，避免逐个订阅行情导致接口阻塞。
+        try:
+            positions = await asyncio.wait_for(
+                ib_client.get_positions(fast=True),
+                timeout=12.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Timed out while fetching positions for close_position")
+            raise HTTPException(status_code=504, detail="Fetching positions timed out")
         target_position = None
         
         for pos in positions:
