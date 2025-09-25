@@ -5,7 +5,7 @@
 class StrategiesManager {
   constructor(app) {
     this.app = app;
-    this.refreshIntervalMs = 5000;
+    this.refreshIntervalMs = 15000;
     this.refreshTimer = null;
     this._visibilityHandler = null;
     this.startAutoRefresh();

@@ -27,17 +27,26 @@ class RiskRulesManager {
             return await this._fetchViaHttp();
         } catch (error) {
             console.error('Failed to load risk rules:', error);
+            if (this.app && typeof this.app.setPanelLoading === 'function') {
+                this.app.setPanelLoading('risk-rules', false);
+            }
             return 'failed';
         }
     }
 
     async _fetchViaHttp() {
         try {
+            if (this.app && typeof this.app.setPanelLoading === 'function') {
+                this.app.setPanelLoading('risk-rules', true);
+            }
             const riskData = await this.app.apiCall('/risk_rules');
             this.applySnapshot({ type: 'risk_rules', success: riskData?.success !== false, rules: riskData?.rules || {}, source: 'http' });
             return 'http';
         } catch (error) {
             console.error('Failed to load risk rules via HTTP:', error);
+            if (this.app && typeof this.app.setPanelLoading === 'function') {
+                this.app.setPanelLoading('risk-rules', false);
+            }
             throw error;
         }
     }
@@ -45,6 +54,9 @@ class RiskRulesManager {
     applySnapshot(payload) {
         if (!payload || payload.type !== 'risk_rules') {
             return false;
+        }
+        if (this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('risk-rules', false);
         }
         if (!payload.success) {
             console.warn('Risk rules snapshot error:', payload.error || 'unknown');

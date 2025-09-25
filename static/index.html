@@ -59,6 +59,11 @@
             border-right: 5px solid transparent;
             border-top: 5px solid #333;
         }
+        .panel-loading-indicator {
+            display: inline-flex;
+            align-items: center;
+            font-size: 0.95rem;
+        }
     </style>
 </head>
 <body>
@@ -440,7 +445,10 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-list"></i> Orders</h5>
-                        <div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="orders" aria-hidden="true">
+                                <i class="fas fa-circle-notch fa-spin"></i>
+                            </span>
                             <button class="btn btn-sm btn-primary me-2" id="placeOrderBtn">
                                 <i class="fas fa-plus"></i> Place Order
                             </button>
@@ -482,7 +490,11 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-briefcase"></i> Portfolio</h5>
-
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="portfolio" aria-hidden="true">
+                                <i class="fas fa-circle-notch fa-spin"></i>
+                            </span>
+                        </div>
                     </div>
                     <div class="card-body">
                         <div class="table-responsive">
@@ -512,7 +524,10 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-shield-alt"></i> Risk Rules</h5>
-                        <div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="risk-rules" aria-hidden="true">
+                                <i class="fas fa-circle-notch fa-spin"></i>
+                            </span>
                             <button class="btn btn-sm btn-warning" id="addRiskRuleBtn2">
                                 <i class="fas fa-plus"></i>
                             </button>
@@ -541,7 +556,10 @@
                 <div class="card" id="strategiesCard">
                   <div class="card-header d-flex justify-content-between align-items-center">
                     <h5 class="mb-0">Strategies</h5>
-                    <div class="d-flex gap-2">
+                    <div class="d-flex align-items-center gap-2">
+                      <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="strategies" aria-hidden="true">
+                        <i class="fas fa-circle-notch fa-spin"></i>
+                      </span>
                       <button class="btn btn-outline-secondary btn-sm" id="strategySettingsBtn">
                         <i class="fas fa-cog"></i>
                       </button>
