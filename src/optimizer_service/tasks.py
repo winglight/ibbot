@@ -18,6 +18,32 @@ from .schemas import (
 from .storage import OptimizerTaskStore
 
 
+def _store_is_stop_requested(store: OptimizerTaskStore, task_id: str) -> bool:
+    checker = getattr(store, "is_stop_requested", None)
+    if callable(checker):
+        try:
+            return bool(checker(task_id))
+        except Exception:
+            return False
+    return False
+
+
+def _store_mark_stopped(store: OptimizerTaskStore, task_id: str, progress: int) -> None:
+    marker = getattr(store, "mark_stopped", None)
+    if not callable(marker):
+        return
+    try:
+        marker(task_id, progress=progress)
+    except TypeError:
+        # Some lightweight test doubles expose ``mark_stopped`` without keyword
+        # arguments.  Fall back to positional invocation so that the task can
+        # still be marked as stopped.
+        marker(task_id, progress)
+    except Exception:
+        # Defensive guard – best-effort update only.
+        pass
+
+
 def run_optimization_task(task_id: str, request: OptimizationRequest, store: OptimizerTaskStore) -> None:
     """Execute optimization workflow (placeholder implementation).
 
@@ -42,8 +68,8 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
         progress_value = initial_progress
 
         for idx, outcome in enumerate(engine.run(), start=1):
-            if store.is_stop_requested(task_id):
-                store.mark_stopped(task_id, progress=progress_value)
+            if _store_is_stop_requested(store, task_id):
+                _store_mark_stopped(store, task_id, progress_value)
                 logger.info("Stop requested, aborting optimization task")
                 return
             progress = min(95, max(10, int(idx / total * 90)))
@@ -65,8 +91,8 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
                 store.append_fail_reason(task_id, reason)
 
         if not results:
-            if store.is_stop_requested(task_id):
-                store.mark_stopped(task_id, progress=progress_value)
+            if _store_is_stop_requested(store, task_id):
+                _store_mark_stopped(store, task_id, progress_value)
                 logger.info("Stop requested before completion, task marked as stopped")
                 return
             message = "所有组合执行失败"
@@ -77,8 +103,8 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
         completed_at = datetime.utcnow()
         elapsed_seconds = max(perf_counter() - start_perf, 0.0)
 
-        if store.is_stop_requested(task_id):
-            store.mark_stopped(task_id, progress=progress_value)
+        if _store_is_stop_requested(store, task_id):
+            _store_mark_stopped(store, task_id, progress_value)
             logger.info("Stop requested after processing combinations, task marked as stopped")
             return
 

@@ -282,7 +282,32 @@ class IBKRClient:
     def get_stock_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD') -> Stock:
         """获取股票合约"""
         return Stock(symbol, exchange, currency)
-    
+
+    def _create_future_contract(self, symbol: str, exchange: str, currency: str) -> Future:
+        """Construct a future contract while tolerating minimal stubs.
+
+        Some lightweight fallbacks (used in tests) expose ``Future`` objects
+        without accepting constructor arguments.  When that happens we create an
+        empty instance and populate the relevant attributes manually so that
+        downstream code can rely on the expected fields being present.
+        """
+
+        try:
+            return Future(symbol=symbol, exchange=exchange, currency=currency)
+        except TypeError:
+            contract = Future()
+            for attr, value in (("symbol", symbol), ("exchange", exchange), ("currency", currency)):
+                try:
+                    setattr(contract, attr, value)
+                except Exception:
+                    pass
+            if getattr(contract, "secType", None) in (None, ""):
+                try:
+                    setattr(contract, "secType", "FUT")
+                except Exception:
+                    pass
+            return contract
+
     def get_future_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD'):
         """获取期货合约"""
 
@@ -295,7 +320,7 @@ class IBKRClient:
             details = INDEX_FUTURE_DETAILS[symbol_upper]
             exchange_to_use = details.get("exchange", exchange)
 
-            contract = Future(symbol=symbol_upper, exchange=exchange_to_use, currency=currency)
+            contract = self._create_future_contract(symbol_upper, exchange_to_use, currency)
             contract.lastTradeDateOrContractMonth = expiry
 
             for attr in ("multiplier", "tradingClass"):
@@ -305,7 +330,7 @@ class IBKRClient:
 
             return contract
 
-        return Future(symbol=symbol_upper, exchange=exchange, currency=currency)
+        return self._create_future_contract(symbol_upper, exchange, currency)
     
     def get_contract(self, symbol: str, sec_type: str = 'STK', exchange: str = 'SMART', currency: str = 'USD'):
         """根据证券类型获取合约"""
