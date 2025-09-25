@@ -404,6 +404,8 @@ class TradingApp {
         this.candlestickSupported = false;
         this.candlestickLoader = null;
         this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
+        this.strategyChartInstance = null;
+        this.strategyChartState = this.createDefaultStrategyChartState();
         // 渲染监控图表时使用的定时器句柄，防止重复渲染导致死循环
         this.monitorChartRenderTimeout = null;
         // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制
@@ -7904,6 +7906,893 @@ class TradingApp {
         }
     }
 
+    createDefaultStrategyChartState() {
+        return {
+            initialized: false,
+            currentStrategy: null,
+            symbol: '',
+            interval: '5 mins',
+            duration: '1 D',
+            fullBars: [],
+            orders: [],
+            visibleCount: 0,
+            isRealtime: false,
+            realtimeTimer: null,
+            isReplaying: false,
+            replayTimer: null,
+            loadToken: null,
+            loading: false
+        };
+    }
+
+    getStrategyChartState() {
+        if (!this.strategyChartState) {
+            this.strategyChartState = this.createDefaultStrategyChartState();
+        }
+        return this.strategyChartState;
+    }
+
+    getStrategyChartRefreshIntervalMs(intervalValue) {
+        const key = normalizeIntervalKey(intervalValue || '');
+        const minutes = INTERVAL_MINUTES_MAP[key] || 5;
+        return Math.max(15000, minutes * 60000);
+    }
+
+    getStrategyChartTimeUnit(intervalValue) {
+        const value = (intervalValue || '').toLowerCase();
+        if (value.includes('day')) return 'day';
+        if (value.includes('hour')) return 'hour';
+        return 'minute';
+    }
+
+    getLocalDayKey(timestamp) {
+        const date = timestamp instanceof Date ? timestamp : new Date(Number(timestamp));
+        if (!Number.isFinite(date.getTime())) {
+            return '';
+        }
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const d = String(date.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+    }
+
+    resolveStrategySymbol(strategy) {
+        if (!strategy) return '';
+        const candidates = [];
+        const pushCandidate = (value) => {
+            if (typeof value === 'string' && value.trim()) {
+                candidates.push(value.trim());
+            }
+        };
+        pushCandidate(strategy.primary_symbol);
+        pushCandidate(strategy.symbol);
+        if (Array.isArray(strategy.symbols) && strategy.symbols.length) {
+            pushCandidate(strategy.symbols[0]);
+        }
+        if (strategy.contract && typeof strategy.contract.symbol === 'string') {
+            pushCandidate(strategy.contract.symbol);
+        }
+        if (Array.isArray(strategy.contracts) && strategy.contracts.length) {
+            pushCandidate(strategy.contracts[0]?.symbol);
+            pushCandidate(strategy.contracts[0]?.local_symbol);
+        }
+        if (typeof strategy.asset === 'string') {
+            pushCandidate(strategy.asset);
+        }
+        if (strategy.instrument && typeof strategy.instrument.symbol === 'string') {
+            pushCandidate(strategy.instrument.symbol);
+        }
+        const resolved = candidates.find(Boolean);
+        return resolved ? resolved.toUpperCase() : '';
+    }
+
+    updateStrategyChartSymbol(symbol, options = {}) {
+        const normalized = typeof symbol === 'string' ? symbol.trim() : '';
+        if (!normalized) {
+            return false;
+        }
+        const upper = normalized.toUpperCase();
+        const state = this.getStrategyChartState();
+        if (state.symbol === upper) {
+            return false;
+        }
+        state.symbol = upper;
+        this.updateStrategyChartSummary();
+        if (options.reload && state.currentStrategy) {
+            this.loadStrategyChart(state.currentStrategy, {
+                symbol: upper,
+                forceRefresh: true,
+                forceExecutions: options.forceExecutions
+            }).catch((err) => console.warn('Failed to reload strategy chart after symbol update:', err));
+        } else if (options.ensureLoaded && state.currentStrategy && !state.fullBars.length) {
+            this.loadStrategyChart(state.currentStrategy, {
+                symbol: upper,
+                forceExecutions: options.forceExecutions
+            }).catch((err) => console.warn('Failed to load strategy chart for symbol:', err));
+        }
+        return true;
+    }
+
+    setupStrategyChartTab() {
+        const state = this.getStrategyChartState();
+        let intervalSelect = document.getElementById('strategyChartInterval');
+        if (intervalSelect) {
+            const cloned = intervalSelect.cloneNode(true);
+            intervalSelect.parentNode.replaceChild(cloned, intervalSelect);
+            intervalSelect = cloned;
+        }
+        let durationSelect = document.getElementById('strategyChartDuration');
+        if (durationSelect) {
+            const cloned = durationSelect.cloneNode(true);
+            durationSelect.parentNode.replaceChild(cloned, durationSelect);
+            durationSelect = cloned;
+        }
+
+        if (intervalSelect) {
+            intervalSelect.value = state.interval || intervalSelect.value || '5 mins';
+        }
+        this.refreshStrategyChartDuration(intervalSelect ? intervalSelect.value : state.interval, {
+            preferredValue: state.duration,
+            selectEl: durationSelect
+        });
+        if (durationSelect) {
+            durationSelect.value = state.duration || durationSelect.value || '1 D';
+        }
+
+        if (intervalSelect) {
+            intervalSelect.addEventListener('change', () => {
+                state.interval = intervalSelect.value || '5 mins';
+                this.refreshStrategyChartDuration(state.interval, {
+                    preferredValue: state.duration,
+                    selectEl: document.getElementById('strategyChartDuration')
+                });
+                const durationEl = document.getElementById('strategyChartDuration');
+                if (durationEl) {
+                    state.duration = durationEl.value || state.duration;
+                }
+                this.stopStrategyChartRealtime({ silent: true });
+                this.stopStrategyChartPlayback({ restoreFull: false, silent: true });
+                if (state.currentStrategy && state.symbol) {
+                    this.loadStrategyChart(state.currentStrategy, {
+                        symbol: state.symbol,
+                        forceRefresh: true
+                    }).catch((err) => console.warn('Failed to reload strategy chart after interval change:', err));
+                }
+            });
+        }
+
+        if (durationSelect) {
+            durationSelect.addEventListener('change', () => {
+                state.duration = durationSelect.value || '1 D';
+                this.stopStrategyChartRealtime({ silent: true });
+                this.stopStrategyChartPlayback({ restoreFull: false, silent: true });
+                if (state.currentStrategy && state.symbol) {
+                    this.loadStrategyChart(state.currentStrategy, {
+                        symbol: state.symbol,
+                        forceRefresh: true
+                    }).catch((err) => console.warn('Failed to reload strategy chart after duration change:', err));
+                }
+            });
+        }
+
+        const realtimeBtnEl = document.getElementById('strategyChartRealtimeBtn');
+        if (realtimeBtnEl) {
+            const cloned = realtimeBtnEl.cloneNode(true);
+            realtimeBtnEl.parentNode.replaceChild(cloned, realtimeBtnEl);
+            cloned.addEventListener('click', () => this.toggleStrategyChartRealtime());
+        }
+
+        const replayBtnEl = document.getElementById('strategyChartReplayBtn');
+        if (replayBtnEl) {
+            const cloned = replayBtnEl.cloneNode(true);
+            replayBtnEl.parentNode.replaceChild(cloned, replayBtnEl);
+            cloned.addEventListener('click', () => this.toggleStrategyChartPlayback());
+        }
+
+        const modalEl = document.getElementById('strategyDetailsModal');
+        if (modalEl && modalEl.dataset.strategyChartCleanup !== 'true') {
+            modalEl.addEventListener('hidden.bs.modal', () => {
+                this.resetStrategyChartState({ keepControls: true });
+            });
+            modalEl.dataset.strategyChartCleanup = 'true';
+        }
+
+        state.initialized = true;
+        state.interval = intervalSelect ? intervalSelect.value || '5 mins' : state.interval || '5 mins';
+        state.duration = durationSelect ? durationSelect.value || '1 D' : state.duration || '1 D';
+        this.updateStrategyChartSummary();
+        this.updateStrategyChartButtons();
+        this.updateStrategyChartStatus('');
+    }
+
+    refreshStrategyChartDuration(intervalValue, options = {}) {
+        const selectEl = options.selectEl || document.getElementById('strategyChartDuration');
+        if (!selectEl) return;
+        const available = getMonitorDurationOptions(intervalValue);
+        const preferred = options.preferredValue || selectEl.value || '1 D';
+        selectEl.innerHTML = '';
+        available.forEach((item, index) => {
+            const option = document.createElement('option');
+            option.value = item.value;
+            option.textContent = item.label;
+            if (index === 0 && !preferred) {
+                option.selected = true;
+            }
+            selectEl.appendChild(option);
+        });
+        const hasPreferred = preferred && available.some((item) => item.value === preferred);
+        const fallback = available[0]?.value || '1 D';
+        selectEl.value = hasPreferred ? preferred : fallback;
+    }
+
+    resetStrategyChartState(options = {}) {
+        const state = this.getStrategyChartState();
+        this.stopStrategyChartRealtime({ silent: true });
+        this.stopStrategyChartPlayback({ restoreFull: false, silent: true });
+        if (options.keepControls) {
+            const intervalSelect = document.getElementById('strategyChartInterval');
+            if (intervalSelect && state.interval) {
+                intervalSelect.value = state.interval;
+            }
+            this.refreshStrategyChartDuration(state.interval, { preferredValue: state.duration });
+            const durationSelect = document.getElementById('strategyChartDuration');
+            if (durationSelect && state.duration) {
+                durationSelect.value = state.duration;
+            }
+        } else {
+            state.interval = '5 mins';
+            state.duration = '1 D';
+            const intervalSelect = document.getElementById('strategyChartInterval');
+            if (intervalSelect) intervalSelect.value = state.interval;
+            this.refreshStrategyChartDuration(state.interval, { preferredValue: state.duration });
+            const durationSelect = document.getElementById('strategyChartDuration');
+            if (durationSelect) durationSelect.value = state.duration;
+        }
+        state.currentStrategy = options.currentStrategy ?? null;
+        state.symbol = options.symbol ? String(options.symbol).trim().toUpperCase() : (options.resetSymbol ? '' : state.symbol || '');
+        state.fullBars = [];
+        state.orders = [];
+        state.visibleCount = 0;
+        state.loadToken = null;
+        state.loading = false;
+        if (!options.preserveCanvas) {
+            this.destroyStrategyChart();
+            const container = document.getElementById('strategyChartContainer');
+            if (container) {
+                container.innerHTML = '<div class="text-center text-muted py-5">加载策略后将显示K线图。</div>';
+            }
+        }
+        this.updateStrategyChartSummary();
+        this.updateStrategyChartButtons();
+        this.updateStrategyChartStatus('');
+    }
+
+    destroyStrategyChart() {
+        if (this.strategyChartInstance) {
+            try {
+                this.strategyChartInstance.destroy();
+            } catch (err) {
+                console.warn('Failed to destroy strategy chart instance:', err);
+            }
+            this.strategyChartInstance = null;
+        }
+    }
+
+    normalizeStrategyChartBars(data) {
+        if (!Array.isArray(data)) return [];
+        const toNumber = (value, fallback = NaN) => {
+            const num = Number(value);
+            return Number.isFinite(num) ? num : fallback;
+        };
+        const bars = data.map((bar) => {
+            const rawTime = bar?.time ?? bar?.date;
+            const parsed = this.parseMonitorChartTime(rawTime);
+            if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime())) {
+                return null;
+            }
+            const open = toNumber(bar?.open ?? bar?.close);
+            const high = toNumber(bar?.high ?? bar?.close);
+            const low = toNumber(bar?.low ?? bar?.close);
+            const close = toNumber(bar?.close);
+            if (!Number.isFinite(close)) {
+                return null;
+            }
+            return {
+                x: parsed.getTime(),
+                o: Number.isFinite(open) ? open : close,
+                h: Number.isFinite(high) ? high : close,
+                l: Number.isFinite(low) ? low : close,
+                c: close,
+                volume: toNumber(bar?.volume, 0) || 0
+            };
+        }).filter(Boolean);
+        bars.sort((a, b) => a.x - b.x);
+        const maxPoints = MONITOR_CHART_MAX_POINTS || 3000;
+        if (bars.length > maxPoints) {
+            return bars.slice(bars.length - maxPoints);
+        }
+        return bars;
+    }
+
+    normalizeStrategyOrders(executions) {
+        if (!Array.isArray(executions)) return [];
+        const normalized = [];
+        executions.forEach((exe) => {
+            const status = String(exe?.status || '').toLowerCase();
+            if (!status.includes('fill')) {
+                return;
+            }
+            const action = String(exe?.action || exe?.side || '').toLowerCase();
+            let side = null;
+            if (action.includes('buy')) side = 'buy';
+            else if (action.includes('sell')) side = 'sell';
+            if (!side) return;
+            const priceCandidates = [exe?.price, exe?.avg_price, exe?.average_price, exe?.fill_price, exe?.filled_avg_price];
+            let price = null;
+            for (const candidate of priceCandidates) {
+                const num = Number(candidate);
+                if (Number.isFinite(num) && num !== 0) {
+                    price = num;
+                    break;
+                }
+            }
+            if (!Number.isFinite(price)) return;
+            const timeSource = exe?.execution_time || exe?.executed_at || exe?.completed_at || exe?.created_at;
+            const parsed = this.parseMonitorChartTime(timeSource);
+            if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime())) {
+                return;
+            }
+            const timestamp = parsed.getTime();
+            normalized.push({
+                time: timestamp,
+                price,
+                side,
+                dayKey: this.getLocalDayKey(timestamp)
+            });
+        });
+        normalized.sort((a, b) => a.time - b.time);
+        return normalized;
+    }
+
+    applyStrategyChartOrders(executions, options = {}) {
+        if (!Array.isArray(executions)) return;
+        const state = this.getStrategyChartState();
+        state.orders = this.normalizeStrategyOrders(executions);
+        if (options.redraw !== false && this.strategyChartInstance && state.fullBars.length) {
+            this.renderStrategyChart();
+        }
+    }
+
+    renderStrategyChart(options = {}) {
+        const state = this.getStrategyChartState();
+        const container = document.getElementById('strategyChartContainer');
+        if (!container) return;
+
+        if (!state.fullBars || !state.fullBars.length) {
+            this.destroyStrategyChart();
+            container.innerHTML = '<div class="alert alert-warning mb-0">暂无K线数据</div>';
+            this.updateStrategyChartStatus(options.extraStatus || '暂无K线数据');
+            return;
+        }
+
+        if (!document.getElementById('strategyChartCanvas')) {
+            container.innerHTML = '<canvas id="strategyChartCanvas" style="width:100%;height:100%;"></canvas>';
+        }
+        const canvas = document.getElementById('strategyChartCanvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const total = state.fullBars.length;
+        const visibleCount = Math.max(1, Math.min(state.visibleCount || total, total));
+        const ohlc = state.fullBars.slice(0, visibleCount);
+        const volumeData = ohlc.map((bar) => ({ x: bar.x, y: bar.volume }));
+        const cutoff = ohlc.length ? ohlc[ohlc.length - 1].x : null;
+        const visibleOrders = cutoff == null
+            ? []
+            : state.orders.filter((order) => order.time <= cutoff);
+        const buyOrders = visibleOrders
+            .filter((order) => order.side === 'buy')
+            .map((order) => ({ x: order.time, y: order.price, order }));
+        const sellOrders = visibleOrders
+            .filter((order) => order.side === 'sell')
+            .map((order) => ({ x: order.time, y: order.price, order }));
+        const maxVolume = volumeData.reduce((acc, point) => Math.max(acc, point.y || 0), 0);
+        const extraParts = [];
+        if (visibleOrders.length) {
+            extraParts.push(`成交 ${visibleOrders.length} 笔`);
+        }
+        if (options.extraStatus) {
+            extraParts.push(options.extraStatus);
+        }
+
+        if (!this.strategyChartInstance) {
+            this.strategyChartInstance = new Chart(ctx, {
+                type: 'candlestick',
+                data: {
+                    datasets: [
+                        {
+                            type: 'candlestick',
+                            label: `${state.symbol || ''} OHLC`,
+                            data: ohlc,
+                            yAxisID: 'y',
+                            parsing: false
+                        },
+                        {
+                            type: 'bar',
+                            label: 'Volume',
+                            data: volumeData,
+                            yAxisID: 'volume',
+                            backgroundColor: 'rgba(99, 102, 241, 0.35)',
+                            borderColor: 'rgba(79, 70, 229, 0.7)',
+                            borderWidth: 1,
+                            parsing: false
+                        },
+                        {
+                            type: 'scatter',
+                            label: 'Buy Orders',
+                            data: buyOrders,
+                            yAxisID: 'y',
+                            parsing: false,
+                            pointStyle: 'triangle',
+                            pointRadius: 6,
+                            pointHoverRadius: 7,
+                            pointBackgroundColor: 'rgba(34, 197, 94, 0.95)',
+                            pointBorderColor: '#15803d',
+                            pointBorderWidth: 1.5,
+                            pointRotation: 0,
+                            clip: false,
+                            showLine: false,
+                            hitRadius: 10,
+                            tooltip: {
+                                callbacks: {
+                                    label: (context) => {
+                                        const raw = context.raw?.order;
+                                        if (raw) {
+                                            const when = new Date(raw.time).toLocaleString();
+                                            return `买入 ${raw.price.toFixed(2)} @ ${when}`;
+                                        }
+                                        return `买入 ${context.parsed.y}`;
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            type: 'scatter',
+                            label: 'Sell Orders',
+                            data: sellOrders,
+                            yAxisID: 'y',
+                            parsing: false,
+                            pointStyle: 'triangle',
+                            pointRadius: 6,
+                            pointHoverRadius: 7,
+                            pointBackgroundColor: 'rgba(239, 68, 68, 0.95)',
+                            pointBorderColor: '#b91c1c',
+                            pointBorderWidth: 1.5,
+                            pointRotation: 180,
+                            clip: false,
+                            showLine: false,
+                            hitRadius: 10,
+                            tooltip: {
+                                callbacks: {
+                                    label: (context) => {
+                                        const raw = context.raw?.order;
+                                        if (raw) {
+                                            const when = new Date(raw.time).toLocaleString();
+                                            return `卖出 ${raw.price.toFixed(2)} @ ${when}`;
+                                        }
+                                        return `卖出 ${context.parsed.y}`;
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    interaction: {
+                        intersect: false,
+                        mode: 'nearest'
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        },
+                        tooltip: {
+                            intersect: false,
+                            mode: 'nearest'
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            adapters: {
+                                date: { locale: 'zh-CN' }
+                            },
+                            time: {
+                                unit: this.getStrategyChartTimeUnit(state.interval),
+                                tooltipFormat: 'MMM dd HH:mm'
+                            },
+                            ticks: {
+                                maxRotation: 45,
+                                autoSkip: true
+                            }
+                        },
+                        y: {
+                            position: 'left',
+                            title: {
+                                display: true,
+                                text: 'Price'
+                            }
+                        },
+                        volume: {
+                            position: 'right',
+                            grid: { display: false },
+                            ticks: { display: false },
+                            title: { display: true, text: 'Volume' },
+                            max: maxVolume ? maxVolume * 1.1 : undefined
+                        }
+                    }
+                }
+            });
+        } else {
+            const datasets = this.strategyChartInstance.data.datasets || [];
+            if (datasets[0]) datasets[0].data = ohlc;
+            if (datasets[1]) datasets[1].data = volumeData;
+            if (datasets[2]) datasets[2].data = buyOrders;
+            if (datasets[3]) datasets[3].data = sellOrders;
+            const xScale = this.strategyChartInstance.options?.scales?.x;
+            if (xScale) {
+                xScale.time = xScale.time || {};
+                xScale.time.unit = this.getStrategyChartTimeUnit(state.interval);
+            }
+            const volumeScale = this.strategyChartInstance.options?.scales?.volume;
+            if (volumeScale) {
+                volumeScale.max = maxVolume ? maxVolume * 1.1 : undefined;
+            }
+            this.strategyChartInstance.update('none');
+        }
+
+        this.updateStrategyChartStatus(extraParts.join(' · '));
+    }
+
+    updateStrategyChartSummary() {
+        const summaryEl = document.getElementById('strategyChartSummary');
+        if (!summaryEl) return;
+        const state = this.getStrategyChartState();
+        const parts = [];
+        if (state.symbol) parts.push(state.symbol);
+        if (state.interval) parts.push(state.interval);
+        if (state.duration) parts.push(state.duration);
+        summaryEl.textContent = parts.length ? parts.join(' · ') : '尚未加载图表';
+    }
+
+    updateStrategyChartButtons() {
+        const state = this.getStrategyChartState();
+        const realtimeBtn = document.getElementById('strategyChartRealtimeBtn');
+        if (realtimeBtn) {
+            const active = state.isRealtime;
+            realtimeBtn.classList.toggle('btn-success', active);
+            realtimeBtn.classList.toggle('btn-outline-success', !active);
+            realtimeBtn.innerHTML = active ? '<i class="fas fa-pause"></i> 停止' : '<i class="fas fa-play"></i> 实时';
+            realtimeBtn.disabled = !active && state.loading;
+        }
+        const replayBtn = document.getElementById('strategyChartReplayBtn');
+        if (replayBtn) {
+            const playing = state.isReplaying;
+            replayBtn.classList.toggle('btn-primary', playing);
+            replayBtn.classList.toggle('btn-outline-secondary', !playing);
+            replayBtn.innerHTML = playing ? '<i class="fas fa-stop"></i> 停止回放' : '<i class="fas fa-history"></i> 回放';
+            replayBtn.disabled = !playing && state.loading;
+        }
+    }
+
+    updateStrategyChartStatus(extraText = '') {
+        const statusEl = document.getElementById('strategyChartStatus');
+        if (!statusEl) return;
+        const state = this.getStrategyChartState();
+        if (state.loading) {
+            statusEl.textContent = '加载中...';
+            return;
+        }
+        if (!state.fullBars || !state.fullBars.length) {
+            statusEl.textContent = extraText || '';
+            return;
+        }
+        const total = state.fullBars.length;
+        const visible = Math.max(1, Math.min(state.visibleCount || total, total));
+        let text = `已显示 ${visible}/${total} 根K线`;
+        if (extraText) {
+            text += ` · ${extraText}`;
+        }
+        if (state.isRealtime) {
+            text = `实时更新 · ${text}`;
+        } else if (state.isReplaying) {
+            text = `回放中 · ${text}`;
+        }
+        statusEl.textContent = text;
+    }
+
+    async loadStrategyChart(name, options = {}) {
+        const state = this.getStrategyChartState();
+        if (!name) return;
+        state.currentStrategy = name;
+        if (options.symbol) {
+            const normalizedSymbol = String(options.symbol).trim().toUpperCase();
+            if (normalizedSymbol) {
+                state.symbol = normalizedSymbol;
+            }
+        }
+
+        const intervalSelect = document.getElementById('strategyChartInterval');
+        if (intervalSelect) {
+            state.interval = intervalSelect.value || state.interval || '5 mins';
+        } else if (!state.interval) {
+            state.interval = '5 mins';
+        }
+        const durationSelect = document.getElementById('strategyChartDuration');
+        if (durationSelect) {
+            state.duration = durationSelect.value || state.duration || '1 D';
+        } else if (!state.duration) {
+            state.duration = '1 D';
+        }
+        this.updateStrategyChartSummary();
+
+        const container = document.getElementById('strategyChartContainer');
+        if (!state.symbol) {
+            if (container) {
+                container.innerHTML = '<div class="alert alert-warning mb-0">策略未配置标的，无法加载K线图。</div>';
+            }
+            state.fullBars = [];
+            state.visibleCount = 0;
+            this.updateStrategyChartButtons();
+            this.updateStrategyChartStatus('缺少标的');
+            return;
+        }
+
+        const loadToken = Symbol('strategy-chart-load');
+        state.loadToken = loadToken;
+        state.loading = true;
+        this.updateStrategyChartButtons();
+        this.updateStrategyChartStatus('加载中...');
+        if (container && !this.strategyChartInstance) {
+            container.innerHTML = '<div class="text-center text-muted py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2">加载图表数据中...</p></div>';
+        }
+
+        const interval = state.interval || '5 mins';
+        const duration = state.duration || '1 D';
+        const useCache = options.useCache !== false;
+        const forceRefresh = options.forceRefresh === true;
+        const forceExecutions = options.forceExecutions === true;
+
+        try {
+            const pluginReady = await this.ensureCandlestickPlugin();
+            if (!pluginReady) {
+                throw new Error('蜡烛图插件加载失败，请稍后再试');
+            }
+
+            let executions = Array.isArray(options.executions) ? options.executions : null;
+            if (!executions || forceExecutions) {
+                try {
+                    executions = await this.fetchStrategyExecutions(name, {
+                        limit: options.executionLimit || 500,
+                        force: forceExecutions
+                    });
+                } catch (err) {
+                    console.warn('Failed to load strategy executions for chart overlay:', err);
+                    executions = executions || [];
+                }
+            }
+            if (Array.isArray(executions)) {
+                this.applyStrategyChartOrders(executions, { redraw: false });
+            }
+
+            const response = await this.apiCall('/chart_data', {
+                method: 'POST',
+                body: JSON.stringify({
+                    symbol: state.symbol,
+                    duration,
+                    bar_size: interval,
+                    data_type: 'TRADES',
+                    use_cache: useCache,
+                    force_refresh: forceRefresh
+                }),
+                allowReadOnly: true,
+                timeout: 70000
+            });
+
+            if (state.loadToken !== loadToken) {
+                return;
+            }
+
+            if (!response || !Array.isArray(response.data) || !response.data.length) {
+                this.destroyStrategyChart();
+                if (container) {
+                    container.innerHTML = '<div class="alert alert-warning mb-0">暂无K线数据</div>';
+                }
+                state.fullBars = [];
+                state.visibleCount = 0;
+                this.updateStrategyChartStatus('暂无K线数据');
+                return;
+            }
+
+            const bars = this.normalizeStrategyChartBars(response.data);
+            if (!bars.length) {
+                this.destroyStrategyChart();
+                if (container) {
+                    container.innerHTML = '<div class="alert alert-warning mb-0">暂无有效K线数据</div>';
+                }
+                state.fullBars = [];
+                state.visibleCount = 0;
+                this.updateStrategyChartStatus('暂无有效K线数据');
+                return;
+            }
+
+            state.fullBars = bars;
+            if (options.keepVisibleCount && Number.isFinite(state.visibleCount) && state.visibleCount > 0) {
+                state.visibleCount = Math.min(Math.max(1, state.visibleCount), bars.length);
+            } else {
+                state.visibleCount = bars.length;
+            }
+
+            this.renderStrategyChart();
+            this.updateStrategyChartSummary();
+        } catch (error) {
+            if (state.loadToken !== loadToken) {
+                return;
+            }
+            console.error('Failed to load strategy chart:', error);
+            if (container) {
+                const message = error?.message || '加载策略图表失败';
+                container.innerHTML = `<div class="alert alert-danger mb-0">${message}</div>`;
+            }
+            state.fullBars = [];
+            state.visibleCount = 0;
+            this.updateStrategyChartStatus('加载失败');
+        } finally {
+            if (state.loadToken === loadToken) {
+                state.loadToken = null;
+                state.loading = false;
+                this.updateStrategyChartButtons();
+                if (state.fullBars && state.fullBars.length) {
+                    this.updateStrategyChartStatus();
+                }
+            }
+        }
+    }
+
+    startStrategyChartRealtime() {
+        const state = this.getStrategyChartState();
+        if (!state.currentStrategy || !state.symbol) {
+            this.updateStrategyChartStatus('缺少标的，无法实时刷新');
+            return;
+        }
+        this.stopStrategyChartPlayback({ restoreFull: true, silent: true });
+        this.stopStrategyChartRealtime({ silent: true });
+        state.isRealtime = true;
+        this.updateStrategyChartButtons();
+        this.updateStrategyChartStatus();
+        const refresh = () => {
+            if (!state.currentStrategy) return;
+            this.loadStrategyChart(state.currentStrategy, {
+                symbol: state.symbol,
+                keepVisibleCount: true,
+                useCache: false,
+                forceRefresh: true
+            }).catch((err) => console.warn('Strategy realtime refresh failed:', err));
+        };
+        refresh();
+        state.realtimeTimer = setInterval(refresh, this.getStrategyChartRefreshIntervalMs(state.interval));
+    }
+
+    stopStrategyChartRealtime(options = {}) {
+        const state = this.getStrategyChartState();
+        if (state.realtimeTimer) {
+            clearInterval(state.realtimeTimer);
+            state.realtimeTimer = null;
+        }
+        const wasRealtime = state.isRealtime;
+        state.isRealtime = false;
+        if (!options.silent && wasRealtime) {
+            this.updateStrategyChartStatus();
+        }
+        this.updateStrategyChartButtons();
+    }
+
+    async startStrategyChartPlayback() {
+        const state = this.getStrategyChartState();
+        if (!state.currentStrategy) return;
+        if (!state.fullBars || !state.fullBars.length) {
+            await this.loadStrategyChart(state.currentStrategy, {
+                symbol: state.symbol
+            }).catch(() => {});
+            if (!state.fullBars || !state.fullBars.length) {
+                return;
+            }
+        }
+
+        const todayKey = this.getLocalDayKey(Date.now());
+        const todaysOrders = state.orders.filter((order) => order.dayKey === todayKey);
+        if (!todaysOrders.length) {
+            this.updateStrategyChartStatus('今日暂无成交记录');
+            return;
+        }
+
+        const firstOrderTime = todaysOrders[0].time;
+        const startIndex = state.fullBars.findIndex((bar) => bar.x >= firstOrderTime);
+        if (startIndex === -1) {
+            this.updateStrategyChartStatus('当前区间无今日成交对应的K线');
+            return;
+        }
+
+        this.stopStrategyChartRealtime({ silent: true });
+        this.stopStrategyChartPlayback({ restoreFull: false, silent: true });
+
+        state.isReplaying = true;
+        state.visibleCount = Math.max(1, startIndex + 1);
+        this.renderStrategyChart();
+        this.updateStrategyChartButtons();
+        this.updateStrategyChartStatus();
+
+        state.replayTimer = setInterval(() => {
+            if (!state.isReplaying) {
+                clearInterval(state.replayTimer);
+                state.replayTimer = null;
+                return;
+            }
+            if (state.visibleCount >= state.fullBars.length) {
+                this.stopStrategyChartPlayback({ restoreFull: true, complete: true });
+                return;
+            }
+            state.visibleCount = Math.min(state.visibleCount + 1, state.fullBars.length);
+            this.renderStrategyChart();
+        }, 1000);
+    }
+
+    stopStrategyChartPlayback(options = {}) {
+        const state = this.getStrategyChartState();
+        const { restoreFull = true, silent = false, complete = false } = options || {};
+        if (state.replayTimer) {
+            clearInterval(state.replayTimer);
+            state.replayTimer = null;
+        }
+        const wasReplaying = state.isReplaying;
+        state.isReplaying = false;
+        if (restoreFull && state.fullBars && state.fullBars.length) {
+            state.visibleCount = state.fullBars.length;
+        }
+        if (!silent && (wasReplaying || complete)) {
+            this.renderStrategyChart({ extraStatus: complete ? '回放完成' : '' });
+        } else if (!silent) {
+            this.updateStrategyChartStatus(complete ? '回放完成' : '');
+        }
+        this.updateStrategyChartButtons();
+        if (complete && silent) {
+            this.updateStrategyChartStatus('回放完成');
+        }
+    }
+
+    toggleStrategyChartRealtime() {
+        const state = this.getStrategyChartState();
+        if (state.isRealtime) {
+            this.stopStrategyChartRealtime();
+        } else {
+            this.startStrategyChartRealtime();
+        }
+    }
+
+    toggleStrategyChartPlayback() {
+        const state = this.getStrategyChartState();
+        if (state.isReplaying) {
+            this.stopStrategyChartPlayback({ restoreFull: true });
+        } else {
+            this.startStrategyChartPlayback();
+        }
+    }
+
     async openStrategyDetails(name) {
         try {
             this.currentStrategyDetails = name;
@@ -7914,6 +8803,26 @@ class TradingApp {
                 const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}`);
                 if (res.success) s = res.strategy;
             } catch {}
+
+            const initialSymbol = this.resolveStrategySymbol(s);
+            this.setupStrategyChartTab();
+            this.resetStrategyChartState({
+                keepControls: true,
+                currentStrategy: name,
+                symbol: initialSymbol || ''
+            });
+            const chartState = this.getStrategyChartState();
+            if (initialSymbol) {
+                chartState.symbol = initialSymbol;
+            }
+            if (chartState.symbol) {
+                this.loadStrategyChart(name, {
+                    symbol: chartState.symbol,
+                    forceExecutions: true
+                }).catch((err) => console.warn('Failed to load strategy chart:', err));
+            } else {
+                this.updateStrategyChartStatus('缺少标的');
+            }
             const typeEl = document.getElementById('detailsStrategyType');
             const trigEl = document.getElementById('detailsTriggerCount');
             const lastEl = document.getElementById('detailsLastTriggered');
@@ -7979,6 +8888,9 @@ class TradingApp {
                             symbolInput.value = resolvedSymbol || '';
                             this.summaryPrimaryCurrent = resolvedSymbol ? resolvedSymbol.toUpperCase() : null;
                             this.updateSummaryPrimaryStatus(resolvedSymbol ? 'saved' : 'empty');
+                        }
+                        if (resolvedSymbol) {
+                            this.updateStrategyChartSymbol(resolvedSymbol, { ensureLoaded: true });
                         }
                         if (highlightsEl) {
                             const points = Array.isArray(info.summary_points) ? info.summary_points : [];
@@ -8659,6 +9571,7 @@ class TradingApp {
                 console.error('Prefetch strategy executions error:', err);
                 executionData = [];
             }
+            this.applyStrategyChartOrders(executionData, { redraw: true });
             const loaders = [
                 this.loadStrategyPerformance(name, { range: '1d', executions: executionData }),
                 this.loadStrategyExecutions(name, { executions: executionData }),
@@ -8798,6 +9711,7 @@ class TradingApp {
             this.executionsPagination.currentPage = 1;
             this.renderExecutionsTable();
             this.renderExecutionsPagination();
+            this.applyStrategyChartOrders(filled);
         } catch (e) {
             console.error('Load executions error:', e);
         }

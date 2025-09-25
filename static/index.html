@@ -1130,6 +1130,11 @@
                   <i class="fas fa-chart-line"></i> <span id="charts-tab-text">Charts</span>
                 </button>
               </li>
+              <li class="nav-item" role="presentation" id="strategy-chart-tab-wrap">
+                <button class="nav-link" id="strategy-chart-tab" data-bs-toggle="tab" data-bs-target="#strategy-chart" type="button" role="tab" aria-controls="strategy-chart" aria-selected="false">
+                  <i class="fas fa-chart-area"></i> 策略K线
+                </button>
+              </li>
               <li class="nav-item" role="presentation" id="executions-tab-wrap">
                 <button class="nav-link" id="executions-tab" data-bs-toggle="tab" data-bs-target="#executions" type="button" role="tab" aria-controls="executions" aria-selected="false">
                   <i class="fas fa-list"></i> Executions
@@ -1276,16 +1281,16 @@
                         <th>Actions</th>
                       </tr>
                     </thead>
-                    <tbody></tbody>
-                  </table>
-                </div>
+                  <tbody></tbody>
+                </table>
               </div>
+            </div>
 
-              <!-- Charts Tab -->
-              <div class="tab-pane fade show active" id="charts" role="tabpanel" aria-labelledby="charts-tab">
-                <div class="row">
-                  <div class="col-md-6">
-                    <div class="card">
+            <!-- Charts Tab -->
+            <div class="tab-pane fade show active" id="charts" role="tabpanel" aria-labelledby="charts-tab">
+              <div class="row">
+                <div class="col-md-6">
+                  <div class="card">
                       <div class="card-header">
                         <h6 class="mb-0"><i class="fas fa-chart-line"></i> Cumulative PnL</h6>
                       </div>
@@ -1328,6 +1333,52 @@
                   </div>
                 </div>
               </div>
+
+            <!-- Strategy Chart Tab -->
+            <div class="tab-pane fade" id="strategy-chart" role="tabpanel" aria-labelledby="strategy-chart-tab">
+              <div class="d-flex flex-wrap gap-3 align-items-end mb-3">
+                <div class="d-flex flex-wrap gap-3 align-items-end">
+                  <div>
+                    <label for="strategyChartInterval" class="form-label small mb-1">Interval</label>
+                    <select class="form-select form-select-sm" id="strategyChartInterval">
+                      <option value="1 min">1 minute</option>
+                      <option value="5 mins" selected>5 minutes</option>
+                      <option value="15 mins">15 minutes</option>
+                      <option value="30 mins">30 minutes</option>
+                      <option value="1 hour">1 hour</option>
+                      <option value="1 day">1 day</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="strategyChartDuration" class="form-label small mb-1">Duration</label>
+                    <select class="form-select form-select-sm" id="strategyChartDuration">
+                      <option value="1 D" selected>1 Day</option>
+                      <option value="2 D">2 Days</option>
+                      <option value="5 D">5 Days</option>
+                      <option value="1 W">1 Week</option>
+                      <option value="1 M">1 Month</option>
+                      <option value="3 M">3 Months</option>
+                      <option value="1 Y">1 Year</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="ms-auto d-flex flex-wrap gap-2">
+                  <button class="btn btn-outline-success btn-sm" id="strategyChartRealtimeBtn" type="button">
+                    <i class="fas fa-play"></i> 实时
+                  </button>
+                  <button class="btn btn-outline-secondary btn-sm" id="strategyChartReplayBtn" type="button">
+                    <i class="fas fa-history"></i> 回放
+                  </button>
+                </div>
+              </div>
+              <div id="strategyChartContainer" class="border rounded" style="min-height: 420px;">
+                <div class="text-center text-muted py-5" id="strategyChartPlaceholder">加载策略后将显示K线图。</div>
+              </div>
+              <div class="d-flex justify-content-between align-items-center mt-2 small text-muted">
+                <span id="strategyChartSummary"></span>
+                <span id="strategyChartStatus"></span>
+              </div>
+            </div>
 
               <!-- Executions Tab -->
               <div class="tab-pane fade" id="executions" role="tabpanel" aria-labelledby="executions-tab">
