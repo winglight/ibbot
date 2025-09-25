@@ -308,14 +308,15 @@ class DatabaseManager:
             status = order.status or 'Submitted'
             cursor.execute(
                 """
-                INSERT INTO orders 
-                (order_id, symbol, action, quantity, order_type, price, status, created_at, updated_at, executed_at, order_source, rule_id, exchange, sec_type, commission, pnl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO orders
+                (order_id, symbol, action, quantity, order_type, price, status, created_at, updated_at, executed_at,
+                 order_source, strategy_name, rule_id, exchange, sec_type, commission, pnl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order.order_id, order.symbol, order.action, order.quantity,
                     order.order_type, order.price, status, created, created, _normalise_iso_timestamp(order.executed_at),
-                    order.order_source, order.rule_id, order.exchange, order.sec_type,
+                    order.order_source, getattr(order, 'strategy_name', None), order.rule_id, order.exchange, order.sec_type,
                     getattr(order, 'commission', None), getattr(order, 'pnl', None),
                 ),
             )
