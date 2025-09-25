@@ -82,6 +82,7 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
         "remaining": 0 if getattr(order, "status", None) == "Filled" else getattr(order, "quantity", 0),
         "submit_time": created_iso,
         "order_source": getattr(order, "order_source", "manual"),
+        "strategy_name": getattr(order, "strategy_name", None),
         "trigger_type": trigger_type,
         "commission": getattr(order, "commission", None),
         "pnl": getattr(order, "pnl", None),
