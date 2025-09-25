@@ -85,31 +85,8 @@ const METRIC_LABELS = {
     spread: "价差变化",
 };
 
-class OptimizerApp {
-    constructor(root) {
-        this.root = root;
-        this.modalRoot = document.getElementById('modal-root');
-        this.refreshButton = document.getElementById('btn-refresh');
-        this.refreshMetadataButton = document.getElementById('btn-refresh-metadata');
-        this.newPlanButton = document.getElementById('btn-new-plan');
-        this.state = {
-            metadata: { base_metrics: [], feature_metrics: [], algorithms: [] },
-            plans: [],
-        };
-    }
-
-    formatMetricName(metric) {
-        return METRIC_LABELS[metric] || metric;
-    }
-
-    formatMetricList(list) {
-        if (!list || !list.length) {
-            return '无';
-        }
-        return list.map((item) => this.formatMetricName(item)).join(', ');
-    }
-
-    formatNumber(value, digits = 2) {
+const FormatUtils = {
+    number(value, digits = 2) {
         if (value === null || value === undefined) {
             return '-';
         }
@@ -118,9 +95,8 @@ class OptimizerApp {
             return '-';
         }
         return num.toFixed(digits);
-    }
-
-    formatDuration(seconds) {
+    },
+    duration(seconds) {
         if (seconds === null || seconds === undefined) {
             return '-';
         }
@@ -151,9 +127,8 @@ class OptimizerApp {
             parts.push(`${secs || Math.round(value)} 秒`);
         }
         return parts.join(' ');
-    }
-
-    formatPercent(value, digits = 1) {
+    },
+    percent(value, digits = 1) {
         if (value === null || value === undefined) {
             return '-';
         }
@@ -162,9 +137,8 @@ class OptimizerApp {
             return '-';
         }
         return `${(num * 100).toFixed(digits)}%`;
-    }
-
-    formatDrawdown(value, digits = 2) {
+    },
+    drawdown(value, digits = 2) {
         if (value === null || value === undefined) {
             return '-';
         }
@@ -180,7 +154,7 @@ class OptimizerApp {
             if (!Number.isFinite(parsed)) {
                 return trimmed;
             }
-            return this.formatDrawdown(parsed, digits);
+            return FormatUtils.drawdown(parsed, digits);
         }
         const num = Number(value);
         if (!Number.isFinite(num)) {
@@ -190,6 +164,56 @@ class OptimizerApp {
             return `${(num * 100).toFixed(digits)}%`;
         }
         return num.toFixed(digits);
+    },
+};
+
+const HtmlUtils = {
+    escape(value) {
+        return (value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    },
+};
+
+class OptimizerApp {
+    constructor(root) {
+        this.root = root;
+        this.modalRoot = document.getElementById('modal-root');
+        this.refreshButton = document.getElementById('btn-refresh');
+        this.refreshMetadataButton = document.getElementById('btn-refresh-metadata');
+        this.newPlanButton = document.getElementById('btn-new-plan');
+        this.state = {
+            metadata: { base_metrics: [], feature_metrics: [], algorithms: [] },
+            plans: [],
+        };
+    }
+
+    formatMetricName(metric) {
+        return METRIC_LABELS[metric] || metric;
+    }
+
+    formatMetricList(list) {
+        if (!list || !list.length) {
+            return '无';
+        }
+        return list.map((item) => this.formatMetricName(item)).join(', ');
+    }
+
+    formatNumber(value, digits = 2) {
+        return FormatUtils.number(value, digits);
+    }
+
+    formatDuration(seconds) {
+        return FormatUtils.duration(seconds);
+    }
+
+    formatPercent(value, digits = 1) {
+        return FormatUtils.percent(value, digits);
+    }
+
+    formatDrawdown(value, digits = 2) {
+        return FormatUtils.drawdown(value, digits);
     }
 
     async init() {
@@ -403,8 +427,21 @@ class OptimizerApp {
     }
 
     renderReportCard(report, planId) {
-        const statusClass = report.state === 'completed' ? 'success' : report.state === 'failed' ? 'failed' : 'running';
-        const statusLabel = report.state === 'completed' ? '完成' : report.state === 'failed' ? '失败' : '进行中';
+        const statusMap = {
+            completed: { className: 'success', label: '完成' },
+            failed: { className: 'failed', label: '失败' },
+            running: { className: 'running', label: '进行中' },
+            stopped: { className: 'stopped', label: '已停止' },
+            pending: { className: 'running', label: '排队中' },
+        };
+        const statusInfo = statusMap[report.state] || { className: 'running', label: report.state || '-' };
+        const statusItems = [`<span class="status-pill ${statusInfo.className}">${statusInfo.label}</span>`];
+        if (report.state === 'running') {
+            statusItems.push(
+                `<button class="btn btn-ghost" data-report-action="stop-task" data-task-id="${report.task_id}" data-plan-id="${planId}">停止</button>`
+            );
+        }
+        const statusHtml = `<div class="actions-row">${statusItems.join('')}</div>`;
         const created = report.created_at ? new Date(report.created_at).toLocaleString() : '-';
         const completed = report.completed_at ? new Date(report.completed_at).toLocaleString() : '-';
         const summary = report.report?.summary;
@@ -473,7 +510,7 @@ class OptimizerApp {
                         <h3>任务 ${report.task_id}</h3>
                         <p class="section-subtitle">开始于 ${created}${completed !== '-' ? ` · 完成于 ${completed}` : ''}</p>
                     </div>
-                    <span class="status-pill ${statusClass}">${statusLabel}</span>
+                    ${statusHtml}
                 </header>
                 ${metricsHtml}
                 ${combinationHtml}
@@ -645,10 +682,7 @@ class OptimizerApp {
     }
 
     escapeHtml(value) {
-        return (value || '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
+        return HtmlUtils.escape(value);
     }
 
     setupReportModalEvents(backdrop) {
@@ -661,6 +695,32 @@ class OptimizerApp {
             const action = button.dataset.reportAction;
             if (!action) return;
             event.preventDefault();
+            if (action === 'stop-task') {
+                const taskId = button.dataset.taskId;
+                const planId = button.dataset.planId || '';
+                if (!taskId) return;
+                const originalLabel = button.textContent;
+                button.disabled = true;
+                button.textContent = '停止中...';
+                try {
+                    const response = await this.postJson(`/api/optimize/tasks/${taskId}/stop`);
+                    this.closeModal();
+                    if (planId) {
+                        await this.openReportModal(planId);
+                    } else {
+                        await this.handleRefresh();
+                    }
+                    if (!response.accepted) {
+                        alert('该任务已完成或已停止。');
+                    }
+                } catch (err) {
+                    console.error(err);
+                    alert('停止任务失败，请稍后重试。');
+                    button.disabled = false;
+                    button.textContent = originalLabel;
+                }
+                return;
+            }
             if (action === 'copy-base' || action === 'copy-feature') {
                 const payload = this.decodePayload(button.dataset.payload);
                 if (!payload || !Object.keys(payload).length) {
@@ -1219,9 +1279,129 @@ class OptimizerApp {
     }
 }
 
+class ParameterComparisonApp {
+    constructor(root) {
+        this.root = root;
+        this.refreshButton = root.querySelector('[data-action="refresh"]');
+        this.content = root.querySelector('[data-role="compare-content"]');
+        this.state = { groups: [] };
+        this.errorMessage = '';
+    }
+
+    async init() {
+        await this.loadData();
+        this.render();
+        this.attachEvents();
+    }
+
+    attachEvents() {
+        if (this.refreshButton) {
+            this.refreshButton.addEventListener('click', async () => {
+                await this.handleRefresh();
+            });
+        }
+    }
+
+    async handleRefresh() {
+        if (this.content) {
+            this.content.innerHTML = '<div class="empty-state">数据刷新中...</div>';
+        }
+        await this.loadData();
+        this.render();
+    }
+
+    async loadData() {
+        this.errorMessage = '';
+        try {
+            const res = await fetch('/api/optimize/parameter-groups');
+            if (!res.ok) throw new Error('failed to load parameter groups');
+            const data = await res.json();
+            this.state.groups = Array.isArray(data.groups) ? data.groups : [];
+        } catch (err) {
+            console.error(err);
+            this.state.groups = [];
+            this.errorMessage = '加载横评数据失败，请稍后重试。';
+        }
+    }
+
+    render() {
+        if (!this.content) return;
+        if (this.errorMessage) {
+            this.content.innerHTML = `<div class="empty-state">${this.errorMessage}</div>`;
+            return;
+        }
+        if (!this.state.groups.length) {
+            this.content.innerHTML = '<div class="empty-state">暂无可对比的参数组，请先完成回测任务。</div>';
+            return;
+        }
+        const header = `
+            <thead>
+                <tr>
+                    <th>标的 / 策略</th>
+                    <th>参数组合</th>
+                    <th>Sharpe (均值/中位)</th>
+                    <th>回撤率 (均值/中位)</th>
+                    <th>收益率 (均值/中位)</th>
+                    <th>统计</th>
+                </tr>
+            </thead>
+        `;
+        const rows = this.state.groups.map((group) => this.renderRow(group)).join('');
+        this.content.innerHTML = `
+            <table class="table compare-table">
+                ${header}
+                <tbody>${rows}</tbody>
+            </table>
+        `;
+    }
+
+    renderRow(group) {
+        const plans = Array.isArray(group.plans) ? group.plans : [];
+        const planTags = plans
+            .map((plan) => `<span class="tag">${HtmlUtils.escape(plan.name)}</span>`)
+            .join('');
+        const planHtml = planTags ? `<div class="tag-list">${planTags}</div>` : '';
+        const parameters = group.parameters || {};
+        const parameterJson = HtmlUtils.escape(JSON.stringify(parameters, null, 2));
+        const sharpeAvg = FormatUtils.number(group.stats?.sharpe?.average, 3);
+        const sharpeMedian = FormatUtils.number(group.stats?.sharpe?.median, 3);
+        const drawdownAvg = FormatUtils.drawdown(group.stats?.max_drawdown?.average, 2);
+        const drawdownMedian = FormatUtils.drawdown(group.stats?.max_drawdown?.median, 2);
+        const returnAvg = FormatUtils.percent(group.stats?.annual_return?.average, 2);
+        const returnMedian = FormatUtils.percent(group.stats?.annual_return?.median, 2);
+        const taskIds = Array.isArray(group.task_ids) ? group.task_ids : [];
+        const taskTitle = HtmlUtils.escape(taskIds.join(', '));
+        return `
+            <tr>
+                <td>
+                    <strong>${HtmlUtils.escape(group.symbol)}</strong>
+                    <div class="section-subtitle">策略 ${HtmlUtils.escape(group.strategy)}</div>
+                    ${planHtml}
+                </td>
+                <td><pre>${parameterJson}</pre></td>
+                <td>${sharpeAvg} / ${sharpeMedian}</td>
+                <td>${drawdownAvg} / ${drawdownMedian}</td>
+                <td>${returnAvg} / ${returnMedian}</td>
+                <td>
+                    <div class="tag-list">
+                        <span class="tag">组合 ${group.sample_size}</span>
+                        <span class="tag" title="${taskTitle}">任务 ${taskIds.length}</span>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }
+}
+
 window.addEventListener('DOMContentLoaded', () => {
     const appRoot = document.getElementById('optimizer-app');
-    if (!appRoot) return;
-    const app = new OptimizerApp(appRoot);
-    app.init();
+    if (appRoot) {
+        const app = new OptimizerApp(appRoot);
+        app.init();
+    }
+    const compareRoot = document.getElementById('parameter-compare-app');
+    if (compareRoot) {
+        const compareApp = new ParameterComparisonApp(compareRoot);
+        compareApp.init();
+    }
 });

@@ -26,6 +26,7 @@ class TaskState(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    STOPPED = "stopped"
 
 
 class OptimizationRequest(BaseModel):
@@ -403,6 +404,43 @@ class OptimizationPlanReportEntry(BaseModel):
 class OptimizationPlanReportList(BaseModel):
     plan_id: str
     reports: List[OptimizationPlanReportEntry]
+
+
+class TaskStopResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    task_id: str
+    accepted: bool = True
+
+
+class MetricAggregate(BaseModel):
+    average: Optional[float] = None
+    median: Optional[float] = None
+
+
+class ParameterGroupPlanRef(BaseModel):
+    id: str
+    name: str
+
+
+class ParameterGroupStats(BaseModel):
+    sharpe: MetricAggregate = Field(default_factory=MetricAggregate)
+    max_drawdown: MetricAggregate = Field(default_factory=MetricAggregate)
+    annual_return: MetricAggregate = Field(default_factory=MetricAggregate)
+
+
+class ParameterGroupPerformance(BaseModel):
+    group_id: str
+    symbol: str
+    strategy: str
+    parameters: Dict[str, Any]
+    sample_size: int
+    task_ids: List[str] = Field(default_factory=list)
+    plans: List[ParameterGroupPlanRef] = Field(default_factory=list)
+    stats: ParameterGroupStats
+
+
+class ParameterGroupPerformanceResponse(BaseModel):
+    groups: List[ParameterGroupPerformance] = Field(default_factory=list)
 
 
 class StrategyGenerationRequest(BaseModel):

@@ -28,7 +28,8 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
 
     logger = _task_logger(task_id)
     logger.info("Starting optimization task")
-    store.update_state(task_id, TaskState.RUNNING, progress=5, message="running")
+    initial_progress = 5
+    store.update_state(task_id, TaskState.RUNNING, progress=initial_progress, message="running")
 
     try:
         engine = OptimizationEngine(request)
@@ -38,9 +39,15 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
         best_result: Tuple[float, OptimizationResultItem] | None = None
         started_at = datetime.utcnow()
         start_perf = perf_counter()
+        progress_value = initial_progress
 
         for idx, outcome in enumerate(engine.run(), start=1):
+            if store.is_stop_requested(task_id):
+                store.mark_stopped(task_id, progress=progress_value)
+                logger.info("Stop requested, aborting optimization task")
+                return
             progress = min(95, max(10, int(idx / total * 90)))
+            progress_value = progress
             store.update_state(
                 task_id,
                 TaskState.RUNNING,
@@ -58,6 +65,10 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
                 store.append_fail_reason(task_id, reason)
 
         if not results:
+            if store.is_stop_requested(task_id):
+                store.mark_stopped(task_id, progress=progress_value)
+                logger.info("Stop requested before completion, task marked as stopped")
+                return
             message = "所有组合执行失败"
             store.fail_task(task_id, message)
             logger.warning(message)
@@ -65,6 +76,11 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
 
         completed_at = datetime.utcnow()
         elapsed_seconds = max(perf_counter() - start_perf, 0.0)
+
+        if store.is_stop_requested(task_id):
+            store.mark_stopped(task_id, progress=progress_value)
+            logger.info("Stop requested after processing combinations, task marked as stopped")
+            return
 
         best_item = best_result[1] if best_result else results[0]
         best_metrics = best_item.metrics
