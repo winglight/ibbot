@@ -1464,16 +1464,23 @@ class IBKRClient:
             # Use synchronous methods in async context
             account_values = ib.accountValues()
 
-            info = {
-                'account_id': None,
-                'account_type': 'Paper' if connection_manager.config.paper_trading else 'Live',
-                'total_cash': 0,
-                'available_funds': 0,
-                'buying_power': 0,
-                'net_liquidation': 0,
-                'unrealized_pnl': 0,
-                'realized_pnl': 0
-            }
+            # Start from the last cached snapshot when available so that we don't
+            # accidentally wipe fields to zero if IBKR returns a partial update.
+            info = self._return_cached_account_info() or {}
+            info = dict(info)  # ensure we don't mutate the cached reference
+
+            # Guarantee all expected keys exist even when we start from a cached
+            # snapshot created by an earlier version of the code.
+            info.setdefault('account_id', None)
+            info['account_type'] = (
+                'Paper' if connection_manager.config.paper_trading else 'Live'
+            )
+            info.setdefault('total_cash', 0.0)
+            info.setdefault('available_funds', 0.0)
+            info.setdefault('buying_power', 0.0)
+            info.setdefault('net_liquidation', 0.0)
+            info.setdefault('unrealized_pnl', 0.0)
+            info.setdefault('realized_pnl', 0.0)
             
             # Get account ID from account values
             def _parse_float(val: Any) -> float:
