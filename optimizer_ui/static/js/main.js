@@ -1513,8 +1513,8 @@ class ParameterComparisonApp {
             .join('');
         const planHtml = planTags ? `<div class="tag-list">${planTags}</div>` : '';
         const parameters = group.parameters || {};
-        const parameterJson = HtmlUtils.escape(JSON.stringify(parameters, null, 2));
         const { base, features } = this.splitParameters(parameters);
+        const parameterHtml = this.renderParameterBlocks(base, features);
         const basePayload = HtmlUtils.escape(this.encodePayload(base));
         const featurePayload = HtmlUtils.escape(this.encodePayload(features));
         const planId = HtmlUtils.escape(this.pickPlanId(plans));
@@ -1535,7 +1535,7 @@ class ParameterComparisonApp {
                     ${planHtml}
                 </td>
                 <td>
-                    <pre>${parameterJson}</pre>
+                    ${parameterHtml}
                     <div class="table-actions">
                         <button class="btn btn-ghost" data-compare-action="generate-strategy" data-base="${basePayload}" data-features="${featurePayload}" data-plan-id="${planId}" data-strategy-name="${strategyName}">生成策略</button>
                     </div>
@@ -1568,6 +1568,37 @@ class ParameterComparisonApp {
             }
         });
         return { base, features };
+    }
+
+    renderParameterBlocks(baseParameters, featureParameters) {
+        const baseJson = HtmlUtils.escape(JSON.stringify(baseParameters || {}, null, 2));
+        const featureEntries = Object.entries(featureParameters || {});
+        const hasFeatures = featureEntries.length > 0;
+        const featureJson = HtmlUtils.escape(
+            hasFeatures ? JSON.stringify(Object.fromEntries(featureEntries), null, 2) : '{}'
+        );
+        if (!hasFeatures) {
+            return `
+                <div class="compare-params">
+                    ${this.renderParameterBlock('基础参数', baseJson)}
+                </div>
+            `;
+        }
+        return `
+            <div class="compare-params compare-params--with-features">
+                ${this.renderParameterBlock('基础参数', baseJson)}
+                ${this.renderParameterBlock('特征参数', featureJson)}
+            </div>
+        `;
+    }
+
+    renderParameterBlock(title, content) {
+        return `
+            <div class="compare-params-block">
+                <h5>${title}</h5>
+                <pre>${content}</pre>
+            </div>
+        `;
     }
 
     encodePayload(payload) {
