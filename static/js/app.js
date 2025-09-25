@@ -6844,6 +6844,10 @@ class TradingApp {
         const frag = document.createDocumentFragment();
         data.forEach(order => {
             if (!order) return;
+            const createdTimestamp = order.created_at
+                || order.submit_time
+                || order.timestamp
+                || null;
             const normalized = {
                 order_id: order.order_id,
                 symbol: order.symbol,
@@ -6858,8 +6862,11 @@ class TradingApp {
                 commission: Number(order.commission ?? 0),
                 order_source: order.order_source || 'strategy',
                 notes: order.notes || '',
-                created_at: order.created_at || order.submit_time || null,
-                submit_time: order.submit_time || order.created_at || null,
+                created_at: createdTimestamp,
+                submit_time: order.submit_time
+                    || order.created_at
+                    || order.timestamp
+                    || createdTimestamp,
             };
             const row = this.orderManager.generateOrderRowHtml(normalized);
             if (row) {
