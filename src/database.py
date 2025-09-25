@@ -126,6 +126,26 @@ class DatabaseManager:
                 """
             )
 
+            # 加速常用查询：按策略分页、按策略聚合PNL、按创建时间筛选
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_strategy_source_created
+                ON orders(strategy_name, order_source, is_deleted, created_at DESC)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_strategy_activity
+                ON orders(strategy_name, is_deleted, executed_at, created_at)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_created_flag
+                ON orders(is_deleted, created_at DESC)
+                """
+            )
+
             # 兼容旧库：补齐缺失列
             cursor.execute("PRAGMA table_info('orders')")
             existing_columns = {row[1] for row in cursor.fetchall()}
@@ -564,6 +584,40 @@ class DatabaseManager:
                 orders.append(Order(*row))
             database_logger.debug(f"Loaded {len(orders)} orders for strategy {strategy_name}")
             return orders
+
+    def get_strategy_daily_pnl(self, strategy_name: str) -> List[Dict[str, float]]:
+        """按天聚合指定策略的PNL数据"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT substr(COALESCE(executed_at, created_at), 1, 10) AS trade_day,
+                       SUM(pnl) AS total_pnl
+                FROM orders
+                WHERE strategy_name = ?
+                  AND is_deleted = 0
+                  AND pnl IS NOT NULL
+                GROUP BY trade_day
+                ORDER BY trade_day
+                """,
+                (strategy_name,),
+            )
+            rows = cursor.fetchall()
+
+        results: List[Dict[str, float]] = []
+        for day, pnl_value in rows:
+            if not day:
+                continue
+            try:
+                pnl_float = float(pnl_value) if pnl_value is not None else 0.0
+            except (TypeError, ValueError):
+                pnl_float = 0.0
+            results.append({"date": day, "pnl": pnl_float})
+
+        database_logger.debug(
+            f"Loaded {len(results)} aggregated pnl rows for strategy {strategy_name}"
+        )
+        return results
 
     def get_strategy_order_stats(
         self,
