@@ -328,6 +328,30 @@ class StrategyManager:
                 record.file_path = runtime_path
             self._save_strategies()
 
+        stored_primary = self._get_strategy_setting(name, "primary_symbol")
+        runtime_symbol = (
+            stored_primary
+            or (getattr(record, "primary_symbol", None) if record else None)
+        )
+        symbol_value: Optional[str] = None
+        if runtime_symbol:
+            try:
+                symbol_value = str(runtime_symbol).strip().upper() or None
+            except Exception:
+                symbol_value = None
+        if symbol_value and hasattr(strategy_instance, "symbol"):
+            try:
+                setattr(strategy_instance, "symbol", symbol_value)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Failed to apply primary symbol to runtime strategy {name}: {exc}"
+                )
+        if symbol_value and hasattr(strategy_instance, "primary_symbol"):
+            try:
+                setattr(strategy_instance, "primary_symbol", symbol_value)
+            except Exception:
+                pass
+
         strategy_instance.enabled = record.enabled if record else strategy_instance.enabled
         if strategy_instance.enabled:
             strategy_instance.start()
@@ -527,6 +551,7 @@ class StrategyManager:
         changed = False
 
         if updates:
+            updated_primary_symbol: Optional[str] = None
             for key, value in updates.items():
                 if current.get(key) != value:
                     current[key] = value
@@ -1847,9 +1872,11 @@ class StrategyManager:
                     if symbol_value:
                         settings_to_save[storage_key] = symbol_value
                         setattr(strategy, 'primary_symbol', symbol_value)
+                        updated_primary_symbol = symbol_value
                     else:
                         settings_to_remove.add(storage_key)
                         setattr(strategy, 'primary_symbol', None)
+                        updated_primary_symbol = None
                     restart_data_push = True
                 elif key == 'schedule':
                     setattr(strategy, key, value)
@@ -1897,6 +1924,31 @@ class StrategyManager:
 
             # 持久化SL/TP设置
             self._persist_strategy_settings(settings_to_save, settings_to_remove)
+
+            if 'primary_symbol' in updates:
+                runtime_instance = self.internal_strategies_runtime.get(name)
+                if runtime_instance and hasattr(runtime_instance, 'symbol'):
+                    try:
+                        setattr(runtime_instance, 'symbol', updated_primary_symbol)
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        strategy_logger.warning(
+                            f"Failed to update runtime strategy symbol for {name}: {exc}"
+                        )
+                if runtime_instance and hasattr(runtime_instance, 'primary_symbol'):
+                    try:
+                        setattr(runtime_instance, 'primary_symbol', updated_primary_symbol)
+                    except Exception:
+                        pass
+                if updated_primary_symbol and runtime_instance:
+                    dom_service = getattr(runtime_instance, 'dom_service', None)
+                    ensure = getattr(dom_service, 'ensure_stream_running', None)
+                    if callable(ensure):
+                        try:
+                            ensure(updated_primary_symbol)
+                        except Exception as exc:  # pragma: no cover - defensive guard
+                            strategy_logger.warning(
+                                f"Failed to auto-start DOM stream for {name}: {exc}"
+                            )
 
             if settings_to_remove:
                 strategy_logger.info(f"Removed strategy settings for {name}: {', '.join(sorted(settings_to_remove))}")

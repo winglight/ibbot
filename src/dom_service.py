@@ -3,6 +3,7 @@ import time
 import asyncio
 import inspect
 import copy
+import threading
 from typing import Dict, List, Optional, Any, Callable, DefaultDict
 from collections import defaultdict
 from threading import Lock
@@ -26,6 +27,7 @@ from src.dom_parameter_tuner import (
 )
 from src.dom_signal_tracker import SignalOutcomeTracker, resolve_outcome_config
 from src.dom_stats import DomStatsAggregator
+from src.dom_settings import get_automation_defaults
 
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
 
@@ -85,6 +87,11 @@ class DOMService:
         self._last_start_error_status: int = 200
         self._start_tasks: Dict[str, asyncio.Task[bool]] = {}
         self._start_tasks_lock = Lock()
+        self._auto_start_symbol: Optional[str] = None
+        self._auto_start_num_rows: int = max(
+            5, min(int(getattr(dom_config, "max_levels", 10) or 10), 30)
+        )
+        self._auto_start_worker_started = False
 
         persisted_config = self._load_persisted_config()
         if persisted_config:
@@ -107,6 +114,21 @@ class DOMService:
                 tuner_parameters=None,
                 persist=False,
             )
+
+        try:
+            defaults = get_automation_defaults()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.debug("Failed to resolve DOM automation defaults: {}", exc)
+            defaults = None
+        if defaults and defaults.symbol:
+            symbol = str(defaults.symbol).strip().upper()
+            if symbol:
+                self._auto_start_symbol = symbol
+                if isinstance(defaults.limit, int) and defaults.limit > 0:
+                    self._auto_start_num_rows = max(
+                        5, min(int(defaults.limit), 30)
+                    )
+                self._start_auto_start_worker()
 
     # --------------------------------------------------------------
     def _on_depth_update(self, symbol: str, data: Dict) -> None:
@@ -555,6 +577,43 @@ class DOMService:
                 self._active_symbol_original = None
         return result
 
+    def ensure_stream_running(
+        self,
+        symbol: Optional[str],
+        *,
+        num_rows: Optional[int] = None,
+        force_restart: bool = False,
+    ) -> bool:
+        """Best-effort helper to keep a DOM stream active without blocking."""
+
+        symbol_code = (symbol or "").strip().upper()
+        if not symbol_code:
+            return False
+        if self.is_stream_active(symbol_code) or self.is_start_in_progress(symbol_code):
+            return True
+
+        target_rows = int(num_rows or self._auto_start_num_rows or 5)
+        try:
+            task = self.request_stream_start(
+                symbol_code, num_rows=target_rows, force_restart=force_restart
+            )
+        except RuntimeError:
+            try:
+                return self.start(
+                    symbol_code, num_rows=target_rows, force_restart=force_restart
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning(
+                    "DOM ensure_stream_running failed in blocking start",
+                    symbol=symbol_code,
+                    error=str(exc),
+                )
+                return False
+        else:
+            if isinstance(task, asyncio.Task):
+                task.add_done_callback(lambda fut: None)
+            return True
+
     async def start_stream(
         self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
     ) -> bool:
@@ -650,6 +709,41 @@ class DOMService:
 
     def stop(self, symbol: str) -> bool:
         return self._stop_stream_blocking(symbol)
+
+    def _start_auto_start_worker(self) -> None:
+        if not self._auto_start_symbol or self._auto_start_worker_started:
+            return
+
+        self._auto_start_worker_started = True
+
+        def _worker() -> None:
+            symbol = self._auto_start_symbol
+            if not symbol:
+                return
+            attempts = 0
+            max_attempts = 40
+            while attempts < max_attempts:
+                attempts += 1
+                if self.is_stream_active(symbol) or self.is_start_in_progress(symbol):
+                    return
+                if connection_manager.is_connected():
+                    try:
+                        if self.start(symbol, num_rows=self._auto_start_num_rows):
+                            logger.info("Auto-started DOM depth stream", symbol=symbol)
+                            return
+                    except Exception as exc:
+                        logger.warning(
+                            "Auto-start DOM stream attempt failed",
+                            symbol=symbol,
+                            error=str(exc),
+                        )
+                time.sleep(3)
+
+        threading.Thread(
+            target=_worker,
+            name="DOMAutoStart",
+            daemon=True,
+        ).start()
 
     def is_start_in_progress(self, symbol: Optional[str] = None) -> bool:
         symbol_key = (symbol or "").upper()
