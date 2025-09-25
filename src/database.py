@@ -7,7 +7,7 @@ import sqlite3
 import json
 import pandas as pd
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Sequence
+from typing import List, Dict, Any, Optional, Sequence, Union
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from loguru import logger
@@ -123,6 +123,26 @@ class DatabaseManager:
                     pnl REAL,
                     is_deleted INTEGER DEFAULT 0
                 )
+                """
+            )
+
+            # 加速常用查询：按策略分页、按策略聚合PNL、按创建时间筛选
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_strategy_source_created
+                ON orders(strategy_name, order_source, is_deleted, created_at DESC)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_strategy_activity
+                ON orders(strategy_name, is_deleted, executed_at, created_at)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_created_flag
+                ON orders(is_deleted, created_at DESC)
                 """
             )
 
@@ -565,6 +585,40 @@ class DatabaseManager:
             database_logger.debug(f"Loaded {len(orders)} orders for strategy {strategy_name}")
             return orders
 
+    def get_strategy_daily_pnl(self, strategy_name: str) -> List[Dict[str, float]]:
+        """按天聚合指定策略的PNL数据"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT substr(COALESCE(executed_at, created_at), 1, 10) AS trade_day,
+                       SUM(pnl) AS total_pnl
+                FROM orders
+                WHERE strategy_name = ?
+                  AND is_deleted = 0
+                  AND pnl IS NOT NULL
+                GROUP BY trade_day
+                ORDER BY trade_day
+                """,
+                (strategy_name,),
+            )
+            rows = cursor.fetchall()
+
+        results: List[Dict[str, float]] = []
+        for day, pnl_value in rows:
+            if not day:
+                continue
+            try:
+                pnl_float = float(pnl_value) if pnl_value is not None else 0.0
+            except (TypeError, ValueError):
+                pnl_float = 0.0
+            results.append({"date": day, "pnl": pnl_float})
+
+        database_logger.debug(
+            f"Loaded {len(results)} aggregated pnl rows for strategy {strategy_name}"
+        )
+        return results
+
     def get_strategy_order_stats(
         self,
         strategy_names: Optional[Sequence[str]] = None,
@@ -606,18 +660,46 @@ class DatabaseManager:
             )
             return stats
 
-    def delete_strategy_orders(self, strategy_name: str, order_source: str = 'strategy') -> int:
-        """删除指定策略的订单记录"""
+    def delete_strategy_orders(
+        self,
+        strategy_name: str,
+        order_source: Optional[Union[str, Sequence[str]]] = 'strategy',
+    ) -> int:
+        """删除指定策略的订单记录
+
+        Args:
+            strategy_name: 策略名称。
+            order_source: 订单来源。可以是单个来源、来源列表/序列，或 None 表示删除该策略的所有来源记录。
+        """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM orders WHERE strategy_name = ? AND order_source = ?",
-                (strategy_name, order_source),
-            )
-            deleted = cursor.rowcount
+            params: List[Any] = [strategy_name]
+            if order_source is None:
+                query = "DELETE FROM orders WHERE strategy_name = ?"
+            elif isinstance(order_source, (list, tuple, set)):
+                sources = list(order_source)
+                if not sources:
+                    return 0
+                placeholders = ",".join(["?"] * len(sources))
+                query = f"DELETE FROM orders WHERE strategy_name = ? AND order_source IN ({placeholders})"
+                params.extend(sources)
+            else:
+                query = "DELETE FROM orders WHERE strategy_name = ? AND order_source = ?"
+                params.append(order_source)
+
+            cursor.execute(query, params)
+            deleted = cursor.rowcount or 0
             conn.commit()
-            database_logger.info(f"Deleted {deleted} orders for strategy: {strategy_name}")
-            return deleted
+            if order_source is None:
+                source_desc = 'all sources'
+            elif isinstance(order_source, (list, tuple, set)):
+                source_desc = ','.join(map(str, order_source))
+            else:
+                source_desc = str(order_source)
+            database_logger.info(
+                f"Deleted {deleted} orders for strategy: {strategy_name} (source={source_desc})"
+            )
+            return int(deleted)
     
     # 历史数据相关方法
     def save_historical_data(self, symbol: str, data: pd.DataFrame, bar_size: str = "1 day"):
