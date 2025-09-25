@@ -413,9 +413,7 @@ class OptimizerApp {
                         <button class="btn btn-ghost" data-modal-close>关闭</button>
                     </header>
                     <main>
-                        ${reports.length
-                            ? reports.map((report) => this.renderReportCard(report, planId)).join('')
-                            : '<div class="empty-state">暂无报告</div>'}
+                        ${this.renderReportListContent(reports, planId)}
                     </main>
                 </div>
             `;
@@ -423,6 +421,29 @@ class OptimizerApp {
         } catch (err) {
             console.error(err);
             alert('加载报告列表失败');
+        }
+    }
+
+    renderReportListContent(reports, planId) {
+        return reports.length
+            ? reports.map((report) => this.renderReportCard(report, planId)).join('')
+            : '<div class="empty-state">暂无报告</div>';
+    }
+
+    async refreshReportModalContent(planId, container) {
+        if (!container) {
+            await this.openReportModal(planId);
+            return;
+        }
+        try {
+            const res = await fetch(`/api/optimize/plans/${planId}/reports`);
+            if (!res.ok) throw new Error('failed to load reports');
+            const data = await res.json();
+            const reports = data.reports ?? [];
+            container.innerHTML = this.renderReportListContent(reports, planId);
+        } catch (err) {
+            console.error(err);
+            alert('刷新报告列表失败');
         }
     }
 
@@ -700,13 +721,13 @@ class OptimizerApp {
                 const planId = button.dataset.planId || '';
                 if (!taskId) return;
                 const originalLabel = button.textContent;
+                const modalMain = button.closest('.modal-panel')?.querySelector('main');
                 button.disabled = true;
                 button.textContent = '停止中...';
                 try {
                     const response = await this.postJson(`/api/optimize/tasks/${taskId}/stop`);
-                    this.closeModal();
                     if (planId) {
-                        await this.openReportModal(planId);
+                        await this.refreshReportModalContent(planId, modalMain);
                     } else {
                         await this.handleRefresh();
                     }
@@ -716,8 +737,11 @@ class OptimizerApp {
                 } catch (err) {
                     console.error(err);
                     alert('停止任务失败，请稍后重试。');
-                    button.disabled = false;
-                    button.textContent = originalLabel;
+                } finally {
+                    if (button.isConnected) {
+                        button.disabled = false;
+                        button.textContent = originalLabel;
+                    }
                 }
                 return;
             }
