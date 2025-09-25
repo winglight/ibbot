@@ -289,7 +289,7 @@ class DOMStrategy(BaseStrategy):
         else:
             self._sell_signals += 1
         self.logger.info(
-            "DOM结构信号触发: direction=%s satisfied=%s symbol=%s price=%.2f",
+            "DOM结构信号触发: direction={} satisfied={} symbol={} price={:.2f}",
             "BUY" if direction > 0 else "SELL",
             ",".join(satisfied) or "-",
             symbol_code,
@@ -317,7 +317,7 @@ class DOMStrategy(BaseStrategy):
             and (now - self._last_execution_time) < self.signal_frequency_seconds
         ):
             self.logger.info(
-                "Execution frequency limit active: %.2fs remaining",
+                "Execution frequency limit active: {:.2f}s remaining",
                 self.signal_frequency_seconds - (now - self._last_execution_time),
             )
             return
@@ -338,7 +338,7 @@ class DOMStrategy(BaseStrategy):
                 self.logger.warning("Computed quantity is zero; skip order")
                 return
             self.logger.info(
-                "DOM strategy preparing order: direction=%s qty=%s price=%.2f",
+                "DOM strategy preparing order: direction={} qty={} price={:.2f}",
                 "BUY" if direction > 0 else "SELL",
                 quantity,
                 price,
