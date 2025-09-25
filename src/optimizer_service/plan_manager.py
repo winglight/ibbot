@@ -184,6 +184,9 @@ class PlanManager:
         task = self._scheduled_tasks.pop(plan_id, None)
         if task:
             task.cancel()
+        for task_id, record in self._task_store.list_tasks_by_plan(plan_id):
+            if record.state in {TaskState.RUNNING, TaskState.PENDING}:
+                self._task_store.request_stop(task_id)
         self._db.save_plan(self._plan_to_dict(plan))
         return plan
 
