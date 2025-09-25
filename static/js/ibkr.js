@@ -237,6 +237,24 @@ class IBKRConnectionManager {
         });
     }
 
+    requestSizingHistory(options = {}) {
+        const payload = { type: 'request_sizing_history' };
+        if (options.symbol) payload.symbol = options.symbol;
+        if (options.since) payload.since = options.since;
+        if (options.context) payload.context = options.context;
+        if (options.force) payload.force = true;
+
+        const limit = Number.isFinite(options.limit) ? Number(options.limit) : 50;
+        payload.limit = limit;
+
+        const keyParts = [options.symbol || '', options.since || '', limit];
+        const key = `sizing_history:${keyParts.join(':')}`;
+        return this._sendThrottled(key, payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 10000,
+        });
+    }
+
     requestStrategies(options = {}) {
         const payload = { type: 'request_strategies' };
         if (options.force) payload.force = true;

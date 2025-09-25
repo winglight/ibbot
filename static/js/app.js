@@ -429,10 +429,12 @@ class TradingApp {
         this.summaryDataFeedCurrent = null;
         this.wsHandlers = new Map();
         this.strategyPerformanceCells = new Map();
+        this.sizingHistoryCache = { table: [], latest: null, meta: null, context: null, receivedAt: 0 };
         this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
         this.registerWebSocketHandler('risk_rules', (payload) => this.handleRiskRulesMessage(payload));
         this.registerWebSocketHandler('strategies_snapshot', (payload) => this.handleStrategiesSnapshot(payload));
         this.registerWebSocketHandler('strategy_status', (payload) => this.handleStrategyStatusMessage(payload));
+        this.registerWebSocketHandler('sizing_history', (payload) => this.handleSizingHistorySnapshot(payload));
 
         this.data_push_state = {};
         this.sidePanelManagerInitialized = false;
@@ -541,6 +543,134 @@ class TradingApp {
             this.strategiesManager.displayStrategies(strategies);
         }
         return true;
+    }
+
+    handleSizingHistorySnapshot(payload) {
+        if (!payload || payload.type !== 'sizing_history') return false;
+        if (!payload.success) {
+            console.warn('Sizing history snapshot failed:', payload.error || 'unknown');
+            if (payload.context === 'gs_rules') {
+                this.applySizingRuleStatusesFromHistory(null);
+            }
+            return true;
+        }
+
+        const history = Array.isArray(payload.data) ? payload.data : [];
+        const meta = payload.meta && typeof payload.meta === 'object' ? payload.meta : {};
+        const context = payload.context;
+
+        const limitValue = Number(meta?.limit ?? 0);
+        const isTablePayload = !context || context === 'table' || (Number.isFinite(limitValue) && limitValue > 1);
+
+        this.sizingHistoryCache.meta = meta;
+        this.sizingHistoryCache.context = context;
+        this.sizingHistoryCache.receivedAt = Date.now();
+        if (isTablePayload) {
+            this.sizingHistoryCache.table = history;
+        }
+        if (history.length > 0) {
+            this.sizingHistoryCache.latest = history[0];
+        } else if (isTablePayload) {
+            this.sizingHistoryCache.latest = null;
+        }
+
+        if (isTablePayload) {
+            this.renderSizingHistory(history);
+        }
+
+        const latestRecord = history[0] || this.sizingHistoryCache.latest || null;
+        this.applySizingRuleStatusesFromHistory(latestRecord);
+
+        return true;
+    }
+
+    renderSizingHistory(history = []) {
+        const tbody = document.querySelector('#sizingHistoryTable tbody');
+        if (!tbody) return;
+
+        const records = Array.isArray(history) ? history : [];
+        if (records.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" class="text-center text-muted">
+                        No sizing history available
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        const rows = records.map((item) => {
+            const timeValue = item?.sent_at || item?.created_at || item?.timestamp;
+            let timestamp = '-';
+            if (timeValue) {
+                try {
+                    timestamp = new Date(timeValue).toLocaleString();
+                } catch (_) {
+                    timestamp = String(timeValue);
+                }
+            }
+            const currentPrice = item?.current_price;
+            const priceDisplay = (currentPrice !== null && currentPrice !== undefined)
+                ? `$${this.formatNumber(currentPrice)}`
+                : 'N/A';
+            return `
+                <tr>
+                    <td>${timestamp}</td>
+                    <td>${item?.symbol ?? '-'}</td>
+                    <td><span class="badge bg-${item?.action === 'BUY' ? 'success' : 'danger'}">${item?.action ?? '-'}</span></td>
+                    <td>${item?.suggested_quantity ?? '-'}</td>
+                    <td>${item?.sizing_method ?? '-'}</td>
+                    <td>${priceDisplay}</td>
+                </tr>
+            `;
+        }).join('');
+
+        tbody.innerHTML = rows;
+    }
+
+    normalizeRuleStatus(status) {
+        if (!status || typeof status !== 'object') {
+            return { passed: true, message: '正常' };
+        }
+        const passed = status.passed !== undefined ? !!status.passed : true;
+        let message = status.message;
+        if (!message) {
+            const errors = Array.isArray(status.errors) ? status.errors : [];
+            if (errors.length > 0) {
+                message = errors.map((err) => {
+                    if (typeof err === 'string') return err;
+                    try {
+                        return JSON.stringify(err);
+                    } catch (_) {
+                        return String(err);
+                    }
+                }).join(' | ');
+            }
+        }
+        if (!message) {
+            message = passed ? '正常' : '违规';
+        }
+        return { passed, message };
+    }
+
+    applySizingRuleStatusesFromHistory(latestRecord) {
+        const record = latestRecord && typeof latestRecord === 'object' ? latestRecord : null;
+        const gStatus = record?.g_rules_status && typeof record.g_rules_status === 'object'
+            ? record.g_rules_status
+            : {};
+        const sStatus = record?.s_rules_status && typeof record.s_rules_status === 'object'
+            ? record.s_rules_status
+            : {};
+        const lastCheck = record?.timestamp || record?.sent_at || record?.created_at || null;
+
+        for (let i = 0; i <= 5; i += 1) {
+            const key = `g${i}`;
+            this.updateRuleStatus(key, this.normalizeRuleStatus(gStatus[key]), lastCheck);
+        }
+        ['s0', 's1', 's2', 's3', 's4'].forEach((key) => {
+            this.updateRuleStatus(key, this.normalizeRuleStatus(sStatus[key]), lastCheck);
+        });
     }
 
     handleStrategyStatusMessage(payload) {
@@ -7306,30 +7436,19 @@ class TradingApp {
         this.showAlert('info', `正在编辑订单 ${orderId}，请修改后重新提交`);
     }
     async loadStrategies(options = {}) {
-        try {
-            if (this.ibkrManager && typeof this.ibkrManager.requestStrategies === 'function') {
-                const result = this.ibkrManager.requestStrategies({
-                    force: Boolean(options.force),
-                    minInterval: options.minInterval ?? 15000,
-                });
-                if (result !== 'failed') {
-                    return result;
-                }
+        if (this.ibkrManager && typeof this.ibkrManager.requestStrategies === 'function') {
+            const result = this.ibkrManager.requestStrategies({
+                force: Boolean(options.force),
+                minInterval: options.minInterval ?? 15000,
+            });
+            if (result === 'failed') {
+                console.warn('Failed to send strategies request via websocket');
             }
-
-            const data = await this.apiCall('/strategies');
-            if (data.success) {
-                this.handleStrategiesSnapshot({
-                    type: 'strategies_snapshot',
-                    success: true,
-                    strategies: data.strategies,
-                    source: 'http',
-                });
-            }
-        } catch (error) {
-            console.error('Failed to load strategies:', error);
-            this.strategiesLoaded = true; // Mark as loaded even on error to avoid repeated calls
+            return result;
         }
+
+        console.warn('WebSocket strategies request unavailable');
+        return 'failed';
     }
 
     displayStrategies(strategies) {
@@ -9079,41 +9198,31 @@ class TradingApp {
     // S Rules (Sizing Policy) related functions
 
 
-    async loadSizingHistory() {
-        try {
-            const data = await this.apiCall('/sizing/history?limit=50');
-            const history = data.data || [];
-            
-            const tbody = document.querySelector('#sizingHistoryTable tbody');
-            if (!tbody) return;
-            
-            tbody.innerHTML = history.map(item => {
-                const timeValue = item.sent_at || item.created_at || item.timestamp;
-            const timestamp = timeValue ? new Date(timeValue).toLocaleString() : '-';
-                return `
-                <tr>
-                    <td>${timestamp}</td>
-                    <td>${item.symbol}</td>
-                    <td><span class="badge bg-${item.action === 'BUY' ? 'success' : 'danger'}">${item.action}</span></td>
-                    <td>${item.suggested_quantity}</td>
-                    <td>${item.sizing_method}</td>
-                    <td>${item.current_price !== null && item.current_price !== undefined ? '$' + this.formatNumber(item.current_price) : 'N/A'}</td>
-                </tr>
-                `;
-            }).join('');
-            
-            if (history.length === 0) {
-                tbody.innerHTML = `
-                    <tr>
-                        <td colspan="6" class="text-center text-muted">
-                            No sizing history available
-                        </td>
-                    </tr>
-                `;
-            }
-        } catch (error) {
-            console.error('Failed to load sizing history:', error);
+    async loadSizingHistory(options = {}) {
+        const cachedHistory = this.sizingHistoryCache?.table;
+        if (Array.isArray(cachedHistory)) {
+            this.renderSizingHistory(cachedHistory);
+        } else {
+            this.renderSizingHistory([]);
         }
+
+        if (this.ibkrManager && typeof this.ibkrManager.requestSizingHistory === 'function') {
+            const result = this.ibkrManager.requestSizingHistory({
+                limit: Number.isFinite(options.limit) ? Number(options.limit) : 50,
+                symbol: options.symbol,
+                since: options.since,
+                context: options.context || 'table',
+                force: Boolean(options.force),
+                minInterval: options.minInterval,
+            });
+            if (result === 'failed') {
+                console.warn('Failed to request sizing history via websocket');
+            }
+            return result;
+        }
+
+        console.warn('WebSocket sizing history request unavailable');
+        return 'failed';
     }
     
     // Suggested Position Size functions
@@ -9410,32 +9519,23 @@ class TradingApp {
 
 
     async loadGSRulesStatus() {
-        try {
-            const response = await this.apiCall('/sizing/history?limit=1');
-            if (response.success && response.data && response.data.length > 0) {
-                const latest = response.data[0];
-                const gStatus = latest.g_rules_status || {};
-                const sStatus = latest.s_rules_status || {};
-                const lastCheck = latest.timestamp;
-                
-                // 更新G Rules状态表格
-                this.updateRuleStatus('g0', gStatus.g0 || { passed: true, message: '正常' }, lastCheck);
-                this.updateRuleStatus('g1', gStatus.g1 || { passed: true, message: '正常' }, lastCheck);
-                this.updateRuleStatus('g2', gStatus.g2 || { passed: true, message: '正常' }, lastCheck);
-                this.updateRuleStatus('g3', gStatus.g3 || { passed: true, message: '正常' }, lastCheck);
-                this.updateRuleStatus('g4', gStatus.g4 || { passed: true, message: '正常' }, lastCheck);
-                this.updateRuleStatus('g5', gStatus.g5 || { passed: true, message: '正常' }, lastCheck);
-                
-                // 更新S Rules状态表格
-                this.updateRuleStatus('s0', sStatus.s0 || { passed: true, message: '正常' }, lastCheck);
-                this.updateRuleStatus('s1', sStatus.s1 || { passed: true, message: '正常' }, lastCheck);
-                this.updateRuleStatus('s2', sStatus.s2 || { passed: true, message: '正常' }, lastCheck);
-                this.updateRuleStatus('s3', sStatus.s3 || { passed: true, message: '正常' }, lastCheck);
-                this.updateRuleStatus('s4', sStatus.s4 || { passed: true, message: '正常' }, lastCheck);
+        const latest = this.sizingHistoryCache?.latest || null;
+        this.applySizingRuleStatusesFromHistory(latest);
+
+        if (this.ibkrManager && typeof this.ibkrManager.requestSizingHistory === 'function') {
+            const result = this.ibkrManager.requestSizingHistory({
+                limit: 1,
+                context: 'gs_rules',
+                minInterval: 5000,
+            });
+            if (result === 'failed') {
+                console.warn('Failed to request G/S rules status via websocket');
             }
-        } catch (error) {
-            console.error('加载 G&S Rules 状态失败:', error);
+            return result;
         }
+
+        console.warn('WebSocket sizing history request unavailable for G/S rules');
+        return 'failed';
     }
 
     updateRuleStatus(ruleId, status, lastCheck) {
