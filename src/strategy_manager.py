@@ -2267,6 +2267,27 @@ if __name__ == "__main__":
             strategy_logger.error(f"Failed to delete strategy {name}: {e}")
             return False
 
+    def reset_strategy_data(self, name: str) -> Dict[str, Any]:
+        """清除指定策略的订单与统计缓存数据。"""
+        if name not in self.strategies:
+            raise ValueError(f"Strategy {name} not found")
+
+        try:
+            deleted = self.db_manager.delete_strategy_orders(name, None)
+        except Exception as exc:
+            strategy_logger.error(f"Failed to delete orders for strategy {name}: {exc}")
+            raise
+
+        strategy = self.strategies.get(name)
+        if strategy:
+            strategy.trigger_count = 0
+            strategy.last_triggered = None
+
+        strategy_logger.info(
+            f"Strategy data reset: {name}, removed {deleted} persisted orders"
+        )
+        return {"deleted_orders": int(deleted or 0)}
+
             
             
             
