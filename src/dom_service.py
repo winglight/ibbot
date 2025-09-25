@@ -5,6 +5,7 @@ import inspect
 import copy
 from typing import Dict, List, Optional, Any, Callable, DefaultDict
 from collections import defaultdict
+from threading import Lock
 
 from loguru import logger
 
@@ -81,6 +82,8 @@ class DOMService:
         )
         self._last_start_error: Optional[str] = None
         self._last_start_error_status: int = 200
+        self._start_tasks: Dict[str, asyncio.Task[bool]] = {}
+        self._start_tasks_lock = Lock()
 
         persisted_config = self._load_persisted_config()
         if persisted_config:
@@ -508,11 +511,27 @@ class DOMService:
             return False
         self._active_symbol = symbol_key
         logger.info("Starting DOM depth stream", symbol=symbol_key, num_rows=num_rows)
+        callback = lambda data, sym=symbol: self._on_depth_update(sym, data)
+        start_kwargs: Dict[str, Any] = {"num_rows": num_rows}
+        try:
+            start_signature = inspect.signature(
+                getattr(depth_subscriber, "start_depth_stream")
+            )
+        except (TypeError, ValueError):
+            start_signature = None
+
+        if start_signature is None or "force_restart" in start_signature.parameters:
+            start_kwargs["force_restart"] = force_restart
+        elif force_restart:
+            logger.debug(
+                "Depth subscriber does not support force_restart; ignoring flag",
+                symbol=symbol_key,
+            )
+
         result = depth_subscriber.start_depth_stream(
             symbol,
-            lambda data, sym=symbol: self._on_depth_update(sym, data),
-            num_rows=num_rows,
-            force_restart=force_restart,
+            callback,
+            **start_kwargs,
         )
         if result:
             logger.info("DOM depth stream started", symbol=symbol_key)
@@ -540,6 +559,36 @@ class DOMService:
         return await asyncio.to_thread(
             self._start_stream_blocking, symbol, num_rows, force_restart=force_restart
         )
+
+    def request_stream_start(
+        self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
+    ) -> asyncio.Task[bool]:
+        """Schedule a DOM stream start and return the task without waiting."""
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                raise
+        else:
+            self._loop = loop
+
+        self._ensure_cleanup_task(loop)
+
+        task = loop.create_task(
+            self.start_stream(symbol, num_rows, force_restart=force_restart)
+        )
+        symbol_key = (symbol or "").upper()
+
+        with self._start_tasks_lock:
+            previous = self._start_tasks.get(symbol_key)
+            if previous and not previous.done():
+                previous.cancel()
+            self._start_tasks[symbol_key] = task
+
+        task.add_done_callback(lambda fut, sym=symbol_key: self._on_start_task_done(sym, fut))
+        return task
 
     def start(
         self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
@@ -577,6 +626,22 @@ class DOMService:
 
     def stop(self, symbol: str) -> bool:
         return self._stop_stream_blocking(symbol)
+
+    def _on_start_task_done(self, symbol: str, fut: "asyncio.Future[bool]") -> None:
+        with self._start_tasks_lock:
+            current = self._start_tasks.get(symbol)
+            if current is fut:
+                self._start_tasks.pop(symbol, None)
+        try:
+            fut.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.error(
+                "DOM depth stream start task failed", symbol=symbol, error=str(exc)
+            )
+            self._last_start_error = str(exc) or "Failed to start DOM depth stream"
+            self._last_start_error_status = 500
 
     # --------------------------------------------------------------
     def get_metrics(self, symbol: Optional[str] = None) -> Dict[str, Any]:
