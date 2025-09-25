@@ -86,7 +86,18 @@ async def add_strategy_api(strategy: StrategyRequest, user: Optional[str] = Depe
 async def get_strategy_api(name: str, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    strategy = strategy_manager.get_strategy(name)
+    loop = asyncio.get_running_loop()
+    try:
+        strategy = await asyncio.wait_for(
+            loop.run_in_executor(None, strategy_manager.get_strategy, name),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"get_strategy timed out for {name}; returning cached snapshot")
+        strategy = strategy_manager.get_strategy_snapshot(name)
+    except Exception as exc:
+        logger.error(f"Failed to load strategy {name}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to load strategy") from exc
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
     return {"success": True, "strategy": strategy}

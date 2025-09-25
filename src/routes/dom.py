@@ -43,13 +43,37 @@ async def dom_start(
     user: Optional[str] = Depends(get_current_user),
 ):
     _ensure_not_read_only(request)
-    ok = await dom_service.start_stream(req.symbol, num_rows=req.num_rows)
+    try:
+        start_task = dom_service.request_stream_start(
+            req.symbol, num_rows=req.num_rows
+        )
+    except RuntimeError:
+        ok = await dom_service.start_stream(req.symbol, num_rows=req.num_rows)
+        if not ok:
+            error_message, status_code = dom_service.get_last_start_error()
+            detail = error_message or "Failed to start depth stream"
+            status = (
+                status_code
+                if isinstance(status_code, int) and 400 <= status_code < 600
+                else 500
+            )
+            raise HTTPException(status_code=status, detail=detail)
+        return {"success": True, "pending": False}
+
+    try:
+        ok = await asyncio.wait_for(asyncio.shield(start_task), timeout=0.5)
+    except asyncio.TimeoutError:
+        return {"success": True, "pending": True}
+    except Exception as exc:
+        logger.error("DOM start task failed", symbol=req.symbol, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to start depth stream") from exc
+
     if not ok:
         error_message, status_code = dom_service.get_last_start_error()
         detail = error_message or "Failed to start depth stream"
         status = status_code if isinstance(status_code, int) and 400 <= status_code < 600 else 500
         raise HTTPException(status_code=status, detail=detail)
-    return {"success": True}
+    return {"success": True, "pending": False}
 
 
 class StopRequest(BaseModel):

@@ -1537,6 +1537,54 @@ class StrategyManager:
             return strategy_dict
         return None
 
+    def get_strategy_snapshot(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return a lightweight strategy snapshot without hitting the database."""
+
+        record = self.strategies.get(name)
+        if not record:
+            return None
+
+        snapshot = asdict(record)
+
+        created_at = snapshot.get("created_at")
+        if isinstance(created_at, datetime):
+            snapshot["created_at"] = to_local_iso(created_at)
+
+        last_triggered = snapshot.get("last_triggered")
+        if isinstance(last_triggered, datetime):
+            snapshot["last_triggered"] = to_local_iso(last_triggered)
+
+        settings = getattr(self, "settings", {}) or {}
+        snapshot["sl_enabled"] = settings.get(f"{name}_sl_enabled", False)
+        snapshot["tp_enabled"] = settings.get(f"{name}_tp_enabled", False)
+        snapshot["sl_type"] = settings.get(f"{name}_sl_type", "amount")
+        snapshot["tp_type"] = settings.get(f"{name}_tp_type", "amount")
+        snapshot["sl_price"] = (
+            settings.get(f"{name}_sl_price") if snapshot["sl_enabled"] else None
+        )
+        snapshot["tp_price"] = (
+            settings.get(f"{name}_tp_price") if snapshot["tp_enabled"] else None
+        )
+
+        primary_symbol = snapshot.get("primary_symbol") or settings.get(
+            f"{name}_primary_symbol"
+        )
+        if primary_symbol:
+            snapshot["primary_symbol"] = primary_symbol
+
+        data_subscription = settings.get(f"{name}_data_subscription")
+        if data_subscription:
+            snapshot["data_subscription"] = data_subscription
+
+        schedule = settings.get(f"{name}_schedule")
+        if schedule:
+            snapshot["schedule"] = schedule
+
+        snapshot["trigger_count"] = int(snapshot.get("trigger_count", 0) or 0)
+        snapshot.setdefault("last_triggered", None)
+
+        return snapshot
+
     def get_internal_strategy_info(self, name: str) -> Optional[Dict[str, Any]]:
         """Return consolidated information for an internal strategy"""
         record = self.strategies.get(name)
