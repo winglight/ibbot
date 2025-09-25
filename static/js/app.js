@@ -429,6 +429,7 @@ class TradingApp {
         this.summaryDataFeedCurrent = null;
         this.wsHandlers = new Map();
         this.strategyPerformanceCells = new Map();
+        this.strategyPerformanceCache = new Map();
         this.strategyRefreshIntervalMs = 15000;
         this.sizingHistoryCache = { table: [], latest: null, meta: null, context: null, receivedAt: 0 };
         this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
@@ -550,15 +551,20 @@ class TradingApp {
             if (typeof err === 'string' && err.toLowerCase().includes('rate')) {
                 return true;
             }
-            pnlCell.textContent = '-';
-            tradesCell.textContent = '-';
+            if (!this.strategyPerformanceCache.has(message.name)) {
+                pnlCell.textContent = '-';
+                tradesCell.textContent = '-';
+            }
             return true;
         }
         const metrics = message.metrics || {};
         const totalPnL = Number(metrics.total_pnl ?? 0);
         const totalExec = Number(metrics.total_executions ?? 0);
-        pnlCell.textContent = `$${(Number.isFinite(totalPnL) ? totalPnL : 0).toFixed(2)}`;
-        tradesCell.textContent = `${Math.max(0, Math.floor((Number.isFinite(totalExec) ? totalExec : 0) / 2))}`;
+        const formattedPnL = `$${(Number.isFinite(totalPnL) ? totalPnL : 0).toFixed(2)}`;
+        const formattedTrades = `${Math.max(0, Math.floor((Number.isFinite(totalExec) ? totalExec : 0) / 2))}`;
+        pnlCell.textContent = formattedPnL;
+        tradesCell.textContent = formattedTrades;
+        this.strategyPerformanceCache.set(message.name, { pnl: formattedPnL, trades: formattedTrades });
         return true;
     }
 
@@ -7610,7 +7616,9 @@ class TradingApp {
 
         tbody.innerHTML = '';
         this.strategyPerformanceCells.clear();
+        const visibleStrategies = new Set();
         strategies.forEach(strategy => {
+            visibleStrategies.add(strategy.name);
             const row = document.createElement('tr');
 
             // Name
@@ -7643,9 +7651,18 @@ class TradingApp {
             
             // P&L（最近1个月）与 Trades（executions/2 取整），先占位，后异步回填
             const pnlCell = document.createElement('td');
-            pnlCell.textContent = '...';
+            const cachedMetrics = this.strategyPerformanceCache.get(strategy.name);
+            if (cachedMetrics && typeof cachedMetrics === 'object') {
+                pnlCell.textContent = cachedMetrics.pnl ?? '...';
+            } else {
+                pnlCell.textContent = '...';
+            }
             const tradesCell = document.createElement('td');
-            tradesCell.textContent = '...';
+            if (cachedMetrics && typeof cachedMetrics === 'object') {
+                tradesCell.textContent = cachedMetrics.trades ?? '...';
+            } else {
+                tradesCell.textContent = '...';
+            }
             
             row.appendChild(nameCell);
             row.appendChild(symbolCell);
@@ -7660,6 +7677,12 @@ class TradingApp {
                 this.ibkrManager.requestStrategyPerformance({ name: strategy.name, range: '1m' });
             }
         });
+
+        for (const name of Array.from(this.strategyPerformanceCache.keys())) {
+            if (!visibleStrategies.has(name)) {
+                this.strategyPerformanceCache.delete(name);
+            }
+        }
     }
 
     async toggleStrategy(name, enabled) {
