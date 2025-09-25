@@ -1021,6 +1021,38 @@ class OptimizerApp {
         };
         [baseField, featureField].forEach((field) => field.addEventListener('input', markEdited));
 
+        const handleParameterPaste = (event) => {
+            const clipboardData = event.clipboardData?.getData('text/plain');
+            if (!clipboardData || !clipboardData.trim()) {
+                return;
+            }
+            const parsed = this.safeParseJson(clipboardData, null);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                return;
+            }
+            const hasBase = Object.prototype.hasOwnProperty.call(parsed, 'base');
+            const hasFeatures = Object.prototype.hasOwnProperty.call(parsed, 'features');
+            if (!hasBase && !hasFeatures) {
+                return;
+            }
+            event.preventDefault();
+            if (hasBase) {
+                const basePayload = parsed.base && typeof parsed.base === 'object' && !Array.isArray(parsed.base)
+                    ? parsed.base
+                    : {};
+                baseField.value = JSON.stringify(basePayload, null, 2);
+                baseField.dataset.userEdited = 'true';
+            }
+            if (hasFeatures) {
+                const featurePayload = parsed.features && typeof parsed.features === 'object' && !Array.isArray(parsed.features)
+                    ? parsed.features
+                    : {};
+                featureField.value = JSON.stringify(featurePayload, null, 2);
+                featureField.dataset.userEdited = 'true';
+            }
+        };
+        [baseField, featureField].forEach((field) => field.addEventListener('paste', handleParameterPaste));
+
         const updateTemplates = () => {
             const selectedBase = [...form.querySelectorAll('input[name="base_metrics"]:checked')].map((el) => el.value);
             const selectedFeatures = [...form.querySelectorAll('input[name="feature_metrics"]:checked')].map((el) => el.value);
