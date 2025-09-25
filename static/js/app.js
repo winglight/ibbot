@@ -6797,7 +6797,7 @@ class TradingApp {
         const sourceOrders = Array.isArray(orders) ? orders : this.internalStrategyOrders;
         const data = Array.isArray(sourceOrders) ? sourceOrders : [];
         if (!strategyName || data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No strategy orders</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No strategy orders</td></tr>';
             return;
         }
 
@@ -6817,7 +6817,9 @@ class TradingApp {
                 pnl: Number(order.pnl ?? 0),
                 commission: Number(order.commission ?? 0),
                 order_source: order.order_source || 'strategy',
-                notes: order.notes || ''
+                notes: order.notes || '',
+                created_at: order.created_at || order.submit_time || null,
+                submit_time: order.submit_time || order.created_at || null,
             };
             const row = this.orderManager.generateOrderRowHtml(normalized);
             if (row) {
@@ -6826,7 +6828,7 @@ class TradingApp {
         });
 
         if (!frag.childNodes.length) {
-            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No strategy orders</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No strategy orders</td></tr>';
             return;
         }
 

@@ -50,7 +50,7 @@ class OrderManager {
         // 显示加载状态
         const tbody = document.querySelector('#ordersTable tbody');
         if (tbody) {
-            tbody.innerHTML = '<tr><td colspan="10" class="text-center"><i class="fas fa-spinner fa-spin"></i> Loading orders...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="11" class="text-center"><i class="fas fa-spinner fa-spin"></i> Loading orders...</td></tr>';
         }
 
         // 调用防抖函数
@@ -82,7 +82,7 @@ class OrderManager {
             console.error('Failed to load orders:', error);
             const tbody = document.querySelector('#ordersTable tbody');
             if (tbody) {
-                tbody.innerHTML = '<tr><td colspan="10" class="text-center text-danger">Failed to load orders</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" class="text-center text-danger">Failed to load orders</td></tr>';
             }
         }
     }
@@ -100,10 +100,10 @@ class OrderManager {
                         if (previous.length) {
                             this.updateOrdersTableSmart(previous, tbody);
                         } else {
-                            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No orders available</td></tr>';
+                            tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No orders available</td></tr>';
                         }
                     } else {
-                        tbody.innerHTML = `<tr><td colspan="10" class="text-center text-danger">${errorText}</td></tr>`;
+                        tbody.innerHTML = `<tr><td colspan="11" class="text-center text-danger">${errorText}</td></tr>`;
                     }
                 }
                 return true;
@@ -194,7 +194,7 @@ class OrderManager {
         
         // 如果没有订单，显示空状态
         if (newOrders.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No orders found</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No orders found</td></tr>';
             return;
         }
         
@@ -280,11 +280,11 @@ class OrderManager {
             const n = Number(txt);
             return isFinite(n) ? n : NaN;
         };
-        
+
         for (let i = 0; i < cells1.length; i++) {
             const isActionsCol = (i === cells1.length - 1);
-            const isPnlCol = (i === 6);        // 列顺序：0-id,1-sym,2-act,3-qty,4-price,5-status,6-pnl,7-comm,8-source,9-ops
-            const isCommissionCol = (i === 7);
+            const isPnlCol = (i === 7);        // 列顺序：0-id,1-sym,2-act,3-qty,4-price,5-status,6-created,7-pnl,8-comm,9-source,10-ops
+            const isCommissionCol = (i === 8);
 
             if (isActionsCol) {
                 // 操作列：比较按钮数量与类型（通过 title），忽略禁用状态、图标闪烁等差异
@@ -342,11 +342,66 @@ class OrderManager {
     /**
      * 生成订单行的HTML
      */
+    formatOrderTimestamp(rawValue) {
+        const escapeHtml = (value) => {
+            if (this.app && typeof this.app.escapeHtml === 'function') {
+                return this.app.escapeHtml(value);
+            }
+            if (value === null || value === undefined) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        };
+
+        if (rawValue === null || rawValue === undefined || rawValue === '') {
+            return { display: '—', title: '', raw: '' };
+        }
+
+        let date = null;
+        if (rawValue instanceof Date) {
+            date = rawValue;
+        } else if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+            date = new Date(rawValue);
+        } else {
+            const str = String(rawValue).trim();
+            if (!str) {
+                return { display: '—', title: '', raw: '' };
+            }
+            date = new Date(str);
+            if (Number.isNaN(date.getTime()) && /^\d+$/.test(str)) {
+                const numeric = Number(str);
+                if (Number.isFinite(numeric)) {
+                    date = new Date(numeric);
+                }
+            }
+        }
+
+        if (date instanceof Date && !Number.isNaN(date.getTime())) {
+            const localeString = date.toLocaleString('zh-CN');
+            const isoString = date.toISOString();
+            return {
+                display: escapeHtml(localeString),
+                title: escapeHtml(isoString),
+                raw: isoString,
+            };
+        }
+
+        const fallback = escapeHtml(String(rawValue));
+        return {
+            display: fallback || '—',
+            title: fallback,
+            raw: String(rawValue),
+        };
+    }
+
     generateOrderRowHtml(order) {
         // 计算价格显示
         let priceDisplay = '';
         if (order.order_type === 'MKT') {
-            priceDisplay = order.avg_fill_price && order.avg_fill_price > 0 ? 
+            priceDisplay = order.avg_fill_price && order.avg_fill_price > 0 ?
                 `$${this.app.formatNumber(order.avg_fill_price)}` : 'Market';
         } else {
             const limitPrice = order.limit_price || order.price;
@@ -373,11 +428,14 @@ class OrderManager {
         const escapedOrderType = orderTypeStr.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
         
         const detailsButton = `<button class="btn btn-sm btn-info me-1" onclick="app.openOrderDetails('${order.order_id}')" title="Details"><i class="fas fa-info-circle"></i></button>`;
-        
-        const editButton = canEdit ? 
+
+        const createdAtInfo = this.formatOrderTimestamp(order.submit_time || order.created_at);
+        const createdTitleAttr = createdAtInfo.title ? ` title="${createdAtInfo.title}"` : '';
+
+        const editButton = canEdit ?
             `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${order.order_id}, '${escapedSymbol}', '${escapedAction}', ${order.quantity}, '${escapedOrderType}', ${(order.limit_price || order.price) || 0})" title="Edit"><i class="fas fa-edit"></i></button>` : '';
-        
-        const syncButton = (order.order_type === 'LMT' && order.status === 'Submitted') ? 
+
+        const syncButton = (order.order_type === 'LMT' && order.status === 'Submitted') ?
             `<button class="btn btn-sm btn-outline-primary me-1" onclick="app.orderManager.syncLimitOrder('${order.order_id}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : '';
         
         const cancelButton = canCancel ? 
@@ -386,9 +444,12 @@ class OrderManager {
         // 使用模板构建一个实际的tr元素，避免返回非元素节点
         const trElement = document.createElement('tr');
         trElement.setAttribute('data-notes', notesText);
+        if (createdAtInfo.raw) {
+            trElement.setAttribute('data-created-at', createdAtInfo.raw);
+        }
         trElement.onmouseenter = (event) => this.app.showNotesTooltip(event, trElement);
         trElement.onmouseleave = () => this.app.hideNotesTooltip();
-        
+
         trElement.innerHTML = `
             <td>${order.order_id}</td>
             <td><a href="#" class="text-decoration-none" onclick="app.openMonitorModal('${escapedSymbol}'); return false;">${this.app.escapeHtml ? this.app.escapeHtml(symbolStr) : symbolStr}</a></td>
@@ -396,6 +457,7 @@ class OrderManager {
             <td>${order.quantity}</td>
             <td>${priceDisplay}</td>
             <td><span class="badge bg-${this.app.getStatusColor(displayStatus)}">${displayStatus}</span></td>
+            <td${createdTitleAttr}>${createdAtInfo.display}</td>
             <td class="${(order.pnl ?? 0) > 0 ? 'text-success' : ((order.pnl ?? 0) < 0 ? 'text-danger' : 'text-muted')}">$${this.app.formatNumber(order.pnl ?? 0)}</td>
             <td>$${this.app.formatNumber(order.commission ?? 0)}</td>
             <td>${sourceDisplay}</td>
@@ -775,7 +837,7 @@ class OrderManager {
         const trList = Array.from(tbody.querySelectorAll('tr'));
         trList.forEach((tr, i) => {
           const tds = tr.querySelectorAll('td, th');
-          if (tds.length !== 10) {
+          if (tds.length !== 11) {
             console.warn(`⚠️ 第 ${i + 1} 行单元格数量异常：`, tds.length, tr.outerHTML.slice(0, 150));
           }
           if (tr.querySelector('div')) {
