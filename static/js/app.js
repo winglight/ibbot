@@ -7021,22 +7021,25 @@ class TradingApp {
     formatDuration(seconds) {
         const numeric = Number(seconds);
         if (!Number.isFinite(numeric) || numeric <= 0) {
-            return '0s';
+            return '0 秒';
         }
 
-        const totalSeconds = Math.max(0, Math.floor(numeric));
-        const days = Math.floor(totalSeconds / 86400);
-        const hours = Math.floor((totalSeconds % 86400) / 3600);
-        const minutes = Math.floor((totalSeconds % 3600) / 60);
-        const secs = totalSeconds % 60;
+        const absolute = Math.max(0, numeric);
+        const unitConfig = [
+            { threshold: 60, unit: '秒', divisor: 1 },
+            { threshold: 3600, unit: '分钟', divisor: 60 },
+            { threshold: 86400, unit: '小时', divisor: 3600 },
+            { threshold: Infinity, unit: '天', divisor: 86400 },
+        ];
 
-        const parts = [];
-        if (days) parts.push(`${days}d`);
-        if (hours) parts.push(`${hours}h`);
-        if (minutes) parts.push(`${minutes}m`);
-        if (secs || parts.length === 0) parts.push(`${secs}s`);
+        const selected = unitConfig.find(({ threshold }) => absolute < threshold) || unitConfig[0];
+        const rawValue = absolute / selected.divisor;
+        const rounded = Math.round(rawValue * 100) / 100;
+        const valueStr = Number.isInteger(rounded)
+            ? String(rounded)
+            : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 
-        return parts.join(' ');
+        return `${valueStr} ${selected.unit}`;
     }
 
     // 根据标的类型修正价格到允许的最小单位
