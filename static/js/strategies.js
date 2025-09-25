@@ -5,6 +5,10 @@
 class StrategiesManager {
   constructor(app) {
     this.app = app;
+    this.refreshIntervalMs = 5000;
+    this.refreshTimer = null;
+    this._visibilityHandler = null;
+    this.startAutoRefresh();
   }
 
   _delegate(method, ...args) {
@@ -21,6 +25,43 @@ class StrategiesManager {
 
   displayStrategies(strategies) {
     return this._delegate('displayStrategies', strategies);
+  }
+
+  startAutoRefresh() {
+    this.stopAutoRefresh();
+    const interval = Math.max(1000, this.app?.strategyRefreshIntervalMs || this.refreshIntervalMs);
+    this.refreshIntervalMs = interval;
+
+    if (typeof document !== 'undefined') {
+      this._visibilityHandler = () => {
+        if (document.visibilityState === 'visible') {
+          this.loadStrategies({ force: true, minInterval: 0 });
+        }
+      };
+      document.addEventListener('visibilitychange', this._visibilityHandler);
+    }
+
+    this.refreshTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      const ws = this.app?.ibkrManager?.ws;
+      if (ws && ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      this.loadStrategies({ minInterval: interval });
+    }, interval);
+  }
+
+  stopAutoRefresh() {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    if (this._visibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this._visibilityHandler);
+      this._visibilityHandler = null;
+    }
   }
 
   async toggleStrategy(name, enabled) {
