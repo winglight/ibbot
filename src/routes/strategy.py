@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from dataclasses import asdict
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
@@ -257,13 +258,22 @@ async def set_strategy_data_push_api(
 ):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    result = await strategy_manager.set_data_push(
-        name,
-        enabled=payload.enabled,
-        subscription=payload.subscription,
-        symbol=payload.symbol,
-        force_restart=bool(payload.force_restart),
-    )
+    set_data_push = strategy_manager.set_data_push
+    call_kwargs = {
+        "enabled": payload.enabled,
+        "subscription": payload.subscription,
+        "symbol": payload.symbol,
+    }
+
+    try:
+        signature = inspect.signature(set_data_push)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature and "force_restart" in signature.parameters:
+        call_kwargs["force_restart"] = bool(payload.force_restart)
+
+    result = await set_data_push(name, **call_kwargs)
 
     state_snapshot = strategy_manager.get_data_push_state(name) or {}
     if not state_snapshot:
