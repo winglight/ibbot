@@ -11,6 +11,7 @@ queue_logger = logger.bind(module="queue_manager", request_id="-")
 from pathlib import Path
 
 from .database import Order
+from .ibkr_client import INDEX_FUTURE_SYMBOLS
 from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
 @dataclass
@@ -312,7 +313,8 @@ class QueueManager:
         
         # 自动检测期货
         sec_type = payload.get('sec_type', 'STK')
-        if payload['symbol'] in ['MNQ', 'NQ', 'ES', 'MES']:
+        symbol = payload['symbol'].upper()
+        if symbol in INDEX_FUTURE_SYMBOLS:
             sec_type = 'FUT'
             exchange = 'CME'
         else:

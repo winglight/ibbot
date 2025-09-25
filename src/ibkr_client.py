@@ -2,7 +2,7 @@ import asyncio
 import itertools
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -28,6 +28,52 @@ from .connection_manager import connection_manager, ConnectionConfig, connection
 from .database import get_db_manager
 
 NY_TZ = ZoneInfo("America/New_York")
+
+
+INDEX_FUTURE_DETAILS: Dict[str, Dict[str, str]] = {
+    "ES": {"exchange": "CME", "multiplier": "50", "tradingClass": "ES"},
+    "MES": {"exchange": "CME", "multiplier": "5", "tradingClass": "MES"},
+    "NQ": {"exchange": "CME", "multiplier": "20", "tradingClass": "NQ"},
+    "MNQ": {"exchange": "CME", "multiplier": "2", "tradingClass": "MNQ"},
+    "YM": {"exchange": "ECBOT", "multiplier": "5", "tradingClass": "YM"},
+    "MYM": {"exchange": "ECBOT", "multiplier": "0.5", "tradingClass": "MYM"},
+    "RTY": {"exchange": "CME", "multiplier": "50", "tradingClass": "RTY"},
+    "M2K": {"exchange": "CME", "multiplier": "5", "tradingClass": "M2K"},
+}
+
+INDEX_FUTURE_SYMBOLS = frozenset(INDEX_FUTURE_DETAILS.keys())
+_QUARTERLY_CONTRACT_MONTHS = (3, 6, 9, 12)
+
+
+def _third_friday_datetime(year: int, month: int) -> datetime:
+    """Return the datetime (NY timezone) of the contract's third Friday open."""
+
+    first_day = datetime(year, month, 1, tzinfo=NY_TZ)
+    # ``weekday`` -> Monday=0 ... Sunday=6; Friday is 4
+    days_until_friday = (4 - first_day.weekday()) % 7
+    third_friday_day = 1 + days_until_friday + 14
+    # CME 股指期货在合约到期当日美东早盘停止交易
+    return datetime(year, month, third_friday_day, 9, 30, tzinfo=NY_TZ)
+
+
+def _front_quarter_contract(now: datetime) -> Tuple[int, int]:
+    """Determine the nearest active quarterly contract (year, month)."""
+
+    ny_now = now.astimezone(NY_TZ)
+    year = ny_now.year
+    month = ny_now.month
+
+    # Pick the first quarterly month that hasn't completed expiration.
+    for candidate in _QUARTERLY_CONTRACT_MONTHS:
+        candidate_year = year
+        if month > candidate:
+            candidate_year += 1
+        expiry = _third_friday_datetime(candidate_year, candidate)
+        if ny_now < expiry:
+            return candidate_year, candidate
+
+    # If all contracts for this calendar year have expired, roll to March next year.
+    return year + 1, _QUARTERLY_CONTRACT_MONTHS[0]
 
 class IBKRClient:
     def __init__(self):
@@ -145,7 +191,7 @@ class IBKRClient:
             async def execute_order_async():
                 try:
                     # 根据证券类型获取正确的合约
-                    if sec_type == 'FUT' or symbol in ['MNQ', 'NQ', 'ES', 'MES']:
+                    if sec_type == 'FUT' or symbol.upper() in INDEX_FUTURE_SYMBOLS:
                         contract = self.get_future_contract(symbol, exchange)
                     else:
                         contract = self.get_stock_contract(symbol, exchange)
@@ -233,67 +279,27 @@ class IBKRClient:
     
     def get_future_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD'):
         """获取期货合约"""
-        from datetime import datetime, timedelta
-        
-        # 为主要期货合约生成正确的expiry格式
-        if symbol in ['MNQ', 'NQ', 'ES', 'MES']:
-            # 获取当前日期
+
+        symbol_upper = symbol.upper()
+        if symbol_upper in INDEX_FUTURE_SYMBOLS:
             now = now_local()
-            
-            # 找到下一个季度合约月份
-            current_month = now.month
-            current_year = now.year
-            
-            # 确定下一个合约月份
-            if current_month <= 3:
-                contract_month = 3
-                contract_year = current_year
-            elif current_month <= 6:
-                contract_month = 6
-                contract_year = current_year
-            elif current_month <= 9:
-                contract_month = 9
-                contract_year = current_year
-            else:
-                contract_month = 12
-                contract_year = current_year
-            
-            # 如果当前月份已经接近合约到期（比如在合约月份的第三周后），使用下一个合约
-            if current_month == contract_month and now.day > 15:
-                if contract_month == 12:
-                    contract_month = 3
-                    contract_year += 1
-                elif contract_month == 9:
-                    contract_month = 12
-                elif contract_month == 6:
-                    contract_month = 9
-                elif contract_month == 3:
-                    contract_month = 6
-            
-            # 使用YYYYMM格式，与test.py保持一致
+            contract_year, contract_month = _front_quarter_contract(now)
             expiry = f"{contract_year}{contract_month:02d}"
-            
-            # 为不同的期货合约设置正确的交易所和细节
-            contract = Future(symbol=symbol, exchange='CME', currency=currency)
+
+            details = INDEX_FUTURE_DETAILS[symbol_upper]
+            exchange_to_use = details.get("exchange", exchange)
+
+            contract = Future(symbol=symbol_upper, exchange=exchange_to_use, currency=currency)
             contract.lastTradeDateOrContractMonth = expiry
-            
-            # 为MNQ等微型期货设置正确的乘数和交易类别
-            if symbol == 'MNQ':
-                contract.multiplier = '2'
-                contract.tradingClass = 'MNQ'
-            elif symbol == 'MES':
-                contract.multiplier = '5'
-                contract.tradingClass = 'MES'
-            elif symbol == 'NQ':
-                contract.multiplier = '20'
-                contract.tradingClass = 'NQ'
-            elif symbol == 'ES':
-                contract.multiplier = '50'
-                contract.tradingClass = 'ES'
-            
+
+            for attr in ("multiplier", "tradingClass"):
+                value = details.get(attr)
+                if value:
+                    setattr(contract, attr, value)
+
             return contract
-        else:
-            return Future(symbol=symbol, exchange=exchange, currency=currency)
+
+        return Future(symbol=symbol_upper, exchange=exchange, currency=currency)
     
     def get_contract(self, symbol: str, sec_type: str = 'STK', exchange: str = 'SMART', currency: str = 'USD'):
         """根据证券类型获取合约"""
@@ -313,7 +319,7 @@ class IBKRClient:
                 return pd.DataFrame()
 
             # MNQ是期货合约
-            if symbol in ['MNQ', 'NQ', 'ES', 'MES']:
+            if symbol.upper() in INDEX_FUTURE_SYMBOLS:
                 contract = self.get_future_contract(symbol, 'CME')
             else:
                 contract = self.get_stock_contract(symbol, exchange)
