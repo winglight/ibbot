@@ -58,6 +58,13 @@ def build_app() -> FastAPI:
             return HTMLResponse("<h3>Optimizer UI is under construction.</h3>", status_code=200)
         return templates.TemplateResponse("index.html", {"request": request})
 
+    @app.get("/compare", response_class=HTMLResponse)
+    async def optimizer_compare(request: Request):
+        template_path = templates_dir / "compare.html"
+        if not template_path.exists():
+            return HTMLResponse("<h3>横评页面暂未配置。</h3>", status_code=200)
+        return templates.TemplateResponse("compare.html", {"request": request})
+
     return app
 
 

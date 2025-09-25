@@ -30,6 +30,7 @@ class TaskRecord:
     created_at: datetime = field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = None
     runtime: Optional[Dict[str, Any]] = None
+    stop_requested: bool = False
 
 
 class OptimizerTaskStore:
@@ -108,6 +109,38 @@ class OptimizerTaskStore:
                 return
             record.fail_reasons.append(reason)
 
+    def request_stop(self, task_id: str) -> bool:
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if not record:
+                return False
+            if record.state in (TaskState.COMPLETED, TaskState.FAILED, TaskState.STOPPED):
+                return False
+            record.stop_requested = True
+            if record.state == TaskState.PENDING:
+                record.state = TaskState.RUNNING
+            record.message = "stopping"
+            self._persist(task_id)
+            return True
+
+    def is_stop_requested(self, task_id: str) -> bool:
+        with self._lock:
+            record = self._tasks.get(task_id)
+            return bool(record and record.stop_requested)
+
+    def mark_stopped(self, task_id: str, progress: Optional[int] = None) -> None:
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if not record:
+                return
+            record.state = TaskState.STOPPED
+            if progress is not None:
+                record.progress = max(0, min(100, progress))
+            record.message = "stopped"
+            record.completed_at = datetime.utcnow()
+            record.stop_requested = False
+            self._persist(task_id)
+
     def complete_task(self, task_id: str, report: OptimizationReportData) -> None:
         with self._lock:
             record = self._tasks.get(task_id)
@@ -149,6 +182,10 @@ class OptimizerTaskStore:
                     self._tasks.pop(task_id)
                     self._db.delete_task(task_id)
 
+    def iter_tasks(self) -> List[Tuple[str, TaskRecord]]:
+        with self._lock:
+            return list(self._tasks.items())
+
     # ------------------------------------------------------------------ Helpers
     def _load_from_db(self) -> None:
         for row in self._db.load_tasks():
@@ -171,6 +208,7 @@ class OptimizerTaskStore:
                 completed_at=datetime.fromisoformat(row["completed_at"])
                 if row.get("completed_at")
                 else None,
+                stop_requested=False,
             )
             self._tasks[row["task_id"]] = record
 

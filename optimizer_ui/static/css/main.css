@@ -198,6 +198,11 @@
     color: #f87171;
 }
 
+.status-pill.stopped {
+    background: rgba(251, 191, 36, 0.2);
+    color: #fbbf24;
+}
+
 .empty-state {
     padding: 2rem;
     text-align: center;
@@ -210,6 +215,21 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.6rem;
+}
+
+.compare-table pre {
+    margin: 0.5rem 0 0;
+    padding: 0.6rem;
+    background: rgba(15, 23, 42, 0.6);
+    border-radius: 0.5rem;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.compare-table .tag-list {
+    margin-top: 0.4rem;
 }
 
 .combo-section {

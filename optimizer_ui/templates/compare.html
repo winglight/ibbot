@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+
+{% block title %}参数组横评 · Optimizer Console{% endblock %}
+
+{% block header_actions %}
+<a class="btn btn-ghost" href="/">返回计划</a>
+{% endblock %}
+
+{% block content %}
+<section class="opt-card" id="parameter-compare-app">
+    <header class="section-header">
+        <div>
+            <h2>参数组横评</h2>
+            <p class="section-subtitle">跨任务聚合 Sharpe、回撤率与收益率</p>
+        </div>
+        <div class="actions-row">
+            <button class="btn btn-ghost" data-action="refresh">刷新</button>
+        </div>
+    </header>
+    <p class="section-subtitle" style="margin-bottom: 1rem;">
+        仅统计每个已完成任务排名前 3 的参数组合，展示三项指标的平均值与中位值。
+    </p>
+    <div data-role="compare-content">
+        <div class="empty-state">数据加载中...</div>
+    </div>
+</section>
+{% endblock %}

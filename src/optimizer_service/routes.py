@@ -27,7 +27,9 @@ from .schemas import (
     StrategyGenerationResponse,
     OptimizerDataRangeResponse,
     OptimizerMetadataResponse,
+    ParameterGroupPerformanceResponse,
     TaskState,
+    TaskStopResponse,
 )
 from .plan_manager import plan_manager
 from .metadata import (
@@ -37,6 +39,7 @@ from .metadata import (
     get_symbol_data_range,
 )
 from .storage import store
+from .analytics import summarize_parameter_groups
 from .strategy_generator import StrategyGenerationError, generate_strategy_file
 from .tasks import run_optimization_task
 
@@ -123,6 +126,21 @@ async def get_report(task_id: str):
     if record.state == TaskState.FAILED or not record.report:
         return OptimizationReportResponse(status="error", task_id=task_id, message=record.message)
     return OptimizationReportResponse(status="ok", task_id=task_id, report=record.report)
+
+
+@router.post(
+    "/tasks/{task_id}/stop",
+    response_model=TaskStopResponse,
+    responses={status.HTTP_404_NOT_FOUND: {"model": ErrorResponse}},
+)
+async def stop_task(task_id: str) -> TaskStopResponse:
+    record = store.get_task(task_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="task not found")
+    if record.state in {TaskState.COMPLETED, TaskState.FAILED, TaskState.STOPPED}:
+        return TaskStopResponse(task_id=task_id, accepted=False)
+    accepted = store.request_stop(task_id)
+    return TaskStopResponse(task_id=task_id, accepted=accepted)
 
 
 # Plan management -------------------------------------------------------------
@@ -251,6 +269,14 @@ async def list_plan_reports(plan_id: str) -> OptimizationPlanReportList:
         for task_id, record in records
     ]
     return OptimizationPlanReportList(plan_id=plan_id, reports=reports_payload)
+
+
+@router.get(
+    "/parameter-groups",
+    response_model=ParameterGroupPerformanceResponse,
+)
+async def list_parameter_group_performance() -> ParameterGroupPerformanceResponse:
+    return summarize_parameter_groups(plan_manager, store)
 
 
 @router.post(
