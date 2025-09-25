@@ -7018,6 +7018,30 @@ class TradingApp {
         });
     }
 
+    formatDuration(seconds) {
+        const numeric = Number(seconds);
+        if (!Number.isFinite(numeric) || numeric <= 0) {
+            return '0 秒';
+        }
+
+        const absolute = Math.max(0, numeric);
+        const unitConfig = [
+            { threshold: 60, unit: '秒', divisor: 1 },
+            { threshold: 3600, unit: '分钟', divisor: 60 },
+            { threshold: 86400, unit: '小时', divisor: 3600 },
+            { threshold: Infinity, unit: '天', divisor: 86400 },
+        ];
+
+        const selected = unitConfig.find(({ threshold }) => absolute < threshold) || unitConfig[0];
+        const rawValue = absolute / selected.divisor;
+        const rounded = Math.round(rawValue * 100) / 100;
+        const valueStr = Number.isInteger(rounded)
+            ? String(rounded)
+            : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+
+        return `${valueStr} ${selected.unit}`;
+    }
+
     // 根据标的类型修正价格到允许的最小单位
     correctPriceStep(price, symbol) {
         if (!price || isNaN(price)) return price;
@@ -8413,7 +8437,11 @@ class TradingApp {
             el('kpiMaxDD').textContent = `$${(m.max_drawdown ?? 0).toFixed(2)}`;
             el('kpiSharpe').textContent = `${(m.sharpe_ratio ?? 0).toFixed(2)}`;
             el('kpiTrades').textContent = `${m.total_executions ?? 0}`;
-            el('kpiAvgDur').textContent = `${m.avg_trade_duration ?? 0}`;
+            const avgDurationRaw = m.avg_trade_duration;
+            el('kpiAvgDur').textContent =
+                typeof avgDurationRaw === 'string'
+                    ? avgDurationRaw
+                    : this.formatDuration(avgDurationRaw ?? 0);
 
             // Charts from executions over selected range
             const executionLimit = Math.max(this.strategyExecutionsDefaultLimit, this.executionsPagination.pageSize || 0);
