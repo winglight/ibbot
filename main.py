@@ -100,9 +100,15 @@ NY_TZ = ZoneInfo("America/New_York")
 
 def resolve_module(path: str) -> str:
     """Simple mapping from request path to module name."""
-    if path.startswith("/api/strategies/internal"):
-        return "internal_strategy"
     if path.startswith("/api/strategies"):
+        # Internal strategy endpoints live under `/api/strategies/{name}` but contain
+        # additional segments such as `/internal-info` or `/status`. The previous
+        # implementation only looked for the now unused `/api/strategies/internal...`
+        # prefix, which caused internal requests to be logged as external. Check for
+        # these internal-specific suffixes before falling back to the external label.
+        internal_segments = ("/internal", "/internal-info", "/status")
+        if any(segment in path for segment in internal_segments):
+            return "internal_strategy"
         return "external_strategy"
     if "/risk" in path:
         return "risk_rule"
