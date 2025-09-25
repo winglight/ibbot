@@ -1637,6 +1637,9 @@ class StrategyManager:
         if runtime is None:
             runtime = self._load_internal_strategy_runtime(self.strategies.get(name))
         runtime_risk_rules: Dict[str, Any] = {}
+        persisted_file_path = strategy.get("file_path")
+        runtime_file_path: Optional[str] = None
+
         if runtime:
             runtime_symbol = getattr(runtime, "symbol", None)
             if runtime_symbol:
@@ -1649,18 +1652,41 @@ class StrategyManager:
                     strategy_logger.warning(f"Runtime info for {name} failed: {exc}")
                     runtime_info = {}
                 if isinstance(runtime_info, dict):
+                    runtime_file_path = runtime_info.get("file_path") or runtime_file_path
                     extracted_rules = runtime_info.pop("risk_rules", {})
                     if isinstance(extracted_rules, dict):
                         runtime_risk_rules.update(extracted_rules)
                         symbols.update(extracted_rules.keys())
                     for key, value in runtime_info.items():
-                        if key in {"name", "strategy_type"}:
+                        if key in {"name", "strategy_type", "file_path"}:
                             continue
                         if value is None:
                             continue
                         strategy[key] = value
 
-            self._attach_parameter_schema(name, strategy, runtime)
+        display_file_path: Optional[str] = None
+
+        if persisted_file_path:
+            module_path = self._resolve_strategy_file_path(persisted_file_path)
+            display_file_path = self._normalize_strategy_file_display(
+                persisted_file_path, module_path
+            )
+
+        if not display_file_path and runtime_file_path:
+            runtime_module_path = self._resolve_strategy_file_path(runtime_file_path)
+            display_file_path = self._normalize_strategy_file_display(
+                runtime_file_path, runtime_module_path
+            )
+
+        if display_file_path:
+            strategy["file_path"] = display_file_path
+            if runtime and getattr(runtime, "file_path", None) != display_file_path:
+                try:
+                    setattr(runtime, "file_path", display_file_path)
+                except Exception:
+                    pass
+
+        self._attach_parameter_schema(name, strategy, runtime)
 
         combined_rules: Dict[str, Any] = {}
         if runtime_risk_rules:
