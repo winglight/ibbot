@@ -9,6 +9,7 @@ class IBKRConnectionManager {
         this.ws = null;
         this.statusCheckInterval = null;
         this._wsThrottle = {};
+        this._wsPendingMessages = [];
         this._lastConnectionStatus = null;
         this._pendingStatusResolvers = new Set();
         this.setupEventListeners();
@@ -101,7 +102,6 @@ class IBKRConnectionManager {
     sendMessage(payload) {
         if (!payload || typeof payload !== 'object') return false;
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-            console.warn('[ws] unable to send message, socket not open', payload?.type);
             return false;
         }
         try {
@@ -111,6 +111,40 @@ class IBKRConnectionManager {
             console.error('[ws] failed to send message', error, payload);
             return false;
         }
+    }
+
+    _queuePendingMessage(key, payload, options = {}) {
+        if (!payload || typeof payload !== 'object') return;
+        if (!this._wsPendingMessages) {
+            this._wsPendingMessages = [];
+        }
+        const minInterval = Math.max(0, Number(options.minInterval ?? 0));
+        const entry = { key: key || payload?.type || `queued:${Date.now()}`, payload, options: { ...options, minInterval } };
+        if (key) {
+            const idx = this._wsPendingMessages.findIndex(item => item.key === key);
+            if (idx !== -1) {
+                this._wsPendingMessages[idx] = entry;
+                return;
+            }
+        }
+        this._wsPendingMessages.push(entry);
+        if (this._wsPendingMessages.length > 50) {
+            this._wsPendingMessages.shift();
+        }
+    }
+
+    _flushPendingMessages() {
+        if (!this._wsPendingMessages || this._wsPendingMessages.length === 0) {
+            return;
+        }
+        const pending = this._wsPendingMessages.slice();
+        this._wsPendingMessages.length = 0;
+        pending.forEach(({ key, payload, options }) => {
+            const retryOptions = { ...options, force: true };
+            setTimeout(() => {
+                this._sendThrottled(key, payload, retryOptions);
+            }, 0);
+        });
     }
 
     _sendThrottled(key, payload, options = {}) {
@@ -123,6 +157,11 @@ class IBKRConnectionManager {
         const now = Date.now();
         const allowNow = options.force || (now - state.lastSent >= minInterval);
         if (allowNow) {
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                state.queued = payload;
+                this._queuePendingMessage(key, payload, { ...options, minInterval });
+                return 'queued';
+            }
             if (state.timer) {
                 clearTimeout(state.timer);
                 state.timer = null;
@@ -620,6 +659,7 @@ class IBKRConnectionManager {
         this.ws.onopen = () => {
             console.log('[ws] connected');
             this._resetThrottleState();
+            this._flushPendingMessages();
             this.requestConnectionStatus({ force: true });
             this.requestRiskRules({ force: true });
             this.requestStrategies({ force: true });
