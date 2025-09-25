@@ -8717,7 +8717,7 @@ class TradingApp {
             const totalCommission = Number(m.total_commission ?? 0);
             const tradesDisplay = Number.isFinite(totalExecutions) ? totalExecutions : 0;
             const commissionDisplay = Number.isFinite(totalCommission)
-                ? ` (手续费 $${totalCommission.toFixed(2)})`
+                ? ` ($${totalCommission.toFixed(2)})`
                 : '';
             el('kpiTrades').textContent = `${tradesDisplay}${commissionDisplay}`;
             const avgDurationRaw = m.avg_trade_duration;
