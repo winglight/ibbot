@@ -2339,7 +2339,30 @@ if __name__ == "__main__":
                 std_dev = statistics.stdev(pnl_values)
                 if std_dev != 0:
                     sharpe_ratio = (avg_pnl / std_dev) * (len(pnl_values) ** 0.5)
-            avg_trade_duration = 0
+            durations: List[float] = []
+            for order in orders:
+                status = getattr(order, "status", "")
+                if isinstance(status, str) and status.lower() != "filled":
+                    continue
+
+                created_raw = getattr(order, "timestamp", None)
+                executed_raw = getattr(order, "executed_at", None)
+                created_dt = parse_local_datetime(created_raw) if created_raw else None
+                executed_dt = parse_local_datetime(executed_raw) if executed_raw else None
+
+                # 对于缺失成交时间的订单，使用创建时间作为结束时间，确保不会产生负值
+                if created_dt and not executed_dt:
+                    executed_dt = created_dt
+
+                if not created_dt or not executed_dt:
+                    continue
+
+                duration_seconds = (executed_dt - created_dt).total_seconds()
+                if duration_seconds >= 0:
+                    durations.append(duration_seconds)
+
+            avg_trade_duration = sum(durations) / len(durations) if durations else 0
+
             return {'total_executions': total_executions,
                     'total_pnl': total_pnl,
                     'avg_pnl': avg_pnl,
