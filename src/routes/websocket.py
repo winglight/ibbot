@@ -344,6 +344,103 @@ async def websocket_endpoint(websocket: WebSocket):
                         "success": False,
                         "error": str(exc),
                     }))
+            elif msg_type == "request_positions_snapshot":
+                key = "positions_snapshot"
+                force = bool(message.get("force"))
+
+                if not connection_manager or not connection_manager.is_connected():
+                    payload = {
+                        "type": "position_update",
+                        "success": False,
+                        "error": "Not connected to IBKR",
+                        "source": "websocket",
+                        "positions": [],
+                    }
+                    await websocket.send_text(json.dumps(payload))
+                    continue
+
+                use_cache = message.get("use_cache")
+                use_cache = bool(use_cache) if use_cache is not None else False
+
+                cached = last_responses.get(key)
+                if use_cache and cached and not force:
+                    cached_payload = dict(cached)
+                    cached_payload["cached"] = True
+                    await websocket.send_text(json.dumps(cached_payload))
+                    continue
+
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "position_update",
+                            "success": False,
+                            "error": "Rate limited",
+                            "source": "websocket",
+                        }))
+                    continue
+
+                fast_flag = message.get("fast")
+                fast = bool(fast_flag) if fast_flag is not None else False
+
+                ib_client = getattr(core, "ibkr_client", None)
+                if ib_client is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "position_update",
+                        "success": False,
+                        "error": "IBKR client unavailable",
+                        "source": "websocket",
+                    }))
+                    continue
+
+                try:
+                    positions = await asyncio.wait_for(
+                        ib_client.get_positions(fast=fast),
+                        timeout=6.0,
+                    )
+                    payload = {
+                        "type": "position_update",
+                        "success": True,
+                        "positions": positions,
+                        "source": "websocket",
+                        "fast": fast,
+                    }
+                    last_responses[key] = payload
+                    await websocket.send_text(json.dumps(payload))
+                except asyncio.TimeoutError:
+                    logger.warning("Positions snapshot request timed out")
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        cached_payload["timeout"] = True
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "position_update",
+                            "success": False,
+                            "error": "Positions request timed out",
+                            "source": "websocket",
+                        }))
+                except Exception as exc:
+                    logger.warning(f"Failed to stream positions snapshot: {exc}")
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        cached_payload["error"] = str(exc)
+                        await websocket.send_text(json.dumps(cached_payload))
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "position_update",
+                            "success": False,
+                            "error": str(exc),
+                            "source": "websocket",
+                        }))
             elif msg_type == "request_dom_automation_status":
                 if orchestrator is None:
                     try:

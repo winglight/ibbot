@@ -187,6 +187,17 @@ class IBKRConnectionManager {
         });
     }
 
+    requestPositionsSnapshot(options = {}) {
+        const payload = { type: 'request_positions_snapshot' };
+        if (options.fast !== undefined) payload.fast = Boolean(options.fast);
+        if (options.useCache !== undefined) payload.use_cache = Boolean(options.useCache);
+        if (options.force) payload.force = true;
+        return this._sendThrottled('positions_snapshot', payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 10000,
+        });
+    }
+
     requestStrategyPerformance(options = {}) {
         const name = options.name || '';
         if (!name) {
@@ -635,6 +646,14 @@ class IBKRConnectionManager {
                 }
                 break;
             case 'portfolio_update':
+                if (this.app?.dataManager && typeof this.app.dataManager.handlePositionsSnapshot === 'function') {
+                    const handled = this.app.dataManager.handlePositionsSnapshot({
+                        type: 'position_update',
+                        positions: data.portfolio,
+                        source: data.source || 'websocket',
+                    });
+                    if (handled) break;
+                }
                 if (data.portfolio) {
                     this.app.dataManager.updatePositionsUI(data.portfolio);
                 }
@@ -652,6 +671,10 @@ class IBKRConnectionManager {
                 }
                 break;
             case 'position_update':
+                if (this.app?.dataManager && typeof this.app.dataManager.handlePositionsSnapshot === 'function') {
+                    const handled = this.app.dataManager.handlePositionsSnapshot(data);
+                    if (handled) break;
+                }
                 if (data.positions) {
                     this.app.dataManager.updatePositionsUI(data.positions);
                 }

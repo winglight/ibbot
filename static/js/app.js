@@ -6675,10 +6675,11 @@ class TradingApp {
     async loadPortfolio(options = {}) {
         const { refresh = true } = options || {};
         try {
+            let handledByWebsocket = false;
             if (refresh && this.dataManager?.loadPortfolio) {
-                await this.dataManager.loadPortfolio();
+                handledByWebsocket = await this.dataManager.loadPortfolio(options);
             }
-            if (this.portfolioManager?.loadPortfolio) {
+            if (!handledByWebsocket && this.portfolioManager?.loadPortfolio) {
                 return this.portfolioManager.loadPortfolio();
             }
         } catch (error) {

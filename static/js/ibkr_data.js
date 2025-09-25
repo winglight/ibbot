@@ -322,20 +322,79 @@ class IBKRDataManager {
     /**
      * 加载投资组合
      */
-    async loadPortfolio() {
+    async loadPortfolio(options = {}) {
+        const {
+            fast = false,
+            useCache = false,
+            force = false,
+            showLoading = true,
+            minInterval,
+        } = options || {};
+
         try {
-            const response = await this.app.apiCall('/positions?fast=false&use_cache=false');
-            if (response.success && response.positions) {
-                const positions = await response.positions;
-                this.updatePositionsUI(positions);
-            } else {
-                console.error('Failed to fetch positions:', response.statusText);
-                this.updatePortfolioUI(this.positions || []);
+            if (showLoading) {
+                this.showPortfolioLoading();
             }
+
+            if (!this.app?.ibkrManager || typeof this.app.ibkrManager.requestPositionsSnapshot !== 'function') {
+                console.warn('IBKR manager unavailable when requesting portfolio snapshot');
+                this.showPortfolioError('无法请求持仓快照：未初始化 WebSocket 连接');
+                return false;
+            }
+
+            const status = this.app.ibkrManager.requestPositionsSnapshot({
+                fast,
+                useCache,
+                force,
+                minInterval,
+            });
+
+            if (status === 'failed') {
+                this.showPortfolioError('无法通过 WebSocket 请求持仓数据');
+                return false;
+            }
+
+            // 返回 true 表示已通过 WebSocket 请求，等待异步更新
+            return status === 'sent' || status === 'queued';
         } catch (error) {
-            console.error('Failed to load portfolio:', error);
-            this.updatePortfolioUI(this.positions || []);
+            console.error('Failed to request portfolio via websocket:', error);
+            this.showPortfolioError('请求持仓数据失败');
+            return false;
         }
+    }
+
+    showPortfolioLoading(message = '正在通过 WebSocket 加载持仓数据...') {
+        const tbody = document.querySelector('#positionsTable tbody');
+        if (!tbody) return;
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="7" class="text-center text-muted py-3">
+                    <div class="spinner-border spinner-border-sm me-2" role="status"></div>${message}
+                </td>
+            </tr>
+        `;
+    }
+
+    showPortfolioError(message) {
+        const tbody = document.querySelector('#positionsTable tbody');
+        if (!tbody) return;
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="7" class="text-center text-danger py-3">
+                    <i class="fas fa-exclamation-triangle me-2"></i>${message}
+                </td>
+            </tr>
+        `;
+    }
+
+    showPortfolioEmpty(message = '暂无持仓数据') {
+        const tbody = document.querySelector('#positionsTable tbody');
+        if (!tbody) return;
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="7" class="text-center text-muted py-3">${message}</td>
+            </tr>
+        `;
     }
 
     /**
@@ -345,7 +404,12 @@ class IBKRDataManager {
         try {
             const tbody = document.querySelector('#positionsTable tbody');
             if (!tbody) return;
-            
+
+            if (!Array.isArray(positions) || positions.length === 0) {
+                this.showPortfolioEmpty();
+                return;
+            }
+
             tbody.innerHTML = positions.map(pos => `
                 <tr>
                     <td>${pos.symbol}</td>
@@ -377,8 +441,28 @@ class IBKRDataManager {
      * 更新持仓UI（用于WebSocket实时更新）
      */
     updatePositionsUI(positions) {
-        this.positions = positions;
-        this.updatePortfolioUI(positions);
+        this.positions = Array.isArray(positions) ? positions : [];
+        this.updatePortfolioUI(this.positions);
+    }
+
+    handlePositionsSnapshot(payload) {
+        if (!payload) return false;
+
+        if (payload.success === false) {
+            const err = payload.error || payload.detail || '无法获取持仓数据';
+            this.showPortfolioError(err);
+            if (Array.isArray(payload.positions)) {
+                this.updatePositionsUI(payload.positions);
+            }
+            return true;
+        }
+
+        if (Array.isArray(payload.positions)) {
+            this.updatePositionsUI(payload.positions);
+            return true;
+        }
+
+        return false;
     }
 
     /**
