@@ -84,6 +84,10 @@ class OptimizerTaskStore:
         with self._lock:
             return self._tasks.get(task_id)
 
+    def iter_tasks(self) -> List[Tuple[str, TaskRecord]]:
+        with self._lock:
+            return list(self._tasks.items())
+
     def update_state(
         self,
         task_id: str,
@@ -175,16 +179,43 @@ class OptimizerTaskStore:
                 tasks.append((task_id, task))
             return tasks
 
+    def find_active_plan_task(self, plan_id: str) -> Optional[Tuple[str, TaskRecord]]:
+        """Return the first running task for a plan, if any."""
+
+        with self._lock:
+            for task_id, task in self._tasks.items():
+                if task.plan_id != plan_id:
+                    continue
+                if task.state in {TaskState.RUNNING, TaskState.PENDING}:
+                    return task_id, task
+        return None
+
+    def has_running_tasks(self, *, exclude_plan_id: Optional[str] = None) -> bool:
+        """Check whether any task is currently in the running state."""
+
+        with self._lock:
+            for task in self._tasks.values():
+                if task.state != TaskState.RUNNING:
+                    continue
+                if exclude_plan_id and task.plan_id == exclude_plan_id:
+                    continue
+                return True
+        return False
+
+    def list_incomplete_tasks(self) -> List[Tuple[str, TaskRecord]]:
+        with self._lock:
+            return [
+                (task_id, task)
+                for task_id, task in self._tasks.items()
+                if task.state in {TaskState.RUNNING, TaskState.PENDING}
+            ]
+
     def delete_tasks_for_plan(self, plan_id: str) -> None:
         with self._lock:
             for task_id in list(self._tasks.keys()):
                 if self._tasks[task_id].plan_id == plan_id:
                     self._tasks.pop(task_id)
                     self._db.delete_task(task_id)
-
-    def iter_tasks(self) -> List[Tuple[str, TaskRecord]]:
-        with self._lock:
-            return list(self._tasks.items())
 
     # ------------------------------------------------------------------ Helpers
     def _load_from_db(self) -> None:

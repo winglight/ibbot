@@ -8,7 +8,9 @@ from datetime import date, datetime, timedelta
 from threading import Lock
 from typing import Any, Dict, List, Optional
 import uuid
+from time import monotonic
 
+from loguru import logger
 from .schemas import (
     OptimizationAlgorithm,
     OptimizationPlanCreate,
@@ -93,6 +95,7 @@ class PlanManager:
         self._plans: Dict[str, OptimizationPlan] = {}
         self._lock = Lock()
         self._scheduled_tasks: Dict[str, asyncio.Task] = {}
+        self._resumed_tasks: set[str] = set()
         if self._task_store is None:
             raise ValueError("PlanManager requires a task store instance")
         self._load_existing()
@@ -184,13 +187,22 @@ class PlanManager:
         self._db.save_plan(self._plan_to_dict(plan))
         return plan
 
-    async def run_plan_once(self, plan_id: str) -> str:
+    async def run_plan_once(self, plan_id: str, *, terminate_existing: bool = False) -> str:
         plan = self.get_plan(plan_id)
+        active = self._task_store.find_active_plan_task(plan.id)
+        if active:
+            if not terminate_existing:
+                raise RuntimeError("plan_has_active_task")
+            await self._wait_for_task_stop(active[0])
+            # After waiting ensure no other active task remains.
+            follow_up_active = self._task_store.find_active_plan_task(plan.id)
+            if follow_up_active:
+                raise RuntimeError("plan_has_active_task")
         existing = self._scheduled_tasks.pop(plan.id, None)
         if existing:
             existing.cancel()
         follow_up = plan.is_active and plan.frequency_minutes > 0
-        return await self._trigger_plan(plan, schedule_follow_up=follow_up)
+        return await self._trigger_plan(plan, schedule_follow_up=follow_up, origin="manual")
 
     async def _schedule_next(self, plan: OptimizationPlan, delay: float) -> None:
         async def runner() -> None:
@@ -199,7 +211,7 @@ class PlanManager:
                     await asyncio.sleep(delay)
                 if not plan.is_active:
                     return
-                await self._trigger_plan(plan, schedule_follow_up=True)
+                await self._trigger_plan(plan, schedule_follow_up=True, origin="auto")
             except asyncio.CancelledError:  # pragma: no cover
                 return
 
@@ -211,8 +223,34 @@ class PlanManager:
         task = loop.create_task(runner())
         self._scheduled_tasks[plan.id] = task
 
-    async def _trigger_plan(self, plan: OptimizationPlan, schedule_follow_up: bool) -> str:
+    async def _trigger_plan(self, plan: OptimizationPlan, schedule_follow_up: bool, *, origin: str) -> str:
         request = plan.to_request()
+        active = self._task_store.find_active_plan_task(plan.id)
+        if active:
+            if origin == "manual":
+                raise RuntimeError("plan_has_active_task")
+            logger.info(
+                "Plan %s has an active task %s, skipping automatic trigger",
+                plan.id,
+                active[0],
+            )
+            if schedule_follow_up and plan.is_active:
+                retry_delay = max(5, min(plan.frequency_minutes * 60, 60))
+                await self._schedule_next(plan, delay=retry_delay)
+            self._db.save_plan(self._plan_to_dict(plan))
+            return active[0]
+        if origin != "manual" and self._task_store.has_running_tasks(exclude_plan_id=plan.id):
+            logger.info(
+                "Detected other running tasks while triggering plan %s automatically; postponing",
+                plan.id,
+            )
+            if schedule_follow_up and plan.is_active:
+                retry_delay = max(5, min(plan.frequency_minutes * 60, 60))
+                await self._schedule_next(plan, delay=retry_delay)
+            self._db.save_plan(self._plan_to_dict(plan))
+            if plan.task_history:
+                return plan.task_history[-1]
+            return plan.id
         task_id = str(uuid.uuid4())
         self._task_store.create_task(
             task_id,
@@ -319,6 +357,7 @@ class PlanManager:
             self._plans[plan.id] = plan
 
     async def resume_active_plans(self) -> None:
+        await self._resume_interrupted_tasks()
         now = datetime.utcnow()
         for plan in self.list_plans():
             if not plan.is_active:
@@ -327,6 +366,40 @@ class PlanManager:
             if plan.next_run_at and plan.next_run_at > now:
                 delay = (plan.next_run_at - now).total_seconds()
             await self._schedule_next(plan, delay=delay)
+
+    async def _resume_interrupted_tasks(self) -> None:
+        pending_tasks = self._task_store.list_incomplete_tasks()
+        for task_id, record in pending_tasks:
+            if task_id in self._resumed_tasks:
+                continue
+            logger.info("Resuming optimizer task %s", task_id)
+            self._resumed_tasks.add(task_id)
+            self._task_store.update_state(
+                task_id,
+                TaskState.RUNNING,
+                progress=record.progress,
+                message="resuming",
+            )
+            asyncio.create_task(
+                asyncio.to_thread(run_optimization_task, task_id, record.request, self._task_store)
+            )
+
+    async def _wait_for_task_stop(self, task_id: str, timeout: float = 30.0) -> None:
+        accepted = self._task_store.request_stop(task_id)
+        if not accepted:
+            return
+        deadline = monotonic() + timeout
+        while monotonic() < deadline:
+            record = self._task_store.get_task(task_id)
+            if not record or record.state in {
+                TaskState.COMPLETED,
+                TaskState.FAILED,
+                TaskState.STOPPED,
+            }:
+                return
+            await asyncio.sleep(0.5)
+        logger.warning("Task %s did not stop within timeout, forcing state to stopped", task_id)
+        self._task_store.mark_stopped(task_id)
 
 
 plan_manager = PlanManager(task_store=global_task_store)
