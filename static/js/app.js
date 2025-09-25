@@ -463,6 +463,13 @@ class TradingApp {
         this.init();
     }
 
+    async ensureDefaultConnectionConfig(options = {}) {
+        if (this.ibkrManager && typeof this.ibkrManager.ensureDefaultConnectionConfig === 'function') {
+            return this.ibkrManager.ensureDefaultConnectionConfig(options);
+        }
+        return undefined;
+    }
+
     registerWebSocketHandler(type, handler) {
         if (!type || typeof handler !== 'function') {
             return () => {};
