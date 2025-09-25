@@ -429,6 +429,7 @@ class TradingApp {
         this.summaryDataFeedCurrent = null;
         this.wsHandlers = new Map();
         this.strategyPerformanceCells = new Map();
+        this.strategyRefreshIntervalMs = 5000;
         this.sizingHistoryCache = { table: [], latest: null, meta: null, context: null, receivedAt: 0 };
         this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
         this.registerWebSocketHandler('risk_rules', (payload) => this.handleRiskRulesMessage(payload));
@@ -7510,9 +7511,10 @@ class TradingApp {
     }
     async loadStrategies(options = {}) {
         if (this.ibkrManager && typeof this.ibkrManager.requestStrategies === 'function') {
+            const minInterval = options.minInterval ?? this.strategyRefreshIntervalMs ?? 15000;
             const result = this.ibkrManager.requestStrategies({
                 force: Boolean(options.force),
-                minInterval: options.minInterval ?? 15000,
+                minInterval,
             });
             if (result === 'failed') {
                 console.warn('Failed to send strategies request via websocket');
@@ -7524,6 +7526,35 @@ class TradingApp {
         return 'failed';
     }
 
+    resolveStrategySymbol(strategy) {
+        if (!strategy || typeof strategy !== 'object') {
+            return '';
+        }
+        const candidates = [
+            strategy.primary_symbol,
+            strategy.symbol,
+            strategy.ticker,
+            strategy?.settings?.primary_symbol,
+            strategy?.meta?.primary_symbol,
+            strategy?.meta?.symbol,
+        ];
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string') {
+                const trimmed = candidate.trim();
+                if (trimmed) {
+                    return trimmed.toUpperCase();
+                }
+            }
+        }
+        if (Array.isArray(strategy.symbols)) {
+            const match = strategy.symbols.find((item) => typeof item === 'string' && item.trim());
+            if (match) {
+                return match.trim().toUpperCase();
+            }
+        }
+        return '';
+    }
+
     displayStrategies(strategies) {
         const tbody = document.querySelector('#strategiesTable tbody');
         if (!tbody) return;
@@ -7532,7 +7563,7 @@ class TradingApp {
         this.strategyPerformanceCells.clear();
         strategies.forEach(strategy => {
             const row = document.createElement('tr');
-            
+
             // Name
             const nameCell = document.createElement('td');
             nameCell.textContent = strategy.name;
@@ -7543,9 +7574,13 @@ class TradingApp {
                 this.openStrategyDetails(strategy.name);
             });
             
-            // Symbol（暂无字段，先占位）
+            // Symbol
             const symbolCell = document.createElement('td');
-            symbolCell.textContent = '-';
+            const resolvedSymbol = this.resolveStrategySymbol(strategy);
+            symbolCell.textContent = resolvedSymbol || '-';
+            if (resolvedSymbol) {
+                symbolCell.title = resolvedSymbol;
+            }
             
             // Status（开关）
             const statusCell = document.createElement('td');
