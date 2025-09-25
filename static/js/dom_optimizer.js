@@ -682,7 +682,7 @@
             refreshStatusBtn?.addEventListener('click', () => this.refreshAutomationStatus({ force: true }));
             loadConfigBtn?.addEventListener('click', () => this.loadCurrentConfig());
             useMonitorBtn?.addEventListener('click', () => this.fillSymbolFromMonitor());
-            refreshStatsBtn?.addEventListener('click', () => this.refreshStatistics());
+            refreshStatsBtn?.addEventListener('click', () => this.refreshStatistics({ forceEnsure: true }));
             querySignalsBtn?.addEventListener('click', () => this.querySignals());
             optimizeBtn?.addEventListener('click', () => this.handleOptimize());
             clearResultBtn?.addEventListener('click', () => this.resetOptimizeResult());
@@ -690,14 +690,14 @@
                 if (this.state.historyMetrics.length) {
                     this.updateTrendChart(this.state.historyMetrics);
                 } else {
-                    this.refreshStatistics({ silent: true });
+                    this.refreshStatistics({ silent: true, forceEnsure: true });
                 }
             });
             thresholdRefreshBtn?.addEventListener('click', () => {
                 if (this.state.historyMetrics.length) {
                     this.updateThresholdChart(this.state.historyMetrics);
                 } else {
-                    this.refreshStatistics({ silent: true });
+                    this.refreshStatistics({ silent: true, forceEnsure: true });
                 }
             });
             indicatorRefreshBtn?.addEventListener('click', () => {
@@ -705,7 +705,7 @@
                     this.updateIndicatorChart(this.state.historyMetrics);
                     this.updateThresholdChart(this.state.historyMetrics);
                 } else {
-                    this.refreshStatistics({ silent: true });
+                    this.refreshStatistics({ silent: true, forceEnsure: true });
                 }
             });
             trendLiveToggle?.addEventListener('click', () => {
@@ -974,7 +974,7 @@
             this.refreshAutomationStatus({ initial: true }).catch(() => {});
             const symbol = this.elements.symbolInput?.value?.trim();
             if (symbol) {
-                this.refreshStatistics().catch(() => {});
+                this.refreshStatistics({ forceEnsure: true }).catch(() => {});
             }
             this.loadCurrentConfig({ auto: true }).catch(() => {});
             this.ensureTrendChart();
@@ -1116,14 +1116,17 @@
             return raw ? JSON.parse(raw) : {};
         }
 
-        async ensureDomStream(symbol) {
+        async ensureDomStream(symbol, options = {}) {
+            const { force = false } = options || {};
             const targetSymbol = (symbol || '').toString().trim().toUpperCase();
             if (!targetSymbol) return;
             if (this.app?.isReadOnly) return;
             const now = Date.now();
+            const ensuredAt = this.state.streamEnsuredAt || 0;
             if (
-                this.state.activeStreamSymbol === targetSymbol
-                && now - (this.state.streamEnsuredAt || 0) < 60_000
+                !force
+                && this.state.activeStreamSymbol === targetSymbol
+                && ensuredAt > 0
             ) {
                 return;
             }
@@ -1339,7 +1342,7 @@
             return chunks.join(' · ');
         }
 
-        async refreshStatistics({ silent = false } = {}) {
+        async refreshStatistics({ silent = false, forceEnsure = false } = {}) {
             if (!this.elements.section) return;
             const rawSymbol = this.elements.symbolInput?.value?.trim();
             if (!rawSymbol) {
@@ -1350,7 +1353,7 @@
             this.setLoading('stats', true);
             if (!silent) this.setButtonLoading(this.elements.refreshStatsBtn, true, '刷新中');
             try {
-                await this.ensureDomStream(symbol);
+                await this.ensureDomStream(symbol, { force: forceEnsure });
             } catch (error) {
                 if (!silent) {
                     this.notify('warning', `尝试启动 DOM 流失败: ${error?.message || error}`);
@@ -2375,7 +2378,7 @@
             if (target) {
                 const symbol = this.elements.symbolInput?.value?.trim();
                 if (symbol) {
-                    this.refreshStatistics({ silent: true }).catch(() => {});
+                    this.refreshStatistics({ silent: true, forceEnsure: true }).catch(() => {});
                 }
                 this.notify('info', '已开启 DOM Optimizer 实时刷新（30 秒频率）。');
             } else {
@@ -3263,7 +3266,7 @@
                 }
                 this.renderOptimizeResult(response);
                 this.refreshAutomationStatus({ force: true }).catch(() => {});
-                this.refreshStatistics({ silent: true }).catch(() => {});
+                this.refreshStatistics({ silent: true, forceEnsure: true }).catch(() => {});
                 this.notify('success', 'DOM 参数优化完成');
             } catch (error) {
                 this.notify('error', `优化失败: ${error?.message || error}`);
