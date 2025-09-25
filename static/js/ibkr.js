@@ -148,6 +148,9 @@ class IBKRConnectionManager {
     }
 
     requestOrdersSnapshot(options = {}) {
+        if (this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('orders', true);
+        }
         const now = new Date();
         const defaultStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
         const payload = {
@@ -157,10 +160,14 @@ class IBKRConnectionManager {
         };
         if (options.force) payload.force = true;
         if (options.useCache === false) payload.use_cache = false;
-        return this._sendThrottled('orders_snapshot', payload, {
+        const result = this._sendThrottled('orders_snapshot', payload, {
             force: Boolean(options.force),
             minInterval: options.minInterval ?? 15000,
         });
+        if (result === 'failed' && this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('orders', false);
+        }
+        return result;
     }
 
     requestDomAutomationStatus(options = {}) {
@@ -188,14 +195,21 @@ class IBKRConnectionManager {
     }
 
     requestPositionsSnapshot(options = {}) {
+        if (this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('portfolio', true);
+        }
         const payload = { type: 'request_positions_snapshot' };
         if (options.fast !== undefined) payload.fast = Boolean(options.fast);
         if (options.useCache !== undefined) payload.use_cache = Boolean(options.useCache);
         if (options.force) payload.force = true;
-        return this._sendThrottled('positions_snapshot', payload, {
+        const result = this._sendThrottled('positions_snapshot', payload, {
             force: Boolean(options.force),
-            minInterval: options.minInterval ?? 10000,
+            minInterval: options.minInterval ?? 15000,
         });
+        if (result === 'failed' && this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('portfolio', false);
+        }
+        return result;
     }
 
     requestStrategyPerformance(options = {}) {
@@ -229,12 +243,19 @@ class IBKRConnectionManager {
     }
 
     requestRiskRules(options = {}) {
+        if (this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('risk-rules', true);
+        }
         const payload = { type: 'request_risk_rules' };
         if (options.force) payload.force = true;
-        return this._sendThrottled('risk_rules', payload, {
+        const result = this._sendThrottled('risk_rules', payload, {
             force: Boolean(options.force),
             minInterval: options.minInterval ?? 15000,
         });
+        if (result === 'failed' && this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('risk-rules', false);
+        }
+        return result;
     }
 
     requestSizingHistory(options = {}) {
@@ -256,12 +277,19 @@ class IBKRConnectionManager {
     }
 
     requestStrategies(options = {}) {
+        if (this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('strategies', true);
+        }
         const payload = { type: 'request_strategies' };
         if (options.force) payload.force = true;
-        return this._sendThrottled('strategies_snapshot', payload, {
+        const result = this._sendThrottled('strategies_snapshot', payload, {
             force: Boolean(options.force),
             minInterval: options.minInterval ?? 15000,
         });
+        if (result === 'failed' && this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('strategies', false);
+        }
+        return result;
     }
 
     requestStrategyStatus(options = {}) {

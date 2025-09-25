@@ -47,12 +47,6 @@ class OrderManager {
     async loadOrders(options = {}) {
         console.log('🔄 loadOrders called');
 
-        // 显示加载状态
-        const tbody = document.querySelector('#ordersTable tbody');
-        if (tbody) {
-            tbody.innerHTML = '<tr><td colspan="11" class="text-center"><i class="fas fa-spinner fa-spin"></i> Loading orders...</td></tr>';
-        }
-
         // 调用防抖函数
         this.debouncedLoadOrders(options);
     }
@@ -63,8 +57,6 @@ class OrderManager {
     async _loadOrders(options = {}) {
         try {
             console.log('🔄 _loadOrders executing');
-
-            const cacheKey = 'orders_main';
 
             // 只获取当天订单，减少数据传输量
             const today = new Date();
@@ -80,6 +72,9 @@ class OrderManager {
 
         } catch (error) {
             console.error('Failed to load orders:', error);
+            if (this.app && typeof this.app.setPanelLoading === 'function') {
+                this.app.setPanelLoading('orders', false);
+            }
             const tbody = document.querySelector('#ordersTable tbody');
             if (tbody) {
                 tbody.innerHTML = '<tr><td colspan="11" class="text-center text-danger">Failed to load orders</td></tr>';
@@ -89,6 +84,9 @@ class OrderManager {
 
     handleOrdersSnapshot(message) {
         try {
+            if (this.app && typeof this.app.setPanelLoading === 'function') {
+                this.app.setPanelLoading('orders', false);
+            }
             if (!message || message.success === false) {
                 const errorText = message?.error || message?.detail || 'Failed to fetch orders via websocket';
                 console.warn('orders_snapshot error:', errorText);

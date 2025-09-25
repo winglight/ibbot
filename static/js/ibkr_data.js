@@ -327,15 +327,10 @@ class IBKRDataManager {
             fast = false,
             useCache = false,
             force = false,
-            showLoading = true,
             minInterval,
         } = options || {};
 
         try {
-            if (showLoading) {
-                this.showPortfolioLoading();
-            }
-
             if (!this.app?.ibkrManager || typeof this.app.ibkrManager.requestPositionsSnapshot !== 'function') {
                 console.warn('IBKR manager unavailable when requesting portfolio snapshot');
                 this.showPortfolioError('无法请求持仓快照：未初始化 WebSocket 连接');
@@ -363,19 +358,10 @@ class IBKRDataManager {
         }
     }
 
-    showPortfolioLoading(message = '正在通过 WebSocket 加载持仓数据...') {
-        const tbody = document.querySelector('#positionsTable tbody');
-        if (!tbody) return;
-        tbody.innerHTML = `
-            <tr>
-                <td colspan="7" class="text-center text-muted py-3">
-                    <div class="spinner-border spinner-border-sm me-2" role="status"></div>${message}
-                </td>
-            </tr>
-        `;
-    }
-
     showPortfolioError(message) {
+        if (this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('portfolio', false);
+        }
         const tbody = document.querySelector('#positionsTable tbody');
         if (!tbody) return;
         tbody.innerHTML = `
@@ -388,6 +374,9 @@ class IBKRDataManager {
     }
 
     showPortfolioEmpty(message = '暂无持仓数据') {
+        if (this.app && typeof this.app.setPanelLoading === 'function') {
+            this.app.setPanelLoading('portfolio', false);
+        }
         const tbody = document.querySelector('#positionsTable tbody');
         if (!tbody) return;
         tbody.innerHTML = `
@@ -403,7 +392,12 @@ class IBKRDataManager {
     updatePortfolioUI(positions) {
         try {
             const tbody = document.querySelector('#positionsTable tbody');
-            if (!tbody) return;
+            if (!tbody) {
+                if (this.app && typeof this.app.setPanelLoading === 'function') {
+                    this.app.setPanelLoading('portfolio', false);
+                }
+                return;
+            }
 
             if (!Array.isArray(positions) || positions.length === 0) {
                 this.showPortfolioEmpty();
@@ -432,6 +426,9 @@ class IBKRDataManager {
                     </td>
                 </tr>
             `).join('');
+            if (this.app && typeof this.app.setPanelLoading === 'function') {
+                this.app.setPanelLoading('portfolio', false);
+            }
         } catch (e) {
             console.error('updatePortfolioUI failed', e);
         }

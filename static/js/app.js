@@ -429,7 +429,7 @@ class TradingApp {
         this.summaryDataFeedCurrent = null;
         this.wsHandlers = new Map();
         this.strategyPerformanceCells = new Map();
-        this.strategyRefreshIntervalMs = 5000;
+        this.strategyRefreshIntervalMs = 15000;
         this.sizingHistoryCache = { table: [], latest: null, meta: null, context: null, receivedAt: 0 };
         this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
         this.registerWebSocketHandler('risk_rules', (payload) => this.handleRiskRulesMessage(payload));
@@ -439,6 +439,7 @@ class TradingApp {
 
         this.data_push_state = {};
         this.sidePanelManagerInitialized = false;
+        this.panelLoadingStates = new Map();
 
         // 初始化登录管理器
         this.loginManager = new LoginManager(this);
@@ -480,6 +481,44 @@ class TradingApp {
         if (handlers.size === 0) {
             this.wsHandlers.delete(type);
         }
+    }
+
+    updatePanelLoadingIndicator(panelKey) {
+        const key = String(panelKey);
+        const indicator = document.querySelector(`[data-panel-spinner="${key}"]`);
+        if (!indicator) return;
+        const count = this.panelLoadingStates.get(key) || 0;
+        if (count > 0) {
+            indicator.classList.remove('d-none');
+            indicator.setAttribute('aria-hidden', 'false');
+        } else {
+            indicator.classList.add('d-none');
+            indicator.setAttribute('aria-hidden', 'true');
+        }
+    }
+
+    setPanelLoading(panelKey, isLoading, options = {}) {
+        if (!panelKey) return 0;
+        const key = String(panelKey);
+        const force = Boolean(options.force);
+        let count = this.panelLoadingStates.get(key) || 0;
+        if (force) {
+            count = 0;
+        }
+        if (isLoading) {
+            count += 1;
+        } else if (count > 0) {
+            count -= 1;
+        } else {
+            count = 0;
+        }
+        this.panelLoadingStates.set(key, count);
+        this.updatePanelLoadingIndicator(key);
+        return count;
+    }
+
+    resetPanelLoading(panelKey) {
+        return this.setPanelLoading(panelKey, false, { force: true });
     }
 
     handleWebSocketPayload(payload) {
@@ -533,6 +572,7 @@ class TradingApp {
 
     handleStrategiesSnapshot(payload) {
         if (!payload || payload.type !== 'strategies_snapshot') return false;
+        this.setPanelLoading('strategies', false);
         if (!payload.success) {
             console.warn('Strategies snapshot failed:', payload.error || 'unknown');
             return true;
@@ -8922,6 +8962,10 @@ class TradingApp {
     // Logs functionality removed - panel no longer exists
 
     clearData() {
+        this.resetPanelLoading('orders');
+        this.resetPanelLoading('portfolio');
+        this.resetPanelLoading('risk-rules');
+        this.resetPanelLoading('strategies');
         const accountInfo = document.getElementById('accountInfo');
         if (accountInfo) {
             accountInfo.innerHTML = '<p class="text-muted">Connect to view account information</p>';
@@ -9913,7 +9957,7 @@ class TradingApp {
 
     // 启动订单状态自动刷新
     startOrdersAutoRefresh() {
-        // 每30秒自动刷新订单状态
+        // 每15秒自动刷新订单状态
         this.ordersRefreshInterval = setInterval(() => {
             // 只有在Orders标签页激活时才刷新
             const ordersTab = document.querySelector('#orders-tab');
@@ -9921,9 +9965,9 @@ class TradingApp {
                 console.log('Auto-refreshing orders status...');
                 this.loadOrders();
             }
-        }, 30000); // 30秒间隔
-        
-        console.log('Orders auto-refresh started (30s interval)');
+        }, 15000); // 15秒间隔
+
+        console.log('Orders auto-refresh started (15s interval)');
     }
 
     // 停止订单状态自动刷新
