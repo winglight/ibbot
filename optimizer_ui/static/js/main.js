@@ -352,6 +352,7 @@ class OptimizerApp {
                         ${plan.is_active
                             ? `<button class="btn btn-ghost" data-action="stop" data-plan-id="${plan.id}">停止</button>`
                             : `<button class="btn btn-ghost" data-action="start" data-plan-id="${plan.id}">启动</button>`}
+                        <button class="btn btn-ghost" data-action="duplicate" data-plan-id="${plan.id}">一键复制</button>
                         <button class="btn btn-ghost" data-action="delete" data-plan-id="${plan.id}">删除</button>
                     </div>
                 </td>
@@ -376,6 +377,9 @@ class OptimizerApp {
                         await fetch(`/api/optimize/plans/${planId}`, { method: 'DELETE' });
                     }
                     break;
+                case 'duplicate':
+                    await this.duplicatePlan(planId);
+                    break;
                 case 'reports':
                     await this.openReportModal(planId);
                     return;
@@ -398,6 +402,37 @@ class OptimizerApp {
             alert('操作失败，请查看控制台。');
             console.error(err);
         }
+    }
+
+    async duplicatePlan(planId) {
+        const plan = this.state.plans.find((item) => item.id === planId);
+        if (!plan) {
+            throw new Error('plan_not_found');
+        }
+        const payload = {
+            name: this.generateCopyName(plan.name),
+            strategy: plan.strategy,
+            symbol: plan.symbol,
+            base_metrics: Array.isArray(plan.base_metrics) ? [...plan.base_metrics] : [],
+            feature_metrics: Array.isArray(plan.feature_metrics) ? [...plan.feature_metrics] : [],
+            parameters: JSON.parse(JSON.stringify(plan.parameters || {})),
+            algorithm: plan.algorithm,
+            start_date: plan.start_date,
+            end_date: plan.end_date,
+            frequency_minutes: plan.frequency_minutes ?? 0,
+        };
+        if (plan.iterations !== undefined && plan.iterations !== null) {
+            payload.iterations = plan.iterations;
+        }
+        await this.postJson('/api/optimize/plans', payload);
+    }
+
+    generateCopyName(originalName) {
+        if (!originalName) {
+            return '未命名计划（copy）';
+        }
+        const trimmed = originalName.replace(/（copy）$/, '');
+        return `${trimmed}（copy）`;
     }
 
     async openReportModal(planId) {
