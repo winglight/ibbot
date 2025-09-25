@@ -8713,7 +8713,13 @@ class TradingApp {
             el('kpiWinRate').textContent = `${(m.win_rate ?? 0).toFixed(2)}%`;
             el('kpiMaxDD').textContent = `$${(m.max_drawdown ?? 0).toFixed(2)}`;
             el('kpiSharpe').textContent = `${(m.sharpe_ratio ?? 0).toFixed(2)}`;
-            el('kpiTrades').textContent = `${m.total_executions ?? 0}`;
+            const totalExecutions = Number(m.total_executions ?? 0);
+            const totalCommission = Number(m.total_commission ?? 0);
+            const tradesDisplay = Number.isFinite(totalExecutions) ? totalExecutions : 0;
+            const commissionDisplay = Number.isFinite(totalCommission)
+                ? ` (手续费 $${totalCommission.toFixed(2)})`
+                : '';
+            el('kpiTrades').textContent = `${tradesDisplay}${commissionDisplay}`;
             const avgDurationRaw = m.avg_trade_duration;
             el('kpiAvgDur').textContent =
                 typeof avgDurationRaw === 'string'
