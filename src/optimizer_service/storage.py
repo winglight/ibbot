@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +31,7 @@ class TaskRecord:
     completed_at: Optional[datetime] = None
     runtime: Optional[Dict[str, Any]] = None
     stop_requested: bool = False
+    stop_requested_at: Optional[datetime] = None
 
 
 class OptimizerTaskStore:
@@ -80,9 +81,15 @@ class OptimizerTaskStore:
             self._tasks[task_id] = record
             self._persist(task_id)
 
+    _STOP_REQUEST_GRACE_PERIOD = timedelta(seconds=30)
+
     def get_task(self, task_id: str) -> Optional[TaskRecord]:
         with self._lock:
-            return self._tasks.get(task_id)
+            record = self._tasks.get(task_id)
+            if not record:
+                return None
+            self._maybe_force_stop(task_id, record)
+            return record
 
     def update_state(
         self,
@@ -94,6 +101,10 @@ class OptimizerTaskStore:
         with self._lock:
             record = self._tasks.get(task_id)
             if not record:
+                return
+            if record.state in {TaskState.COMPLETED, TaskState.FAILED}:
+                return
+            if record.state == TaskState.STOPPED and record.stop_requested:
                 return
             record.state = state
             if progress is not None:
@@ -116,7 +127,12 @@ class OptimizerTaskStore:
                 return False
             if record.state in (TaskState.COMPLETED, TaskState.FAILED, TaskState.STOPPED):
                 return False
+            now = datetime.utcnow()
+            if record.stop_requested:
+                self._maybe_force_stop(task_id, record, reference_time=now)
+                return True
             record.stop_requested = True
+            record.stop_requested_at = now
             if record.state == TaskState.PENDING:
                 record.state = TaskState.RUNNING
             record.message = "stopping"
@@ -139,6 +155,7 @@ class OptimizerTaskStore:
             record.message = "stopped"
             record.completed_at = datetime.utcnow()
             record.stop_requested = False
+            record.stop_requested_at = None
             self._persist(task_id)
 
     def complete_task(self, task_id: str, report: OptimizationReportData) -> None:
@@ -151,6 +168,8 @@ class OptimizerTaskStore:
             record.message = "completed"
             record.report = report
             record.completed_at = datetime.utcnow()
+            record.stop_requested = False
+            record.stop_requested_at = None
             self._persist(task_id)
 
     def fail_task(self, task_id: str, message: str) -> None:
@@ -162,6 +181,8 @@ class OptimizerTaskStore:
             record.message = message
             record.progress = 100
             record.completed_at = datetime.utcnow()
+            record.stop_requested = False
+            record.stop_requested_at = None
             self._persist(task_id)
 
     def list_tasks_by_plan(self, plan_id: str) -> List[Tuple[str, TaskRecord]]:
@@ -170,6 +191,7 @@ class OptimizerTaskStore:
             for task_id, task in self._tasks.items():
                 if task.plan_id != plan_id:
                     continue
+                self._maybe_force_stop(task_id, task)
                 self._ensure_report_summary(task_id, task)
                 self._ensure_runtime_snapshot(task)
                 tasks.append((task_id, task))
@@ -209,6 +231,7 @@ class OptimizerTaskStore:
                 if row.get("completed_at")
                 else None,
                 stop_requested=False,
+                stop_requested_at=None,
             )
             self._tasks[row["task_id"]] = record
 
@@ -367,6 +390,31 @@ class OptimizerTaskStore:
             return int(match.group(1))
         except ValueError:  # pragma: no cover - defensive
             return 0
+
+    def _maybe_force_stop(
+        self,
+        task_id: str,
+        record: TaskRecord,
+        *,
+        reference_time: Optional[datetime] = None,
+    ) -> None:
+        if (
+            not record.stop_requested
+            or record.state != TaskState.RUNNING
+            or record.message != "stopping"
+        ):
+            return
+        if not record.stop_requested_at:
+            return
+        now = reference_time or datetime.utcnow()
+        if now - record.stop_requested_at < self._STOP_REQUEST_GRACE_PERIOD:
+            return
+        record.state = TaskState.STOPPED
+        record.message = "stopped"
+        record.completed_at = now
+        # Keep stop_requested flag true so that a late task loop still exits once it observes the flag.
+        record.stop_requested = True
+        self._persist(task_id)
 
 
 store = OptimizerTaskStore()
