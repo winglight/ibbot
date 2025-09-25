@@ -16,7 +16,7 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, List, Optional, Any, TYPE_CHECKING, Set, Tuple, Iterable
+from typing import Dict, List, Optional, Any, TYPE_CHECKING, Set, Tuple, Iterable, Union
 from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -551,6 +551,46 @@ class StrategyManager:
         key = f"{strategy_name}_{suffix}"
         return (self.settings or {}).get(key, default)
 
+    def _normalize_strategy_file_display(
+        self,
+        path_value: Optional[Union[str, Path]],
+        module_path: Optional[Path] = None,
+    ) -> Optional[str]:
+        """Normalize strategy file paths for persistence/display."""
+
+        if path_value is None:
+            return None
+
+        text = str(path_value).strip()
+        if not text:
+            return None
+
+        text = text.replace("\\", "/")
+
+        try:
+            candidate = Path(text)
+        except Exception:
+            return text
+
+        if candidate.is_absolute():
+            try:
+                return candidate.relative_to(self.strategy_dir).as_posix()
+            except ValueError:
+                try:
+                    return candidate.relative_to(Path.cwd()).as_posix()
+                except ValueError:
+                    return candidate.as_posix()
+
+        if module_path:
+            try:
+                module_relative = module_path.relative_to(self.strategy_dir).as_posix()
+            except ValueError:
+                module_relative = module_path.as_posix()
+            if text == module_path.as_posix():
+                return module_relative
+
+        return text
+
     def _resolve_strategy_file_path(self, file_path: Optional[str]) -> Optional[Path]:
         """Resolve absolute filesystem path for an internal strategy module."""
 
@@ -675,6 +715,33 @@ class StrategyManager:
                 f"Failed to instantiate strategy class {strategy_cls.__name__}: {exc}"
             )
             return None
+
+        desired_file_path = self._normalize_strategy_file_display(
+            strategy.file_path, module_path
+        )
+        runtime_file_path = self._normalize_strategy_file_display(
+            getattr(instance, "file_path", None), module_path
+        )
+
+        if desired_file_path:
+            if desired_file_path != runtime_file_path:
+                try:
+                    setattr(instance, "file_path", desired_file_path)
+                    runtime_file_path = desired_file_path
+                except Exception:
+                    pass
+        else:
+            fallback_path = self._normalize_strategy_file_display(module_path, module_path)
+            if fallback_path and fallback_path != runtime_file_path:
+                try:
+                    setattr(instance, "file_path", fallback_path)
+                    runtime_file_path = fallback_path
+                except Exception:
+                    pass
+            desired_file_path = fallback_path
+
+        if desired_file_path and strategy.file_path != desired_file_path:
+            strategy.file_path = desired_file_path
 
         if getattr(instance, "name", None) != strategy.name:
             try:
