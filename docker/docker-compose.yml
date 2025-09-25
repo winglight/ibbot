@@ -60,7 +60,7 @@ services:
     volumes:
       - ../logs:/app/logs
       - ../data:/app/data
-      - ../strategy:/app/strategy
+      - ../src/strategies:/app/src/strategies
     depends_on:
       - ib-gateway
     networks:
@@ -86,6 +86,7 @@ services:
       - ./.env
     volumes:
       - ../data:/app/data
+      - ../src/strategies:/app/src/strategies
     depends_on:
       - ibbot
     networks:
