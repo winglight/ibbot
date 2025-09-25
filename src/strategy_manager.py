@@ -2267,6 +2267,98 @@ if __name__ == "__main__":
             strategy_logger.error(f"Failed to delete strategy {name}: {e}")
             return False
 
+    def _resolve_strategy_name(self, candidate: str) -> Optional[str]:
+        """Resolve incoming strategy identifiers to the canonical stored name."""
+
+        normalized = (candidate or "").strip()
+        if not normalized:
+            return None
+
+        if normalized in self.strategies:
+            return normalized
+
+        lowered = normalized.lower()
+        for existing in self.strategies:
+            if existing.lower() == lowered:
+                return existing
+
+        slugged = slugify_strategy_name(normalized)
+        for existing in self.strategies:
+            if slugify_strategy_name(existing) == slugged:
+                return existing
+
+        return None
+
+    def reset_strategy_data(self, name: str) -> Dict[str, Any]:
+        """清除指定策略的订单与统计缓存数据。"""
+
+        resolved_name = self._resolve_strategy_name(name)
+        if resolved_name is None:
+            # 尝试刷新本地缓存，再次解析
+            try:
+                self._load_from_database()
+            except Exception as exc:  # pragma: no cover - defensive logging
+                strategy_logger.warning(
+                    f"Failed to refresh strategies from database while resolving {name}: {exc}"
+                )
+            resolved_name = self._resolve_strategy_name(name)
+
+        if resolved_name is None:
+            # 最后从数据库确认是否存在对应记录
+            try:
+                record = self.db_manager.get_strategy(name)
+            except Exception as exc:  # pragma: no cover - database safeguard
+                strategy_logger.error(
+                    f"Strategy lookup error during reset for {name}: {exc}"
+                )
+                record = None
+            if record is not None:
+                resolved_name = record.name
+            else:
+                raise ValueError(f"Strategy {name} not found")
+
+        try:
+            deleted = self.db_manager.delete_strategy_orders(resolved_name, None)
+        except Exception as exc:
+            strategy_logger.error(
+                f"Failed to delete orders for strategy {resolved_name}: {exc}"
+            )
+            raise
+
+        strategy = self.strategies.get(resolved_name)
+        if strategy:
+            strategy.trigger_count = 0
+            strategy.last_triggered = None
+
+        runtime = self.internal_strategies_runtime.get(resolved_name)
+        if runtime is not None:
+            # 清理常见的运行时统计，避免前端展示过期状态
+            for attr in ("loss_streak", "breaker_tripped"):
+                if hasattr(runtime, attr):
+                    try:
+                        if attr == "breaker_tripped":
+                            setattr(runtime, attr, False)
+                        else:
+                            setattr(runtime, attr, 0)
+                    except Exception:
+                        pass
+            reset_hook = getattr(runtime, "reset_breaker", None)
+            if callable(reset_hook):
+                try:
+                    reset_hook()
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    strategy_logger.warning(
+                        f"Runtime reset hook failed for {resolved_name}: {exc}"
+                    )
+
+        strategy_logger.info(
+            f"Strategy data reset: {resolved_name}, removed {deleted} persisted orders"
+        )
+        return {
+            "deleted_orders": int(deleted or 0),
+            "strategy_name": resolved_name,
+        }
+
             
             
             

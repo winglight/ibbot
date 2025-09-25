@@ -8197,6 +8197,87 @@ class TradingApp {
                 exportBtn.onclick = () => this.exportExecutionsCsv(name);
             }
 
+            const resetBtn = document.getElementById('resetStrategyDataBtn');
+            if (resetBtn) {
+                const clonedReset = resetBtn.cloneNode(true);
+                resetBtn.parentNode.replaceChild(clonedReset, resetBtn);
+                clonedReset.addEventListener('click', async () => {
+                    const curName = document.getElementById('detailsStrategyName')?.textContent || name;
+                    if (!curName) return;
+                    if (!confirm(`确定要重置策略 "${curName}" 的全部订单与统计数据吗？此操作不可撤销！`)) {
+                        return;
+                    }
+                    const originalHtml = clonedReset.innerHTML;
+                    clonedReset.disabled = true;
+                    clonedReset.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Resetting…';
+                    try {
+                        const res = await this.apiCall(`/strategies/${encodeURIComponent(curName)}/reset`, { method: 'POST' });
+                        if (!res?.success) {
+                            const message = res?.error || res?.detail || '重置策略数据失败';
+                            throw new Error(message);
+                        }
+
+                        this.clearStrategyExecutionsCache(curName);
+                        const currentRange = document.getElementById('performanceRange')?.value || '1d';
+                        const refreshTasks = [
+                            this.loadStrategyExecutions(curName, { executions: [], force: true }),
+                            this.loadInternalStrategyOrders(curName, { executions: [], force: true }),
+                            this.loadStrategyPerformance(curName, { range: currentRange, executions: [] }),
+                            this.loadPnLCalendar(curName),
+                        ];
+                        await Promise.allSettled(refreshTasks);
+
+                        try {
+                            const detailRes = await this.apiCall(`/strategies/${encodeURIComponent(curName)}`);
+                            if (detailRes?.success) {
+                                const strategyInfo = detailRes.strategy || {};
+                                const trigEl = document.getElementById('detailsTriggerCount');
+                                if (trigEl) trigEl.textContent = strategyInfo.trigger_count ?? 0;
+                                const lastEl = document.getElementById('detailsLastTriggered');
+                                if (lastEl) {
+                                    lastEl.textContent = strategyInfo.last_triggered
+                                        ? new Date(strategyInfo.last_triggered).toLocaleString()
+                                        : '-';
+                                }
+                                const typeEl = document.getElementById('detailsStrategyType');
+                                if (typeEl && strategyInfo.strategy_type) {
+                                    typeEl.textContent = strategyInfo.strategy_type;
+                                }
+                            }
+                        } catch (refreshErr) {
+                            console.warn('Failed to refresh strategy info after reset', refreshErr);
+                            const trigEl = document.getElementById('detailsTriggerCount');
+                            if (trigEl) trigEl.textContent = '0';
+                            const lastEl = document.getElementById('detailsLastTriggered');
+                            if (lastEl) lastEl.textContent = '-';
+                        }
+
+                        const perfCells = this.strategyPerformanceCells?.get(curName);
+                        if (perfCells) {
+                            perfCells.pnlCell.textContent = '$0.00';
+                            perfCells.tradesCell.textContent = '0';
+                        }
+                        if (this.strategiesManager && typeof this.strategiesManager.loadStrategies === 'function') {
+                            try {
+                                await this.strategiesManager.loadStrategies({ force: true });
+                            } catch (refreshListErr) {
+                                console.warn('Failed to refresh strategies list after reset', refreshListErr);
+                            }
+                        }
+
+                        const successMessage = res?.message || '策略订单与统计数据已重置';
+                        this.showAlert('success', successMessage);
+                    } catch (error) {
+                        console.error('Reset strategy data error:', error);
+                        const errMsg = error?.message || '重置策略数据失败';
+                        this.showAlert('danger', errMsg);
+                    } finally {
+                        clonedReset.disabled = false;
+                        clonedReset.innerHTML = originalHtml;
+                    }
+                });
+            }
+
             // 删除策略按钮
             const delBtn = document.getElementById('deleteStrategyFromDetails');
             if (delBtn) {

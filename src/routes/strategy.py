@@ -189,11 +189,31 @@ async def toggle_strategy_api(name: str, enabled: bool, user: Optional[str] = De
         raise HTTPException(status_code=400, detail="Failed to toggle strategy")
     return {"success": True}
 
+
+@router.post("/api/strategies/{name}/reset")
+async def reset_strategy_data_api(name: str, user: Optional[str] = Depends(get_current_user)):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    try:
+        result = strategy_manager.reset_strategy_data(name)
+        resolved_name = result.get("strategy_name", name)
+        return {
+            "success": True,
+            "result": result,
+            "message": f"Strategy {resolved_name} data reset",
+        }
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error(f"Reset strategy data error for {name}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to reset strategy data")
+
+
 @router.get("/api/strategies/{name}/performance")
 async def get_strategy_performance_api(name: str, range: str = "1d", start: Optional[str] = None, end: Optional[str] = None, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    
+
     try:
         start_date = None
         end_date = None
