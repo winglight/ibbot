@@ -1286,6 +1286,7 @@ class ParameterComparisonApp {
         this.content = root.querySelector('[data-role="compare-content"]');
         this.state = { groups: [] };
         this.errorMessage = '';
+        this.sortState = { key: 'sharpe', direction: 'desc' };
     }
 
     async init() {
@@ -1300,6 +1301,31 @@ class ParameterComparisonApp {
                 await this.handleRefresh();
             });
         }
+        if (this.content) {
+            this.content.addEventListener('click', async (event) => {
+                const sortButton = event.target.closest('button[data-sort-key]');
+                if (sortButton) {
+                    event.preventDefault();
+                    const { sortKey } = sortButton.dataset;
+                    if (sortKey) {
+                        this.handleSort(sortKey);
+                    }
+                    return;
+                }
+                const actionButton = event.target.closest('button[data-compare-action]');
+                if (!actionButton) {
+                    return;
+                }
+                const action = actionButton.dataset.compareAction;
+                if (!action) {
+                    return;
+                }
+                event.preventDefault();
+                if (action === 'generate-strategy') {
+                    await this.handleGenerateStrategy(actionButton);
+                }
+            });
+        }
     }
 
     async handleRefresh() {
@@ -1307,6 +1333,18 @@ class ParameterComparisonApp {
             this.content.innerHTML = '<div class="empty-state">数据刷新中...</div>';
         }
         await this.loadData();
+        this.render();
+    }
+
+    handleSort(sortKey) {
+        if (!sortKey) return;
+        const normalized = this.getSortAggregateKey(sortKey);
+        if (!normalized) return;
+        if (this.sortState.key === normalized) {
+            this.sortState.direction = this.sortState.direction === 'asc' ? 'desc' : 'asc';
+        } else {
+            this.sortState = { key: normalized, direction: normalized === 'max_drawdown' ? 'asc' : 'desc' };
+        }
         this.render();
     }
 
@@ -1334,24 +1372,105 @@ class ParameterComparisonApp {
             this.content.innerHTML = '<div class="empty-state">暂无可对比的参数组，请先完成回测任务。</div>';
             return;
         }
+        const groups = this.getSortedGroups();
         const header = `
             <thead>
                 <tr>
                     <th>标的 / 策略</th>
                     <th>参数组合</th>
-                    <th>Sharpe (均值/中位)</th>
-                    <th>回撤率 (均值/中位)</th>
-                    <th>收益率 (均值/中位)</th>
+                    ${this.renderSortHeader('Sharpe (均值/中位)', 'sharpe')}
+                    ${this.renderSortHeader('回撤率 (均值/中位)', 'max_drawdown')}
+                    ${this.renderSortHeader('收益率 (均值/中位)', 'annual_return')}
                     <th>统计</th>
                 </tr>
             </thead>
         `;
-        const rows = this.state.groups.map((group) => this.renderRow(group)).join('');
+        const rows = groups.map((group) => this.renderRow(group)).join('');
         this.content.innerHTML = `
             <table class="table compare-table">
                 ${header}
                 <tbody>${rows}</tbody>
             </table>
+        `;
+    }
+
+    getSortedGroups() {
+        const groups = Array.isArray(this.state.groups) ? [...this.state.groups] : [];
+        if (!groups.length) {
+            return groups;
+        }
+        const { key, direction } = this.sortState;
+        const multiplier = direction === 'asc' ? 1 : -1;
+        groups.sort((a, b) => {
+            const valueA = this.getSortValue(a, key);
+            const valueB = this.getSortValue(b, key);
+            const hasA = valueA !== null;
+            const hasB = valueB !== null;
+            if (!hasA && !hasB) {
+                return (a.symbol || '').localeCompare(b.symbol || '');
+            }
+            if (!hasA) {
+                return 1;
+            }
+            if (!hasB) {
+                return -1;
+            }
+            if (valueA === valueB) {
+                if (a.sample_size === b.sample_size) {
+                    return (a.symbol || '').localeCompare(b.symbol || '') || (a.strategy || '').localeCompare(b.strategy || '');
+                }
+                return direction === 'asc'
+                    ? (a.sample_size || 0) - (b.sample_size || 0)
+                    : (b.sample_size || 0) - (a.sample_size || 0);
+            }
+            return (valueA - valueB) * multiplier;
+        });
+        return groups;
+    }
+
+    getSortAggregateKey(sortKey) {
+        if (sortKey === 'sharpe' || sortKey === 'max_drawdown' || sortKey === 'annual_return') {
+            return sortKey;
+        }
+        if (sortKey === 'drawdown') {
+            return 'max_drawdown';
+        }
+        if (sortKey === 'return') {
+            return 'annual_return';
+        }
+        return '';
+    }
+
+    getSortValue(group, sortKey) {
+        if (!group || !sortKey) {
+            return null;
+        }
+        const stats = group.stats || {};
+        const aggregate = stats[sortKey];
+        if (!aggregate) {
+            return null;
+        }
+        const candidate =
+            typeof aggregate.average === 'number' && Number.isFinite(aggregate.average)
+                ? aggregate.average
+                : typeof aggregate.median === 'number' && Number.isFinite(aggregate.median)
+                ? aggregate.median
+                : null;
+        return candidate;
+    }
+
+    renderSortHeader(label, sortKey) {
+        const normalized = this.getSortAggregateKey(sortKey);
+        const isActive = this.sortState.key === normalized;
+        const direction = isActive ? this.sortState.direction : '';
+        const indicator = !isActive ? '↕' : direction === 'asc' ? '↑' : '↓';
+        return `
+            <th>
+                <button type="button" class="table-sort-button${isActive ? ' is-active' : ''}" data-sort-key="${normalized}" data-sort-direction="${direction}">
+                    <span>${label}</span>
+                    <span class="sort-indicator">${indicator}</span>
+                </button>
+            </th>
         `;
     }
 
@@ -1363,6 +1482,11 @@ class ParameterComparisonApp {
         const planHtml = planTags ? `<div class="tag-list">${planTags}</div>` : '';
         const parameters = group.parameters || {};
         const parameterJson = HtmlUtils.escape(JSON.stringify(parameters, null, 2));
+        const { base, features } = this.splitParameters(parameters);
+        const basePayload = HtmlUtils.escape(this.encodePayload(base));
+        const featurePayload = HtmlUtils.escape(this.encodePayload(features));
+        const planId = HtmlUtils.escape(this.pickPlanId(plans));
+        const strategyName = HtmlUtils.escape(this.buildDefaultStrategyName(group));
         const sharpeAvg = FormatUtils.number(group.stats?.sharpe?.average, 3);
         const sharpeMedian = FormatUtils.number(group.stats?.sharpe?.median, 3);
         const drawdownAvg = FormatUtils.drawdown(group.stats?.max_drawdown?.average, 2);
@@ -1378,7 +1502,12 @@ class ParameterComparisonApp {
                     <div class="section-subtitle">策略 ${HtmlUtils.escape(group.strategy)}</div>
                     ${planHtml}
                 </td>
-                <td><pre>${parameterJson}</pre></td>
+                <td>
+                    <pre>${parameterJson}</pre>
+                    <div class="table-actions">
+                        <button class="btn btn-ghost" data-compare-action="generate-strategy" data-base="${basePayload}" data-features="${featurePayload}" data-plan-id="${planId}" data-strategy-name="${strategyName}">生成策略</button>
+                    </div>
+                </td>
                 <td>${sharpeAvg} / ${sharpeMedian}</td>
                 <td>${drawdownAvg} / ${drawdownMedian}</td>
                 <td>${returnAvg} / ${returnMedian}</td>
@@ -1390,6 +1519,96 @@ class ParameterComparisonApp {
                 </td>
             </tr>
         `;
+    }
+
+    splitParameters(parameters) {
+        const base = {};
+        const features = {};
+        Object.entries(parameters || {}).forEach(([key, value]) => {
+            if (key.includes('__')) {
+                const [metric, param] = key.split('__');
+                if (!features[metric]) {
+                    features[metric] = {};
+                }
+                features[metric][param] = value;
+            } else {
+                base[key] = value;
+            }
+        });
+        return { base, features };
+    }
+
+    encodePayload(payload) {
+        try {
+            return encodeURIComponent(JSON.stringify(payload ?? {}));
+        } catch (err) {
+            console.warn('Failed to encode payload', err);
+            return '';
+        }
+    }
+
+    decodePayload(encoded) {
+        if (!encoded) return {};
+        try {
+            const raw = decodeURIComponent(encoded);
+            return JSON.parse(raw);
+        } catch (err) {
+            console.warn('Failed to decode payload', err);
+            return {};
+        }
+    }
+
+    buildDefaultStrategyName(group) {
+        if (!group) {
+            return 'optimizer-strategy';
+        }
+        const symbol = (group.symbol || 'symbol').toString();
+        const strategy = (group.strategy || 'strategy').toString();
+        return `${symbol}-${strategy}-${group.sample_size || 1}`;
+    }
+
+    pickPlanId(plans) {
+        if (!Array.isArray(plans) || !plans.length) {
+            return '';
+        }
+        const withId = plans.find((plan) => plan && plan.id);
+        return (withId && withId.id) || '';
+    }
+
+    async handleGenerateStrategy(button) {
+        if (!button) return;
+        const base = this.decodePayload(button.dataset.base);
+        const features = this.decodePayload(button.dataset.features);
+        const planId = button.dataset.planId && button.dataset.planId.trim() ? button.dataset.planId : undefined;
+        const suggested = button.dataset.strategyName || '';
+        const strategyName = window.prompt('请输入策略名称', suggested);
+        if (!strategyName) return;
+        try {
+            const response = await this.postJson('/api/optimize/strategies', {
+                strategy_name: strategyName,
+                plan_id: planId,
+                base_parameters: base,
+                feature_parameters: features,
+            });
+            const filePath = response.file_path || '策略已生成';
+            alert(`策略已生成：${filePath}`);
+        } catch (err) {
+            console.error(err);
+            alert('策略生成失败，请稍后重试。');
+        }
+    }
+
+    async postJson(url, data) {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: data ? JSON.stringify(data) : undefined,
+        });
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(text || '请求失败');
+        }
+        return res.json().catch(() => ({}));
     }
 }
 
