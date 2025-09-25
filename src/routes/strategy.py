@@ -24,12 +24,61 @@ router = APIRouter()
 
 EXECUTIONS_CACHE_TTL = 2.0
 DAILY_PNL_CACHE_TTL = 30.0
+EXECUTIONS_FETCH_TIMEOUT = 3.0
+DAILY_PNL_FETCH_TIMEOUT = 3.5
 
 _executions_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
 _executions_cache_lock: Optional[asyncio.Lock] = None
+_executions_fetch_tasks: Dict[Tuple[str, int], asyncio.Task] = {}
 
 _daily_pnl_cache: Dict[str, Dict[str, Any]] = {}
 _daily_pnl_cache_lock: Optional[asyncio.Lock] = None
+_daily_pnl_fetch_tasks: Dict[str, asyncio.Task] = {}
+
+
+async def _load_strategy_executions(
+    name: str,
+    limit: int,
+    cache_key: Tuple[str, int],
+) -> Dict[str, Any]:
+    executions = await asyncio.to_thread(strategy_manager.get_executions, name, limit)
+    formatted = [
+        asdict(exec_item) if hasattr(exec_item, "__dict__") else exec_item
+        for exec_item in executions
+    ]
+    payload: Dict[str, Any] = {"success": True, "executions": formatted}
+
+    if _executions_cache_lock is None:
+        raise RuntimeError("Executions cache lock unavailable")
+
+    async with _executions_cache_lock:
+        _executions_cache[cache_key] = {
+            "timestamp": monotonic(),
+            "data": dict(payload),
+        }
+
+    payload["from_cache"] = False
+    payload["cache_age"] = 0.0
+    return payload
+
+
+async def _load_strategy_daily_pnl(name: str, cache_key: str) -> Dict[str, Any]:
+    db = get_db_manager()
+    data = await asyncio.to_thread(db.get_strategy_daily_pnl, name)
+    payload: Dict[str, Any] = {"success": True, "pnl": data}
+
+    if _daily_pnl_cache_lock is None:
+        raise RuntimeError("Daily PnL cache lock unavailable")
+
+    async with _daily_pnl_cache_lock:
+        _daily_pnl_cache[cache_key] = {
+            "timestamp": monotonic(),
+            "data": dict(payload),
+        }
+
+    payload["from_cache"] = False
+    payload["cache_age"] = 0.0
+    return payload
 
 
 async def invalidate_strategy_cache(strategy_name: Optional[str] = None) -> None:
@@ -353,36 +402,72 @@ async def get_strategy_daily_pnl(
     cached_entry: Optional[Dict[str, Any]] = None
     now = monotonic()
 
-    if not force_refresh:
-        async with _daily_pnl_cache_lock:
-            entry = _daily_pnl_cache.get(cache_key)
-            if entry and now - entry.get("timestamp", 0.0) < DAILY_PNL_CACHE_TTL:
+    async with _daily_pnl_cache_lock:
+        entry = _daily_pnl_cache.get(cache_key)
+        if entry and not force_refresh:
+            age = now - entry.get("timestamp", 0.0)
+            if age < DAILY_PNL_CACHE_TTL:
                 cached_payload = dict(entry.get("data", {}))
                 cached_payload["from_cache"] = True
-                cached_payload["cache_age"] = now - entry.get("timestamp", now)
+                cached_payload["cache_age"] = age
                 return cached_payload
-            cached_entry = entry
+        if entry:
+            cached_entry = dict(entry)
+        if force_refresh:
+            _daily_pnl_cache.pop(cache_key, None)
+            task = _daily_pnl_fetch_tasks.pop(cache_key, None)
+            if task and not task.done():
+                task.cancel()
+        fetch_task = _daily_pnl_fetch_tasks.get(cache_key)
+        if not fetch_task or fetch_task.done():
+            fetch_task = asyncio.create_task(_load_strategy_daily_pnl(name, cache_key))
+
+            def _cleanup(fut: asyncio.Future, key: str = cache_key) -> None:
+                _daily_pnl_fetch_tasks.pop(key, None)
+                if fut.cancelled():
+                    return
+                try:
+                    fut.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.warning(
+                        "Strategy daily PnL fetch task failed",
+                        strategy=name,
+                        error=str(exc),
+                    )
+
+            fetch_task.add_done_callback(_cleanup)
+            _daily_pnl_fetch_tasks[cache_key] = fetch_task
 
     try:
-        db = get_db_manager()
-        data = await asyncio.to_thread(db.get_strategy_daily_pnl, name)
-    except Exception as e:
-        logger.error(f"Get strategy daily pnl error: {e}")
+        payload = await asyncio.wait_for(
+            asyncio.shield(fetch_task), timeout=DAILY_PNL_FETCH_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Strategy daily PnL fetch timed out; returning cached snapshot",
+            strategy=name,
+        )
         if cached_entry:
             cached_payload = dict(cached_entry.get("data", {})) or {"success": True, "pnl": []}
             cached_payload["from_cache"] = True
-            cached_payload["cache_warning"] = str(e)
+            cached_payload["cache_age"] = now - cached_entry.get("timestamp", now)
+            cached_payload["refresh_in_progress"] = True
             return cached_payload
-        raise HTTPException(status_code=500, detail=str(e))
-
-    payload = {"success": True, "pnl": data}
-    async with _daily_pnl_cache_lock:
-        _daily_pnl_cache[cache_key] = {
-            "timestamp": monotonic(),
-            "data": dict(payload),
+        return {
+            "success": True,
+            "pnl": [],
+            "from_cache": True,
+            "refresh_in_progress": True,
         }
+    except Exception as exc:
+        logger.error(f"Get strategy daily pnl error: {exc}")
+        if cached_entry:
+            cached_payload = dict(cached_entry.get("data", {})) or {"success": True, "pnl": []}
+            cached_payload["from_cache"] = True
+            cached_payload["cache_warning"] = str(exc)
+            return cached_payload
+        raise HTTPException(status_code=500, detail=str(exc))
 
-    payload["from_cache"] = False
     return payload
 
 # External trigger endpoint - Async queue version
@@ -466,39 +551,75 @@ async def get_strategy_executions(
     cached_entry: Optional[Dict[str, Any]] = None
     now = monotonic()
 
-    if not force_refresh:
-        async with _executions_cache_lock:
-            entry = _executions_cache.get(cache_key)
-            if entry and now - entry.get("timestamp", 0.0) < EXECUTIONS_CACHE_TTL:
+    async with _executions_cache_lock:
+        entry = _executions_cache.get(cache_key)
+        if entry and not force_refresh:
+            age = now - entry.get("timestamp", 0.0)
+            if age < EXECUTIONS_CACHE_TTL:
                 cached_payload = dict(entry.get("data", {}))
                 cached_payload["from_cache"] = True
-                cached_payload["cache_age"] = now - entry.get("timestamp", now)
+                cached_payload["cache_age"] = age
                 return cached_payload
-            cached_entry = entry
+        if entry:
+            cached_entry = dict(entry)
+        if force_refresh:
+            _executions_cache.pop(cache_key, None)
+            task = _executions_fetch_tasks.pop(cache_key, None)
+            if task and not task.done():
+                task.cancel()
+        fetch_task = _executions_fetch_tasks.get(cache_key)
+        if not fetch_task or fetch_task.done():
+            fetch_task = asyncio.create_task(
+                _load_strategy_executions(name, effective_limit, cache_key)
+            )
+
+            def _cleanup(fut: asyncio.Future, key: Tuple[str, int] = cache_key) -> None:
+                _executions_fetch_tasks.pop(key, None)
+                if fut.cancelled():
+                    return
+                try:
+                    fut.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.warning(
+                        "Strategy executions fetch task failed",
+                        strategy=name,
+                        error=str(exc),
+                    )
+
+            fetch_task.add_done_callback(_cleanup)
+            _executions_fetch_tasks[cache_key] = fetch_task
 
     try:
-        executions = await asyncio.to_thread(strategy_manager.get_executions, name, effective_limit)
-        formatted = [
-            asdict(exec_item) if hasattr(exec_item, "__dict__") else exec_item
-            for exec_item in executions
-        ]
-    except Exception as e:
-        logger.error(f"Get strategy executions error: {e}")
+        payload = await asyncio.wait_for(
+            asyncio.shield(fetch_task), timeout=EXECUTIONS_FETCH_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Strategy executions fetch timed out; returning cached snapshot",
+            strategy=name,
+            limit=effective_limit,
+        )
         if cached_entry:
             cached_payload = dict(cached_entry.get("data", {})) or {"success": True, "executions": []}
             cached_payload["from_cache"] = True
-            cached_payload["cache_warning"] = str(e)
+            cached_payload["cache_age"] = now - cached_entry.get("timestamp", now)
+            cached_payload["refresh_in_progress"] = True
             return cached_payload
-        raise HTTPException(status_code=500, detail=str(e))
-
-    payload = {"success": True, "executions": formatted}
-    async with _executions_cache_lock:
-        _executions_cache[cache_key] = {
-            "timestamp": monotonic(),
-            "data": dict(payload),
+        return {
+            "success": True,
+            "executions": [],
+            "from_cache": True,
+            "refresh_in_progress": True,
         }
+    except Exception as exc:
+        logger.error(f"Get strategy executions error: {exc}")
+        if cached_entry:
+            cached_payload = dict(cached_entry.get("data", {})) or {"success": True, "executions": []}
+            cached_payload["from_cache"] = True
+            cached_payload["cache_warning"] = str(exc)
+            return cached_payload
+        raise HTTPException(status_code=500, detail=str(exc))
 
-    payload["from_cache"] = False
     return payload
 
 # Clear all executions for a strategy

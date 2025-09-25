@@ -25,6 +25,8 @@ from loguru import logger
 router = APIRouter()
 dom_service = get_dom_service()
 
+DOM_STOP_TIMEOUT = 2.5
+
 
 def _ensure_not_read_only(request: Request) -> None:
     if getattr(request.state, "is_read_only", False):
@@ -103,10 +105,46 @@ async def dom_stop(
     symbol = (req.symbol or "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
-    ok = await dom_service.stop_stream(symbol)
+    stop_task = asyncio.create_task(dom_service.stop_stream(symbol))
+    try:
+        ok = await asyncio.wait_for(asyncio.shield(stop_task), timeout=DOM_STOP_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "DOM stop request timed out; continuing in background",
+            symbol=symbol,
+        )
+
+        def _log_result(fut: asyncio.Future) -> None:
+            try:
+                result = fut.result()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning(
+                    "Background DOM stop task failed",
+                    symbol=symbol,
+                    error=str(exc),
+                )
+            else:
+                if result:
+                    logger.info(
+                        "DOM stop completed asynchronously",
+                        symbol=symbol,
+                    )
+                else:
+                    logger.warning(
+                        "DOM stop background task reported no active stream",
+                        symbol=symbol,
+                    )
+
+        stop_task.add_done_callback(_log_result)
+        return {"success": True, "pending": True}
+    except Exception as exc:
+        stop_task.cancel()
+        logger.error("DOM stop task failed", symbol=symbol, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to stop depth stream") from exc
+
     if not ok:
         raise HTTPException(status_code=400, detail="No active depth stream for symbol")
-    return {"success": True}
+    return {"success": True, "pending": False}
 
 
 class DOMConfigModel(BaseModel):

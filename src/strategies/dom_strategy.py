@@ -166,6 +166,22 @@ class DOMStrategy(BaseStrategy):
         started = super().start()
         if not started:
             return False
+        ensure_symbol = self.symbol or getattr(self, "primary_symbol", None)
+        if ensure_symbol and self.dom_service:
+            ensure = getattr(self.dom_service, "ensure_stream_running", None)
+            if callable(ensure):
+                try:
+                    if ensure(ensure_symbol):
+                        self.logger.info(
+                            "Ensured DOM stream running for symbol",
+                            symbol=ensure_symbol,
+                        )
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    self.logger.warning(
+                        "Failed to auto-start DOM stream",
+                        symbol=ensure_symbol,
+                        error=str(exc),
+                    )
         self._started_at = time.time()
         self._last_runtime_duration = 0.0
         self._last_data_timestamp = 0.0
