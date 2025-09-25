@@ -311,16 +311,44 @@ class ConnectionManager:
                                                     price_value = float(candidate)
                                                     break
 
-                                            order_source = 'manual'
-                                            order_ref = getattr(order_obj, 'orderRef', '')
-                                            if isinstance(order_ref, str) and order_ref:
-                                                lower_ref = order_ref.lower()
-                                                if 'tp' in lower_ref:
-                                                    order_source = 'tp'
-                                                elif 'sl' in lower_ref:
-                                                    order_source = 'sl'
-                                                elif 'auto' in lower_ref or 'strategy' in lower_ref or 'risk' in lower_ref:
-                                                    order_source = 'auto'
+                                            order_source = None
+
+                                            # 优先尝试从 RiskManager/OrderManager 中识别订单来源
+                                            try:
+                                                import core  # 延迟导入避免循环依赖
+
+                                                risk_manager = getattr(core, 'risk_manager', None)
+                                                if (risk_manager and
+                                                        hasattr(risk_manager, 'auto_orders') and
+                                                        order_id in risk_manager.auto_orders):
+                                                    auto_order = risk_manager.auto_orders.get(order_id)
+                                                    candidate = getattr(auto_order, 'order_source', None)
+                                                    if candidate:
+                                                        order_source = str(candidate)
+
+                                                if order_source is None:
+                                                    existing = om.get_order(order_id)
+                                                    if existing and getattr(existing, 'order_source', None):
+                                                        order_source = str(existing.order_source)
+                                            except Exception as detect_err:  # pragma: no cover - defensive
+                                                connection_logger.debug(
+                                                    f"Order source detection failed for {order_id}: {detect_err}"
+                                                )
+
+                                            # 如果仍未识别来源，再回退到 orderRef 的启发式判断
+                                            if not order_source:
+                                                order_source = 'manual'
+                                                order_ref = getattr(order_obj, 'orderRef', '')
+                                                if isinstance(order_ref, str) and order_ref:
+                                                    lower_ref = order_ref.lower()
+                                                    if 'tp' in lower_ref:
+                                                        order_source = 'tp'
+                                                    elif 'sl' in lower_ref:
+                                                        order_source = 'sl'
+                                                    elif ('auto' in lower_ref or
+                                                          'strategy' in lower_ref or
+                                                          'risk' in lower_ref):
+                                                        order_source = 'auto'
 
                                             await asyncio.to_thread(
                                                 om.add_order,
