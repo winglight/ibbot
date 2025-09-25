@@ -1516,8 +1516,16 @@ class IBKRClient:
                 ibkr_logger.error(f"IBKR connection lost for get positions")
                 return []
             
-            # Use portfolio() to get current market data snapshot
-            portfolio_items = ib.portfolio()
+            # Use portfolio() to get current market data snapshot without blocking the event loop
+            def _portfolio_snapshot():
+                return ib.portfolio()
+
+            portfolio_items = await asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
+                _portfolio_snapshot,
+            )
+            if portfolio_items is None:
+                portfolio_items = []
 
             # 当发生短暂断线/同步延迟时，IB可能返回空的portfolio快照。
             # 为避免前端仓位瞬时清空，这里使用短期缓存回退。
@@ -1529,12 +1537,33 @@ class IBKRClient:
                     ibkr_logger.warning("IB portfolio() returned empty and no valid cache; returning empty list")
                     return []
             position_list = []
-            
+
+            realtime_tasks: Dict[str, asyncio.Task] = {}
+            realtime_results: Dict[str, Optional[Dict[str, Any]]] = {}
+            if not fast:
+                fetch_semaphore = asyncio.Semaphore(5)
+
+                async def _prefetch(symbol: str):
+                    async with fetch_semaphore:
+                        return await self.get_real_time_data(symbol)
+
+                for item in portfolio_items:
+                    if not getattr(item, 'position', 0):
+                        continue
+                    sym = getattr(getattr(item, 'contract', None), 'symbol', None)
+                    if not sym or sym in realtime_tasks:
+                        continue
+                    cache_ts = self.price_cache_timestamp.get(sym)
+                    cached_price = self.price_cache.get(sym)
+                    if cached_price and cache_ts and (now_local() - cache_ts) < timedelta(seconds=self.price_cache_ttl_seconds):
+                        continue
+                    realtime_tasks[sym] = asyncio.create_task(_prefetch(sym))
+
             for item in portfolio_items:
                 # Filter out zero positions to avoid stale data
                 if item.position == 0:
                     continue
-                
+
                 sym = item.contract.symbol
                 current_price = None
                 price_source = None
@@ -1579,23 +1608,35 @@ class IBKRClient:
                 
                 # 2) 如果缓存无效，尝试获取实时价格（仅在非快速模式下且不在ThreadPoolExecutor中）
                 if current_price is None and not fast:
-                    try:
-                        # 检查是否在ThreadPoolExecutor中运行
-                        current_thread = threading.current_thread()
-                        is_in_thread_pool = isinstance(current_thread, threading.Thread) and 'ThreadPoolExecutor' in current_thread.name
-                        
-                        # 只在主线程或非ThreadPoolExecutor线程中获取实时价格
-                        if not is_in_thread_pool:
-                            data = await self.get_real_time_data(sym)
-                            if data and data.get('last'):
-                                current_price = data['last']
-                                price_source = "realtime"
+                    if sym in realtime_results:
+                        data = realtime_results[sym]
+                    else:
+                        task = realtime_tasks.get(sym)
+                        if task:
+                            try:
+                                data = await asyncio.wait_for(task, timeout=4.0)
+                            except asyncio.TimeoutError:
+                                task.cancel()
+                                ibkr_logger.warning(f"Realtime price request for {sym} timed out")
+                                data = None
+                            except asyncio.CancelledError:
+                                ibkr_logger.debug(f"Realtime price task for {sym} cancelled")
+                                raise
+                            except Exception as e:
+                                ibkr_logger.debug(f"Realtime price fetch error for {sym}: {e}")
+                                data = None
+                            else:
+                                realtime_results[sym] = data
+                            finally:
+                                realtime_tasks.pop(sym, None)
                         else:
-                            # 在ThreadPoolExecutor中，完全跳过实时价格获取以避免阻塞
-                            ibkr_logger.debug(f"Skipping real-time fetch for {sym} in ThreadPoolExecutor to avoid blocking")
-                    except Exception as e:
-                        ibkr_logger.debug(f"Realtime price fetch error for {sym}: {e}")
-                
+                            data = None
+                        if sym not in realtime_results:
+                            realtime_results[sym] = data
+                    if data and data.get('last'):
+                        current_price = data['last']
+                        price_source = "realtime"
+
                 # 3) 如果实时获取失败或为快速模式，尝试使用 marketPrice
                 if current_price is None:
                     if item.marketPrice and item.marketPrice == item.marketPrice and item.marketPrice > 0:

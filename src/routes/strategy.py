@@ -236,17 +236,8 @@ async def get_strategy_daily_pnl(name: str, user: Optional[str] = Depends(get_cu
     if 'order_manager' not in globals() or not order_manager:
         raise HTTPException(status_code=500, detail="Order manager not initialized")
     try:
-        orders = order_manager.get_orders(strategy_name=name)
-        daily: Dict[str, float] = {}
-        for o in orders:
-            if o.pnl is None:
-                continue
-            date_source = o.executed_at or o.created_at
-            if not date_source:
-                continue
-            day = date_source.date().isoformat()
-            daily[day] = daily.get(day, 0.0) + float(o.pnl)
-        data = [{"date": d, "pnl": v} for d, v in sorted(daily.items())]
+        db = get_db_manager()
+        data = await asyncio.to_thread(db.get_strategy_daily_pnl, name)
         return {"success": True, "pnl": data}
     except Exception as e:
         logger.error(f"Get strategy daily pnl error: {e}")
@@ -318,7 +309,7 @@ async def get_strategy_executions(name: str, limit: int = 100, user: Optional[st
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     try:
-        executions = strategy_manager.get_executions(name, limit)
+        executions = await asyncio.to_thread(strategy_manager.get_executions, name, limit)
         return {"success": True, "executions": [asdict(exec) if hasattr(exec, '__dict__') else exec for exec in executions]}
     except Exception as e:
         logger.error(f"Get strategy executions error: {e}")
