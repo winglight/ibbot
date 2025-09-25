@@ -69,24 +69,32 @@
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
         <div class="container-fluid">
-            <a class="navbar-brand" href="#">
-                <i class="fas fa-chart-line"></i> IBKR Trading Bot
-            </a>
-            <div class="navbar-nav ms-auto">
-                <button class="btn btn-outline-light btn-sm me-2" id="connectionSettingsBtn">
+            <div class="d-flex align-items-center gap-2">
+                <a class="navbar-brand" href="#">
+                    <i class="fas fa-chart-line"></i> IBKR Trading Bot
+                </a>
+                <button class="btn btn-outline-light btn-sm" id="openConfigurationBtn" title="Configuration">
+                    <i class="fas fa-sliders-h"></i>
+                </button>
+            </div>
+            <div class="d-flex align-items-center ms-auto gap-2">
+                <button class="btn btn-outline-light btn-sm" id="connectionSettingsBtn">
                     <i class="fas fa-cog"></i> IBKR
                 </button>
-                <button class="btn btn-outline-light btn-sm me-2" id="loginBtn">
+                <button class="btn btn-outline-light btn-sm" id="loginBtn">
                     <i class="fas fa-user"></i> Login
                 </button>
-                <button class="btn btn-outline-light btn-sm me-2" id="logoutBtn" style="display: none;">
+                <button class="btn btn-outline-light btn-sm" id="logoutBtn" style="display: none;">
                     <i class="fas fa-sign-out-alt"></i> Logout
                 </button>
-                <span class="navbar-text">
+                <span class="navbar-text d-flex align-items-center gap-2">
                     <span id="connectionStatus" class="status-indicator status-disconnected"></span>
                     <span id="connectionText">Disconnected</span>
                 </span>
-                <span id="authRoleBadge" class="badge bg-warning text-dark ms-3 d-none">
+                <button class="btn btn-outline-light btn-sm" id="openNotificationsBtn" title="Notifications">
+                    <i class="fas fa-bell"></i>
+                </button>
+                <span id="authRoleBadge" class="badge bg-warning text-dark d-none">
                     <i class="fas fa-user-shield me-1"></i>Visitor
                 </span>
             </div>
@@ -408,15 +416,6 @@
     </aside>
 
     <div class="container-fluid mt-4">
-        <div class="page-header d-flex align-items-center justify-content-between mb-4">
-            <button class="btn btn-outline-primary side-panel-toggle" id="openConfigurationBtn">
-                <i class="fas fa-sliders-h me-2"></i> Configuration
-            </button>
-            <h2 class="page-title mb-0">Trading Dashboard</h2>
-            <button class="btn btn-outline-primary side-panel-toggle" id="openNotificationsBtn">
-                <i class="fas fa-bell me-2"></i> Notifications
-            </button>
-        </div>
         <div id="readOnlyBanner" class="alert alert-warning d-none" role="alert">
             <i class="fas fa-eye-slash me-2"></i>访客账号处于只读模式，无法执行交易或修改配置。
         </div>
@@ -560,6 +559,9 @@
                       <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="strategies" aria-hidden="true">
                         <i class="fas fa-circle-notch fa-spin"></i>
                       </span>
+                      <button class="btn btn-outline-secondary btn-sm" id="openDomOptimizerModalBtn" data-bs-toggle="modal" data-bs-target="#domOptimizerModal" title="DOM Optimizer">
+                        <i class="fas fa-arrow-up"></i>
+                      </button>
                       <button class="btn btn-outline-secondary btn-sm" id="strategySettingsBtn">
                         <i class="fas fa-cog"></i>
                       </button>
@@ -589,311 +591,8 @@
 
         </div>
 
-        <!-- DOM Optimizer Section -->
-        <section id="domOptimizerSection" class="mt-4">
-            <div class="card shadow-sm">
-                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                    <div>
-                        <h5 class="mb-1"><i class="fas fa-sliders-h me-2"></i>DOM Optimizer</h5>
-                        <small class="text-muted">参数调节、信号统计与自动化运行概览</small>
-                    </div>
-                    <div class="d-flex align-items-center gap-2">
-                        <span id="domOptimizerStatusBadge" class="badge bg-secondary text-uppercase">Idle</span>
-                        <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerRefreshStatusBtn">
-                            <i class="fas fa-sync-alt me-1"></i>刷新状态
-                        </button>
-                    </div>
-                </div>
-                <div class="card-body">
-                    <div class="row g-3">
-                        <div class="col-lg-4 d-flex flex-column gap-3">
-                            <div class="card h-100 border-0 shadow-sm">
-                                <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                                    <span class="fw-semibold text-uppercase small text-muted">配置与统计</span>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerLoadConfigBtn">
-                                        <i class="fas fa-download me-1"></i>载入
-                                    </button>
-                                </div>
-                                <div class="card-body">
-                                    <form id="domOptimizerConfigForm" class="row g-3">
-                                        <div class="col-12">
-                                            <label for="domOptimizerSymbolInput" class="form-label">交易标的</label>
-                                            <div class="input-group input-group-sm">
-                                                <input type="text" class="form-control" id="domOptimizerSymbolInput" placeholder="例如: MES">
-                                                <button class="btn btn-outline-secondary" type="button" id="domOptimizerUseMonitorBtn">
-                                                    <i class="fas fa-bolt"></i> 监控
-                                                </button>
-                                            </div>
-                                            <div class="form-text">可直接从当前监控或手动输入符号。</div>
-                                        </div>
-                                        <div class="col-6">
-                                            <label for="domOptimizerLookbackInput" class="form-label">统计窗口 (分钟)</label>
-                                            <input type="number" class="form-control form-control-sm" id="domOptimizerLookbackInput" min="15" step="15" value="240">
-                                            <div class="form-text">影响统计面板与信号列表，Outcome 窗口与此保持一致。</div>
-                                        </div>
-                                        <div class="col-12">
-                                            <label for="domOptimizerLookbackSlider" class="form-label">统计窗口快捷调节</label>
-                                            <input type="range" class="form-range" id="domOptimizerLookbackSlider" min="0" max="11" step="1">
-                                            <div class="form-text" id="domOptimizerLookbackDisplay">240 分钟</div>
-                                        </div>
-                                        <div class="col-6">
-                                            <label for="domOptimizerStatsLimitInput" class="form-label">最大记录数</label>
-                                            <input type="number" class="form-control form-control-sm" id="domOptimizerStatsLimitInput" min="50" step="50" value="500">
-                                        </div>
-                                        <div class="col-6">
-                                            <label for="domOptimizerMinSignalsInput" class="form-label">最少信号数</label>
-                                            <input type="number" class="form-control form-control-sm" id="domOptimizerMinSignalsInput" min="0" value="0">
-                                        </div>
-                                        <div class="col-12">
-                                            <label class="form-label mb-1">阈值配置</label>
-                                            <div class="small text-muted mb-2">参数分为两层：基础阈值（OBI / OFI / Trend 等核心指标）与特征阈值（堆单、吸收等特征信号）。</div>
-                                            <div class="d-flex justify-content-end mb-2">
-                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerFeaturePresetBtn">
-                                                    <i class="fas fa-download me-1"></i>填充当前配置
-                                                </button>
-                                            </div>
-                                            <div class="border rounded-3 p-3 bg-light mb-3">
-                                                <div class="fw-semibold text-uppercase small text-muted mb-2">基础阈值 JSON</div>
-                                                <textarea class="form-control font-monospace" id="domOptimizerBaseThresholdsInput" rows="5" placeholder='{"base_thresholds": {"long": {"obi5": 0.6, "ofi": 0.0}}, "obi_candidates": [0.55, 0.6, 0.65, 0.7], "ofi_candidates": [0, 5, 10, 15], "trend_candidates": [0.5, 0.7, 0.85, 0.95]}'></textarea>
-                                                <div class="form-text mt-1">可同时编辑基础阈值及候选组合，留空则沿用后端配置。</div>
-                                            </div>
-                                            <div class="border rounded-3 p-3 bg-light">
-                                                <div class="fw-semibold text-uppercase small text-muted mb-2">特征阈值 JSON</div>
-                                                <textarea class="form-control font-monospace" id="domOptimizerFeatureThresholdsInput" rows="6" placeholder='{"stacking": {"intensity": 0.35}}'></textarea>
-                                                <div class="form-text mt-1">支持堆单 / 吸收等特征的细粒度阈值配置，留空则保持当前设置。</div>
-                                            </div>
-                                        </div>
-                                    </form>
-                                    <div class="d-grid gap-2 mt-2">
-                                        <button type="button" class="btn btn-primary btn-sm" id="domOptimizerRefreshStatsBtn">
-                                            <i class="fas fa-chart-bar me-1"></i>刷新统计
-                                        </button>
-                                    </div>
-                                    <hr>
-                                    <div>
-                                        <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
-                                            <span>信号总数</span>
-                                            <span class="fw-semibold" id="domOptimizerStatsTotal">-</span>
-                                        </div>
-                                        <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
-                                            <span>多头 / 空头</span>
-                                            <span class="fw-semibold" id="domOptimizerStatsBySide">-</span>
-                                        </div>
-                                        <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
-                                            <span>已评估成功率</span>
-                                            <span class="fw-semibold text-success" id="domOptimizerStatsSuccessRate">-</span>
-                                        </div>
-                                        <div class="d-flex justify-content-between align-items-center py-1 small text-muted">
-                                            <span>待评估信号</span>
-                                            <span class="fw-semibold text-warning" id="domOptimizerStatsPending">-</span>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="card border-0 shadow-sm">
-                                <div class="card-header py-2">
-                                    <span class="fw-semibold text-uppercase small text-muted">自动化状态</span>
-                                </div>
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between small text-muted mb-2">
-                                        <span>当前状态</span>
-                                        <span class="fw-semibold" id="domOptimizerStatusText">-</span>
-                                    </div>
-                                    <div class="d-flex justify-content-between small text-muted mb-2">
-                                        <span>最近执行</span>
-                                        <span class="fw-semibold" id="domOptimizerLastRun">-</span>
-                                    </div>
-                                    <div class="d-flex justify-content-between small text-muted mb-2">
-                                        <span>耗时</span>
-                                        <span class="fw-semibold" id="domOptimizerLastDuration">-</span>
-                                    </div>
-                                    <div class="d-flex justify-content-between small text-muted mb-2">
-                                        <span>下一次计划</span>
-                                        <span class="fw-semibold" id="domOptimizerNextRun">-</span>
-                                    </div>
-                                    <div class="border rounded p-2 bg-light small" id="domOptimizerLastResultPanel" style="min-height: 72px;">
-                                        <div class="text-muted mb-1">最近结果</div>
-                                        <div id="domOptimizerLastResult">暂无数据</div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="card border-0 shadow-sm">
-                                <div class="card-header py-2">
-                                    <span class="fw-semibold text-uppercase small text-muted">性能概览</span>
-                                </div>
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
-                                        <span>全部信号精度</span>
-                                        <span class="fw-semibold" id="domOptimizerSummaryPrecision">-</span>
-                                    </div>
-                                    <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
-                                        <span>平均响应时间</span>
-                                        <span class="fw-semibold" id="domOptimizerSummaryDelay">-</span>
-                                    </div>
-                                    <div class="d-flex justify-content-between align-items-center small text-muted">
-                                        <span>最新信号</span>
-                                        <span class="fw-semibold" id="domOptimizerSummaryLatest">-</span>
-                                    </div>
-                                    <hr>
-                                    <div class="small text-muted" id="domOptimizerSummaryNotes">
-                                        <span class="text-muted">刷新统计或查询信号后自动更新。</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-lg-8 d-flex flex-column gap-3">
-                            <div class="card shadow-sm">
-                                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                                    <div>
-                                        <h6 class="mb-0">Trend Score 与价格</h6>
-                                        <small class="text-muted">基于 /api/dom/history 数据绘制</small>
-                                    </div>
-                                    <div class="btn-group btn-group-sm" role="group">
-                                        <button type="button" class="btn btn-outline-secondary" id="domOptimizerTrendRefreshBtn">
-                                            <i class="fas fa-sync-alt"></i>
-                                        </button>
-                                        <button type="button" class="btn btn-outline-secondary" id="domOptimizerTrendLiveToggle" data-active="0">
-                                            <i class="fas fa-broadcast-tower"></i>
-                                        </button>
-                                    </div>
-                                </div>
-                                <div class="card-body">
-                                    <div class="ratio ratio-16x9">
-                                        <canvas id="domOptimizerTrendChart"></canvas>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="card shadow-sm">
-                                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                                    <div>
-                                        <h6 class="mb-0">OBI / OFI 指标</h6>
-                                        <small class="text-muted">包含阈值与信号标记</small>
-                                    </div>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerIndicatorRefreshBtn">
-                                        <i class="fas fa-sync-alt"></i>
-                                    </button>
-                                </div>
-                                <div class="card-body">
-                                    <div class="ratio ratio-16x9">
-                                        <canvas id="domOptimizerIndicatorChart"></canvas>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="card shadow-sm">
-                                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                                    <div>
-                                        <h6 class="mb-0">阈值信号与价格对比</h6>
-                                        <small class="text-muted">展示阈值轨迹与价格联动</small>
-                                    </div>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerThresholdRefreshBtn">
-                                        <i class="fas fa-sync-alt"></i>
-                                    </button>
-                                </div>
-                                <div class="card-body">
-                                    <div class="ratio ratio-16x9">
-                                        <canvas id="domOptimizerThresholdChart"></canvas>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="card shadow-sm">
-                                <div class="card-header py-3">
-                                    <div class="row g-2 align-items-end">
-                                        <div class="col-md-3">
-                                            <label for="domOptimizerStartInput" class="form-label">开始时间</label>
-                                            <input type="datetime-local" class="form-control form-control-sm" id="domOptimizerStartInput">
-                                        </div>
-                                        <div class="col-md-3">
-                                            <label for="domOptimizerEndInput" class="form-label">结束时间</label>
-                                            <input type="datetime-local" class="form-control form-control-sm" id="domOptimizerEndInput">
-                                        </div>
-                                        <div class="col-md-2">
-                                            <label for="domOptimizerPageSizeInput" class="form-label">分页大小</label>
-                                            <input type="number" class="form-control form-control-sm" id="domOptimizerPageSizeInput" min="10" step="10" value="25">
-                                        </div>
-                                        <div class="col-md-2">
-                                            <label for="domOptimizerOutcomeFilter" class="form-label">Outcome</label>
-                                            <select class="form-select form-select-sm" id="domOptimizerOutcomeFilter">
-                                                <option value="">全部</option>
-                                                <option value="success">成功</option>
-                                                <option value="failed">失败</option>
-                                                <option value="pending">待评估</option>
-                                            </select>
-                                        </div>
-                                        <div class="col-md-2 d-grid">
-                                            <button type="button" class="btn btn-primary btn-sm" id="domOptimizerQuerySignalsBtn">
-                                                <i class="fas fa-search me-1"></i>查询
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="card-body">
-                                    <div class="table-responsive">
-                                        <table class="table table-sm align-middle" id="domOptimizerSignalsTable">
-                                            <thead class="table-light">
-                                                <tr>
-                                                    <th>时间</th>
-                                                    <th>方向</th>
-                                                    <th>价格</th>
-                                                    <th>OBI</th>
-                                                    <th>OFI</th>
-                                                    <th>Trend</th>
-                                                    <th>Outcome</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                <tr class="text-center text-muted">
-                                                    <td colspan="7">尚未查询信号</td>
-                                                </tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                                <div class="card-footer d-flex flex-column flex-lg-row gap-2 justify-content-between align-items-lg-center">
-                                    <small class="text-muted" id="domOptimizerSignalsRange">实际时间范围：-</small>
-                                    <small class="text-muted" id="domOptimizerSignalsSummary">0 条记录</small>
-                                    <div class="btn-group btn-group-sm" role="group" aria-label="DOM signals pagination" id="domOptimizerPagination">
-                                        <button type="button" class="btn btn-outline-secondary" data-page="prev" disabled>
-                                            <i class="fas fa-chevron-left"></i>
-                                        </button>
-                                        <button type="button" class="btn btn-outline-secondary disabled">
-                                            <span id="domOptimizerCurrentPage">1</span>/<span id="domOptimizerTotalPages">1</span>
-                                        </button>
-                                        <button type="button" class="btn btn-outline-secondary" data-page="next" disabled>
-                                            <i class="fas fa-chevron-right"></i>
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="card shadow-sm">
-                                <div class="card-body">
-                                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-                                        <div>
-                                            <h6 class="mb-1">手动优化</h6>
-                                            <small class="text-muted">调用 /api/dom/optimize 进行阈值调参</small>
-                                        </div>
-                                        <div class="form-check form-switch">
-                                            <input class="form-check-input" type="checkbox" id="domOptimizerApplySwitch" checked>
-                                            <label class="form-check-label" for="domOptimizerApplySwitch">写入并应用</label>
-                                        </div>
-                                    </div>
-                                    <div class="d-flex flex-wrap gap-2 mb-3">
-                                        <button type="button" class="btn btn-success btn-sm" id="domOptimizerOptimizeBtn">
-                                            <i class="fas fa-magic me-1"></i>立即优化
-                                        </button>
-                                        <button type="button" class="btn btn-outline-secondary btn-sm" id="domOptimizerClearResultBtn">
-                                            <i class="fas fa-eraser me-1"></i>清除结果
-                                        </button>
-                                    </div>
-                                    <div class="border rounded p-3 bg-light" id="domOptimizerOptimizeResult">
-                                        <div class="text-muted small">点击“立即优化”后将在此展示最新结果、精度统计以及阈值建议。</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
+        <!-- DOM Optimizer moved to modal -->
+
 
     </div>
 
@@ -2766,6 +2465,324 @@
     </div>
 
     <!-- DOM Outcome Detail Modal -->
+    <!-- DOM Optimizer Modal -->
+    <div class="modal fade" id="domOptimizerModal" tabindex="-1" aria-labelledby="domOptimizerModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="domOptimizerModalLabel"><i class="fas fa-sliders-h me-2"></i>DOM Optimizer</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <section id="domOptimizerSection" class="dom-optimizer-modal-section">
+                        <div class="card shadow-sm">
+                            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                <div>
+                                    <h5 class="mb-1"><i class="fas fa-sliders-h me-2"></i>DOM Optimizer</h5>
+                                    <small class="text-muted">参数调节、信号统计与自动化运行概览</small>
+                                </div>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span id="domOptimizerStatusBadge" class="badge bg-secondary text-uppercase">Idle</span>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerRefreshStatusBtn">
+                                        <i class="fas fa-sync-alt me-1"></i>刷新状态
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="row g-3">
+                                    <div class="col-lg-4 d-flex flex-column gap-3">
+                                        <div class="card h-100 border-0 shadow-sm">
+                                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                                <span class="fw-semibold text-uppercase small text-muted">配置与统计</span>
+                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerLoadConfigBtn">
+                                                    <i class="fas fa-download me-1"></i>载入
+                                                </button>
+                                            </div>
+                                            <div class="card-body">
+                                                <form id="domOptimizerConfigForm" class="row g-3">
+                                                    <div class="col-12">
+                                                        <label for="domOptimizerSymbolInput" class="form-label">交易标的</label>
+                                                        <div class="input-group input-group-sm">
+                                                            <input type="text" class="form-control" id="domOptimizerSymbolInput" placeholder="例如: MES">
+                                                            <button class="btn btn-outline-secondary" type="button" id="domOptimizerUseMonitorBtn">
+                                                                <i class="fas fa-bolt"></i> 监控
+                                                            </button>
+                                                        </div>
+                                                        <div class="form-text">可直接从当前监控或手动输入符号。</div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <label for="domOptimizerLookbackInput" class="form-label">统计窗口 (分钟)</label>
+                                                        <input type="number" class="form-control form-control-sm" id="domOptimizerLookbackInput" min="15" step="15" value="240">
+                                                        <div class="form-text">影响统计面板与信号列表，Outcome 窗口与此保持一致。</div>
+                                                    </div>
+                                                    <div class="col-12">
+                                                        <label for="domOptimizerLookbackSlider" class="form-label">统计窗口快捷调节</label>
+                                                        <input type="range" class="form-range" id="domOptimizerLookbackSlider" min="0" max="11" step="1">
+                                                        <div class="form-text" id="domOptimizerLookbackDisplay">240 分钟</div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <label for="domOptimizerStatsLimitInput" class="form-label">最大记录数</label>
+                                                        <input type="number" class="form-control form-control-sm" id="domOptimizerStatsLimitInput" min="50" step="50" value="500">
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <label for="domOptimizerMinSignalsInput" class="form-label">最少信号数</label>
+                                                        <input type="number" class="form-control form-control-sm" id="domOptimizerMinSignalsInput" min="0" value="0">
+                                                    </div>
+                                                    <div class="col-12">
+                                                        <label class="form-label mb-1">阈值配置</label>
+                                                        <div class="small text-muted mb-2">参数分为两层：基础阈值（OBI / OFI / Trend 等核心指标）与特征阈值（堆单、吸收等特征信号）。</div>
+                                                        <div class="d-flex justify-content-end mb-2">
+                                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerFeaturePresetBtn">
+                                                                <i class="fas fa-download me-1"></i>填充当前配置
+                                                            </button>
+                                                        </div>
+                                                        <div class="border rounded-3 p-3 bg-light mb-3">
+                                                            <div class="fw-semibold text-uppercase small text-muted mb-2">基础阈值 JSON</div>
+                                                            <textarea class="form-control font-monospace" id="domOptimizerBaseThresholdsInput" rows="5" placeholder='{"base_thresholds": {"long": {"obi5": 0.6, "ofi": 0.0}}, "obi_candidates": [0.55, 0.6, 0.65, 0.7], "ofi_candidates": [0, 5, 10, 15], "trend_candidates": [0.5, 0.7, 0.85, 0.95]}'></textarea>
+                                                            <div class="form-text mt-1">可同时编辑基础阈值及候选组合，留空则沿用后端配置。</div>
+                                                        </div>
+                                                        <div class="border rounded-3 p-3 bg-light">
+                                                            <div class="fw-semibold text-uppercase small text-muted mb-2">特征阈值 JSON</div>
+                                                            <textarea class="form-control font-monospace" id="domOptimizerFeatureThresholdsInput" rows="6" placeholder='{"stacking": {"intensity": 0.35}}'></textarea>
+                                                            <div class="form-text mt-1">支持堆单 / 吸收等特征的细粒度阈值配置，留空则保持当前设置。</div>
+                                                        </div>
+                                                    </div>
+                                                </form>
+                                                <div class="d-grid gap-2 mt-2">
+                                                    <button type="button" class="btn btn-primary btn-sm" id="domOptimizerRefreshStatsBtn">
+                                                        <i class="fas fa-chart-bar me-1"></i>刷新统计
+                                                    </button>
+                                                </div>
+                                                <hr>
+                                                <div>
+                                                    <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
+                                                        <span>信号总数</span>
+                                                        <span class="fw-semibold" id="domOptimizerStatsTotal">-</span>
+                                                    </div>
+                                                    <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
+                                                        <span>多头 / 空头</span>
+                                                        <span class="fw-semibold" id="domOptimizerStatsBySide">-</span>
+                                                    </div>
+                                                    <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
+                                                        <span>已评估成功率</span>
+                                                        <span class="fw-semibold text-success" id="domOptimizerStatsSuccessRate">-</span>
+                                                    </div>
+                                                    <div class="d-flex justify-content-between align-items-center py-1 small text-muted">
+                                                        <span>待评估信号</span>
+                                                        <span class="fw-semibold text-warning" id="domOptimizerStatsPending">-</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card border-0 shadow-sm">
+                                            <div class="card-header py-2">
+                                                <span class="fw-semibold text-uppercase small text-muted">自动化状态</span>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="d-flex justify-content-between small text-muted mb-2">
+                                                    <span>当前状态</span>
+                                                    <span class="fw-semibold" id="domOptimizerStatusText">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between small text-muted mb-2">
+                                                    <span>最近执行</span>
+                                                    <span class="fw-semibold" id="domOptimizerLastRun">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between small text-muted mb-2">
+                                                    <span>耗时</span>
+                                                    <span class="fw-semibold" id="domOptimizerLastDuration">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between small text-muted mb-2">
+                                                    <span>下一次计划</span>
+                                                    <span class="fw-semibold" id="domOptimizerNextRun">-</span>
+                                                </div>
+                                                <div class="border rounded p-2 bg-light small" id="domOptimizerLastResultPanel" style="min-height: 72px;">
+                                                    <div class="text-muted mb-1">最近结果</div>
+                                                    <div id="domOptimizerLastResult">暂无数据</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card border-0 shadow-sm">
+                                            <div class="card-header py-2">
+                                                <span class="fw-semibold text-uppercase small text-muted">性能概览</span>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
+                                                    <span>全部信号精度</span>
+                                                    <span class="fw-semibold" id="domOptimizerSummaryPrecision">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
+                                                    <span>平均响应时间</span>
+                                                    <span class="fw-semibold" id="domOptimizerSummaryDelay">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between align-items-center small text-muted">
+                                                    <span>最新信号</span>
+                                                    <span class="fw-semibold" id="domOptimizerSummaryLatest">-</span>
+                                                </div>
+                                                <hr>
+                                                <div class="small text-muted" id="domOptimizerSummaryNotes">
+                                                    <span class="text-muted">刷新统计或查询信号后自动更新。</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-lg-8 d-flex flex-column gap-3">
+                                        <div class="card shadow-sm">
+                                            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                                <div>
+                                                    <h6 class="mb-0">Trend Score 与价格</h6>
+                                                    <small class="text-muted">基于 /api/dom/history 数据绘制</small>
+                                                </div>
+                                                <div class="btn-group btn-group-sm" role="group">
+                                                    <button type="button" class="btn btn-outline-secondary" id="domOptimizerTrendRefreshBtn">
+                                                        <i class="fas fa-sync-alt"></i>
+                                                    </button>
+                                                    <button type="button" class="btn btn-outline-secondary" id="domOptimizerTrendLiveToggle" data-active="0">
+                                                        <i class="fas fa-broadcast-tower"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="ratio ratio-16x9">
+                                                    <canvas id="domOptimizerTrendChart"></canvas>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card shadow-sm">
+                                            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                                <div>
+                                                    <h6 class="mb-0">OBI / OFI 指标</h6>
+                                                    <small class="text-muted">包含阈值与信号标记</small>
+                                                </div>
+                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerIndicatorRefreshBtn">
+                                                    <i class="fas fa-sync-alt"></i>
+                                                </button>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="ratio ratio-16x9">
+                                                    <canvas id="domOptimizerIndicatorChart"></canvas>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card shadow-sm">
+                                            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                                <div>
+                                                    <h6 class="mb-0">阈值信号与价格对比</h6>
+                                                    <small class="text-muted">展示阈值轨迹与价格联动</small>
+                                                </div>
+                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerThresholdRefreshBtn">
+                                                    <i class="fas fa-sync-alt"></i>
+                                                </button>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="ratio ratio-16x9">
+                                                    <canvas id="domOptimizerThresholdChart"></canvas>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card shadow-sm">
+                                            <div class="card-header py-3">
+                                                <div class="row g-2 align-items-end">
+                                                    <div class="col-md-3">
+                                                        <label for="domOptimizerStartInput" class="form-label">开始时间</label>
+                                                        <input type="datetime-local" class="form-control form-control-sm" id="domOptimizerStartInput">
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label for="domOptimizerEndInput" class="form-label">结束时间</label>
+                                                        <input type="datetime-local" class="form-control form-control-sm" id="domOptimizerEndInput">
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label for="domOptimizerPageSizeInput" class="form-label">分页大小</label>
+                                                        <input type="number" class="form-control form-control-sm" id="domOptimizerPageSizeInput" min="10" step="10" value="25">
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label for="domOptimizerOutcomeFilter" class="form-label">Outcome</label>
+                                                        <select class="form-select form-select-sm" id="domOptimizerOutcomeFilter">
+                                                            <option value="">全部</option>
+                                                            <option value="success">成功</option>
+                                                            <option value="failed">失败</option>
+                                                            <option value="pending">待评估</option>
+                                                        </select>
+                                                    </div>
+                                                    <div class="col-md-2 d-grid">
+                                                        <button type="button" class="btn btn-primary btn-sm" id="domOptimizerQuerySignalsBtn">
+                                                            <i class="fas fa-search me-1"></i>查询
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="table-responsive">
+                                                    <table class="table table-sm align-middle" id="domOptimizerSignalsTable">
+                                                        <thead class="table-light">
+                                                            <tr>
+                                                                <th>时间</th>
+                                                                <th>方向</th>
+                                                                <th>价格</th>
+                                                                <th>OBI</th>
+                                                                <th>OFI</th>
+                                                                <th>Trend</th>
+                                                                <th>Outcome</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            <tr class="text-center text-muted">
+                                                                <td colspan="7">尚未查询信号</td>
+                                                            </tr>
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                            <div class="card-footer d-flex flex-column flex-lg-row gap-2 justify-content-between align-items-lg-center">
+                                                <small class="text-muted" id="domOptimizerSignalsRange">实际时间范围：-</small>
+                                                <small class="text-muted" id="domOptimizerSignalsSummary">0 条记录</small>
+                                                <div class="btn-group btn-group-sm" role="group" aria-label="DOM signals pagination" id="domOptimizerPagination">
+                                                    <button type="button" class="btn btn-outline-secondary" data-page="prev" disabled>
+                                                        <i class="fas fa-chevron-left"></i>
+                                                    </button>
+                                                    <button type="button" class="btn btn-outline-secondary disabled">
+                                                        <span id="domOptimizerCurrentPage">1</span>/<span id="domOptimizerTotalPages">1</span>
+                                                    </button>
+                                                    <button type="button" class="btn btn-outline-secondary" data-page="next" disabled>
+                                                        <i class="fas fa-chevron-right"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card shadow-sm">
+                                            <div class="card-body">
+                                                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                                                    <div>
+                                                        <h6 class="mb-1">手动优化</h6>
+                                                        <small class="text-muted">调用 /api/dom/optimize 进行阈值调参</small>
+                                                    </div>
+                                                    <div class="form-check form-switch">
+                                                        <input class="form-check-input" type="checkbox" id="domOptimizerApplySwitch" checked>
+                                                        <label class="form-check-label" for="domOptimizerApplySwitch">写入并应用</label>
+                                                    </div>
+                                                </div>
+                                                <div class="d-flex flex-wrap gap-2 mb-3">
+                                                    <button type="button" class="btn btn-success btn-sm" id="domOptimizerOptimizeBtn">
+                                                        <i class="fas fa-magic me-1"></i>立即优化
+                                                    </button>
+                                                    <button type="button" class="btn btn-outline-secondary btn-sm" id="domOptimizerClearResultBtn">
+                                                        <i class="fas fa-eraser me-1"></i>清除结果
+                                                    </button>
+                                                </div>
+                                                <div class="border rounded p-3 bg-light" id="domOptimizerOptimizeResult">
+                                                    <div class="text-muted small">点击“立即优化”后将在此展示最新结果、精度统计以及阈值建议。</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="modal fade" id="domOutcomeModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-xl modal-dialog-scrollable">
             <div class="modal-content">
