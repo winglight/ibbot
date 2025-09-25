@@ -298,6 +298,13 @@ class QueueManager:
             raise Exception("Strategy not found")
         if not strategy.get('enabled', False):
             raise Exception("Strategy disabled")
+
+        # 统一使用策略真实名称用于记录和持久化
+        strategy_name_for_record = (
+            payload.get('strategy_name')
+            or strategy.get('name')
+            or payload['strategy']
+        )
         
         # 处理订单参数
         order_type = payload['type'].upper()
@@ -406,8 +413,8 @@ class QueueManager:
                     order_type=order_type_for_record,
                     price=payload.get('price', 0.0),
                     order_source="strategy",
-                    strategy_name=payload['strategy'],
-                    rule_id=payload['strategy'],
+                    strategy_name=strategy_name_for_record,
+                    rule_id=strategy_name_for_record,
                     exchange=exchange,
                     sec_type=sec_type
                 )
@@ -425,8 +432,9 @@ class QueueManager:
                         timestamp=to_local_iso(created_at) or created_at.isoformat(),
                         status="Submitted",
                         executed_at=None,
-                        rule_id=payload['strategy'],
+                        rule_id=strategy_name_for_record,
                         order_source="strategy",
+                        strategy_name=strategy_name_for_record,
                     )
                     auto_order.created_at = created_at
                     auto_order.executed_at = None
@@ -444,8 +452,9 @@ class QueueManager:
                 timestamp=to_local_iso(created_at) or created_at.isoformat(),
                 status="Submitted",
                 executed_at=None,
-                rule_id=payload['strategy'],
+                rule_id=strategy_name_for_record,
                 order_source="strategy",
+                strategy_name=strategy_name_for_record,
             )
             auto_order.created_at = created_at
             auto_order.executed_at = None
