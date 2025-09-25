@@ -215,6 +215,24 @@ class DepthSubscriber:
         return self._last_error, self._last_error_status
 
     # ------------------------------------------------------------------
+    def is_depth_stream_active(self, symbol: Optional[str] = None) -> bool:
+        """Check whether a depth stream is currently active for ``symbol``."""
+
+        with self._lock:
+            if symbol is None:
+                return bool(self._streams)
+
+            symbol_key = symbol if isinstance(symbol, str) else str(symbol)
+            if symbol_key in self._streams:
+                return True
+
+            alt_key = symbol_key.upper()
+            if alt_key != symbol_key and alt_key in self._streams:
+                return True
+
+        return False
+
+    # ------------------------------------------------------------------
     def _resolve_ibkr_client(self):
         """Return an IBKR client instance, creating it lazily when required."""
 

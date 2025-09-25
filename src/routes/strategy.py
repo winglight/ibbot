@@ -1,7 +1,8 @@
 import asyncio
 from dataclasses import asdict
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
+from time import monotonic
 
 from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
@@ -20,6 +21,76 @@ from src.models import (
 )
 
 router = APIRouter()
+
+EXECUTIONS_CACHE_TTL = 2.0
+DAILY_PNL_CACHE_TTL = 30.0
+
+_executions_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
+_executions_cache_lock: Optional[asyncio.Lock] = None
+
+_daily_pnl_cache: Dict[str, Dict[str, Any]] = {}
+_daily_pnl_cache_lock: Optional[asyncio.Lock] = None
+
+
+async def invalidate_strategy_cache(strategy_name: Optional[str] = None) -> None:
+    """Invalidate cached strategy data.
+
+    When ``strategy_name`` is ``None`` the entire cache is cleared. Otherwise only
+    entries related to the provided strategy are removed.
+    """
+
+    global _executions_cache_lock, _daily_pnl_cache_lock
+
+    if _executions_cache_lock is None:
+        _executions_cache_lock = asyncio.Lock()
+    if _daily_pnl_cache_lock is None:
+        _daily_pnl_cache_lock = asyncio.Lock()
+
+    async with _executions_cache_lock:
+        if strategy_name is None:
+            _executions_cache.clear()
+        else:
+            targets = [key for key in _executions_cache if key[0] == strategy_name]
+            for target in targets:
+                _executions_cache.pop(target, None)
+
+    async with _daily_pnl_cache_lock:
+        if strategy_name is None:
+            _daily_pnl_cache.clear()
+        else:
+            _daily_pnl_cache.pop(strategy_name, None)
+
+
+def _clear_cache_without_lock(strategy_name: Optional[str] = None) -> None:
+    if strategy_name is None:
+        _executions_cache.clear()
+        _daily_pnl_cache.clear()
+        return
+
+    targets = [key for key in _executions_cache if key[0] == strategy_name]
+    for target in targets:
+        _executions_cache.pop(target, None)
+    _daily_pnl_cache.pop(strategy_name, None)
+
+
+def schedule_strategy_cache_invalidation(strategy_name: Optional[str] = None) -> None:
+    """Best-effort helper for non-async contexts to invalidate caches."""
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            _clear_cache_without_lock(strategy_name)
+            return
+        if not loop.is_running():
+            loop.run_until_complete(invalidate_strategy_cache(strategy_name))
+            return
+        loop.call_soon_threadsafe(asyncio.create_task, invalidate_strategy_cache(strategy_name))
+        return
+
+    asyncio.create_task(invalidate_strategy_cache(strategy_name))
 
 @router.get("/api/strategy/settings")
 async def get_strategy_settings(user: Optional[str] = Depends(get_current_user)):
@@ -180,6 +251,8 @@ async def rename_strategy_api(name: str, payload: StrategyRenameRequest, user: O
     ok = strategy_manager.rename_strategy(name, payload.new_name, rename_file=payload.rename_file or False)
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to rename strategy")
+    await invalidate_strategy_cache(name)
+    await invalidate_strategy_cache(payload.new_name)
     return {"success": True}
 
 @router.delete("/api/strategies/{name}")
@@ -189,6 +262,7 @@ async def delete_strategy_api(name: str, user: Optional[str] = Depends(get_curre
     success = strategy_manager.delete_strategy(name)
     if not success:
         raise HTTPException(status_code=404, detail="Strategy not found")
+    await invalidate_strategy_cache(name)
     return {"success": True}
 
 @router.post("/api/strategies/{name}/toggle")
@@ -207,6 +281,7 @@ async def reset_strategy_data_api(name: str, user: Optional[str] = Depends(get_c
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
     try:
         result = strategy_manager.reset_strategy_data(name)
+        await invalidate_strategy_cache(name)
         return {
             "success": True,
             "result": result,
@@ -262,16 +337,53 @@ async def get_strategy_performance_api(name: str, range: str = "1d", start: Opti
 
 
 @router.get("/api/strategies/{name}/pnl/daily")
-async def get_strategy_daily_pnl(name: str, user: Optional[str] = Depends(get_current_user)):
+async def get_strategy_daily_pnl(
+    name: str,
+    force_refresh: bool = False,
+    user: Optional[str] = Depends(get_current_user),
+):
     if 'order_manager' not in globals() or not order_manager:
         raise HTTPException(status_code=500, detail="Order manager not initialized")
+
+    global _daily_pnl_cache_lock
+    if _daily_pnl_cache_lock is None:
+        _daily_pnl_cache_lock = asyncio.Lock()
+
+    cache_key = name
+    cached_entry: Optional[Dict[str, Any]] = None
+    now = monotonic()
+
+    if not force_refresh:
+        async with _daily_pnl_cache_lock:
+            entry = _daily_pnl_cache.get(cache_key)
+            if entry and now - entry.get("timestamp", 0.0) < DAILY_PNL_CACHE_TTL:
+                cached_payload = dict(entry.get("data", {}))
+                cached_payload["from_cache"] = True
+                cached_payload["cache_age"] = now - entry.get("timestamp", now)
+                return cached_payload
+            cached_entry = entry
+
     try:
         db = get_db_manager()
         data = await asyncio.to_thread(db.get_strategy_daily_pnl, name)
-        return {"success": True, "pnl": data}
     except Exception as e:
         logger.error(f"Get strategy daily pnl error: {e}")
+        if cached_entry:
+            cached_payload = dict(cached_entry.get("data", {})) or {"success": True, "pnl": []}
+            cached_payload["from_cache"] = True
+            cached_payload["cache_warning"] = str(e)
+            return cached_payload
         raise HTTPException(status_code=500, detail=str(e))
+
+    payload = {"success": True, "pnl": data}
+    async with _daily_pnl_cache_lock:
+        _daily_pnl_cache[cache_key] = {
+            "timestamp": monotonic(),
+            "data": dict(payload),
+        }
+
+    payload["from_cache"] = False
+    return payload
 
 # External trigger endpoint - Async queue version
 @router.post("/api/strategy")
@@ -334,16 +446,60 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
         "status": "queued"
     }
 @router.get("/api/strategies/{name}/executions")
-async def get_strategy_executions(name: str, limit: int = 100, user: Optional[str] = Depends(get_current_user)):
+async def get_strategy_executions(
+    name: str,
+    limit: int = 100,
+    force_refresh: bool = False,
+    user: Optional[str] = Depends(get_current_user),
+):
     """Get strategy execution logs"""
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+
+    effective_limit = max(1, min(int(limit or 1), 1000))
+
+    global _executions_cache_lock
+    if _executions_cache_lock is None:
+        _executions_cache_lock = asyncio.Lock()
+
+    cache_key = (name, effective_limit)
+    cached_entry: Optional[Dict[str, Any]] = None
+    now = monotonic()
+
+    if not force_refresh:
+        async with _executions_cache_lock:
+            entry = _executions_cache.get(cache_key)
+            if entry and now - entry.get("timestamp", 0.0) < EXECUTIONS_CACHE_TTL:
+                cached_payload = dict(entry.get("data", {}))
+                cached_payload["from_cache"] = True
+                cached_payload["cache_age"] = now - entry.get("timestamp", now)
+                return cached_payload
+            cached_entry = entry
+
     try:
-        executions = await asyncio.to_thread(strategy_manager.get_executions, name, limit)
-        return {"success": True, "executions": [asdict(exec) if hasattr(exec, '__dict__') else exec for exec in executions]}
+        executions = await asyncio.to_thread(strategy_manager.get_executions, name, effective_limit)
+        formatted = [
+            asdict(exec_item) if hasattr(exec_item, "__dict__") else exec_item
+            for exec_item in executions
+        ]
     except Exception as e:
         logger.error(f"Get strategy executions error: {e}")
+        if cached_entry:
+            cached_payload = dict(cached_entry.get("data", {})) or {"success": True, "executions": []}
+            cached_payload["from_cache"] = True
+            cached_payload["cache_warning"] = str(e)
+            return cached_payload
         raise HTTPException(status_code=500, detail=str(e))
+
+    payload = {"success": True, "executions": formatted}
+    async with _executions_cache_lock:
+        _executions_cache[cache_key] = {
+            "timestamp": monotonic(),
+            "data": dict(payload),
+        }
+
+    payload["from_cache"] = False
+    return payload
 
 # Clear all executions for a strategy
 @router.delete("/api/strategies/{name}/executions")
@@ -352,6 +508,7 @@ async def clear_strategy_executions(name: str, user: Optional[str] = Depends(get
     try:
         db = get_db_manager()
         deleted = db.delete_strategy_orders(name)
+        await invalidate_strategy_cache(name)
         return {"success": True, "deleted": int(deleted)}
     except Exception as e:
         logger.error(f"Clear strategy executions error: {e}")
