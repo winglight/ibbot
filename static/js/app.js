@@ -8604,10 +8604,7 @@ class TradingApp {
         const forceExecutions = options.forceExecutions === true;
 
         try {
-            const pluginReady = await this.ensureCandlestickPlugin();
-            if (!pluginReady) {
-                throw new Error('蜡烛图插件加载失败，请稍后再试');
-            }
+            const pluginPromise = this.ensureCandlestickPlugin();
 
             let executions = Array.isArray(options.executions) ? options.executions : null;
             if (!executions || forceExecutions) {
@@ -8651,6 +8648,18 @@ class TradingApp {
                 state.fullBars = [];
                 state.visibleCount = 0;
                 this.updateStrategyChartStatus('暂无K线数据');
+                return;
+            }
+
+            const pluginReady = await pluginPromise;
+            if (!pluginReady) {
+                this.destroyStrategyChart();
+                if (container) {
+                    container.innerHTML = '<div class="alert alert-danger mb-0">蜡烛图组件加载失败，请稍后刷新重试。</div>';
+                }
+                state.fullBars = [];
+                state.visibleCount = 0;
+                this.updateStrategyChartStatus('图表组件加载失败');
                 return;
             }
 
