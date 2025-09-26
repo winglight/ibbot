@@ -1164,33 +1164,97 @@ class StrategyManager:
         state = self.data_push_state.setdefault(strategy_name, {})
         prior_state = dict(state)
         stored_subscription = subscription or self._get_strategy_setting(strategy_name, "data_subscription")
-        if not stored_subscription:
-            state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
+
+        target_symbol_candidate = (
+            symbol
+            or state.get("symbol")
+            or getattr(record, "primary_symbol", None)
+            or self._get_strategy_setting(strategy_name, "primary_symbol")
+        )
+        target_symbol = (
+            str(target_symbol_candidate).strip().upper()
+            if target_symbol_candidate
+            else None
+        )
+
+        if enabled and not getattr(record, "enabled", True):
+            state.update(
+                {
+                    "enabled": False,
+                    "active": False,
+                    "subscription": stored_subscription,
+                    "symbol": target_symbol,
+                    "awaiting_data": False,
+                    "last_data_timestamp": None,
+                }
+            )
             state.pop("_last_gap_warning_at", None)
-            reason = "未配置数据订阅"
+            state.pop("_last_restart_attempt", None)
+            state.pop("restart_requested", None)
+            reason = "策略已禁用"
+            self._set_data_push_reason(strategy_name, reason)
             self._record_data_push_event(
                 strategy_name,
-                "数据推送启动失败：未配置订阅",
+                "数据推送启动失败：策略已禁用",
                 level="warning",
                 reason=reason,
             )
             strategy_logger.warning(
-                "Data push request rejected - subscription missing",
+                "Data push enable rejected - strategy disabled",
                 strategy=strategy_name,
-                requested_action="enable" if enabled else "disable",
             )
             return {
                 "success": False,
-                "error": "No subscription configured",
+                "error": "Strategy disabled",
                 "status_reason": reason,
+                "active": False,
+                "subscription": stored_subscription,
+                "symbol": target_symbol,
+                "awaiting_data": False,
+                "last_data_timestamp": None,
             }
 
-        # Determine target symbol
-        target_symbol = symbol or state.get("symbol") or getattr(record, "primary_symbol", None)
-        if not target_symbol:
-            target_symbol = self._get_strategy_setting(strategy_name, "primary_symbol")
-        if target_symbol:
-            target_symbol = str(target_symbol).strip().upper()
+        if not stored_subscription:
+            state.update(
+                {
+                    "enabled": False,
+                    "active": False,
+                    "awaiting_data": False,
+                    "last_data_timestamp": None,
+                    "subscription": None,
+                    "symbol": target_symbol,
+                }
+            )
+            state.pop("_last_gap_warning_at", None)
+            if enabled:
+                reason = "未配置数据订阅"
+                self._record_data_push_event(
+                    strategy_name,
+                    "数据推送启动失败：未配置订阅",
+                    level="warning",
+                    reason=reason,
+                )
+                strategy_logger.warning(
+                    "Data push request rejected - subscription missing",
+                    strategy=strategy_name,
+                    requested_action="enable" if enabled else "disable",
+                )
+                return {
+                    "success": False,
+                    "error": "No subscription configured",
+                    "status_reason": reason,
+                }
+
+            self._set_data_push_reason(strategy_name, "推送已停止")
+            return {
+                "success": True,
+                "active": False,
+                "subscription": None,
+                "symbol": target_symbol,
+                "awaiting_data": False,
+                "last_data_timestamp": None,
+                "status_reason": "推送已停止",
+            }
 
         strategy_logger.info(
             "Data push change requested",
@@ -2383,6 +2447,21 @@ class StrategyManager:
                         runtime.enable()
                     else:
                         runtime.disable()
+                if (
+                    not strategy.enabled
+                    and strategy.strategy_type == 'internal'
+                ):
+                    try:
+                        result = await self.set_data_push(name, False)
+                        if not result.get("success"):
+                            error_msg = result.get("error") or "unknown error"
+                            strategy_logger.warning(
+                                f"Failed to disable data push while strategy {name} disabled: {error_msg}"
+                            )
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        strategy_logger.warning(
+                            f"Exception while disabling data push for {name}: {exc}"
+                        )
             self._invalidate_strategies_cache()
             self.restart_scheduler()
             return True

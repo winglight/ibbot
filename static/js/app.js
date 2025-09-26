@@ -7901,6 +7901,7 @@ class TradingApp {
             : (strategy.data_push_state && typeof strategy.data_push_state === 'object')
                 ? strategy.data_push_state
                 : null;
+        const strategyEnabled = typeof strategy.enabled === 'boolean' ? strategy.enabled : true;
 
         let isReceiving;
         if (typeof strategy.is_receiving_data === 'boolean') {
@@ -7971,7 +7972,7 @@ class TradingApp {
             ? info.symbol
             : this.resolveStrategySymbol(strategy);
 
-        return {
+        const baseInfo = {
             text: detailText || (isReceiving ? '数据接收中' : (active ? '推送已开启' : '未推送')),
             tooltip: tooltipParts.join('；'),
             active,
@@ -7983,6 +7984,20 @@ class TradingApp {
             statusLabel,
             toggleDisabled: Boolean(isExternal),
         };
+
+        if (!strategyEnabled) {
+            return {
+                ...baseInfo,
+                active: false,
+                awaitingData: false,
+                text: '策略已禁用',
+                statusLabel: '策略已禁用',
+                toggleDisabled: true,
+                reason: baseInfo.reason || '策略已禁用',
+            };
+        }
+
+        return baseInfo;
     }
 
     displayStrategies(strategies) {
@@ -8110,6 +8125,9 @@ class TradingApp {
         try {
             await this.apiCall(`/strategies/${encodeURIComponent(name)}/toggle?enabled=${enabled}`, { method: 'POST' });
             this.showAlert('success', `Strategy ${name} ${enabled ? 'enabled' : 'disabled'}`);
+            if (this.strategiesManager && typeof this.strategiesManager.loadStrategies === 'function') {
+                this.strategiesManager.loadStrategies({ force: true, minInterval: 0 });
+            }
         } catch (error) {
             console.error('Failed to toggle strategy:', error);
             this.showAlert('danger', 'Failed to toggle strategy');
@@ -8149,6 +8167,12 @@ class TradingApp {
             : controlEl
                 ? !!controlEl.checked
                 : !originalInfo.active;
+
+        if (targetEnabled && !strategy.enabled) {
+            this.showAlert('warning', '启用策略后才能开启数据推送');
+            revertToOriginal();
+            return;
+        }
 
         const info = (strategy.data_reception && typeof strategy.data_reception === 'object')
             ? strategy.data_reception
