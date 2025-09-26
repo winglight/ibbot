@@ -118,6 +118,11 @@ CHECK_INTERVAL=5  # 检查间隔（分钟）
 # Web服务器
 WEB_HOST=0.0.0.0
 WEB_PORT=8000
+
+# WebSocket广播节奏（可选）
+PNL_BROADCAST_INTERVAL_SEC=5              # 循环检查间隔（秒）
+ACCOUNT_BROADCAST_INTERVAL_SEC=30         # 账户信息最小刷新间隔（秒）
+PORTFOLIO_BROADCAST_INTERVAL_SEC=15       # 持仓最小刷新间隔（秒）
 ```
 
 ### 2. IBKR TWS/Gateway设置

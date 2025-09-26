@@ -84,8 +84,26 @@ from src.routes.dom import router as dom_router
 # Global variables
 load_dotenv()
 
+
+def _get_interval_env(name: str, default: int) -> int:
+    """Read a non-negative interval (seconds) from environment variables.
+
+    Falls back to ``default`` when the value is missing or invalid and clamps
+    negative values to zero so the caller can treat ``0`` as "no throttling".
+    """
+
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(0, value)
+
+
 # 优化：可配置的PnL广播间隔（秒），默认5秒
-PNL_BROADCAST_INTERVAL_SEC = int(os.getenv('PNL_BROADCAST_INTERVAL_SEC', '5'))
+PNL_BROADCAST_INTERVAL_SEC = _get_interval_env('PNL_BROADCAST_INTERVAL_SEC', 5)
+# 降低账户和持仓轮询频率，防止频繁命中IB限流
+ACCOUNT_BROADCAST_INTERVAL_SEC = _get_interval_env('ACCOUNT_BROADCAST_INTERVAL_SEC', 30)
+PORTFOLIO_BROADCAST_INTERVAL_SEC = _get_interval_env('PORTFOLIO_BROADCAST_INTERVAL_SEC', 15)
 
 # Context variables for request-scoped logging
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
@@ -518,6 +536,8 @@ pnl_broadcast_task = None
 
 # 添加：定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
 async def _pnl_broadcast_loop():
+    last_account_fetch = 0.0
+    last_positions_fetch = 0.0
     try:
         while True:
             await asyncio.sleep(PNL_BROADCAST_INTERVAL_SEC)
@@ -525,11 +545,19 @@ async def _pnl_broadcast_loop():
             if not websocket_manager.connections:
                 continue
             try:
-                    # 仅在已连接且 ibkr_client 可用时运行
-                    if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
-                        continue
-                    account_info = None
-                    positions = None
+                # 仅在已连接且 ibkr_client 可用时运行
+                if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
+                    continue
+
+                now_monotonic = time.monotonic()
+                account_info = None
+                positions = None
+
+                should_fetch_account = (
+                    ACCOUNT_BROADCAST_INTERVAL_SEC == 0
+                    or now_monotonic - last_account_fetch >= ACCOUNT_BROADCAST_INTERVAL_SEC
+                )
+                if should_fetch_account:
                     try:
                         account_info = await asyncio.wait_for(
                             ibkr_client.get_account_info(),
@@ -537,6 +565,14 @@ async def _pnl_broadcast_loop():
                         )
                     except Exception:
                         account_info = None
+                    finally:
+                        last_account_fetch = now_monotonic
+
+                should_fetch_positions = (
+                    PORTFOLIO_BROADCAST_INTERVAL_SEC == 0
+                    or now_monotonic - last_positions_fetch >= PORTFOLIO_BROADCAST_INTERVAL_SEC
+                )
+                if should_fetch_positions:
                     try:
                         positions = await asyncio.wait_for(
                             ibkr_client.get_positions(fast=True),
@@ -544,16 +580,19 @@ async def _pnl_broadcast_loop():
                         )
                     except Exception:
                         positions = None
-                    if account_info is not None:
-                        await websocket_manager.broadcast({
-                            "type": "account_update",
-                            "account_info": account_info
-                        })
-                    if positions is not None:
-                        await websocket_manager.broadcast({
-                            "type": "position_update",
-                            "positions": positions
-                        })
+                    finally:
+                        last_positions_fetch = now_monotonic
+
+                if account_info is not None:
+                    await websocket_manager.broadcast({
+                        "type": "account_update",
+                        "account_info": account_info
+                    })
+                if positions is not None:
+                    await websocket_manager.broadcast({
+                        "type": "position_update",
+                        "positions": positions
+                    })
             except Exception as be:
                 logger.debug(f"PnL broadcast iteration error: {be}")
     except asyncio.CancelledError:
