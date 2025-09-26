@@ -35,7 +35,7 @@ def _ensure_not_read_only(request: Request) -> None:
 
 class StartRequest(BaseModel):
     symbol: str
-    num_rows: int = 5
+    num_rows: int = Field(default=5, ge=1, le=30)
     force_restart: bool = False
 
 

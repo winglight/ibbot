@@ -60,6 +60,21 @@ class DepthSubscriber:
         """
         self._set_last_error(None, 200)
 
+        raw_num_rows = num_rows
+        try:
+            requested_rows = int(raw_num_rows)
+        except (TypeError, ValueError):
+            requested_rows = 5
+            _depth_logger.debug(
+                f"Invalid num_rows {raw_num_rows!r} for {symbol}; defaulting to {requested_rows}"
+            )
+        sanitized_rows = max(1, min(requested_rows, 30))
+        if sanitized_rows != requested_rows:
+            _depth_logger.debug(
+                f"Clamped num_rows from {requested_rows} to {sanitized_rows} for {symbol}"
+            )
+        num_rows = sanitized_rows
+
         if not self.connection_manager.is_connected():
             reason = "IBKR connection not active for depth stream"
             self._set_last_error(reason, 400)

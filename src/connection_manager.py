@@ -120,6 +120,97 @@ class ConnectionManager:
         
         self.config = config
         connection_logger.info(f"Connection config updated: {config.to_dict()}")
+
+    def _patch_wrapper_depth_guard(self, wrapper: Any) -> None:
+        """防止ib_insync深度更新触发IndexError导致崩溃"""
+
+        if not wrapper or not hasattr(wrapper, "updateMktDepthL2"):
+            return
+
+        update_method = getattr(wrapper.updateMktDepthL2, "__func__", wrapper.updateMktDepthL2)
+        if getattr(update_method, "__ibbot_depth_guard__", False):
+            return
+
+        try:
+            from ib_insync.objects import DOMLevel, MktDepthData
+        except Exception as exc:  # pragma: no cover - defensive guard
+            connection_logger.debug(f"Skipping depth guard patch (missing DOM classes): {exc}")
+            return
+
+        orig_update = wrapper.updateMktDepthL2
+
+        def safe_update(self_wrapped, reqId, position, marketMaker, operation, side, price, size, isSmartDepth=False):
+            ticker = None
+            try:
+                ticker = self_wrapped.reqId2Ticker.get(reqId)
+            except Exception:
+                ticker = None
+
+            if ticker is not None:
+                dom = ticker.domBids if side else ticker.domAsks
+                if operation == 1 and position >= len(dom):
+                    missing = position - len(dom) + 1
+                    if missing > 0:
+                        try:
+                            dom.extend(DOMLevel(price, 0.0, marketMaker) for _ in range(missing))
+                        except Exception:
+                            dom.extend([DOMLevel(price, 0.0, marketMaker)] * missing)
+                    try:
+                        dom[position] = DOMLevel(price, size, marketMaker)
+                    except Exception as assign_error:  # pragma: no cover - extremely unlikely
+                        connection_logger.debug(
+                            "Depth guard assignment failed",
+                            req_id=reqId,
+                            position=position,
+                            side=side,
+                            error=str(assign_error),
+                        )
+                        return
+                    tick = MktDepthData(
+                        self_wrapped.lastTime,
+                        position,
+                        marketMaker,
+                        operation,
+                        side,
+                        price,
+                        size,
+                    )
+                    ticker.domTicks.append(tick)
+                    try:
+                        self_wrapped.pendingTickers.add(ticker)
+                    except Exception:
+                        pass
+                    return
+
+                if operation == 2 and position >= len(dom):
+                    connection_logger.debug(
+                        "Ignoring depth delete beyond bounds",
+                        req_id=reqId,
+                        position=position,
+                        side=side,
+                    )
+                    return
+
+            try:
+                return orig_update(reqId, position, marketMaker, operation, side, price, size, isSmartDepth)
+            except IndexError as exc:  # pragma: no cover - defensive fallback
+                connection_logger.warning(
+                    "Depth update raised IndexError even after guard",
+                    req_id=reqId,
+                    position=position,
+                    side=side,
+                    operation=operation,
+                    error=str(exc),
+                )
+                return None
+
+        safe_update.__ibbot_depth_guard__ = True
+        wrapper.updateMktDepthL2 = types.MethodType(safe_update, wrapper)
+        try:
+            wrapper.updateMktDepth.__func__.__ibbot_depth_guard__ = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        connection_logger.debug("Patched ib_insync wrapper.updateMktDepthL2 to guard DOM depth indexes")
     
     def _connect_in_thread(self) -> bool:
         """在独立线程中连接到IBKR服务器"""
@@ -137,6 +228,7 @@ class ConnectionManager:
                 
                 # 创建新的IB实例
                 self.ib = IB()
+                self._patch_wrapper_depth_guard(self.ib.wrapper)
                 
                 # 尝试连接，如果客户端ID冲突则自动尝试其他ID
                 original_client_id = self.config.client_id
