@@ -39,6 +39,7 @@ INDEX_FUTURE_DETAILS: Dict[str, Dict[str, str]] = {
     "MYM": {"exchange": "ECBOT", "multiplier": "0.5", "tradingClass": "MYM"},
     "RTY": {"exchange": "CME", "multiplier": "50", "tradingClass": "RTY"},
     "M2K": {"exchange": "CME", "multiplier": "5", "tradingClass": "M2K"},
+    "VX": {"exchange": "CFE", "multiplier": "1000", "tradingClass": "VX"},
 }
 
 INDEX_FUTURE_SYMBOLS = frozenset(INDEX_FUTURE_DETAILS.keys())
@@ -1516,7 +1517,7 @@ class IBKRClient:
                 elif item.tag == 'UnrealizedPnL' and currency_ok:
                     info['unrealized_pnl'] = _parse_float(item.value)
                 elif item.tag == 'RealizedPnL' and currency_ok:
-                    info['realized_pnl'] = _parse_float(item.value)
+                    info['realized_pnl'] = 0.0 #_parse_float(item.value)
 
             # Persist snapshot for downstream consumers (risk manager, summaries)
             try:

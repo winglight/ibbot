@@ -24,6 +24,7 @@ router = APIRouter()
 CURRENT_PRICE_CACHE_ONLY = os.getenv("CURRENT_PRICE_CACHE_ONLY", "False").lower() == "true"
 historical_data_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_DURATION_MINUTES = 1  # 缓存1分钟
+INDEX_FUTURE_ROOTS = {"ES", "MES", "NQ", "MNQ", "YM", "MYM", "RTY", "M2K", "VX"}
 
 
 def _require_ib_client():
@@ -572,7 +573,8 @@ async def get_current_price(
             )
 
         try:
-            timeout_duration = 3.0 if request.symbol == "MNQ" else 2.0
+            symbol_upper = (request.symbol or '').upper()
+            timeout_duration = 3.0 if any(symbol_upper.startswith(root) for root in INDEX_FUTURE_ROOTS) else 2.0
             df = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,

@@ -10,10 +10,22 @@ from typing import Any, Awaitable, Dict, Optional, Sequence, Tuple
 
 from loguru import logger
 
+from src.ibkr_client import INDEX_FUTURE_DETAILS
 from .base import BaseStrategy
 
 
-FUTURES_SYMBOLS = {"MNQ", "NQ", "ES", "MES"}
+FUTURES_SYMBOLS = set(INDEX_FUTURE_DETAILS.keys())
+DEFAULT_FUTURE_TICKS = {
+    'ES': 0.25,
+    'MES': 0.25,
+    'NQ': 0.25,
+    'MNQ': 0.25,
+    'YM': 1.0,
+    'MYM': 1.0,
+    'RTY': 0.1,
+    'M2K': 0.1,
+    'VX': 0.05,
+}
 
 
 class DOMStrategy(BaseStrategy):
@@ -388,9 +400,16 @@ class DOMStrategy(BaseStrategy):
 
     # ------------------------------------------------------------------
     def _resolve_instrument(self, symbol: str) -> tuple[str, str]:
-        if symbol.upper() in FUTURES_SYMBOLS:
-            return "CME", "FUT"
-        return "SMART", "STK"
+        sym = (symbol or '').upper()
+        details = INDEX_FUTURE_DETAILS.get(sym)
+        if details is None:
+            for key in sorted(INDEX_FUTURE_DETAILS.keys(), key=len, reverse=True):
+                if sym.startswith(key):
+                    details = INDEX_FUTURE_DETAILS[key]
+                    break
+        if details:
+            return details.get('exchange', 'CME'), 'FUT'
+        return 'SMART', 'STK'
 
     # ------------------------------------------------------------------
     def _safe_float(self, value: Any) -> Optional[float]:
@@ -420,7 +439,13 @@ class DOMStrategy(BaseStrategy):
             tick = self._safe_float(candidate)
             if tick and tick > 0:
                 return tick
-        if symbol.upper() in FUTURES_SYMBOLS:
+        upper = symbol.upper()
+        if upper in DEFAULT_FUTURE_TICKS:
+            return DEFAULT_FUTURE_TICKS[upper]
+        for key, default_tick in DEFAULT_FUTURE_TICKS.items():
+            if upper.startswith(key):
+                return default_tick
+        if upper in FUTURES_SYMBOLS:
             return 0.25
         return 0.01
 

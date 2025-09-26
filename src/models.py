@@ -223,6 +223,7 @@ class RiskConfigUpdateRequest(BaseModel):
     contract_rounding: Optional[str] = None  # none/down/up/nearest
     price_threshold: Optional[float] = None
     leverage_mnq: Optional[int] = None
+    leverage_map: Optional[Dict[str, float]] = None
 
     cb_daily_r: Optional[float] = None
     cb_streak: Optional[int] = None
@@ -243,6 +244,20 @@ class RiskConfigUpdateRequest(BaseModel):
         if v is not None and v < 0:
             raise ValueError('integer values must be >= 0 when provided')
         return v
+
+    @field_validator('leverage_map', 'point_value_map')
+    def normalize_numeric_map(cls, value):
+        if value is None:
+            return value
+        cleaned = {}
+        for key, val in value.items():
+            if val is None:
+                continue
+            num = float(val)
+            if num < 0:
+                raise ValueError('map values must be >= 0 when provided')
+            cleaned[str(key).upper()] = num
+        return cleaned
 
 # 新增：仓位建议请求模型
 class PositionSizingRequest(BaseModel):

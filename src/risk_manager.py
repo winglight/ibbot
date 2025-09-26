@@ -106,8 +106,22 @@ class RiskManager:
         
         # 价格阈值与杠杆配置
         self.price_threshold = float(os.getenv('PRICE_THRESHOLD', 0.02))  # 从环境变量读取，默认2%金额阈值
-        self.leverage_mnq = int(os.getenv('LEVERAGE_MNQ', 20))  # MNQ杠杆倍数，从环境变量读取
-        
+
+        index_lev_default = int(os.getenv('LEVERAGE_INDEX_DEFAULT', 20))
+        micro_lev_default = int(os.getenv('LEVERAGE_INDEX_MICRO_DEFAULT', index_lev_default))
+        self.leverage_map: Dict[str, float] = {
+            'ES': float(os.getenv('LEVERAGE_ES', index_lev_default)),
+            'MES': float(os.getenv('LEVERAGE_MES', micro_lev_default)),
+            'NQ': float(os.getenv('LEVERAGE_NQ', index_lev_default)),
+            'MNQ': float(os.getenv('LEVERAGE_MNQ', micro_lev_default)),
+            'YM': float(os.getenv('LEVERAGE_YM', index_lev_default)),
+            'MYM': float(os.getenv('LEVERAGE_MYM', micro_lev_default)),
+            'RTY': float(os.getenv('LEVERAGE_RTY', index_lev_default)),
+            'M2K': float(os.getenv('LEVERAGE_M2K', micro_lev_default)),
+            'VX': float(os.getenv('LEVERAGE_VX', 10)),
+        }
+        self.leverage_mnq = float(self.leverage_map.get('MNQ', micro_lev_default))
+
         # 动态仓位管理与断路器配置
         self.risk_per_trade_r = float(os.getenv('RISK_PER_TRADE_R', 0.005))
         self.rv_ref_value = float(os.getenv('RV_REF_VALUE', 1.0))
@@ -126,6 +140,11 @@ class RiskManager:
             'MES': 5.0,
             'NQ': 20.0,
             'ES': 50.0,
+            'YM': 5.0,
+            'MYM': 0.5,
+            'RTY': 50.0,
+            'M2K': 5.0,
+            'VX': 1000.0,
         }
 
         # 回撤分级缩放
@@ -163,6 +182,7 @@ class RiskManager:
         self.position_limit_per_symbol: Dict[str, float] = {}
 
         # 从数据库加载现有数据
+        self._load_risk_config_from_db()
         self._load_from_database()
         self._load_position_limits_from_db()
 
@@ -349,19 +369,22 @@ class RiskManager:
             self.cb_daily_r = float(cfg.get('cb_daily_r', self.cb_daily_r))
             self.cb_streak = int(cfg.get('cb_streak', self.cb_streak))
             self.price_threshold = float(cfg.get('price_threshold', self.price_threshold))
-            self.leverage_mnq = int(cfg.get('leverage_mnq', self.leverage_mnq))
+
+            leverage_cfg = self._normalize_upper_float_map(cfg.get('leverage_map'))
+            if leverage_cfg:
+                self.leverage_map.update(leverage_cfg)
+
+            if 'leverage_mnq' in cfg:
+                try:
+                    self.leverage_map['MNQ'] = float(cfg.get('leverage_mnq'))
+                except Exception:
+                    pass
+            self.leverage_mnq = float(self.leverage_map.get('MNQ', self.leverage_mnq))
 
             # 点值映射
-            pv_map = cfg.get('point_value_map')
-            if isinstance(pv_map, dict):
-                cleaned: Dict[str, float] = {}
-                for k, v in pv_map.items():
-                    try:
-                        cleaned[(k or '').upper()] = float(v)
-                    except Exception:
-                        continue
-                if cleaned:
-                    self.point_value_map.update(cleaned)
+            pv_map = self._normalize_upper_float_map(cfg.get('point_value_map'))
+            if pv_map:
+                self.point_value_map.update(pv_map)
 
             risk_logger.info("Loaded risk runtime config from database")
         except Exception as e:
@@ -403,6 +426,19 @@ class RiskManager:
 
         self._load_position_limits_from_db()
 
+    def _normalize_upper_float_map(self, data: Optional[Dict[str, Any]]) -> Dict[str, float]:
+        """Convert a mapping to uppercase string keys with float values."""
+
+        if not data:
+            return {}
+        normalized: Dict[str, float] = {}
+        for key, value in data.items():
+            try:
+                normalized[str(key).upper()] = float(value)
+            except Exception:
+                continue
+        return normalized
+
     def get_position_limit(self, symbol: str) -> Optional[float]:
         """Return the maximum absolute position allowed for the symbol."""
 
@@ -431,9 +467,10 @@ class RiskManager:
                 'contract_rounding': self.contract_rounding,
                 'price_threshold': self.price_threshold,
                 'leverage_mnq': self.leverage_mnq,
+                'leverage_map': self._normalize_upper_float_map(self.leverage_map),
                 'cb_daily_r': self.cb_daily_r,
                 'cb_streak': self.cb_streak,
-                'point_value_map': self.point_value_map,
+                'point_value_map': self._normalize_upper_float_map(self.point_value_map),
             }
         except Exception as e:
             risk_logger.error(f"get_config error: {e}")
@@ -487,25 +524,30 @@ class RiskManager:
             self.cb_daily_r = as_float('cb_daily_r', self.cb_daily_r)
             self.cb_streak = as_int('cb_streak', self.cb_streak)
             self.price_threshold = as_float('price_threshold', self.price_threshold)
-            self.leverage_mnq = as_int('leverage_mnq', self.leverage_mnq)
+
+            if 'leverage_mnq' in updates:
+                self.leverage_map['MNQ'] = as_float('leverage_mnq', self.leverage_map.get('MNQ'))
+
+            lev_updates = self._normalize_upper_float_map(updates.get('leverage_map'))
+            if lev_updates:
+                self.leverage_map.update(lev_updates)
+
+            self.leverage_mnq = float(self.leverage_map.get('MNQ', self.leverage_mnq))
 
             # 点值映射合并
-            if isinstance(updates.get('point_value_map'), dict):
-                pv_new: Dict[str, float] = {}
-                for k, v in updates['point_value_map'].items():
-                    try:
-                        pv_new[(k or '').upper()] = float(v)
-                    except Exception:
-                        continue
-                if pv_new:
-                    self.point_value_map.update(pv_new)
+            pv_new = self._normalize_upper_float_map(updates.get('point_value_map'))
+            if pv_new:
+                self.point_value_map.update(pv_new)
 
             # 持久化到数据库（使用 config 表，strategy_settings 键下的 risk_config 命名空间）
             settings = self.db_manager.load_strategy_config() or {}
             settings['risk_config'] = self.get_config()
             self.db_manager.save_strategy_config(settings)
 
-            return self.get_config()
+            config = self.get_config()
+            if 'leverage_map' not in config:
+                config['leverage_map'] = self._normalize_upper_float_map(self.leverage_map)
+            return config
         except Exception as e:
             risk_logger.error(f"update_config error: {e}")
             return self.get_config()
@@ -892,7 +934,10 @@ class RiskManager:
         
         # 以金额阈值为基础，按杠杆换算成价格差阈值
         amount_threshold = self.price_threshold
-        threshold_price = amount_threshold * self.leverage_mnq if symbol == 'MNQ' else amount_threshold
+        leverage = self.get_leverage(symbol)
+        if leverage <= 0:
+            leverage = 1.0
+        threshold_price = amount_threshold * leverage
         
         # 检查是否已有任何limit order pending，如果有则跳过
         if self.pending_orders[symbol]["stop_loss"] or self.pending_orders[symbol]["take_profit"]:
@@ -1850,6 +1895,21 @@ class RiskManager:
             return 1.0
         except Exception:
             return 1.0
+
+    def get_leverage(self, symbol: str) -> float:
+        """Return the configured leverage multiplier for a symbol, falling back to root matches."""
+        sym = (symbol or '').upper()
+        if not sym:
+            return 1.0
+        try:
+            if sym in self.leverage_map:
+                return float(self.leverage_map[sym])
+            for key in sorted(self.leverage_map.keys(), key=len, reverse=True):
+                if sym.startswith(key):
+                    return float(self.leverage_map[key])
+        except Exception:
+            pass
+        return 1.0
 
     def _estimate_rv(self, symbol: str) -> Tuple[Optional[float], Optional[float], str]:
         """基于历史日线自动估算当前RV与参考RV。

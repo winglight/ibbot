@@ -151,13 +151,15 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
         
         leverage = {}
         try:
-            default_mnq_lev = int(os.getenv('LEVERAGE_MNQ', 20))
             if 'risk_manager' in globals() and risk_manager is not None:
-                leverage["MNQ"] = int(getattr(risk_manager, "leverage_mnq", default_mnq_lev))
-            else:
-                leverage["MNQ"] = default_mnq_lev
+                lev_map = getattr(risk_manager, 'leverage_map', None)
+                if isinstance(lev_map, dict):
+                    leverage = {k: float(v) for k, v in lev_map.items()}
+            if not leverage:
+                default_mnq_lev = float(os.getenv('LEVERAGE_MNQ', 20))
+                leverage = {'MNQ': default_mnq_lev}
         except Exception:
-            leverage["MNQ"] = 20
+            leverage = {'MNQ': 20.0}
 
         # 新增：返回完整风控配置，添加超时保护
         full_cfg = {}

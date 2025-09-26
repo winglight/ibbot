@@ -1682,7 +1682,7 @@ class TradingApp {
             if (!symbol) return null;
             const s = String(symbol).trim().toUpperCase();
             // Common futures roots and FX futures roots
-            const FUT_ROOTS = new Set(['MNQ','NQ','ES','MES','YM','MYM','RTY','M2K','CL','NG','GC','SI','HG','ZB','ZN','ZF','ZT','6E','6J','6B','6A','6C','6S']);
+            const FUT_ROOTS = new Set(['MNQ','NQ','ES','MES','YM','MYM','RTY','M2K','VX','CL','NG','GC','SI','HG','ZB','ZN','ZF','ZT','6E','6J','6B','6A','6C','6S']);
             // Root only (e.g., MNQ), or root+month code like MNQZ4 / MNQZ24
             if (FUT_ROOTS.has(s) || /^[A-Z]{1,3}[FGHJKMNQUVXZ][0-9]$/.test(s) || /^[A-Z]{1,3}[FGHJKMNQUVXZ][0-9]{2}$/.test(s)) {
                 return 'FUT';
@@ -7601,6 +7601,9 @@ class TradingApp {
             // RTY/M2K 期货最小单位是0.1
             else if (upperSymbol.includes('RTY') || upperSymbol.includes('M2K')) {
                 step = 0.1;
+            }
+            else if (upperSymbol.startsWith('VX')) {
+                step = 0.05;
             }
         }
         
