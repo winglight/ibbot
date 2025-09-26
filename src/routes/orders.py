@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Optional, Dict, Tuple, Any
 
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
@@ -105,8 +105,8 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
             # 失效订单缓存，避免3秒缓存导致新订单不可见
             try:
                 global orders_cache, orders_cache_timestamp
-                orders_cache = []
-                orders_cache_timestamp = None
+                orders_cache = {}
+                orders_cache_timestamp = {}
             except Exception:
                 pass
 
@@ -747,24 +747,25 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # 订单缓存，避免频繁查询数据库
-orders_cache = []
-orders_cache_timestamp = None
+orders_cache: Dict[Tuple[int, int, Optional[str]], Dict[str, Any]] = {}
+orders_cache_timestamp: Dict[Tuple[int, int, Optional[str]], datetime] = {}
 ORDERS_CACHE_TTL = 3  # 缓存有效期（秒）
 
 @router.get("/api/orders")
-async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int = 100, use_cache: bool = True, start_date: Optional[str] = None):
+async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int = 100, use_cache: bool = True,
+                     start_date: Optional[str] = None, page: int = 1):
     """获取订单列表（从数据库读取，包含历史订单）
-    - limit: 限制返回的订单数量，默认100条，提高性能
-    - use_cache: 是否使用API级别缓存（默认 True）。启用时，短时间内的重复请求将直接返回缓存结果，无需重新查询数据库。
-    - start_date: 起始时间（ISO字符串，可含Z时区后缀）。若提供，则仅返回created_at不早于该时间的订单。
+    - limit: 每页返回的订单数量，默认100条
+    - use_cache: 是否使用API级别缓存（默认 True）
+    - start_date: 起始时间（ISO字符串）
+    - page: 页码，从1开始
     """
     global orders_cache, orders_cache_timestamp
-    
+
     try:
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
-        
-        # 解析start_date（如果提供），统一转换为本地时区的有时区时间
+
         start_dt = None
         if start_date:
             try:
@@ -772,38 +773,48 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
             except Exception as e:
                 logger.warning(f"Invalid start_date '{start_date}': {e}")
                 start_dt = None
-        
-        # 检查缓存是否有效（当且仅当未指定start_date时才使用缓存）
+
         current_time = now_local()
-        if use_cache and not start_dt and orders_cache and orders_cache_timestamp:
-            cache_age = (current_time - orders_cache_timestamp).total_seconds()
-            if cache_age < ORDERS_CACHE_TTL:
-                logger.debug(f"Using orders cache, age: {cache_age:.1f}s")
-                return {"success": True, "orders": orders_cache, "from_cache": True}
-        
-        # 从 OrderManager 获取所有订单数据（已按创建时间降序排列），限制数量提高性能
-        # 使用异步执行避免阻塞事件循环
+        if limit <= 0:
+            limit = 100
+        page = max(1, page)
+        offset = (page - 1) * limit if limit else 0
+        cache_key = (limit, page, start_dt.isoformat() if start_dt else None)
+
+        if use_cache and not start_dt:
+            cached_payload = orders_cache.get(cache_key)
+            cached_timestamp = orders_cache_timestamp.get(cache_key)
+            if cached_payload and cached_timestamp:
+                cache_age = (current_time - cached_timestamp).total_seconds()
+                if cache_age < ORDERS_CACHE_TTL:
+                    logger.debug(f"Using orders cache, age: {cache_age:.1f}s")
+                    response = dict(cached_payload)
+                    response["from_cache"] = True
+                    return response
+
         loop = asyncio.get_event_loop()
         try:
-            orders = await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: order_manager.get_orders(limit=limit, start_date=start_dt)
+                    lambda: order_manager.get_orders(
+                        limit=limit,
+                        start_date=start_dt,
+                        offset=offset,
+                        return_total=True,
+                    )
                 ),
-                timeout=5.0  # 5秒超时
+                timeout=5.0
             )
 
-            # 根据start_date进行服务端过滤，确保只返回当天（或指定起始时间之后）的订单
-            if start_dt:
-                orders = [
-                    o for o in orders
-                    if getattr(o, 'created_at', None)
-                    and ensure_local_timezone(o.created_at) >= start_dt
-                ]
-            
-            # 转换字段名以匹配前端期望
+            if isinstance(result, tuple):
+                orders_list, total_count = result
+            else:
+                orders_list = result
+                total_count = len(orders_list)
+
             converted_orders = []
-            for o in orders:
+            for o in orders_list:
                 raw_type = (o.order_type or '').upper()
                 if raw_type in ('MARKET', 'MKT'):
                     order_type = 'MKT'
@@ -811,15 +822,14 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                     order_type = 'LMT'
                 else:
                     order_type = raw_type or 'MKT'
-                
+
                 price_val = 0.0
                 try:
                     if o.price is not None:
                         price_val = float(o.price)
                 except Exception:
                     price_val = 0.0
-                
-                # 计算触发类型：仅对机器人订单（auto）有效
+
                 trigger_type = None
                 try:
                     if getattr(o, 'order_source', 'manual') == 'auto':
@@ -831,7 +841,7 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                             trigger_type = 'risk_rule'
                 except Exception:
                     trigger_type = None
-                
+
                 converted_order = {
                     'order_id': o.order_id,
                     'symbol': o.symbol,
@@ -843,9 +853,7 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                     'status': o.status,
                     'filled': o.quantity if o.status == 'Filled' else 0,
                     'remaining': 0 if o.status == 'Filled' else o.quantity,
-                    # 标准化时间戳：始终包含时区偏移，避免前端解析成UTC导致跨日
                     'submit_time': to_local_iso(getattr(o, 'created_at', None)),
-                    # 兼容字段，等同于submit_time
                     'created_at': to_local_iso(getattr(o, 'created_at', None)),
                     'order_source': getattr(o, 'order_source', 'manual'),
                     'strategy_name': getattr(o, 'strategy_name', None),
@@ -854,31 +862,60 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                     'pnl': getattr(o, 'pnl', None)
                 }
                 converted_orders.append(converted_order)
-            
-            # 更新缓存（当且仅当未指定start_date时）
-            if not start_dt:
-                orders_cache = converted_orders
-                orders_cache_timestamp = current_time
-            
-            return {"success": True, "orders": converted_orders, "from_cache": False}
-            
+
+            total_pages = max(1, (total_count + limit - 1) // limit) if limit else 1
+            meta = {
+                "limit": limit,
+                "page_size": limit,
+                "page": page,
+                "total": total_count,
+                "total_pages": total_pages,
+                "has_prev": page > 1,
+                "has_next": page < total_pages,
+                "start_date": start_date,
+                "generated_at": to_local_iso(now_local()),
+                "source": "rest_api",
+            }
+
+            response_payload = {"success": True, "orders": converted_orders, "meta": meta, "from_cache": False}
+
+            if use_cache and not start_dt:
+                orders_cache[cache_key] = response_payload
+                orders_cache_timestamp[cache_key] = current_time
+
+            return response_payload
+
         except asyncio.TimeoutError:
-            # 如果超时但有缓存，返回缓存数据
-            if orders_cache:
-                logger.warning("Orders request timed out, returning cached data")
-                return {"success": True, "orders": orders_cache, "from_cache": True, "cache_warning": "Request timed out, showing cached data"}
-            else:
-                logger.warning("Orders request timed out and no cache available")
-                return {"success": False, "error": "Orders request timed out"}
-        
+            cached_payload = orders_cache.get(cache_key)
+            cache_time = orders_cache_timestamp.get(cache_key)
+            if cached_payload and cache_time:
+                cache_age = (current_time - cache_time).total_seconds()
+                logger.warning(
+                    f"Orders request timed out, returning cached data (age: {cache_age:.1f}s)"
+                    if cache_age is not None else
+                    "Orders request timed out, returning cached data"
+                )
+                response = dict(cached_payload)
+                response["from_cache"] = True
+                response["cache_warning"] = "Request timed out, showing cached data"
+                return response
+
+            logger.warning("Orders request timed out and no cache available")
+            return {"success": False, "error": "Orders request timed out"}
+
     except HTTPException:
         raise
     except Exception as e:
-        # 如果出错但有缓存，返回缓存数据
-        if orders_cache and orders_cache_timestamp:
-            logger.error(f"Get orders error: {e}, returning cached data")
-            return {"success": True, "orders": orders_cache, "from_cache": True, "cache_warning": "Error occurred, showing cached data"}
-        
+        cached_payload = orders_cache.get(cache_key)
+        cache_time = orders_cache_timestamp.get(cache_key)
+        if cached_payload and cache_time:
+            cache_age = (current_time - cache_time).total_seconds()
+            logger.error(f"Get orders error: {e}, returning cached data (age: {cache_age:.1f}s)")
+            response = dict(cached_payload)
+            response["from_cache"] = True
+            response["cache_warning"] = "Error occurred, showing cached data"
+            return response
+
         logger.error(f"Get orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

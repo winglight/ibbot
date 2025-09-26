@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import time
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
@@ -90,18 +91,41 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
 
 
 def _orders_payload(
-    orders: List[Any], *, limit: Optional[int] = None, start_date: Optional[str] = None
+    orders: List[Any], *, limit: Optional[int] = None, start_date: Optional[str] = None,
+    page: Optional[int] = None, total: Optional[int] = None
 ) -> Dict[str, Any]:
+    returned = len(orders)
+    meta: Dict[str, Any] = {
+        "limit": limit,
+        "page_size": limit,
+        "start_date": start_date,
+        "generated_at": to_local_iso(now_local()),
+        "source": "websocket",
+        "returned": returned,
+    }
+    if page is not None:
+        meta["page"] = page
+        meta["has_prev"] = page > 1
+    if total is not None:
+        meta["total"] = total
+        if limit:
+            total_pages = max(1, math.ceil(total / limit))
+            meta["total_pages"] = total_pages
+            if page is not None:
+                meta["has_next"] = page < total_pages
+                meta["has_prev"] = page > 1
+        elif page is not None and "has_prev" not in meta:
+            meta["has_prev"] = page > 1
+    elif limit:
+        if page is not None and "has_prev" not in meta:
+            meta["has_prev"] = page > 1
+        meta["has_next"] = returned >= limit
+
     return {
         "type": "orders_snapshot",
         "success": True,
         "orders": [_serialise_order(order) for order in orders],
-        "meta": {
-            "limit": limit,
-            "start_date": start_date,
-            "generated_at": to_local_iso(now_local()),
-            "source": "websocket",
-        },
+        "meta": meta,
     }
 
 
@@ -271,11 +295,24 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         if 'order_manager' in globals() and order_manager:
             loop = asyncio.get_event_loop()
-            orders = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: order_manager.get_orders(limit=300)),
+            initial_limit = 10
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: order_manager.get_orders(
+                        limit=initial_limit,
+                        offset=0,
+                        return_total=True,
+                    ),
+                ),
                 timeout=5.0
             )
-            payload = _orders_payload(orders, limit=300)
+            if isinstance(result, tuple):
+                orders, total = result
+            else:
+                orders = result
+                total = len(orders)
+            payload = _orders_payload(orders, limit=initial_limit, page=1, total=total)
             await websocket.send_text(json.dumps(payload))
     except Exception as e:
         logger.warning(f"Failed to send initial orders snapshot: {e}")
@@ -384,12 +421,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    limit = int(message.get("limit", 50))
+                    limit = int(message.get("limit", 10))
                 except (TypeError, ValueError):
-                    limit = 50
+                    limit = 10
+                try:
+                    page = int(message.get("page", 1))
+                except (TypeError, ValueError):
+                    page = 1
+                if limit <= 0:
+                    limit = 10
+                if page < 1:
+                    page = 1
+                offset = (page - 1) * limit
+
                 start_date_raw = message.get("start_date")
                 start_dt = parse_local_datetime(start_date_raw)
-                key = f"orders_snapshot:{limit}:{start_date_raw}"
+                key = f"orders_snapshot:{limit}:{start_date_raw}:{page}"
                 force = bool(message.get("force"))
                 if not _allow_request(request_tracker, key, force=force):
                     cached = last_responses.get(key)
@@ -408,20 +455,29 @@ async def websocket_endpoint(websocket: WebSocket):
                 loop = asyncio.get_event_loop()
 
                 try:
-                    orders = await asyncio.wait_for(
+                    result = await asyncio.wait_for(
                         loop.run_in_executor(
                             None,
                             lambda: order_manager.get_orders(
                                 limit=limit,
                                 start_date=start_dt,
+                                offset=offset,
+                                return_total=True,
                             ),
                         ),
                         timeout=6.0,
                     )
+                    if isinstance(result, tuple):
+                        orders, total = result
+                    else:
+                        orders = result
+                        total = len(orders)
                     payload = _orders_payload(
                         orders,
                         limit=limit,
                         start_date=start_date_raw,
+                        page=page,
+                        total=total,
                     )
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))

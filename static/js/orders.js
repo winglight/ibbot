@@ -6,11 +6,22 @@ class OrderManager {
     constructor(app) {
         this.app = app;
         this.orders = [];
+        this.ordersById = new Map();
         this.ordersCache = {};
         this.debouncedLoadOrders = null;
+        this.lastOrdersStartDate = null;
+        this.pagination = {
+            page: 1,
+            pageSize: 10,
+            total: 0,
+            totalPages: 1,
+            hasNext: false,
+            hasPrev: false,
+        };
         this.initOrdersDebounce();
         this.wsSubscriptions = [];
         this.registerWebSocketHandlers();
+        this.setupPaginationControls();
     }
 
     /**
@@ -62,11 +73,21 @@ class OrderManager {
             const today = new Date();
             const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
             console.log('🌐 Requesting today\'s orders snapshot via WebSocket');
+            const pageSize = Number.isFinite(options.limit) ? Number(options.limit) : (this.pagination?.pageSize || 10);
+            const requestedPage = Number.isFinite(options.page) ? Number(options.page) : (this.pagination?.page || 1);
+            const safePage = Math.max(1, requestedPage);
+            if (!Number.isFinite(this.pagination.pageSize) || this.pagination.pageSize !== pageSize) {
+                this.pagination.pageSize = pageSize;
+            }
+            if (!Number.isFinite(this.pagination.page) || this.pagination.page !== safePage) {
+                this.pagination.page = safePage;
+            }
             if (this.app && this.app.ibkrManager && typeof this.app.ibkrManager.requestOrdersSnapshot === 'function') {
                 this.app.ibkrManager.requestOrdersSnapshot({
-                    limit: options.limit ?? 50,
+                    limit: pageSize,
                     startDate: startOfDay,
                     force: Boolean(options.force),
+                    page: safePage,
                 });
             }
 
@@ -107,38 +128,148 @@ class OrderManager {
                 return true;
             }
 
+            const meta = message?.meta || {};
+            const normalizedStartDate = typeof meta.start_date === 'string' ? meta.start_date : null;
+            if (normalizedStartDate !== this.lastOrdersStartDate) {
+                this.ordersById = new Map();
+                this.lastOrdersStartDate = normalizedStartDate;
+            } else if (!this.ordersById) {
+                this.ordersById = new Map();
+            }
+
             const orders = Array.isArray(message?.orders) ? message.orders : [];
-            this.orders = orders;
 
             const tbody = document.querySelector('#ordersTable tbody');
             if (!tbody) return true;
 
-            const now = new Date();
-            const startOfDayMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-            const endOfDayMs = startOfDayMs + 24 * 60 * 60 * 1000;
-            const filteredOrders = orders.filter(order => {
-                if (!order || order.order_id === 0) return false;
-                if (!order.submit_time) return false;
-                const ts = new Date(order.submit_time).getTime();
-                return ts >= startOfDayMs && ts < endOfDayMs;
-            });
-            const sortedOrders = filteredOrders.sort((a, b) => {
-                const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
-                const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;
-                if (bt !== at) return bt - at;
-                const aid = Number(a.order_id) || 0;
-                const bid = Number(b.order_id) || 0;
-                return bid - aid;
+            const sortedOrders = orders
+                .filter(order => order && order.order_id !== 0)
+                .sort((a, b) => {
+                    const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
+                    const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;
+                    if (bt !== at) return bt - at;
+                    const aid = Number(a.order_id) || 0;
+                    const bid = Number(b.order_id) || 0;
+                    return bid - aid;
+                });
+            this.orders = sortedOrders;
+
+            sortedOrders.forEach(order => {
+                if (!order || !order.order_id) return;
+                this.ordersById.set(order.order_id.toString(), order);
             });
 
             if (this.app) {
-                this.app.orders = sortedOrders.slice();
+                const aggregated = Array.from(this.ordersById.values()).sort((a, b) => {
+                    const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
+                    const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;
+                    if (bt !== at) return bt - at;
+                    const aid = Number(a.order_id) || 0;
+                    const bid = Number(b.order_id) || 0;
+                    return bid - aid;
+                });
+                this.app.orders = aggregated;
             }
+            this.applyPaginationMeta(meta, sortedOrders.length);
             this.updateOrdersTableSmart(sortedOrders, tbody);
+            this.updatePaginationControls();
         } catch (error) {
             console.error('Failed to process orders_snapshot:', error);
         }
         return true;
+    }
+
+    setupPaginationControls() {
+        const prevBtn = document.getElementById('ordersPrevPageBtn');
+        const nextBtn = document.getElementById('ordersNextPageBtn');
+        if (prevBtn) {
+            prevBtn.addEventListener('click', () => {
+                if (this.pagination?.hasPrev) {
+                    this.goToPage((this.pagination.page || 1) - 1);
+                }
+            });
+        }
+        if (nextBtn) {
+            nextBtn.addEventListener('click', () => {
+                if (this.pagination?.hasNext) {
+                    this.goToPage((this.pagination.page || 1) + 1);
+                }
+            });
+        }
+        this.updatePaginationControls();
+    }
+
+    applyPaginationMeta(meta = {}, receivedCount = 0) {
+        if (!this.pagination) {
+            this.pagination = {
+                page: 1,
+                pageSize: 10,
+                total: 0,
+                totalPages: 1,
+                hasNext: false,
+                hasPrev: false,
+            };
+        }
+        const limit = Number(meta.page_size ?? meta.limit ?? this.pagination.pageSize ?? 10) || 10;
+        const page = Math.max(1, Number(meta.page ?? this.pagination.page ?? 1));
+        const total = Number.isFinite(Number(meta.total)) ? Number(meta.total) : null;
+        let totalPages = Number.isFinite(Number(meta.total_pages)) ? Number(meta.total_pages) : null;
+        if (!totalPages && total !== null && limit > 0) {
+            totalPages = Math.max(1, Math.ceil(total / limit));
+        }
+        const hasNext = typeof meta.has_next === 'boolean'
+            ? meta.has_next
+            : (total !== null ? page < Math.max(totalPages || 1, 1) : receivedCount >= limit);
+        const hasPrev = typeof meta.has_prev === 'boolean' ? meta.has_prev : page > 1;
+        const derivedTotal = total !== null
+            ? total
+            : (!hasNext ? Math.max(0, (page - 1) * limit + receivedCount) : this.pagination.total || 0);
+
+        this.pagination = {
+            page,
+            pageSize: limit,
+            total: derivedTotal,
+            totalPages: totalPages || Math.max(1, hasNext ? page + 1 : page),
+            hasNext,
+            hasPrev,
+        };
+    }
+
+    updatePaginationControls() {
+        const infoEl = document.getElementById('ordersPaginationInfo');
+        const prevBtn = document.getElementById('ordersPrevPageBtn');
+        const nextBtn = document.getElementById('ordersNextPageBtn');
+        const page = this.pagination?.page || 1;
+        const totalPages = this.pagination?.totalPages || 1;
+        const total = this.pagination?.total ?? null;
+        const pageSize = this.pagination?.pageSize || 10;
+        const currentCount = Array.isArray(this.orders) ? this.orders.length : 0;
+        const rangeStart = currentCount === 0 ? 0 : (page - 1) * pageSize + 1;
+        const rangeEnd = (page - 1) * pageSize + currentCount;
+        if (infoEl) {
+            if (total !== null && Number.isFinite(total)) {
+                infoEl.textContent = `第 ${page} / ${Math.max(totalPages, 1)} 页 · 第 ${rangeStart || 0}-${rangeEnd || 0} 条 · 共 ${total} 条`;
+            } else {
+                infoEl.textContent = `第 ${page} 页 · 第 ${rangeStart || 0}-${rangeEnd || 0} 条`;
+            }
+        }
+        if (prevBtn) {
+            prevBtn.disabled = !this.pagination?.hasPrev;
+        }
+        if (nextBtn) {
+            nextBtn.disabled = !this.pagination?.hasNext;
+        }
+    }
+
+    goToPage(page, options = {}) {
+        const target = Math.max(1, Number(page) || 1);
+        this.pagination.page = target;
+        this.loadOrders({
+            ...options,
+            page: target,
+            limit: this.pagination.pageSize,
+            force: true,
+        });
     }
 
     /**
