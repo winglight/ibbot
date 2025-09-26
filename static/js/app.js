@@ -7917,7 +7917,6 @@ class TradingApp {
         if (lastTimestamp) {
             tooltipParts.push(`最后数据时间：${lastTimestamp}`);
         }
-
         const statusLabel = (() => {
             if (!isExternal && active) {
                 if (awaitingData) return '等待DOM数据…';
