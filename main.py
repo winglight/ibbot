@@ -164,6 +164,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         main_logger.warning(f"Strategy manager startup warning: {e}")
 
+    # Ensure the queue worker is available for internal strategy orders
+    if getattr(core, "ibkr_client", None) is None:
+        try:
+            core.ibkr_client = core.IBKRClient()
+            main_logger.info("IBKRClient initialized for queue worker startup")
+        except Exception as e:
+            main_logger.warning(f"IBKR client initialization warning: {e}")
+
+    if getattr(core, "ibkr_client", None) is not None:
+        try:
+            await queue_manager.start_worker()
+            main_logger.info("Queue worker started during application startup")
+        except Exception as e:
+            main_logger.warning(f"Queue worker startup warning: {e}")
+    else:
+        main_logger.warning("Queue worker not started because IBKR client is unavailable")
+
     yield
     # Shutdown
     main_logger.info("Application shutting down...")
