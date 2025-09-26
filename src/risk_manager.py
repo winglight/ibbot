@@ -2010,16 +2010,57 @@ class RiskManager:
                 self.clear_order_queue()
             except Exception:
                 pass
-            risk_logger.warning(f"[CB] Circuit breaker TRIGGERED: {self.circuit_reason}")
+            context_parts = [
+                f"触发原因: {self.circuit_reason}",
+                f"当日亏损(R): {self.daily_loss_R:.2f}",
+                f"连败次数: {self.loss_streak}",
+                f"风险队列长度: {self.order_queue.qsize()}",
+            ]
+            queue_context = None
+            strategy_context = None
+            try:
+                import core as core_module  # type: ignore
+
+                queue_mgr = getattr(core_module, "queue_manager", None)
+                if queue_mgr:
+                    status = queue_mgr.get_queue_status()
+                    queue_context = (
+                        f"策略队列 - 挂起: {status.get('pending_count', 0)}, "
+                        f"处理中: {status.get('processing_count', 0)}, 失败: {status.get('failed_count', 0)}"
+                    )
+                strategy_mgr = getattr(core_module, "strategy_manager", None)
+                if strategy_mgr:
+                    names = getattr(strategy_mgr, "get_enabled_strategy_names", lambda: [])()
+                    if names:
+                        strategy_context = f"启用策略: {len(names)} ({', '.join(names)})"
+                    else:
+                        strategy_context = "启用策略: 0"
+            except Exception as exc:  # pragma: no cover - defensive guard
+                risk_logger.debug(f"[CB] Failed to build notification context: {exc}")
+
+            if queue_context:
+                context_parts.append(queue_context)
+            if strategy_context:
+                context_parts.append(strategy_context)
+
+            formatted_context = "\n".join(context_parts)
+            risk_logger.warning(
+                "[CB] Circuit breaker TRIGGERED",
+                reason=self.circuit_reason,
+                loss_R=self.daily_loss_R,
+                loss_streak=self.loss_streak,
+            )
             try:
                 if self.notification_manager:
-                    asyncio.create_task(self.notification_manager.send_risk_notification(
-                        symbol="ALL",
-                        message=f"断路器触发: {self.circuit_reason}",
-                        risk_type="circuit_breaker"
-                    ))
-            except Exception:
-                pass
+                    asyncio.create_task(
+                        self.notification_manager.send_risk_notification(
+                            symbol="ALL",
+                            message=formatted_context,
+                            risk_type="circuit_breaker"
+                        )
+                    )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                risk_logger.warning(f"[CB] Failed to send circuit breaker notification: {exc}")
             return False, self.circuit_reason
 
         return True, "ok"
