@@ -7,6 +7,8 @@ from src.database import get_db_manager
 from src.queue_manager import queue_manager
 from src.order_manager import get_order_manager
 from src.websocket_manager import websocket_manager
+from src.market_data_stream import PriceVolumeStream
+from src.atr_trailing_service import ATRTrailingService
 from loguru import logger
 
 from src.notification_manager import NotificationManager
@@ -36,6 +38,12 @@ strategy_risk_manager = StrategyRiskManager(
     db_manager=db_manager,
     notification_manager=notification_manager,
 )
+price_volume_stream = PriceVolumeStream()
+atr_trailing_service = ATRTrailingService(
+    price_stream=price_volume_stream,
+    risk_manager=risk_manager,
+    notification_manager=notification_manager,
+)
 
 try:
     strategy_manager.set_dependencies(
@@ -58,7 +66,7 @@ except Exception:
     pass
 
 try:
-    risk_manager.set_dependencies(order_manager=order_manager)
+    risk_manager.set_dependencies(order_manager=order_manager, atr_service=atr_trailing_service)
 except Exception:
     pass
 

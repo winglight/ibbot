@@ -5,7 +5,7 @@ import json
 import math
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from queue import Queue
 
@@ -37,9 +37,13 @@ class RiskRule:
     enabled: bool = True
     max_time_span: Optional[int] = None  # 以分钟为单位的最大持仓时间
     created_at: datetime = None
-    
+    auto_trailing: bool = False
+    atr_params: Dict[str, Any] = field(default_factory=dict)
+
     def __post_init__(self):
         self.created_at = ensure_local_timezone(self.created_at) or now_local()
+        if not isinstance(self.atr_params, dict):
+            self.atr_params = dict(self.atr_params or {})
 
 @dataclass
 class OrderRequest:
@@ -89,6 +93,7 @@ class RiskManager:
         self.order_manager = None
         self.ibkr_client = None
         self._ibkr_client_warning_logged = False
+        self.atr_service = None
 
         # 监控状态
         self.monitoring_active = False
@@ -238,7 +243,9 @@ class RiskManager:
                     max_loss_percent=rule_db.max_loss_percent,
                     enabled=getattr(rule_db, 'enabled', True),  # 从数据库读取enabled
                     max_time_span=getattr(rule_db, 'max_time_span', None),
-                    created_at=parse_local_datetime(rule_db.timestamp) if rule_db.timestamp else now_local()
+                    created_at=parse_local_datetime(rule_db.timestamp) if rule_db.timestamp else now_local(),
+                    auto_trailing=getattr(rule_db, 'auto_trailing', False),
+                    atr_params=getattr(rule_db, 'atr_params', {})
                 )
                 self.risk_rules[rule.symbol] = rule
 
@@ -653,10 +660,13 @@ class RiskManager:
 
     def add_risk_rule(self, symbol: str, stop_loss_price: Optional[float] = None,
                       take_profit_price: Optional[float] = None, max_loss_percent: Optional[float] = None,
-                      max_time_span: Optional[int] = None):
+                      max_time_span: Optional[int] = None, auto_trailing: bool = False,
+                      atr_params: Optional[Dict[str, Any]] = None):
         """添加风险规则"""
         try:
-            risk_logger.info(f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}, max_time_span={max_time_span}")
+            risk_logger.info(
+                f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}, max_time_span={max_time_span}, auto_trailing={auto_trailing}"
+            )
             rule = RiskRule(
                 symbol=symbol,
                 stop_loss_price=stop_loss_price,
@@ -664,9 +674,11 @@ class RiskManager:
                 max_loss_percent=max_loss_percent,
                 enabled=True,
                 max_time_span=max_time_span,
-                created_at=now_local()
+                created_at=now_local(),
+                auto_trailing=auto_trailing,
+                atr_params=atr_params or {}
             )
-            
+
             # 转换为数据库层的 RiskRule 并保存到数据库
             db_rule = DatabaseRiskRule(
                 symbol=rule.symbol,
@@ -675,7 +687,9 @@ class RiskManager:
                 max_loss_percent=rule.max_loss_percent,
                 enabled=rule.enabled,
                 max_time_span=rule.max_time_span,
-                timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                auto_trailing=rule.auto_trailing,
+                atr_params=rule.atr_params
             )
             self.db_manager.save_risk_rule(db_rule)
             risk_logger.debug(f"Risk rule persisted: {db_rule}")
@@ -698,6 +712,8 @@ class RiskManager:
             
             # 从内存删除
             if symbol in self.risk_rules:
+                if getattr(self.risk_rules[symbol], 'auto_trailing', False) and getattr(self, 'atr_service', None):
+                    self.atr_service.disable_symbol(symbol)
                 del self.risk_rules[symbol]
                 risk_logger.info(f"Risk rule removed for {symbol}")
                 return True
@@ -709,11 +725,15 @@ class RiskManager:
             return False
 
     def update_risk_rule(self, symbol: str, stop_loss_price: float = None,
-                         take_profit_price: float = None, enabled: bool = True,
-                         max_time_span: Optional[int] = None) -> bool:
+                         take_profit_price: float = None, enabled: Optional[bool] = None,
+                         max_time_span: Optional[int] = None,
+                         auto_trailing: Optional[bool] = None,
+                         atr_params: Optional[Dict[str, Any]] = None) -> bool:
         """更新风险规则"""
         try:
-            risk_logger.info(f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}, max_time_span={max_time_span}")
+            risk_logger.info(
+                f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}, max_time_span={max_time_span}, auto_trailing={auto_trailing}"
+            )
             if symbol in self.risk_rules:
                 rule = self.risk_rules[symbol]
                 if stop_loss_price is not None:
@@ -722,12 +742,16 @@ class RiskManager:
                 if take_profit_price is not None:
                     risk_logger.debug(f"Updating TP for {symbol}: {rule.take_profit_price} -> {take_profit_price}")
                     rule.take_profit_price = take_profit_price
-                if rule.enabled != enabled:
+                if enabled is not None and rule.enabled != enabled:
                     risk_logger.debug(f"Updating enabled for {symbol}: {rule.enabled} -> {enabled}")
-                rule.enabled = enabled
+                    rule.enabled = enabled
                 if max_time_span is not None:
                     rule.max_time_span = max_time_span
-                
+                if auto_trailing is not None:
+                    rule.auto_trailing = auto_trailing
+                if atr_params is not None:
+                    rule.atr_params = dict(atr_params)
+
                 # 转换为数据库层的 RiskRule 并保存到数据库
                 db_rule = DatabaseRiskRule(
                     symbol=rule.symbol,
@@ -736,7 +760,9 @@ class RiskManager:
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
                     max_time_span=rule.max_time_span,
-                    timestamp=to_local_iso(rule.created_at)
+                    timestamp=to_local_iso(rule.created_at),
+                    auto_trailing=rule.auto_trailing,
+                    atr_params=rule.atr_params
                 )
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.debug(f"Risk rule persisted after update: {db_rule}")
@@ -789,6 +815,13 @@ class RiskManager:
                 
                 await self._check_position_risk(position, account_info)
                 await self._check_stop_loss_take_profit(position, client)
+
+                rule = self.risk_rules.get(symbol)
+                if rule and getattr(rule, 'auto_trailing', False) and getattr(self, 'atr_service', None):
+                    try:
+                        await self.atr_service.refresh_for_symbol(symbol, position, rule)
+                    except Exception as atr_err:
+                        risk_logger.warning(f"ATR trailing update failed for {symbol}: {atr_err}")
             
             # 检查是否有持仓为0但风险规则仍激活的资产，如果有则反激活风险规则
             position_symbols = {pos['symbol'] for pos in positions if pos['position'] != 0}
@@ -804,9 +837,13 @@ class RiskManager:
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
                         max_time_span=rule.max_time_span,
-                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                        auto_trailing=rule.auto_trailing,
+                        atr_params=rule.atr_params
                     )
                     self.db_manager.save_risk_rule(db_rule)
+                    if getattr(rule, 'auto_trailing', False) and getattr(self, 'atr_service', None):
+                        self.atr_service.disable_symbol(symbol)
                     risk_logger.info(f"Risk rule for {symbol} has been deactivated due to zero position")
             
             risk_logger.info("=== Position monitoring cycle completed ===")
@@ -921,7 +958,9 @@ class RiskManager:
                 max_loss_percent=rule.max_loss_percent,
                 enabled=rule.enabled,
                 max_time_span=rule.max_time_span,
-                timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                auto_trailing=rule.auto_trailing,
+                atr_params=rule.atr_params
             )
             self.db_manager.save_risk_rule(db_rule)
             return
@@ -1015,7 +1054,9 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                            auto_trailing=rule.auto_trailing,
+                            atr_params=rule.atr_params
                         )
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.info(f"Take profit rule disabled after market order for {symbol}")
@@ -1031,7 +1072,9 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                            auto_trailing=rule.auto_trailing,
+                            atr_params=rule.atr_params
                         )
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.info(f"Take profit rule disabled due to order failure for {symbol}")
@@ -1046,7 +1089,9 @@ class RiskManager:
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
                         max_time_span=rule.max_time_span,
-                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                        auto_trailing=rule.auto_trailing,
+                        atr_params=rule.atr_params
                     )
                     self.db_manager.save_risk_rule(db_rule)
                     risk_logger.info(f"Take profit rule disabled due to exception for {symbol}")
@@ -1084,7 +1129,9 @@ class RiskManager:
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
                     max_time_span=rule.max_time_span,
-                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                    auto_trailing=rule.auto_trailing,
+                    atr_params=rule.atr_params
                 )
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.info(f"Take profit order queued for {symbol} at ${current_price:.2f}, rule disabled")
@@ -1195,7 +1242,9 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                            auto_trailing=rule.auto_trailing,
+                            atr_params=rule.atr_params
                         )
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.warning(f"🔒 Stop loss rule disabled for {symbol} after triggering at ${current_price:.2f}")
@@ -1212,7 +1261,9 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                            auto_trailing=rule.auto_trailing,
+                            atr_params=rule.atr_params
                         )
                         self.db_manager.save_risk_rule(db_rule)
                         risk_logger.info(f"Stop loss rule disabled due to order failure for {symbol}")
@@ -1227,7 +1278,9 @@ class RiskManager:
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
                         max_time_span=rule.max_time_span,
-                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                        auto_trailing=rule.auto_trailing,
+                        atr_params=rule.atr_params
                     )
                     self.db_manager.save_risk_rule(db_rule)
                     risk_logger.info(f"Stop loss rule disabled due to exception for {symbol}")
@@ -1265,7 +1318,9 @@ class RiskManager:
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
                     max_time_span=rule.max_time_span,
-                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                    auto_trailing=rule.auto_trailing,
+                    atr_params=rule.atr_params
                 )
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.info(f"Stop loss order queued for {symbol} at ${current_price:.2f}, rule disabled")
@@ -1608,9 +1663,11 @@ class RiskManager:
             })
         return orders
 
-    def set_dependencies(self, order_manager=None):
+    def set_dependencies(self, order_manager=None, atr_service=None):
         """注入外部依赖"""
         self.order_manager = order_manager
+        if atr_service is not None:
+            self.atr_service = atr_service
 
     def remove_order_record(self, order_id: str):
         """从记录中删除订单"""
@@ -1662,7 +1719,9 @@ class RiskManager:
                                 max_loss_percent=rule.max_loss_percent,
                                 enabled=rule.enabled,
                                 max_time_span=rule.max_time_span,
-                                timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                                timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                                auto_trailing=rule.auto_trailing,
+                                atr_params=rule.atr_params
                             )
                             self.db_manager.save_risk_rule(db_rule)
                             risk_logger.info(f"Risk rule for {symbol} disabled due to filled order {order_id}")

@@ -61,6 +61,8 @@ class RiskRule:
     enabled: bool = True
     max_time_span: Optional[int] = None  # 以分钟为单位的最大持仓时间
     timestamp: str = None
+    auto_trailing: bool = False
+    atr_params: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -232,10 +234,19 @@ class DatabaseManager:
                     max_loss_percent REAL,
                     enabled BOOLEAN DEFAULT 1,
                     max_time_span INTEGER,
-                    timestamp TEXT NOT NULL
+                    timestamp TEXT NOT NULL,
+                    auto_trailing BOOLEAN DEFAULT 0,
+                    atr_params TEXT
                 )
                 """
             )
+
+            cursor.execute("PRAGMA table_info('risk_rules')")
+            risk_columns = {row[1] for row in cursor.fetchall()}
+            if 'auto_trailing' not in risk_columns:
+                cursor.execute("ALTER TABLE risk_rules ADD COLUMN auto_trailing BOOLEAN DEFAULT 0")
+            if 'atr_params' not in risk_columns:
+                cursor.execute("ALTER TABLE risk_rules ADD COLUMN atr_params TEXT")
 
             # 创建策略表
             cursor.execute("""
@@ -483,12 +494,25 @@ class DatabaseManager:
     def load_risk_rules(self) -> List[RiskRule]:
         """加载所有风险规则"""
         with self._cursor() as cursor:
-            cursor.execute("SELECT symbol, stop_loss_price, take_profit_price, max_loss_percent, COALESCE(enabled, 1) as enabled, max_time_span, timestamp FROM risk_rules")
+            cursor.execute(
+                """
+                SELECT symbol, stop_loss_price, take_profit_price, max_loss_percent,
+                       COALESCE(enabled, 1) as enabled, max_time_span, timestamp,
+                       COALESCE(auto_trailing, 0) as auto_trailing, atr_params
+                FROM risk_rules
+                """
+            )
             rows = cursor.fetchall()
-            
+
             rules = []
             for row in rows:
-                # row: (symbol, sl, tp, max_loss_percent, enabled, timestamp)
+                atr_payload = row[8]
+                parsed_params = None
+                if atr_payload:
+                    try:
+                        parsed_params = json.loads(atr_payload)
+                    except json.JSONDecodeError:
+                        parsed_params = None
                 rule = RiskRule(
                     symbol=row[0],
                     stop_loss_price=row[1],
@@ -496,7 +520,9 @@ class DatabaseManager:
                     max_loss_percent=row[3],
                     enabled=bool(row[4]),
                     max_time_span=row[5],
-                    timestamp=row[6]
+                    timestamp=row[6],
+                    auto_trailing=bool(row[7]),
+                    atr_params=parsed_params,
                 )
                 rules.append(rule)
             
@@ -508,17 +534,29 @@ class DatabaseManager:
         with self._cursor() as cursor:
             ts = _normalise_iso_timestamp(rule.timestamp) or now_local().isoformat()
             enabled_val = 1 if getattr(rule, 'enabled', True) else 0
+            atr_payload = None
+            if getattr(rule, "atr_params", None):
+                try:
+                    atr_payload = json.dumps(rule.atr_params)
+                except TypeError:
+                    atr_payload = None
+
             cursor.execute(
                 """
-                INSERT INTO risk_rules (symbol, stop_loss_price, take_profit_price, max_loss_percent, enabled, max_time_span, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO risk_rules (
+                    symbol, stop_loss_price, take_profit_price, max_loss_percent,
+                    enabled, max_time_span, timestamp, auto_trailing, atr_params
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     stop_loss_price=excluded.stop_loss_price,
                     take_profit_price=excluded.take_profit_price,
                     max_loss_percent=excluded.max_loss_percent,
                     enabled=excluded.enabled,
                     max_time_span=excluded.max_time_span,
-                    timestamp=excluded.timestamp
+                    timestamp=excluded.timestamp,
+                    auto_trailing=excluded.auto_trailing,
+                    atr_params=excluded.atr_params
                 """,
                 (
                     rule.symbol,
@@ -528,6 +566,8 @@ class DatabaseManager:
                     enabled_val,
                     rule.max_time_span,
                     ts,
+                    int(getattr(rule, "auto_trailing", False)),
+                    atr_payload,
                 ),
             )
             database_logger.debug(f"Risk rule saved: {rule.symbol}")
