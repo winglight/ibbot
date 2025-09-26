@@ -1883,59 +1883,56 @@ class TradingApp {
         
         const refreshSuggestionBtn = document.getElementById('refreshSuggestion');
         if (refreshSuggestionBtn) {
-            console.log('Refresh suggestion button found and event listener attached');
-            refreshSuggestionBtn.addEventListener('click', () => {
-                console.log('Refresh suggestion button clicked!');
-                this.refreshPositionSuggestion();
+            refreshSuggestionBtn.addEventListener('click', async () => {
+                const icon = refreshSuggestionBtn.querySelector('i');
+                refreshSuggestionBtn.disabled = true;
+                if (icon) {
+                    icon.classList.add('fa-spin');
+                }
+                try {
+                    await this.refreshPositionSuggestion();
+                } finally {
+                    refreshSuggestionBtn.disabled = false;
+                    if (icon) {
+                        icon.classList.remove('fa-spin');
+                    }
+                }
             });
-        } else {
-            console.log('Refresh suggestion button not found!');
         }
-        
-        // Auto-refresh suggestion when order parameters change
+
         const orderSymbol = document.getElementById('orderSymbol');
         const orderAction = document.getElementById('orderAction');
         const orderPrice = document.getElementById('orderPrice');
         if (orderSymbol) {
             orderSymbol.addEventListener('input', () => {
                 const symbol = orderSymbol.value.toUpperCase().trim();
-                
-                // 获取当前价格（如果输入的标的长度>=2）
-                if (symbol.length >= 2) {
-                    // 使用防抖避免频繁调用
-                    clearTimeout(this.priceUpdateTimeout);
-                    this.priceUpdateTimeout = setTimeout(() => {
-                        this.fetchCurrentPrice(symbol);
-                    }, 500);
-                } else {
-                    // 隐藏价格显示
+                // Recalculate risk prices whenever symbol changes
+                this.updateRiskPrices().catch(console.error);
+
+                if (!symbol) {
                     const priceDisplay = document.getElementById('currentPriceDisplay');
                     if (priceDisplay) {
                         priceDisplay.style.display = 'none';
                     }
                 }
-                
-                // Recalculate risk prices whenever symbol changes
-                this.updateRiskPrices().catch(console.error);
-                
-                // Refresh position suggestion with debounce
-                this.debounceRefreshSuggestion();
+
+                this.clearPositionSuggestion();
             });
         }
         if (orderAction) {
             orderAction.addEventListener('change', () => {
                 // Update risk prices when action changes
                 this.updateRiskPrices().catch(console.error);
-                // Refresh position suggestion with debounce
-                this.debounceRefreshSuggestion();
+
+                this.clearPositionSuggestion();
             });
         }
         if (orderPrice) {
             orderPrice.addEventListener('input', () => {
                 // Update risk prices when price changes
                 this.updateRiskPrices().catch(console.error);
-                // Refresh position suggestion with debounce
-                this.debounceRefreshSuggestion();
+
+                this.clearPositionSuggestion();
             });
         }
 
@@ -2225,27 +2222,21 @@ class TradingApp {
             this.updateRiskPrices().catch(console.error);
         });
         
-        // Order price change - auto-calculate risk prices
-        document.getElementById('orderPrice').addEventListener('input', () => {
-            this.updateRiskPrices().catch(console.error);
-        });
-        
         // Stop loss and take profit price changes - calculate expected PnL only
         document.getElementById('stopLossPrice').addEventListener('input', () => {
             this.updateExpectedPnL();
-            // 移除自动刷新position suggestion，避免频繁API调用
-            // this.debounceRefreshSuggestion();
+            this.clearPositionSuggestion();
         });
-        
+
         document.getElementById('takeProfitPrice').addEventListener('input', () => {
             this.updateExpectedPnL();
+            this.clearPositionSuggestion();
         });
         
         // Order quantity change - update expected PnL only
         document.getElementById('orderQuantity').addEventListener('input', () => {
             this.updateExpectedPnL();
-            // 只有在数量变化时才刷新position suggestion
-            this.debounceRefreshSuggestion();
+            this.clearPositionSuggestion();
         });
         
         // Note: Order action and symbol event listeners are already handled above in the unified section
@@ -10944,68 +10935,57 @@ class TradingApp {
     
     // Suggested Position Size functions
     async refreshPositionSuggestion() {
-        const symbol = document.getElementById('orderSymbol')?.value?.trim();
+        const symbolRaw = document.getElementById('orderSymbol')?.value || '';
+        const symbol = symbolRaw.trim().toUpperCase();
         const action = document.getElementById('orderAction')?.value;
         const priceInput = document.getElementById('orderPrice')?.value?.trim();
         const price = parseFloat(priceInput) || 0;
         const stopLoss = parseFloat(document.getElementById('stopLossPrice')?.value) || 0;
-    
-    console.log('refreshPositionSuggestion called with:', { symbol, action, price, stopLoss });
-    console.log('stopLossPrice element value:', document.getElementById('stopLossPrice')?.value);
-        
+
         // Note: Position sizing calculation doesn't require IB connection
         // Only actual order placement requires connection
-        
+
         if (!symbol || !action) {
-            console.log('Missing symbol or action, clearing suggestion');
             this.clearPositionSuggestion();
             return;
         }
-        
+
         // If no price is provided, try to get current market price
         let effectivePrice = price;
         if (!effectivePrice || effectivePrice <= 0) {
-            console.log('No price provided, attempting to get current market price for', symbol);
             try {
                 const position = this.dataManager.getPosition(symbol);
                 if (position && position.current_price > 0) {
                     effectivePrice = position.current_price;
-                    console.log('Using current market price:', effectivePrice);
                 }
             } catch (error) {
-                console.log('Could not get market price:', error);
             }
 
             // If still no price, show error and return
             if (!effectivePrice || effectivePrice <= 0) {
-                console.log('No valid price available, clearing suggestion');
                 this.showAlert('warning', '请输入价格或确保该股票有当前市场价格');
                 this.clearPositionSuggestion();
                 return;
             }
         }
-        
+
         // Calculate stop_distance based on action and stop loss
         let stopDistance = 0;
-        console.log('Calculating stopDistance - stopLoss:', stopLoss, 'effectivePrice:', effectivePrice, 'action:', action);
-        
+
         if (stopLoss > 0) {
             if (action === 'BUY') {
                 stopDistance = Math.abs(effectivePrice - stopLoss);
             } else if (action === 'SELL') {
                 stopDistance = Math.abs(stopLoss - effectivePrice);
             }
-            console.log('Calculated stopDistance from SL price:', stopDistance);
         } else {
             // Default stop distance based on symbol type
             if (symbol.includes('ES') || symbol.includes('NQ') || symbol.includes('YM') || symbol.includes('RTY')) {
                 // For futures, use a smaller default stop distance (e.g., 10 points)
                 stopDistance = 10;
-                console.log('Using default futures stopDistance:', stopDistance);
             } else {
                 // For stocks, use 2% of price as default
                 stopDistance = effectivePrice * 0.02;
-                console.log('Using default stock stopDistance:', stopDistance);
             }
         }
         
@@ -11031,13 +11011,6 @@ class TradingApp {
             console.error('Failed to get position suggestion:', error);
             this.clearPositionSuggestion();
         }
-    }
-    
-    debounceRefreshSuggestion() {
-        clearTimeout(this.suggestionTimeout);
-        this.suggestionTimeout = setTimeout(() => {
-            this.refreshPositionSuggestion();
-        }, 500);
     }
     
     updatePositionSuggestionUI(data) {
