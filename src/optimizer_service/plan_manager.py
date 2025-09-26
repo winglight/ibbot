@@ -377,6 +377,7 @@ class PlanManager:
                 continue
             logger.info("Resuming optimizer task %s", task_id)
             self._resumed_tasks.add(task_id)
+            self._task_store.mark_resumed(task_id)
             self._task_store.update_state(
                 task_id,
                 TaskState.RUNNING,

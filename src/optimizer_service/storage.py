@@ -31,6 +31,8 @@ class TaskRecord:
     completed_at: Optional[datetime] = None
     runtime: Optional[Dict[str, Any]] = None
     stop_requested: bool = False
+    resumed_at: Optional[datetime] = None
+    last_group_count: Optional[int] = None
 
 
 class OptimizerTaskStore:
@@ -127,6 +129,15 @@ class OptimizerTaskStore:
             self._persist(task_id)
             return True
 
+    def mark_resumed(self, task_id: str) -> None:
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if not record:
+                return
+            record.resumed_at = datetime.utcnow()
+            record.last_group_count = self._extract_processed_count(record.message)
+            self._persist(task_id)
+
     def is_stop_requested(self, task_id: str) -> bool:
         with self._lock:
             record = self._tasks.get(task_id)
@@ -143,6 +154,8 @@ class OptimizerTaskStore:
             record.message = "stopped"
             record.completed_at = datetime.utcnow()
             record.stop_requested = False
+            record.resumed_at = None
+            record.last_group_count = None
             self._persist(task_id)
 
     def complete_task(self, task_id: str, report: OptimizationReportData) -> None:
@@ -155,6 +168,8 @@ class OptimizerTaskStore:
             record.message = "completed"
             record.report = report
             record.completed_at = datetime.utcnow()
+            record.resumed_at = None
+            record.last_group_count = None
             self._persist(task_id)
 
     def fail_task(self, task_id: str, message: str) -> None:
@@ -166,6 +181,8 @@ class OptimizerTaskStore:
             record.message = message
             record.progress = 100
             record.completed_at = datetime.utcnow()
+            record.resumed_at = None
+            record.last_group_count = None
             self._persist(task_id)
 
     def list_tasks_by_plan(self, plan_id: str) -> List[Tuple[str, TaskRecord]]:
@@ -240,6 +257,10 @@ class OptimizerTaskStore:
                 if row.get("completed_at")
                 else None,
                 stop_requested=False,
+                resumed_at=datetime.fromisoformat(row["resumed_at"])
+                if row.get("resumed_at")
+                else None,
+                last_group_count=row.get("last_group_count"),
             )
             self._tasks[row["task_id"]] = record
 
@@ -258,6 +279,8 @@ class OptimizerTaskStore:
             "report": record.report.dict() if record.report else None,
             "created_at": record.created_at.isoformat(),
             "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+            "resumed_at": record.resumed_at.isoformat() if record.resumed_at else None,
+            "last_group_count": record.last_group_count,
         }
         self._db.save_task(task_payload)
 
@@ -375,16 +398,23 @@ class OptimizerTaskStore:
         if record.state == TaskState.FAILED and processed == 0:
             processed = estimated_total
         now = datetime.utcnow()
-        elapsed = max((now - record.created_at).total_seconds(), 0.0)
+        started_at = record.resumed_at or record.created_at
+        elapsed = max((now - started_at).total_seconds(), 0.0)
+        baseline = record.last_group_count or 0
         runtime = compute_runtime_summary(
-            record.created_at,
+            started_at,
             now,
             elapsed,
-            estimated_total,
-            processed,
+            max(estimated_total - baseline, 0) if record.resumed_at else estimated_total,
+            max(processed - baseline, 0) if record.resumed_at else processed,
         )
         runtime["status"] = record.state.value
-        runtime["actual_total_combinations"] = processed
+        runtime["actual_total_combinations"] = (
+            max(processed - baseline, 0) if record.resumed_at else processed
+        )
+        if record.resumed_at:
+            runtime["resumed_at"] = record.resumed_at.isoformat() + "Z"
+            runtime["previous_total_combinations"] = baseline
         return runtime
 
     @staticmethod
