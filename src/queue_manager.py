@@ -272,6 +272,66 @@ class QueueManager:
         task.started_at = now_local()
         self._save_tasks()
 
+        queue_logger.bind(payload=task.payload).info(
+            f"Processing task {task.task_id}, type: {task.task_type}"
+        )
+
+        try:
+            # 根据任务类型调用相应的处理器
+            if task.task_type == "strategy_order":
+                await self._process_strategy_order(task)
+            else:
+                raise ValueError(f"Unknown task type: {task.task_type}")
+
+            task.status = "completed"
+            task.completed_at = now_local()
+            queue_logger.info(f"Task {task.task_id} completed successfully")
+
+        except Exception as e:
+            error_msg = str(e)
+            task.error_message = error_msg
+
+            # 针对未连接IBKR的情况进行延后处理而非计为失败/重试
+            import core
+            if ("Not connected to IBKR" in error_msg) or (not core.ibkr_client.is_connected()):
+                task.status = "pending"
+                task.started_at = None
+                # 重新排队等待连接恢复
+                self.pending_queue.append(task.task_id)
+                queue_logger.warning(
+                    f"Task {task.task_id} deferred: {error_msg}; will retry when connected"
+                )
+                # 小幅休眠避免紧密轮询
+                await asyncio.sleep(0.5)
+            elif "Strategy disabled" in error_msg or "Strategy not found" in error_msg:
+                # 对于禁用或不存在的策略，不进行重试，直接标记为失败
+                task.status = "failed"
+                task.completed_at = now_local()
+                queue_logger.error(
+                    f"Task {task.task_id} failed permanently: {error_msg}"
+                )
+            else:
+                task.retry_count += 1
+                queue_logger.error(
+                    f"Task {task.task_id} failed: {error_msg}, retry {task.retry_count}/{task.max_retries}"
+                )
+
+                if task.retry_count < task.max_retries:
+                    # 重新加入队列
+                    task.status = "pending"
+                    task.started_at = None
+                    self.pending_queue.append(task.task_id)
+                    queue_logger.info(f"Task {task.task_id} requeued for retry")
+                else:
+                    task.status = "failed"
+                    task.completed_at = now_local()
+                    queue_logger.error(
+                        f"Task {task.task_id} failed permanently after {task.max_retries} retries"
+                    )
+
+        finally:
+            self._save_tasks()
+
     def _resolve_notification_manager(self):
         if self.notification_manager:
             return self.notification_manager
@@ -376,63 +436,7 @@ class QueueManager:
                 self._last_backlog_alert = now
         elif status["pending_count"] == 0:
             self._last_backlog_alert = 0.0
-        
-        queue_logger.bind(payload=task.payload).info(
-            f"Processing task {task.task_id}, type: {task.task_type}"
-        )
-        
-        try:
-            # 根据任务类型调用相应的处理器
-            if task.task_type == "strategy_order":
-                await self._process_strategy_order(task)
-            else:
-                raise ValueError(f"Unknown task type: {task.task_type}")
-            
-            task.status = "completed"
-            task.completed_at = now_local()
-            queue_logger.info(f"Task {task.task_id} completed successfully")
-            
-        except Exception as e:
-            error_msg = str(e)
-            task.error_message = error_msg
 
-            # 针对未连接IBKR的情况进行延后处理而非计为失败/重试
-            import core
-            if ("Not connected to IBKR" in error_msg) or (not core.ibkr_client.is_connected()):
-                task.status = "pending"
-                task.started_at = None
-                # 重新排队等待连接恢复
-                self.pending_queue.append(task.task_id)
-                queue_logger.warning(f"Task {task.task_id} deferred: {error_msg}; will retry when connected")
-                # 小幅休眠避免紧密轮询
-                await asyncio.sleep(0.5)
-            elif "Strategy disabled" in error_msg or "Strategy not found" in error_msg:
-                # 对于禁用或不存在的策略，不进行重试，直接标记为失败
-                task.status = "failed"
-                task.completed_at = now_local()
-                queue_logger.error(f"Task {task.task_id} failed permanently: {error_msg}")
-            else:
-                task.retry_count += 1
-                queue_logger.error(
-                    f"Task {task.task_id} failed: {error_msg}, retry {task.retry_count}/{task.max_retries}"
-                )
-
-                if task.retry_count < task.max_retries:
-                    # 重新加入队列
-                    task.status = "pending"
-                    task.started_at = None
-                    self.pending_queue.append(task.task_id)
-                    queue_logger.info(f"Task {task.task_id} requeued for retry")
-                else:
-                    task.status = "failed"
-                    task.completed_at = now_local()
-                    queue_logger.error(
-                        f"Task {task.task_id} failed permanently after {task.max_retries} retries"
-                    )
-        
-        finally:
-            self._save_tasks()
-    
     async def _process_strategy_order(self, task: QueueTask):
         """处理策略订单任务"""
         from datetime import datetime
