@@ -64,6 +64,7 @@ class DOMService:
         self._last_depth: Dict[str, Any] = {}
         self._last_depth_by_symbol: Dict[str, Dict[str, Any]] = {}
         self._last_metrics_by_symbol: Dict[str, Dict[str, Any]] = {}
+        self._active_symbols: Dict[str, str] = {}
         self._active_symbol: Optional[str] = None
         self._active_symbol_original: Optional[str] = None
         self._cache = DomCacheManager()
@@ -508,6 +509,37 @@ class DOMService:
         else:
             loop.call_soon_threadsafe(_schedule)
 
+    def _set_primary_active_symbol(self, symbol_key: Optional[str]) -> None:
+        if symbol_key and symbol_key in self._active_symbols:
+            self._active_symbol = symbol_key
+            self._active_symbol_original = self._active_symbols[symbol_key]
+            return
+
+        if self._active_symbols:
+            first_key = next(iter(self._active_symbols))
+            self._active_symbol = first_key
+            self._active_symbol_original = self._active_symbols[first_key]
+            return
+
+        self._active_symbol = None
+        self._active_symbol_original = None
+
+    def _register_active_symbol(self, symbol_key: str, original: str) -> None:
+        if not symbol_key:
+            return
+
+        self._active_symbols[symbol_key] = original or symbol_key
+        self._set_primary_active_symbol(symbol_key)
+
+    def _unregister_active_symbol(self, symbol_key: str) -> Optional[str]:
+        if not symbol_key:
+            return None
+
+        removed = self._active_symbols.pop(symbol_key, None)
+        if removed is not None or self._active_symbol == symbol_key:
+            self._set_primary_active_symbol(None)
+        return removed
+
     def _start_stream_blocking(
         self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
     ) -> bool:
@@ -532,7 +564,7 @@ class DOMService:
             self._last_start_error = reason
             self._last_start_error_status = 400
             return False
-        self._active_symbol = symbol_key
+        self._active_symbol = symbol_key or None
         self._active_symbol_original = symbol
         logger.info("Starting DOM depth stream", symbol=symbol_key, num_rows=num_rows)
         callback = lambda data, sym=symbol: self._on_depth_update(sym, data)
@@ -561,6 +593,7 @@ class DOMService:
             logger.info("DOM depth stream started", symbol=symbol_key)
             self._last_start_error = None
             self._last_start_error_status = 200
+            self._register_active_symbol(symbol_key, symbol)
         else:
             logger.warning("Failed to start DOM depth stream", symbol=symbol_key)
             try:
@@ -572,9 +605,7 @@ class DOMService:
                 self._last_start_error_status = status if status >= 400 else 500
             else:
                 self._last_start_error_status = 500
-            if self._active_symbol == symbol_key:
-                self._active_symbol = None
-                self._active_symbol_original = None
+            self._unregister_active_symbol(symbol_key)
         return result
 
     def ensure_stream_running(
@@ -673,12 +704,11 @@ class DOMService:
     def get_last_start_error(self) -> tuple[Optional[str], int]:
         return self._last_start_error, self._last_start_error_status
 
-    def _stop_stream_blocking(self, symbol: str) -> bool:
-        symbol_key = (symbol or "").upper()
-        if self._active_symbol and symbol_key == self._active_symbol:
-            self._active_symbol = None
-            self._active_symbol_original = None
-        result = depth_subscriber.stop_depth_stream(symbol)
+    def _stop_stream_blocking(self, symbol: str, symbol_key: Optional[str] = None) -> bool:
+        symbol_key = (symbol_key or symbol or "").upper()
+        target_symbol = symbol or self._active_symbols.get(symbol_key) or symbol_key
+        result = depth_subscriber.stop_depth_stream(target_symbol)
+        self._unregister_active_symbol(symbol_key)
         if result:
             logger.info("Stopped DOM depth stream", symbol=symbol_key)
         else:
@@ -695,20 +725,25 @@ class DOMService:
                 had_pending = True
             self._start_tasks.pop(symbol_key, None)
 
-        if self._active_symbol and symbol_key == self._active_symbol:
-            self._active_symbol = None
-            self._active_symbol_original = None
+        removed_symbol = self._unregister_active_symbol(symbol_key)
 
         if not self._loop or self._loop.is_closed():
             try:
                 self._loop = asyncio.get_running_loop()
             except RuntimeError:
                 pass
-        result = await asyncio.to_thread(self._stop_stream_blocking, symbol)
+        target_symbol = removed_symbol or symbol
+        result = await asyncio.to_thread(
+            self._stop_stream_blocking,
+            target_symbol,
+            symbol_key,
+        )
         return bool(result or had_pending)
 
     def stop(self, symbol: str) -> bool:
-        return self._stop_stream_blocking(symbol)
+        symbol_key = (symbol or "").upper()
+        target_symbol = self._unregister_active_symbol(symbol_key) or symbol
+        return self._stop_stream_blocking(target_symbol, symbol_key)
 
     def _start_auto_start_worker(self) -> None:
         if not self._auto_start_symbol or self._auto_start_worker_started:
@@ -754,19 +789,32 @@ class DOMService:
             return any(task and not task.done() for task in self._start_tasks.values())
 
     def is_stream_active(self, symbol: Optional[str] = None) -> bool:
-        candidate = symbol or self._active_symbol_original
-        if candidate:
+        symbol_key = (symbol or "").upper()
+        lookup_key = symbol_key or self._active_symbol or ""
+
+        candidates: List[str] = []
+        if symbol:
+            candidates.append(symbol)
+        if lookup_key:
+            stored = self._active_symbols.get(lookup_key)
+            if stored:
+                candidates.append(stored)
+            candidates.append(lookup_key)
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
             try:
                 if depth_subscriber.is_depth_stream_active(candidate):
                     return True
             except Exception:
-                pass
+                continue
 
-        symbol_key = (symbol or "").upper()
-        if not symbol_key and self._active_symbol:
-            symbol_key = self._active_symbol
-
-        return bool(symbol_key and self._active_symbol == symbol_key)
+        if symbol_key:
+            return symbol_key in self._active_symbols
+        return bool(self._active_symbols)
 
     def _on_start_task_done(self, symbol: str, fut: "asyncio.Future[bool]") -> None:
         with self._start_tasks_lock:
@@ -776,9 +824,7 @@ class DOMService:
         try:
             result = fut.result()
         except asyncio.CancelledError:
-            if self._active_symbol == symbol:
-                self._active_symbol = None
-                self._active_symbol_original = None
+            self._unregister_active_symbol(symbol)
             return
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.error(
@@ -786,13 +832,10 @@ class DOMService:
             )
             self._last_start_error = str(exc) or "Failed to start DOM depth stream"
             self._last_start_error_status = 500
-            if self._active_symbol == symbol:
-                self._active_symbol = None
-                self._active_symbol_original = None
+            self._unregister_active_symbol(symbol)
         else:
-            if not result and self._active_symbol == symbol:
-                self._active_symbol = None
-                self._active_symbol_original = None
+            if not result:
+                self._unregister_active_symbol(symbol)
 
     # --------------------------------------------------------------
     def get_metrics(self, symbol: Optional[str] = None) -> Dict[str, Any]:
