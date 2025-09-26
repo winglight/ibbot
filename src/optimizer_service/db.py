@@ -84,9 +84,23 @@ class OptimizerDatabase:
                     report_json TEXT,
                     created_at TEXT NOT NULL,
                     completed_at TEXT,
+                    resumed_at TEXT,
+                    last_group_count INTEGER,
                     FOREIGN KEY(plan_id) REFERENCES optimizer_plans(id) ON DELETE CASCADE
                 );
                 """
+            )
+        self._ensure_task_column("resumed_at", "TEXT")
+        self._ensure_task_column("last_group_count", "INTEGER")
+
+    def _ensure_task_column(self, column: str, definition: str) -> None:
+        cursor = self._conn.execute("PRAGMA table_info(optimizer_tasks)")
+        columns = {row["name"] for row in cursor.fetchall()}
+        if column in columns:
+            return
+        with self._conn:
+            self._conn.execute(
+                f"ALTER TABLE optimizer_tasks ADD COLUMN {column} {definition}"
             )
 
     # ------------------------------------------------------------------ Plans
@@ -192,8 +206,9 @@ class OptimizerDatabase:
                 """
                 INSERT INTO optimizer_tasks (
                     task_id, plan_id, request_json, state, progress,
-                    message, fail_reasons, report_json, created_at, completed_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    message, fail_reasons, report_json, created_at, completed_at,
+                    resumed_at, last_group_count
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     plan_id=excluded.plan_id,
                     request_json=excluded.request_json,
@@ -203,7 +218,9 @@ class OptimizerDatabase:
                     fail_reasons=excluded.fail_reasons,
                     report_json=excluded.report_json,
                     created_at=excluded.created_at,
-                    completed_at=excluded.completed_at
+                    completed_at=excluded.completed_at,
+                    resumed_at=excluded.resumed_at,
+                    last_group_count=excluded.last_group_count
                 """,
                 (
                     task_data["task_id"],
@@ -216,6 +233,8 @@ class OptimizerDatabase:
                     _json_dump(task_data.get("report")),
                     task_data["created_at"],
                     task_data.get("completed_at"),
+                    task_data.get("resumed_at"),
+                    task_data.get("last_group_count"),
                 ),
             )
 
@@ -241,6 +260,8 @@ class OptimizerDatabase:
                 "report": _json_load(row["report_json"]),
                 "created_at": row["created_at"],
                 "completed_at": row["completed_at"],
+                "resumed_at": row["resumed_at"],
+                "last_group_count": row["last_group_count"],
             }
 
 
