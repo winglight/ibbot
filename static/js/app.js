@@ -7843,6 +7843,74 @@ class TradingApp {
         return '';
     }
 
+    formatStrategyDataReception(strategy) {
+        const fallback = { text: '-', tooltip: '' };
+        if (!strategy || typeof strategy !== 'object') {
+            return fallback;
+        }
+
+        const info = (strategy.data_reception && typeof strategy.data_reception === 'object')
+            ? strategy.data_reception
+            : (strategy.data_push_state && typeof strategy.data_push_state === 'object')
+                ? strategy.data_push_state
+                : null;
+
+        let isReceiving;
+        if (typeof strategy.is_receiving_data === 'boolean') {
+            isReceiving = strategy.is_receiving_data;
+        } else if (info && typeof info.is_receiving === 'boolean') {
+            isReceiving = Boolean(info.is_receiving);
+        } else {
+            isReceiving = false;
+        }
+
+        const awaitingData = info && typeof info.awaiting_data !== 'undefined'
+            ? Boolean(info.awaiting_data)
+            : false;
+        const reasonText = (info && info.status_reason)
+            || strategy.data_push_reason
+            || (strategy.strategy_type && strategy.strategy_type !== 'internal' ? '外部策略' : '');
+        const lastTimestamp = info && info.last_data_timestamp ? info.last_data_timestamp : null;
+        const isExternal = strategy.strategy_type && strategy.strategy_type !== 'internal';
+
+        let text;
+        if (isReceiving) {
+            text = reasonText ? `Yes — ${reasonText}` : 'Yes';
+        } else {
+            if (!reasonText && awaitingData) {
+                text = 'No — 等待数据';
+            } else if (reasonText) {
+                text = `No — ${reasonText}`;
+            } else if (isExternal) {
+                text = 'No — 外部策略';
+            } else {
+                text = 'No';
+            }
+        }
+
+        const tooltipParts = [];
+        if (info && typeof info.active !== 'undefined') {
+            tooltipParts.push(info.active ? '推送已开启' : '推送未开启');
+        }
+        if (awaitingData && !isReceiving) {
+            tooltipParts.push('正在等待数据');
+        }
+        if (info && info.subscription) {
+            tooltipParts.push(`订阅：${info.subscription}`);
+        }
+        if (info && info.symbol) {
+            tooltipParts.push(`标的：${info.symbol}`);
+        }
+        if (lastTimestamp) {
+            tooltipParts.push(`最后数据时间：${lastTimestamp}`);
+        }
+
+        return {
+            text,
+            tooltip: tooltipParts.join('；'),
+        };
+    }
+
     displayStrategies(strategies) {
         const tbody = document.querySelector('#strategiesTable tbody');
         if (!tbody) return;
@@ -7877,11 +7945,19 @@ class TradingApp {
             const toggleSwitch = document.createElement('div');
             toggleSwitch.className = 'form-check form-switch';
             toggleSwitch.innerHTML = `
-                <input class="form-check-input" type="checkbox" ${strategy.enabled ? 'checked' : ''} 
+                <input class="form-check-input" type="checkbox" ${strategy.enabled ? 'checked' : ''}
                        onchange="app.strategiesManager.toggleStrategy('${strategy.name}', this.checked)">
             `;
             statusCell.appendChild(toggleSwitch);
-            
+
+            // 数据接收状态
+            const receptionCell = document.createElement('td');
+            const receptionInfo = this.formatStrategyDataReception(strategy);
+            receptionCell.textContent = receptionInfo.text;
+            if (receptionInfo.tooltip) {
+                receptionCell.title = receptionInfo.tooltip;
+            }
+
             // P&L（最近1个月）与 Trades（executions/2 取整），先占位，后异步回填
             const pnlCell = document.createElement('td');
             const cachedMetrics = this.strategyPerformanceCache.get(strategy.name);
@@ -7900,6 +7976,7 @@ class TradingApp {
             row.appendChild(nameCell);
             row.appendChild(symbolCell);
             row.appendChild(statusCell);
+            row.appendChild(receptionCell);
             row.appendChild(pnlCell);
             row.appendChild(tradesCell);
 

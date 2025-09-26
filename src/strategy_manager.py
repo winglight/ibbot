@@ -2802,6 +2802,54 @@ if __name__ == "__main__":
                 strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
             if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
                 strategy_dict['last_triggered'] = to_local_iso(strategy_dict['last_triggered'])
+
+            data_push_state = self.data_push_state.get(strategy.name, {}) or {}
+            awaiting_data = bool(data_push_state.get('awaiting_data'))
+            status_reason = data_push_state.get('status_reason')
+            last_data_timestamp = data_push_state.get('last_data_timestamp')
+            data_push_active = bool(data_push_state.get('active'))
+            data_push_subscription = data_push_state.get('subscription')
+            data_push_symbol = data_push_state.get('symbol')
+            is_receiving_data = False
+
+            if strategy.strategy_type == 'internal':
+                try:
+                    runtime_status = self.get_internal_strategy_status(strategy.name)
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(
+                        f"Failed to load runtime status for {strategy.name}: {exc}"
+                    )
+                    runtime_status = None
+                if isinstance(runtime_status, dict):
+                    is_receiving_data = bool(runtime_status.get('is_receiving_data'))
+                    status_reason = runtime_status.get('data_push_reason') or status_reason
+                    push_snapshot = runtime_status.get('data_push') or {}
+                    if push_snapshot:
+                        if 'awaiting_data' in push_snapshot:
+                            awaiting_data = bool(push_snapshot.get('awaiting_data'))
+                        if push_snapshot.get('last_data_timestamp'):
+                            last_data_timestamp = push_snapshot.get('last_data_timestamp')
+                        if 'active' in push_snapshot:
+                            data_push_active = bool(push_snapshot.get('active'))
+                        if push_snapshot.get('subscription'):
+                            data_push_subscription = push_snapshot.get('subscription')
+                        if push_snapshot.get('symbol'):
+                            data_push_symbol = push_snapshot.get('symbol')
+            elif status_reason is None and data_push_state:
+                status_reason = data_push_state.get('status_reason')
+
+            strategy_dict['is_receiving_data'] = is_receiving_data
+            strategy_dict['data_push_reason'] = status_reason
+            strategy_dict['data_reception'] = {
+                'is_receiving': is_receiving_data,
+                'status_reason': status_reason,
+                'awaiting_data': awaiting_data,
+                'active': data_push_active,
+                'subscription': data_push_subscription,
+                'symbol': data_push_symbol,
+                'last_data_timestamp': last_data_timestamp,
+            }
+
             result.append(strategy_dict)
 
         generated_at = time.monotonic()
