@@ -7280,7 +7280,7 @@ class TradingApp {
             this.currentRiskSettings = res.settings || payload;
             this.renderRiskSettingsForm(this.currentRiskSettings);
             this.updateRiskSettingsStatus('saved');
-            this.showToast('success', '风控设置已保存');
+            this.showAlert('success', '风控设置已保存');
         } catch (error) {
             console.error('Failed to save strategy risk settings', error);
             this.updateRiskSettingsStatus('error', error?.message);
