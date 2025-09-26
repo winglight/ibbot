@@ -398,20 +398,27 @@ class OptimizerTaskStore:
         if record.state == TaskState.FAILED and processed == 0:
             processed = estimated_total
         now = datetime.utcnow()
-        started_at = record.resumed_at or record.created_at
-        elapsed = max((now - started_at).total_seconds(), 0.0)
         baseline = record.last_group_count or 0
+        total_processed = processed
+        if record.resumed_at:
+            # ``processed`` reflects the cumulative combinations since the task was
+            # first created. When a task resumes we keep track of the previously
+            # finished combinations via ``last_group_count``. Frontend users expect
+            # the runtime card to continue showing the full totals instead of just
+            # the delta after resuming, hence we fall back to the baseline when the
+            # worker has not reported fresh progress yet.
+            total_processed = max(processed, baseline)
+        started_at = record.created_at
+        elapsed = max((now - started_at).total_seconds(), 0.0)
         runtime = compute_runtime_summary(
             started_at,
             now,
             elapsed,
-            max(estimated_total - baseline, 0) if record.resumed_at else estimated_total,
-            max(processed - baseline, 0) if record.resumed_at else processed,
+            estimated_total,
+            total_processed,
         )
         runtime["status"] = record.state.value
-        runtime["actual_total_combinations"] = (
-            max(processed - baseline, 0) if record.resumed_at else processed
-        )
+        runtime["actual_total_combinations"] = total_processed
         if record.resumed_at:
             runtime["resumed_at"] = record.resumed_at.isoformat() + "Z"
             runtime["previous_total_combinations"] = baseline
