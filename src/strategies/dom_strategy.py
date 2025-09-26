@@ -53,6 +53,7 @@ class DOMStrategy(BaseStrategy):
         self._last_signal_direction: int = 0
         self._last_signal_time: float = 0.0
         self._last_execution_time: float = 0.0
+        self._last_execution_times: Dict[str, float] = {}
         self._listener_attached: bool = False
         self._processing: bool = False
         self._started_at: Optional[float] = None
@@ -190,6 +191,7 @@ class DOMStrategy(BaseStrategy):
         self._buy_signals = 0
         self._sell_signals = 0
         self._price_extremes.clear()
+        self._last_execution_times.clear()
         if not self._listener_attached:
             self.dom_service.add_listener(self._on_dom_metrics)
             self._listener_attached = True
@@ -289,7 +291,7 @@ class DOMStrategy(BaseStrategy):
         else:
             self._sell_signals += 1
         self.logger.info(
-            "DOM结构信号触发: direction=%s satisfied=%s symbol=%s price=%.2f",
+            "DOM结构信号触发: direction={} satisfied={} symbol={} price={:.2f}",
             "BUY" if direction > 0 else "SELL",
             ",".join(satisfied) or "-",
             symbol_code,
@@ -312,13 +314,17 @@ class DOMStrategy(BaseStrategy):
             return
 
         now = time.time()
+        last_symbol_execution = self._last_execution_times.get(symbol)
         if (
             self.signal_frequency_seconds > 0
-            and (now - self._last_execution_time) < self.signal_frequency_seconds
+            and last_symbol_execution
+            and (now - last_symbol_execution) < self.signal_frequency_seconds
         ):
+            remaining = self.signal_frequency_seconds - (now - last_symbol_execution)
             self.logger.info(
-                "Execution frequency limit active: %.2fs remaining",
-                self.signal_frequency_seconds - (now - self._last_execution_time),
+                "Execution frequency limit active for {}: {:.2f}s remaining",
+                symbol,
+                remaining,
             )
             return
 
@@ -338,7 +344,7 @@ class DOMStrategy(BaseStrategy):
                 self.logger.warning("Computed quantity is zero; skip order")
                 return
             self.logger.info(
-                "DOM strategy preparing order: direction=%s qty=%s price=%.2f",
+                "DOM strategy preparing order: direction={} qty={} price={:.2f}",
                 "BUY" if direction > 0 else "SELL",
                 quantity,
                 price,
@@ -368,6 +374,7 @@ class DOMStrategy(BaseStrategy):
                 payload=payload,
             )
             self._last_execution_time = now
+            self._last_execution_times[symbol] = now
         finally:
             self._processing = False
 

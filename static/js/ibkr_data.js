@@ -10,6 +10,7 @@ class IBKRDataManager {
         this.priceCacheTimeout = 30000; // 30秒缓存
         this.dailySummaryLoading = false;
         this.dailySummaryChart = null;
+        this.lastAccountInfo = null;
     }
 
     /**
@@ -265,6 +266,7 @@ class IBKRDataManager {
             // 未连接或无信息时的占位展示
             if (!info || (typeof info === 'object' && info.connected === false)) {
                 const lastErr = info && info.last_error ? String(info.last_error) : '';
+                this.lastAccountInfo = null;
                 accountInfoDiv.innerHTML = `
                     <div class="alert alert-warning mb-2" role="alert">
                         未连接到 IBKR${lastErr ? `：${lastErr}` : ''}
@@ -286,30 +288,57 @@ class IBKRDataManager {
                 return;
             }
 
+            const parseNumber = (value) => {
+                if (typeof value === 'number' && Number.isFinite(value)) {
+                    return value;
+                }
+                if (typeof value === 'string') {
+                    const normalized = value.replace(/,/g, '').trim();
+                    if (!normalized) return null;
+                    const parsed = Number(normalized);
+                    return Number.isFinite(parsed) ? parsed : null;
+                }
+                return null;
+            };
+
+            const lastSnapshot = this.lastAccountInfo || {};
+
             // 安全提取字段并提供默认值
-            const account_id = info.account_id || 'N/A';
-            const account_type = info.account_type || 'N/A';
-            const net_liquidation = Number(info.net_liquidation) || 0;
-            const available_funds = Number(info.available_funds) || 0;
-            const buying_power = Number(info.buying_power) || 0;
-            const unrealized_pnl = Number(info.unrealized_pnl) || 0;
-            const realized_pnl = Number(info.realized_pnl) || 0;
+            const account_id = info.account_id || lastSnapshot.account_id || 'N/A';
+            const account_type = info.account_type || lastSnapshot.account_type || 'N/A';
+            const net_liquidation = parseNumber(info.net_liquidation);
+            const available_funds = parseNumber(info.available_funds);
+            const buying_power = parseNumber(info.buying_power);
+            const unrealized_pnl = parseNumber(info.unrealized_pnl);
+            const realized_pnl = parseNumber(info.realized_pnl);
+
+            const normalizedInfo = {
+                account_id,
+                account_type,
+                net_liquidation: net_liquidation ?? lastSnapshot.net_liquidation ?? 0,
+                available_funds: available_funds ?? lastSnapshot.available_funds ?? 0,
+                buying_power: buying_power ?? lastSnapshot.buying_power ?? 0,
+                unrealized_pnl: unrealized_pnl ?? lastSnapshot.unrealized_pnl ?? 0,
+                realized_pnl: realized_pnl ?? lastSnapshot.realized_pnl ?? 0,
+            };
+
+            this.lastAccountInfo = { ...normalizedInfo };
 
             accountInfoDiv.innerHTML = `
                 <div class="row">
                     <div class="col-md-6">
-                        <p><strong>Account ID:</strong> ${account_id}</p>
-                        <p><strong>Account Type:</strong> ${account_type}</p>
-                        <p><strong>Net Liquidation:</strong> $${this.app.formatNumber(net_liquidation)}</p>
+                        <p><strong>Account ID:</strong> ${normalizedInfo.account_id}</p>
+                        <p><strong>Account Type:</strong> ${normalizedInfo.account_type}</p>
+                        <p><strong>Net Liquidation:</strong> $${this.app.formatNumber(normalizedInfo.net_liquidation)}</p>
                     </div>
                     <div class="col-md-6">
-                        <p><strong>Available Funds:</strong> $${this.app.formatNumber(available_funds)}</p>
-                        <p><strong>Buying Power:</strong> $${this.app.formatNumber(buying_power)}</p>
-                        <p class="${unrealized_pnl >= 0 ? 'profit' : 'loss'}">
-                            <strong>Unrealized P&L:</strong> $${this.app.formatNumber(unrealized_pnl)}
+                        <p><strong>Available Funds:</strong> $${this.app.formatNumber(normalizedInfo.available_funds)}</p>
+                        <p><strong>Buying Power:</strong> $${this.app.formatNumber(normalizedInfo.buying_power)}</p>
+                        <p class="${normalizedInfo.unrealized_pnl >= 0 ? 'profit' : 'loss'}">
+                            <strong>Unrealized P&L:</strong> $${this.app.formatNumber(normalizedInfo.unrealized_pnl)}
                         </p>
-                        <p class="${realized_pnl >= 0 ? 'profit' : 'loss'}">
-                            <strong>Realized P&L:</strong> $${this.app.formatNumber(realized_pnl)}
+                        <p class="${normalizedInfo.realized_pnl >= 0 ? 'profit' : 'loss'}">
+                            <strong>Realized P&L:</strong> $${this.app.formatNumber(normalizedInfo.realized_pnl)}
                         </p>
                     </div>
                 </div>

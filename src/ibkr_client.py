@@ -1464,33 +1464,59 @@ class IBKRClient:
             # Use synchronous methods in async context
             account_values = ib.accountValues()
 
-            info = {
-                'account_id': None,
-                'account_type': 'Paper' if connection_manager.config.paper_trading else 'Live',
-                'total_cash': 0,
-                'available_funds': 0,
-                'buying_power': 0,
-                'net_liquidation': 0,
-                'unrealized_pnl': 0,
-                'realized_pnl': 0
-            }
+            # Start from the last cached snapshot when available so that we don't
+            # accidentally wipe fields to zero if IBKR returns a partial update.
+            info = self._return_cached_account_info() or {}
+            info = dict(info)  # ensure we don't mutate the cached reference
+
+            # Guarantee all expected keys exist even when we start from a cached
+            # snapshot created by an earlier version of the code.
+            info.setdefault('account_id', None)
+            info['account_type'] = (
+                'Paper' if connection_manager.config.paper_trading else 'Live'
+            )
+            info.setdefault('total_cash', 0.0)
+            info.setdefault('available_funds', 0.0)
+            info.setdefault('buying_power', 0.0)
+            info.setdefault('net_liquidation', 0.0)
+            info.setdefault('unrealized_pnl', 0.0)
+            info.setdefault('realized_pnl', 0.0)
             
             # Get account ID from account values
+            def _parse_float(val: Any) -> float:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return 0.0
+
             for item in account_values:
-                if item.tag == 'AccountCode':
+                try:
+                    currency = (item.currency or '').upper()
+                except AttributeError:
+                    currency = ''
+
+                # Account id may be stored either in AccountCode value or the account field itself
+                if item.tag == 'AccountCode' and item.value:
                     info['account_id'] = item.value
-                elif item.tag == 'TotalCashValue' and item.currency == 'USD':
-                    info['total_cash'] = float(item.value)
-                elif item.tag == 'AvailableFunds' and item.currency == 'USD':
-                    info['available_funds'] = float(item.value)
-                elif item.tag == 'BuyingPower' and item.currency == 'USD':
-                    info['buying_power'] = float(item.value)
-                elif item.tag == 'NetLiquidation' and item.currency == 'USD':
-                    info['net_liquidation'] = float(item.value)
-                elif item.tag == 'UnrealizedPnL' and item.currency == 'USD':
-                    info['unrealized_pnl'] = float(item.value)
-                elif item.tag == 'RealizedPnL' and item.currency == 'USD':
-                    info['realized_pnl'] = float(item.value)
+                elif not info['account_id'] and getattr(item, 'account', None):
+                    info['account_id'] = item.account
+
+                # IBKR may report base currency values using either USD or BASE depending on
+                # account configuration, so accept both to avoid zeroing out valid data.
+                currency_ok = currency in ('USD', 'BASE', '')
+
+                if item.tag == 'TotalCashValue' and currency_ok:
+                    info['total_cash'] = _parse_float(item.value)
+                elif item.tag == 'AvailableFunds' and currency_ok:
+                    info['available_funds'] = _parse_float(item.value)
+                elif item.tag == 'BuyingPower' and currency_ok:
+                    info['buying_power'] = _parse_float(item.value)
+                elif item.tag == 'NetLiquidation' and currency_ok:
+                    info['net_liquidation'] = _parse_float(item.value)
+                elif item.tag == 'UnrealizedPnL' and currency_ok:
+                    info['unrealized_pnl'] = _parse_float(item.value)
+                elif item.tag == 'RealizedPnL' and currency_ok:
+                    info['realized_pnl'] = _parse_float(item.value)
 
             # Persist snapshot for downstream consumers (risk manager, summaries)
             try:

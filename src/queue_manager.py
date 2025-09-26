@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -49,21 +50,32 @@ class QueueManager:
         self.strategy_manager = None
         self.websocket_manager = None
         self.order_manager = None
-        
+        self.notification_manager = None
+
         # 确保数据目录存在
         self.data_dir = Path("data")
         self.data_dir.mkdir(exist_ok=True)
         self.queue_file = self.data_dir / "queue_tasks.json"
-        
+
         # 启动时加载持久化的任务
         self._load_tasks()
-    
-    def set_dependencies(self, risk_manager, strategy_manager, websocket_manager, order_manager=None):
+
+        # 运行时监控指标
+        self._last_queue_heartbeat: float = 0.0
+        self._last_backlog_alert: float = 0.0
+        self._queue_heartbeat_interval: float = 60.0
+        self._backlog_alert_interval: float = 300.0
+        self._backlog_pending_threshold: int = 20
+        self._backlog_age_threshold: float = 120.0
+
+    def set_dependencies(self, risk_manager, strategy_manager, websocket_manager, order_manager=None, notification_manager=None):
         """设置依赖对象"""
         self.risk_manager = risk_manager
         self.strategy_manager = strategy_manager
         self.websocket_manager = websocket_manager
         self.order_manager = order_manager
+        if notification_manager:
+            self.notification_manager = notification_manager
         queue_logger.info("Dependencies set for QueueManager")
     
     def add_task(self, task_type: str, payload: Dict[str, Any], max_retries: int = 3) -> str:
@@ -112,7 +124,7 @@ class QueueManager:
         processing_count = len(self.processing_tasks)
         completed_count = len([t for t in self.tasks.values() if t.status == "completed"])
         failed_count = len([t for t in self.tasks.values() if t.status == "failed"])
-        
+
         return {
             "is_running": self.is_running,
             "pending_count": pending_count,
@@ -121,6 +133,32 @@ class QueueManager:
             "failed_count": failed_count,
             "total_tasks": len(self.tasks),
             "max_concurrent_tasks": self.max_concurrent_tasks
+        }
+
+    def get_oldest_pending_task_info(self) -> Optional[Dict[str, Any]]:
+        """返回最久等待的任务信息，包括等待时间与重试次数"""
+        oldest_task: Optional[QueueTask] = None
+        oldest_created_at: Optional[datetime] = None
+        fallback_now = now_local()
+        for task_id in self.pending_queue:
+            task = self.tasks.get(task_id)
+            if not task:
+                continue
+            task_created = ensure_local_timezone(task.created_at) or fallback_now
+            if oldest_task is None or (oldest_created_at is None or task_created < oldest_created_at):
+                oldest_task = task
+                oldest_created_at = task_created
+
+        if not oldest_task or oldest_created_at is None:
+            return None
+
+        current_time = now_local()
+        age_seconds = max((current_time - oldest_created_at).total_seconds(), 0)
+        return {
+            "task_id": oldest_task.task_id,
+            "age_seconds": age_seconds,
+            "retry_count": oldest_task.retry_count,
+            "task_type": oldest_task.task_type,
         }
     
     def get_all_tasks(self) -> List[Dict[str, Any]]:
@@ -147,15 +185,21 @@ class QueueManager:
         """启动队列工作器"""
         if self.is_running:
             return
-        
+
         self.is_running = True
         self._worker_task = asyncio.create_task(self._worker_loop())
         queue_logger.info("Queue worker started")
-    
+        self._last_queue_heartbeat = 0.0
+        self._last_backlog_alert = 0.0
+        try:
+            await self._notify_queue_state("started")
+        except Exception as exc:
+            queue_logger.warning(f"Queue worker start notification failed: {exc}")
+
     async def stop_worker(self):
         """停止队列工作器"""
         self.is_running = False
-        
+
         # 取消所有正在处理的任务
         for task in self.processing_tasks.values():
             task.cancel()
@@ -166,9 +210,13 @@ class QueueManager:
                 await self._worker_task
             except asyncio.CancelledError:
                 pass
-        
+
         queue_logger.info("Queue worker stopped")
-    
+        try:
+            await self._notify_queue_state("stopped")
+        except Exception as exc:
+            queue_logger.warning(f"Queue worker stop notification failed: {exc}")
+
     async def _worker_loop(self):
         """队列工作器主循环"""
         while self.is_running:
@@ -202,15 +250,20 @@ class QueueManager:
                 for task_id, processing_task in self.processing_tasks.items():
                     if processing_task.done():
                         completed_task_ids.append(task_id)
-                
+
                 for task_id in completed_task_ids:
                     del self.processing_tasks[task_id]
-                
+
+                await self._monitor_queue_health()
                 # 短暂休眠避免CPU占用过高
                 await asyncio.sleep(0.1)
-                
+
             except Exception as e:
                 queue_logger.error(f"Worker loop error: {e}")
+                try:
+                    await self._monitor_queue_health()
+                except Exception:
+                    pass
                 await asyncio.sleep(1)
 
     async def _process_task(self, task: QueueTask):
@@ -218,6 +271,111 @@ class QueueManager:
         task.status = "processing"
         task.started_at = now_local()
         self._save_tasks()
+
+    def _resolve_notification_manager(self):
+        if self.notification_manager:
+            return self.notification_manager
+        try:
+            import core as core_module  # type: ignore
+
+            return getattr(core_module, "notification_manager", None)
+        except Exception:
+            return None
+
+    async def _notify_queue_state(self, state: str) -> None:
+        manager = self._resolve_notification_manager()
+        if not manager:
+            return
+
+        status = self.get_queue_status()
+        message = (
+            "队列工作器已启动" if state == "started" else "队列工作器已停止"
+        )
+        detail_line = (
+            f"挂起: {status['pending_count']} | 处理中: {status['processing_count']} | 失败: {status['failed_count']}"
+        )
+
+        await manager.send_notification(
+            message=f"{message}\n{detail_line}",
+            event_type=f"queue_{state}",
+            queue_state=state,
+            pending=status["pending_count"],
+            processing=status["processing_count"],
+            failed=status["failed_count"],
+        )
+
+    async def _send_queue_backlog_alert(
+        self,
+        status: Dict[str, Any],
+        oldest: Dict[str, Any],
+        max_retry: int,
+    ) -> None:
+        manager = self._resolve_notification_manager()
+        if not manager:
+            return
+
+        message = (
+            "⚠️ 队列挂起告警 ⚠️\n\n"
+            f"挂起任务: {status['pending_count']}\n"
+            f"最久等待: {int(oldest['age_seconds'])} 秒 (任务 {oldest['task_id']})\n"
+            f"最大重试次数: {max_retry}"
+        )
+
+        await manager.send_notification(
+            message=message,
+            event_type="queue_warning",
+            pending=status["pending_count"],
+            processing=status["processing_count"],
+            oldest_task=oldest.get("task_id"),
+            oldest_wait_seconds=oldest.get("age_seconds"),
+            max_retry=max_retry,
+        )
+
+    async def _monitor_queue_health(self) -> None:
+        now = time.time()
+        status = self.get_queue_status()
+        oldest = self.get_oldest_pending_task_info()
+        pending_retry_counts = [
+            task.retry_count for task in self.tasks.values() if task.status == "pending"
+        ]
+        max_retry = max(pending_retry_counts, default=0)
+
+        if now - self._last_queue_heartbeat >= self._queue_heartbeat_interval:
+            heartbeat_logger = queue_logger.bind(event="queue_heartbeat")
+            heartbeat_logger.info(
+                "Queue heartbeat",
+                pending=status["pending_count"],
+                processing=status["processing_count"],
+                failed=status["failed_count"],
+                oldest_task=oldest["task_id"] if oldest else None,
+                oldest_wait_seconds=int(oldest["age_seconds"]) if oldest else None,
+                max_retry=max_retry,
+            )
+            self._last_queue_heartbeat = now
+
+        backlog_condition = (
+            status["pending_count"] >= self._backlog_pending_threshold
+            and oldest is not None
+            and oldest["age_seconds"] >= self._backlog_age_threshold
+        )
+
+        if backlog_condition:
+            if now - self._last_backlog_alert >= self._backlog_alert_interval:
+                queue_logger.warning(
+                    "Queue backlog detected",
+                    pending=status["pending_count"],
+                    processing=status["processing_count"],
+                    oldest_task=oldest["task_id"],
+                    oldest_wait_seconds=int(oldest["age_seconds"]),
+                    max_retry=max_retry,
+                )
+                try:
+                    await self._send_queue_backlog_alert(status, oldest, max_retry)
+                except Exception as exc:
+                    queue_logger.warning(f"Queue backlog alert notification failed: {exc}")
+                self._last_backlog_alert = now
+        elif status["pending_count"] == 0:
+            self._last_backlog_alert = 0.0
         
         queue_logger.bind(payload=task.payload).info(
             f"Processing task {task.task_id}, type: {task.task_type}"

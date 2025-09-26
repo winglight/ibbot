@@ -352,6 +352,7 @@ class OptimizerApp {
                         ${plan.is_active
                             ? `<button class="btn btn-ghost" data-action="stop" data-plan-id="${plan.id}">停止</button>`
                             : `<button class="btn btn-ghost" data-action="start" data-plan-id="${plan.id}">启动</button>`}
+                        <button class="btn btn-ghost" data-action="duplicate" data-plan-id="${plan.id}">一键复制</button>
                         <button class="btn btn-ghost" data-action="delete" data-plan-id="${plan.id}">删除</button>
                     </div>
                 </td>
@@ -375,6 +376,9 @@ class OptimizerApp {
                     if (confirm('确定要删除该计划吗？')) {
                         await fetch(`/api/optimize/plans/${planId}`, { method: 'DELETE' });
                     }
+                    break;
+                case 'duplicate':
+                    await this.duplicatePlan(planId);
                     break;
                 case 'reports':
                     await this.openReportModal(planId);
@@ -400,6 +404,37 @@ class OptimizerApp {
         }
     }
 
+    async duplicatePlan(planId) {
+        const plan = this.state.plans.find((item) => item.id === planId);
+        if (!plan) {
+            throw new Error('plan_not_found');
+        }
+        const payload = {
+            name: this.generateCopyName(plan.name),
+            strategy: plan.strategy,
+            symbol: plan.symbol,
+            base_metrics: Array.isArray(plan.base_metrics) ? [...plan.base_metrics] : [],
+            feature_metrics: Array.isArray(plan.feature_metrics) ? [...plan.feature_metrics] : [],
+            parameters: JSON.parse(JSON.stringify(plan.parameters || {})),
+            algorithm: plan.algorithm,
+            start_date: plan.start_date,
+            end_date: plan.end_date,
+            frequency_minutes: plan.frequency_minutes ?? 0,
+        };
+        if (plan.iterations !== undefined && plan.iterations !== null) {
+            payload.iterations = plan.iterations;
+        }
+        await this.postJson('/api/optimize/plans', payload);
+    }
+
+    generateCopyName(originalName) {
+        if (!originalName) {
+            return '未命名计划（copy）';
+        }
+        const trimmed = originalName.replace(/（copy）$/, '');
+        return `${trimmed}（copy）`;
+    }
+
     async openReportModal(planId) {
         try {
             const res = await fetch(`/api/optimize/plans/${planId}/reports`);
@@ -413,9 +448,7 @@ class OptimizerApp {
                         <button class="btn btn-ghost" data-modal-close>关闭</button>
                     </header>
                     <main>
-                        ${reports.length
-                            ? reports.map((report) => this.renderReportCard(report, planId)).join('')
-                            : '<div class="empty-state">暂无报告</div>'}
+                        ${this.renderReportListContent(reports, planId)}
                     </main>
                 </div>
             `;
@@ -423,6 +456,29 @@ class OptimizerApp {
         } catch (err) {
             console.error(err);
             alert('加载报告列表失败');
+        }
+    }
+
+    renderReportListContent(reports, planId) {
+        return reports.length
+            ? reports.map((report) => this.renderReportCard(report, planId)).join('')
+            : '<div class="empty-state">暂无报告</div>';
+    }
+
+    async refreshReportModalContent(planId, container) {
+        if (!container) {
+            await this.openReportModal(planId);
+            return;
+        }
+        try {
+            const res = await fetch(`/api/optimize/plans/${planId}/reports`);
+            if (!res.ok) throw new Error('failed to load reports');
+            const data = await res.json();
+            const reports = data.reports ?? [];
+            container.innerHTML = this.renderReportListContent(reports, planId);
+        } catch (err) {
+            console.error(err);
+            alert('刷新报告列表失败');
         }
     }
 
@@ -700,13 +756,13 @@ class OptimizerApp {
                 const planId = button.dataset.planId || '';
                 if (!taskId) return;
                 const originalLabel = button.textContent;
+                const modalMain = button.closest('.modal-panel')?.querySelector('main');
                 button.disabled = true;
                 button.textContent = '停止中...';
                 try {
                     const response = await this.postJson(`/api/optimize/tasks/${taskId}/stop`);
-                    this.closeModal();
                     if (planId) {
-                        await this.openReportModal(planId);
+                        await this.refreshReportModalContent(planId, modalMain);
                     } else {
                         await this.handleRefresh();
                     }
@@ -716,8 +772,11 @@ class OptimizerApp {
                 } catch (err) {
                     console.error(err);
                     alert('停止任务失败，请稍后重试。');
-                    button.disabled = false;
-                    button.textContent = originalLabel;
+                } finally {
+                    if (button.isConnected) {
+                        button.disabled = false;
+                        button.textContent = originalLabel;
+                    }
                 }
                 return;
             }

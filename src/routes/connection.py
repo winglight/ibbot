@@ -63,6 +63,7 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
                     strategy_manager=strategy_manager,
                     websocket_manager=websocket_manager,
                     order_manager=order_manager,
+                    notification_manager=notification_manager,
                 )
             except Exception as dep_err:
                 logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
