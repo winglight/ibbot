@@ -5,6 +5,7 @@ SQLite数据库模块
 
 import sqlite3
 import json
+import time
 import pandas as pd
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Sequence, Union
@@ -326,12 +327,12 @@ class DatabaseManager:
 
     def update_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None, commission: float = None, pnl: float = None):
         """更新订单状态和价格（新）"""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=5) as conn:
             cursor = conn.cursor()
-            
+
             update_fields = []
             values = []
-            
+
             if status is not None:
                 update_fields.append("status = ?")
                 values.append(status)
@@ -349,7 +350,7 @@ class DatabaseManager:
                 update_fields.append("pnl = ?")
                 values.append(pnl)
                 database_logger.debug(f"Adding pnl update: {pnl}")
-            
+
             if update_fields:
                 # 总是更新 updated_at
                 update_fields.append("updated_at = ?")
@@ -357,12 +358,28 @@ class DatabaseManager:
                 values.append(order_id)
                 update_sql = f"UPDATE orders SET {', '.join(update_fields)} WHERE order_id = ?"
                 database_logger.debug(f"Executing SQL: {update_sql} with values: {values}")
-                cursor.execute(update_sql, values)
-                conn.commit()
-                database_logger.debug(f"SQL executed successfully, rows affected: {cursor.rowcount}")
-                database_logger.debug(
-                    f"Order {order_id} updated: {dict(zip([f.split(' = ')[0] for f in update_fields], values[:-1]))}"
-                )
+
+                max_attempts = 5
+                delay = 0.05
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        cursor.execute(update_sql, values)
+                        conn.commit()
+                        database_logger.debug(f"SQL executed successfully, rows affected: {cursor.rowcount}")
+                        database_logger.debug(
+                            f"Order {order_id} updated: {dict(zip([f.split(' = ')[0] for f in update_fields], values[:-1]))}"
+                        )
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if "locked" in str(exc).lower() and attempt < max_attempts:
+                            sleep_for = delay * (2 ** (attempt - 1))
+                            database_logger.warning(
+                                f"Database locked when updating order {order_id}; retrying in {sleep_for:.2f}s"
+                            )
+                            time.sleep(sleep_for)
+                            continue
+                        database_logger.error(f"Failed to update order {order_id}: {exc}")
+                        raise
     
     async def update_order_commission_pnl(self, order_id: str, commission: float, pnl: float):
         """异步更新订单的佣金和PnL"""

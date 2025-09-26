@@ -2,8 +2,9 @@
 将原有的 auto_orders 表重构为 orders 表，支持完整的订单生命周期管理
 """
 
+import asyncio
 import sqlite3
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Awaitable
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict, fields
 from enum import Enum
@@ -13,7 +14,6 @@ import re
 order_logger = logger.bind(module="order_manager", request_id="-")
 
 from .database import get_db_manager
-import asyncio
 from .utils import (
     ensure_local_timezone,
     now_local,
@@ -543,6 +543,29 @@ class OrderManager:
             order_logger.error(f"Error updating order {order_id} status: {e}")
             return False
 
+    def _schedule_async(self, coro: Awaitable, context: str):
+        """Run an async coroutine safely whether or not a loop is active."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            task = loop.create_task(coro)
+
+            def _log_task_result(task: "asyncio.Task"):
+                try:
+                    task.result()
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    order_logger.error(f"{context} failed: {exc}")
+
+            task.add_done_callback(_log_task_result)
+        else:
+            try:
+                asyncio.run(coro)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                order_logger.error(f"{context} failed: {exc}")
+
     def _send_filled_notifications(self, order: Order):
         """发送订单成交通知（浏览器通知和Telegram消息）"""
         try:
@@ -577,52 +600,36 @@ class OrderManager:
                             {"type": "portfolio_update", "portfolio": positions}
                         )
 
-                    try:
-                        loop = asyncio.get_running_loop()
-                        asyncio.create_task(_broadcast())
-                    except RuntimeError:
-                        asyncio.run(_broadcast())
+                    self._schedule_async(_broadcast(), "WebSocket broadcast")
                     order_logger.info(f"🌐 已发送浏览器通知: 订单 {order.order_id} 成交")
                 except Exception as e:
                     order_logger.error(f"发送浏览器通知失败: {e}")
-            
+
             # 发送通知消息
             if hasattr(self, 'notification_manager') and self.notification_manager:
                 try:
-                    import asyncio
                     # 使用统一的通知管理器发送订单通知
-                    try:
-                        loop = asyncio.get_running_loop()
-                        asyncio.create_task(self.notification_manager.send_order_notification(
+                    self._schedule_async(
+                        self.notification_manager.send_order_notification(
                             order_type=order.order_type,
                             symbol=order.symbol,
                             quantity=order.quantity,
                             price=order.fill_price,
                             status="Filled",
                             order_id=order.order_id
-                        ))
-                    except RuntimeError:
-                        # 没有运行中的事件循环，创建新的
-                        asyncio.run(self.notification_manager.send_order_notification(
-                            order_type=order.order_type,
-                            symbol=order.symbol,
-                            quantity=order.quantity,
-                            price=order.fill_price,
-                            status="Filled",
-                            order_id=order.order_id
-                        ))
+                        ),
+                        "Order notification dispatch"
+                    )
                     order_logger.info(f"📱 已发送Telegram通知: 订单 {order.order_id} 成交")
                 except Exception as e:
                     order_logger.error(f"发送Telegram通知失败: {e}")
-            
+
             # 检查并停用已平仓资产的风险规则
-            try:
-                loop = asyncio.get_running_loop()
-                asyncio.create_task(self._check_and_deactivate_risk_rules(order.symbol, order.order_source))
-            except RuntimeError:
-                # 没有运行中的事件循环，创建新的
-                asyncio.run(self._check_and_deactivate_risk_rules(order.symbol, order.order_source))
-                    
+            self._schedule_async(
+                self._check_and_deactivate_risk_rules(order.symbol, order.order_source),
+                "Risk rule deactivation"
+            )
+
         except Exception as e:
             order_logger.error(f"发送订单成交通知失败: {e}")
     
