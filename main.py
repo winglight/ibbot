@@ -575,8 +575,8 @@ def main():
         import uvicorn
         uvicorn.run(
             app,
-            host=os.getenv('WEB_HOST', '0.0.0.0'),
-            port=int(os.getenv('WEB_PORT', '8000')),
+            host=web_host,
+            port=web_port,
             log_level="warning"  # 减少HTTP请求日志显示
         )
         

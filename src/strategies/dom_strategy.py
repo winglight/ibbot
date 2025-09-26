@@ -241,7 +241,7 @@ class DOMStrategy(BaseStrategy):
 
     # ------------------------------------------------------------------
     def _on_dom_metrics(self, symbol: Optional[str], metrics: Dict[str, Any], _: Dict[str, Any]) -> None:
-        if not self.enabled or not self.active or self.breaker_tripped:
+        if not self.enabled or not self.active:
             return
         symbol_code = (symbol or metrics.get("symbol") or "").upper()
         if not symbol_code:
@@ -275,6 +275,14 @@ class DOMStrategy(BaseStrategy):
         direction, satisfied = self._evaluate_signal(symbol_code, metrics, price_float, tick_size, now)
         if direction == 0:
             self._last_signal_direction = 0
+            return
+
+        if self.breaker_tripped:
+            self._last_signal_direction = 0
+            self.logger.debug(
+                "Circuit breaker active; skip DOM trade evaluation",
+                symbol=symbol_code,
+            )
             return
 
         if (
@@ -977,4 +985,3 @@ class DOMStrategy(BaseStrategy):
             "sell_signals": self._sell_signals,
             "last_data_timestamp": float(self._last_data_timestamp) if self._last_data_timestamp else 0.0,
         }
-
