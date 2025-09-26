@@ -224,7 +224,7 @@ async def dom_ws(websocket: WebSocket, symbol: str):
     try:
         while True:
             metrics = dom_service.get_metrics(symbol)
-            events = dom_service.get_events()
+            events = dom_service.get_events(symbol)
 
             metrics_signature = _make_signature(metrics)
             events_signature = _make_signature(events)
