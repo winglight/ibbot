@@ -7843,6 +7843,113 @@ class TradingApp {
         return '';
     }
 
+    formatStrategyDataReception(strategy) {
+        const fallback = {
+            text: '-',
+            tooltip: '',
+            active: false,
+            awaitingData: false,
+            reason: '',
+            isReceiving: false,
+            subscription: null,
+            symbol: '',
+            statusLabel: '-',
+            toggleDisabled: false,
+        };
+        if (!strategy || typeof strategy !== 'object') {
+            return fallback;
+        }
+
+        const info = (strategy.data_reception && typeof strategy.data_reception === 'object')
+            ? strategy.data_reception
+            : (strategy.data_push_state && typeof strategy.data_push_state === 'object')
+                ? strategy.data_push_state
+                : null;
+
+        let isReceiving;
+        if (typeof strategy.is_receiving_data === 'boolean') {
+            isReceiving = strategy.is_receiving_data;
+        } else if (info && typeof info.is_receiving === 'boolean') {
+            isReceiving = Boolean(info.is_receiving);
+        } else {
+            isReceiving = false;
+        }
+
+        const awaitingData = info && typeof info.awaiting_data !== 'undefined'
+            ? Boolean(info.awaiting_data)
+            : false;
+        const reasonText = (info && info.status_reason)
+            || strategy.data_push_reason
+            || (strategy.strategy_type && strategy.strategy_type !== 'internal' ? '外部策略' : '');
+        const lastTimestamp = info && info.last_data_timestamp ? info.last_data_timestamp : null;
+        const isExternal = strategy.strategy_type && strategy.strategy_type !== 'internal';
+        const active = info && typeof info.active !== 'undefined'
+            ? Boolean(info.active)
+            : Boolean(isReceiving);
+
+        let detailText = '';
+        if (isReceiving) {
+            detailText = reasonText || '数据接收中';
+        } else if (awaitingData && !reasonText) {
+            detailText = '等待数据';
+        } else if (reasonText) {
+            detailText = reasonText;
+        } else if (isExternal) {
+            detailText = '外部策略';
+        }
+
+        const tooltipParts = [];
+        if (info && typeof info.active !== 'undefined') {
+            tooltipParts.push(info.active ? '推送已开启' : '推送未开启');
+        }
+        if (awaitingData && !isReceiving) {
+            tooltipParts.push('正在等待数据');
+        }
+        if (reasonText) {
+            tooltipParts.push(`状态说明：${reasonText}`);
+        }
+        if (info && info.subscription) {
+            tooltipParts.push(`订阅：${info.subscription}`);
+        }
+        if (info && info.symbol) {
+            tooltipParts.push(`标的：${info.symbol}`);
+        }
+        if (lastTimestamp) {
+            tooltipParts.push(`最后数据时间：${lastTimestamp}`);
+        }
+
+        const statusLabel = (() => {
+            if (!isExternal && active) {
+                if (awaitingData) return '等待DOM数据…';
+                if (reasonText) return reasonText;
+                return '已推送';
+            }
+            if (reasonText) return reasonText;
+            if (isExternal) return '未推送';
+            return active ? '已推送' : '未推送';
+        })();
+
+        const resolvedSubscription = info && info.subscription
+            ? info.subscription
+            : (strategy.data_subscription || null);
+        const resolvedSymbol = info && info.symbol
+            ? info.symbol
+            : this.resolveStrategySymbol(strategy);
+
+        return {
+            text: detailText || (isReceiving ? '数据接收中' : (active ? '推送已开启' : '未推送')),
+            tooltip: tooltipParts.join('；'),
+            active,
+            awaitingData,
+            reason: reasonText || '',
+            isReceiving: Boolean(isReceiving),
+            subscription: resolvedSubscription || null,
+            symbol: resolvedSymbol || '',
+            statusLabel,
+            toggleDisabled: Boolean(isExternal),
+        };
+    }
+
     displayStrategies(strategies) {
         const tbody = document.querySelector('#strategiesTable tbody');
         if (!tbody) return;
@@ -7877,11 +7984,56 @@ class TradingApp {
             const toggleSwitch = document.createElement('div');
             toggleSwitch.className = 'form-check form-switch';
             toggleSwitch.innerHTML = `
-                <input class="form-check-input" type="checkbox" ${strategy.enabled ? 'checked' : ''} 
+                <input class="form-check-input" type="checkbox" ${strategy.enabled ? 'checked' : ''}
                        onchange="app.strategiesManager.toggleStrategy('${strategy.name}', this.checked)">
             `;
             statusCell.appendChild(toggleSwitch);
-            
+
+            // 数据接收状态
+            const receptionCell = document.createElement('td');
+            const receptionInfo = this.formatStrategyDataReception(strategy);
+            receptionCell.classList.add('align-middle');
+            if (!this.strategyReceptionSwitchSeq) {
+                this.strategyReceptionSwitchSeq = 0;
+            }
+            const receptionSwitchId = `strategyReceptionSwitch-${++this.strategyReceptionSwitchSeq}`;
+            const receptionSwitchWrap = document.createElement('div');
+            receptionSwitchWrap.className = 'form-check form-switch mb-1';
+            const receptionSwitch = document.createElement('input');
+            receptionSwitch.className = 'form-check-input';
+            receptionSwitch.type = 'checkbox';
+            receptionSwitch.id = receptionSwitchId;
+            receptionSwitch.checked = !!receptionInfo.active;
+            if (receptionInfo.toggleDisabled) {
+                receptionSwitch.disabled = true;
+                receptionSwitch.title = receptionInfo.reason || '仅内部策略支持数据推送';
+            }
+            const receptionLabel = document.createElement('label');
+            receptionLabel.className = 'form-check-label visually-hidden';
+            receptionLabel.setAttribute('for', receptionSwitchId);
+            receptionLabel.textContent = '数据推送';
+            receptionSwitchWrap.appendChild(receptionSwitch);
+            receptionSwitchWrap.appendChild(receptionLabel);
+            receptionCell.appendChild(receptionSwitchWrap);
+
+            const receptionDetail = document.createElement('div');
+            receptionDetail.className = 'small text-muted';
+            receptionDetail.textContent = receptionInfo.text || '-';
+            if (receptionInfo.tooltip) {
+                receptionDetail.title = receptionInfo.tooltip;
+            }
+            receptionCell.appendChild(receptionDetail);
+
+            if (!receptionInfo.toggleDisabled) {
+                receptionSwitch.addEventListener('change', () => {
+                    this.toggleStrategyDataReception(strategy, {
+                        controlEl: receptionSwitch,
+                        statusEl: receptionDetail,
+                        enabled: receptionSwitch.checked,
+                    });
+                });
+            }
+
             // P&L（最近1个月）与 Trades（executions/2 取整），先占位，后异步回填
             const pnlCell = document.createElement('td');
             const cachedMetrics = this.strategyPerformanceCache.get(strategy.name);
@@ -7900,6 +8052,7 @@ class TradingApp {
             row.appendChild(nameCell);
             row.appendChild(symbolCell);
             row.appendChild(statusCell);
+            row.appendChild(receptionCell);
             row.appendChild(pnlCell);
             row.appendChild(tradesCell);
 
@@ -7927,6 +8080,135 @@ class TradingApp {
             this.showAlert('danger', 'Failed to toggle strategy');
             // Reload to revert the switch
             this.strategiesManager.loadStrategies();
+        }
+    }
+
+    async toggleStrategyDataReception(strategy, { enabled, controlEl, statusEl } = {}) {
+        if (!strategy || !strategy.name) return;
+        const name = strategy.name;
+        if (!this.strategyDataPushBusy) {
+            this.strategyDataPushBusy = new Set();
+        }
+        if (this.strategyDataPushBusy.has(name)) {
+            if (controlEl) {
+                controlEl.checked = !controlEl.checked;
+            }
+            return;
+        }
+
+        const originalInfo = this.formatStrategyDataReception(strategy);
+        let finalInfo = originalInfo;
+        const revertToOriginal = () => {
+            if (controlEl) {
+                controlEl.checked = originalInfo.active;
+                controlEl.disabled = originalInfo.toggleDisabled;
+            }
+            if (statusEl) {
+                statusEl.textContent = originalInfo.text || '-';
+                statusEl.title = originalInfo.tooltip || '';
+            }
+        };
+
+        const targetEnabled = typeof enabled === 'boolean'
+            ? enabled
+            : controlEl
+                ? !!controlEl.checked
+                : !originalInfo.active;
+
+        const info = (strategy.data_reception && typeof strategy.data_reception === 'object')
+            ? strategy.data_reception
+            : (strategy.data_push_state && typeof strategy.data_push_state === 'object')
+                ? strategy.data_push_state
+                : {};
+
+        const subscription = info?.subscription
+            || strategy.data_subscription
+            || strategy.subscription
+            || null;
+        const symbolCandidate = info?.symbol
+            || this.resolveStrategySymbol(strategy)
+            || '';
+        const symbol = symbolCandidate ? String(symbolCandidate).trim().toUpperCase() : '';
+
+        if (targetEnabled && !subscription) {
+            this.showAlert('warning', '请选择数据订阅后再开启推送');
+            revertToOriginal();
+            return;
+        }
+        if (targetEnabled && !symbol) {
+            this.showAlert('warning', '请先配置主标的后再开启推送');
+            revertToOriginal();
+            return;
+        }
+
+        this.strategyDataPushBusy.add(name);
+        if (controlEl) {
+            controlEl.disabled = true;
+        }
+        if (statusEl) {
+            statusEl.textContent = targetEnabled ? '推送中…' : '未推送';
+            statusEl.title = '';
+        }
+
+        try {
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/data-push`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    enabled: targetEnabled,
+                    subscription: subscription || null,
+                    symbol: symbol || null,
+                }),
+            });
+
+            if (!res || typeof res !== 'object') {
+                throw new Error('Empty response');
+            }
+
+            const state = res.state || {};
+            if (!res.success) {
+                this.showAlert('danger', res.error || 'Failed to update data push state');
+                finalInfo = originalInfo;
+                return;
+            }
+
+            const awaitingData = !!state.awaiting_data && !!state.active;
+            strategy.data_reception = {
+                ...(strategy.data_reception || {}),
+                active: !!state.active,
+                awaiting_data: awaitingData,
+                status_reason: state.status_reason || null,
+                subscription: state.subscription || subscription || null,
+                symbol: state.symbol || symbol || null,
+                last_data_timestamp: state.last_data_timestamp
+                    || (strategy.data_reception?.last_data_timestamp ?? null),
+            };
+            if (state.active && !awaitingData && !state.status_reason) {
+                strategy.is_receiving_data = true;
+            } else if (!state.active) {
+                strategy.is_receiving_data = false;
+            }
+            if (state.status_reason) {
+                strategy.data_push_reason = state.status_reason;
+            } else if (!state.active) {
+                strategy.data_push_reason = '';
+            }
+
+            finalInfo = this.formatStrategyDataReception(strategy);
+            this.loadStrategies({ force: true });
+        } catch (error) {
+            console.error('Failed to update strategy data push state from list', error);
+            this.showAlert('danger', 'Failed to update data push state');
+            finalInfo = originalInfo;
+        } finally {
+            if (controlEl) {
+                controlEl.disabled = finalInfo.toggleDisabled;
+                controlEl.checked = finalInfo.active;
+            }
+            if (statusEl) {
+                statusEl.textContent = finalInfo.text || '-';
+                statusEl.title = finalInfo.tooltip || '';
+            }
+            this.strategyDataPushBusy.delete(name);
         }
     }
 
