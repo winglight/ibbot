@@ -67,6 +67,7 @@ class DOMService:
         self._active_symbols: Dict[str, str] = {}
         self._active_symbol: Optional[str] = None
         self._active_symbol_original: Optional[str] = None
+        self._processors: Dict[str, DOMProcessor] = {}
         self._cache = DomCacheManager()
         self._stats = DomStatsAggregator(self._cache)
         self.db_manager = get_db_manager()
@@ -93,6 +94,14 @@ class DOMService:
             5, min(int(getattr(dom_config, "max_levels", 10) or 10), 30)
         )
         self._auto_start_worker_started = False
+        self._processor_window: int = int(getattr(dom_config, "window", 10000))
+        self._processor_max_levels: int = int(getattr(dom_config, "max_levels", 30))
+        self._current_base_thresholds: Dict[str, Dict[str, float]] = copy.deepcopy(
+            DEFAULT_BASE_THRESHOLDS
+        )
+        self._current_feature_thresholds: Dict[str, Dict[str, float]] = copy.deepcopy(
+            DEFAULT_FEATURE_THRESHOLDS
+        )
 
         persisted_config = self._load_persisted_config()
         if persisted_config:
@@ -151,13 +160,18 @@ class DOMService:
         if symbol_key:
             self._last_depth_by_symbol[symbol_key] = snapshot
 
-        self.processor.on_depth_update(snapshot)
-        metrics = dict(self.processor.last_metrics)
+        processor = self._ensure_processor_for_symbol(symbol_key)
+        if processor is not self.processor:
+            self.processor = processor
+            set_dom_processor(processor)
+
+        processor.on_depth_update(snapshot)
+        metrics = dict(processor.last_metrics)
         if symbol_key:
             metrics["symbol"] = symbol_key
             self._last_metrics_by_symbol[symbol_key] = metrics
-        metrics["signal_long"] = bool(self.processor.last_signals.get("long"))
-        metrics["signal_short"] = bool(self.processor.last_signals.get("short"))
+        metrics["signal_long"] = bool(processor.last_signals.get("long"))
+        metrics["signal_short"] = bool(processor.last_signals.get("short"))
         if symbol_key:
             state = self._previous_signal_flags[symbol_key]
             for direction in ("long", "short"):
@@ -186,7 +200,7 @@ class DOMService:
                 self._stats.mark_dirty(symbol_key)
 
         ts = time.time()
-        for evt in self.processor.last_events:
+        for evt in processor.last_events:
             self._alerts.append({"id": self._next_alert_id, "event": evt, "timestamp": ts})
             self._next_alert_id += 1
         self._perform_cleanup()
@@ -422,9 +436,14 @@ class DOMService:
 
         tuner_params = self._resolve_tuner_parameters(overrides=tuner_parameters)
 
+        self._processor_window = int(target_window)
+        self._processor_max_levels = int(target_levels)
+        self._current_base_thresholds = copy.deepcopy(base_thresholds)
+        self._current_feature_thresholds = copy.deepcopy(feature_thresholds)
+
         parameter_tuner = DOMParameterTuner(
-            base_thresholds=base_thresholds,
-            feature_thresholds=feature_thresholds,
+            base_thresholds=self._current_base_thresholds,
+            feature_thresholds=self._current_feature_thresholds,
             stats_window=int(tuner_params["stats_window"]),
             penalty_decay=float(tuner_params["penalty_decay"]),
             penalty_step=float(tuner_params["penalty_step"]),
@@ -434,10 +453,13 @@ class DOMService:
         )
 
         self.processor = DOMProcessor(
-            window=target_window,
-            max_levels=target_levels,
+            window=self._processor_window,
+            max_levels=self._processor_max_levels,
             parameter_tuner=parameter_tuner,
         )
+        self._processors = {}
+        if self._active_symbol:
+            self._processors[self._active_symbol] = self.processor
         set_dom_processor(self.processor)
 
         logger.info(
@@ -513,22 +535,43 @@ class DOMService:
         if symbol_key and symbol_key in self._active_symbols:
             self._active_symbol = symbol_key
             self._active_symbol_original = self._active_symbols[symbol_key]
+            processor = self._get_processor_for_symbol(symbol_key)
+            if processor is None:
+                processor = self._ensure_processor_for_symbol(symbol_key)
+            if processor is not None and processor is not self.processor:
+                self.processor = processor
+                set_dom_processor(processor)
             return
 
         if self._active_symbols:
             first_key = next(iter(self._active_symbols))
             self._active_symbol = first_key
             self._active_symbol_original = self._active_symbols[first_key]
+            processor = self._get_processor_for_symbol(first_key)
+            if processor is None:
+                processor = self._ensure_processor_for_symbol(first_key)
+            if processor is not None and processor is not self.processor:
+                self.processor = processor
+                set_dom_processor(processor)
             return
 
         self._active_symbol = None
         self._active_symbol_original = None
+        if not self._processors:
+            self.processor = self._create_processor_instance()
+        else:
+            self.processor = next(iter(self._processors.values()))
+        set_dom_processor(self.processor)
 
     def _register_active_symbol(self, symbol_key: str, original: str) -> None:
         if not symbol_key:
             return
 
         self._active_symbols[symbol_key] = original or symbol_key
+        processor = self._ensure_processor_for_symbol(symbol_key)
+        if processor is not None and processor is not self.processor:
+            self.processor = processor
+            set_dom_processor(processor)
         self._set_primary_active_symbol(symbol_key)
 
     def _unregister_active_symbol(self, symbol_key: str) -> Optional[str]:
@@ -536,9 +579,65 @@ class DOMService:
             return None
 
         removed = self._active_symbols.pop(symbol_key, None)
+        removed_processor = self._processors.pop(symbol_key, None)
         if removed is not None or self._active_symbol == symbol_key:
             self._set_primary_active_symbol(None)
+        if removed_processor is not None and removed_processor is self.processor:
+            replacement: Optional[DOMProcessor] = None
+            if self._active_symbol and self._active_symbol in self._processors:
+                replacement = self._processors[self._active_symbol]
+            elif self._processors:
+                replacement = next(iter(self._processors.values()))
+            if replacement is None:
+                replacement = self._create_processor_instance()
+            self.processor = replacement
+            set_dom_processor(self.processor)
+        self._previous_signal_flags.pop(symbol_key, None)
         return removed
+
+    def _create_processor_instance(self) -> DOMProcessor:
+        tuner_params = self._tuner_parameters or DEFAULT_TUNER_PARAMETERS
+        parameter_tuner = DOMParameterTuner(
+            base_thresholds=copy.deepcopy(self._current_base_thresholds),
+            feature_thresholds=copy.deepcopy(self._current_feature_thresholds),
+            stats_window=int(tuner_params["stats_window"]),
+            penalty_decay=float(tuner_params["penalty_decay"]),
+            penalty_step=float(tuner_params["penalty_step"]),
+            max_penalty=float(tuner_params["max_penalty"]),
+            reversal_window_sec=int(tuner_params["reversal_window_sec"]),
+            session_timezone=str(tuner_params["session_timezone"]),
+        )
+        return DOMProcessor(
+            window=int(self._processor_window),
+            max_levels=int(self._processor_max_levels),
+            parameter_tuner=parameter_tuner,
+        )
+
+    def _ensure_processor_for_symbol(self, symbol_key: str) -> DOMProcessor:
+        if not symbol_key:
+            return self.processor
+        existing = self._processors.get(symbol_key)
+        if existing is not None:
+            return existing
+        if not self._processors:
+            processor = self.processor
+        else:
+            processor = self._create_processor_instance()
+        self._processors[symbol_key] = processor
+        return processor
+
+    def _get_processor_for_symbol(
+        self, symbol_key: Optional[str]
+    ) -> Optional[DOMProcessor]:
+        if symbol_key:
+            processor = self._processors.get(symbol_key)
+            if processor is not None:
+                return processor
+        if self._active_symbol and self._active_symbol in self._processors:
+            return self._processors[self._active_symbol]
+        if self._processors:
+            return next(iter(self._processors.values()))
+        return self.processor
 
     def _start_stream_blocking(
         self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
@@ -840,11 +939,12 @@ class DOMService:
     # --------------------------------------------------------------
     def get_metrics(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         target = (symbol or self._active_symbol or "").upper()
-        active = dict(self.processor.last_metrics)
-        if active:
-            active_symbol = active.get("symbol")
-            if not target or not active_symbol or active_symbol == target:
-                return active
+        processor = self._get_processor_for_symbol(target if target else None)
+        if processor and processor.last_metrics:
+            active = dict(processor.last_metrics)
+            if target and not active.get("symbol"):
+                active["symbol"] = target
+            return active
         if target and target in self._last_metrics_by_symbol:
             return dict(self._last_metrics_by_symbol[target])
         if target:
@@ -921,8 +1021,12 @@ class DOMService:
         return filtered
 
     # --------------------------------------------------------------
-    def get_events(self) -> List[str]:
-        return list(self.processor.last_events)
+    def get_events(self, symbol: Optional[str] = None) -> List[str]:
+        target = (symbol or self._active_symbol or "").upper()
+        processor = self._get_processor_for_symbol(target if target else None)
+        if processor and processor.last_events:
+            return list(processor.last_events)
+        return []
 
     # --------------------------------------------------------------
     def get_history(
@@ -1012,6 +1116,8 @@ class DOMService:
 
     # --------------------------------------------------------------
     def _get_current_base_thresholds(self) -> Dict[str, Dict[str, float]]:
+        if self._current_base_thresholds:
+            return copy.deepcopy(self._current_base_thresholds)
         tuner = getattr(self.processor, "parameter_tuner", None)
         if tuner and getattr(tuner, "base_thresholds", None):
             return copy.deepcopy(tuner.base_thresholds)
@@ -1023,6 +1129,8 @@ class DOMService:
 
     # --------------------------------------------------------------
     def _get_current_feature_thresholds(self) -> Dict[str, Dict[str, float]]:
+        if self._current_feature_thresholds:
+            return copy.deepcopy(self._current_feature_thresholds)
         tuner = getattr(self.processor, "parameter_tuner", None)
         if tuner and getattr(tuner, "feature_thresholds", None):
             return copy.deepcopy(tuner.feature_thresholds)
