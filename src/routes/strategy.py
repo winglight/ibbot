@@ -19,6 +19,7 @@ from src.models import (
     ExternalStrategyOrderRequest,
     StrategyRenameRequest,
     StrategyDataPushRequest,
+    StrategyRiskSettings,
 )
 
 router = APIRouter()
@@ -233,6 +234,36 @@ async def get_internal_strategy_info_api(name: str, user: Optional[str] = Depend
     return {"success": True, "strategy": info}
 
 
+@router.get("/api/strategies/{name}/risk-settings")
+async def get_strategy_risk_settings_api(name: str, user: Optional[str] = Depends(get_current_user)):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    if name not in strategy_manager.strategies:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    settings = strategy_manager.get_strategy_risk_settings(name)
+    return {"success": True, "settings": settings}
+
+
+@router.put("/api/strategies/{name}/risk-settings")
+async def update_strategy_risk_settings_api(
+    name: str,
+    payload: StrategyRiskSettings,
+    user: Optional[str] = Depends(get_current_user),
+): 
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    if name not in strategy_manager.strategies:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    try:
+        updated = strategy_manager.update_strategy_risk_settings(name, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(f"Failed to update strategy risk settings for {name}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to update risk settings") from exc
+    return {"success": True, "settings": updated}
+
+
 @router.get("/api/strategies/{name}/status")
 async def get_internal_strategy_status_api(name: str, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
@@ -286,11 +317,16 @@ async def set_strategy_data_push_api(
         "awaiting_data": bool(state_snapshot.get("awaiting_data")),
         "last_data_timestamp": state_snapshot.get("last_data_timestamp")
         or result.get("last_data_timestamp"),
+        "status_reason": state_snapshot.get("status_reason") or result.get("status_reason"),
     }
 
     if not result.get("success"):
         error_message = result.get("error") or "Failed to update data push state"
-        return {"success": False, "error": error_message, "state": state_payload}
+        return {
+            "success": False,
+            "error": error_message,
+            "state": state_payload,
+        }
 
     return {"success": True, "state": state_payload}
 

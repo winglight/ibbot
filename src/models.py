@@ -168,6 +168,38 @@ class StrategySettingsRequest(BaseModel):
     api_method: Optional[str] = None
     api_payload_template: Optional[Dict[str, Any]] = None
     strategy_path: Optional[str] = None
+
+
+class StrategyRiskSettings(BaseModel):
+    """策略级风控设置"""
+
+    max_positions: Optional[int] = None
+    forbid_add_on_loss: bool = True
+    loss_time_threshold: Optional[int] = None  # seconds
+    loss_pnl_threshold: Optional[float] = None
+    notify_on_trigger: bool = True
+
+    @field_validator('max_positions')
+    def validate_max_positions(cls, value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError('max_positions must be >= 0 when provided')
+        return value
+
+    @field_validator('loss_time_threshold')
+    def validate_loss_time_threshold(cls, value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError('loss_time_threshold must be >= 0 when provided')
+        return value
+
+    @field_validator('loss_pnl_threshold')
+    def validate_loss_pnl_threshold(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        return float(value)
     enable_auth: Optional[bool] = None
     auth_token: Optional[str] = None
 
