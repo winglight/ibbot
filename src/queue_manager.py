@@ -440,7 +440,7 @@ class QueueManager:
     async def _process_strategy_order(self, task: QueueTask):
         """处理策略订单任务"""
         from datetime import datetime
-        
+
         # 检查依赖对象是否已设置
         if not all([self.risk_manager, self.strategy_manager, self.websocket_manager]):
             raise Exception("Dependencies not properly set")
@@ -525,28 +525,22 @@ class QueueManager:
             sec_type=sec_type,
         ).info("Placing strategy order via IBKR")
 
-        if order_type == "MARKET":
-            trade = await core.ibkr_client.place_market_order(
-                symbol=payload['symbol'],
-                quantity=payload['qty'],
-                action=action,
-                exchange=exchange,
-                sec_type=sec_type
-            )
-        elif order_type == "LIMIT":
-            if not payload.get('price'):
-                raise Exception("Price required for limit order")
-            trade = core.ibkr_client.place_limit_order(
-                symbol=payload['symbol'],
-                quantity=payload['qty'],
-                price=payload['price'],
-                action=action,
-                exchange=exchange,
-                sec_type=sec_type
-            )
-        else:
+        if order_type not in ("MARKET", "LIMIT"):
             raise Exception("Invalid order type")
-        
+
+        if order_type == "LIMIT" and not payload.get('price'):
+            raise Exception("Price required for limit order")
+
+        trade = await self._place_order_off_thread(
+            symbol=payload['symbol'],
+            quantity=payload['qty'],
+            action=action,
+            order_type=order_type,
+            exchange=exchange,
+            sec_type=sec_type,
+            price=payload.get('price'),
+        )
+
         if not trade:
             raise Exception("Failed to place strategy order")
         order_id = str(trade.order.orderId)
@@ -648,7 +642,80 @@ class QueueManager:
             action=action,
             quantity=payload['qty'],
         ).info(f"Strategy order placed successfully: {order_id}")
-    
+
+    async def _place_order_off_thread(
+        self,
+        *,
+        symbol: str,
+        quantity: int,
+        action: str,
+        order_type: str,
+        exchange: str,
+        sec_type: str,
+        price: Optional[float],
+    ):
+        """在后台线程中执行下单流程，避免阻塞事件循环。"""
+
+        try:
+            return await asyncio.to_thread(
+                self._place_order_blocking,
+                symbol,
+                quantity,
+                action,
+                order_type,
+                exchange,
+                sec_type,
+                price,
+            )
+        except Exception as exc:
+            queue_logger.error(
+                "Failed to place order off thread",
+                symbol=symbol,
+                action=action,
+                order_type=order_type,
+                exchange=exchange,
+                sec_type=sec_type,
+                quantity=quantity,
+                error=str(exc),
+            )
+            raise
+
+    def _place_order_blocking(
+        self,
+        symbol: str,
+        quantity: int,
+        action: str,
+        order_type: str,
+        exchange: str,
+        sec_type: str,
+        price: Optional[float],
+    ):
+        """在后台线程中调用 IBKR 客户端的下单接口。"""
+
+        import core  # 延迟导入避免循环导入
+
+        if order_type == "MARKET":
+            return asyncio.run(
+                core.ibkr_client.place_market_order(
+                    symbol=symbol,
+                    quantity=quantity,
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type,
+                )
+            )
+        elif order_type == "LIMIT":
+            return core.ibkr_client.place_limit_order(
+                symbol=symbol,
+                quantity=quantity,
+                price=price,
+                action=action,
+                exchange=exchange,
+                sec_type=sec_type,
+            )
+
+        raise ValueError(f"Unsupported order type: {order_type}")
+
     def _save_tasks(self):
         """持久化任务到文件"""
         try:
