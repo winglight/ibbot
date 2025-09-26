@@ -2019,8 +2019,8 @@ class StrategyManager:
 
         push_state = self.data_push_state.get(name)
         if push_state:
+            now_ts = time.time()
             was_awaiting = bool(push_state.get("awaiting_data"))
-            is_receiving = bool(status.get("is_receiving_data"))
             active_flag = bool(push_state.get("active"))
             subscription_value = push_state.get("subscription") or self._get_strategy_setting(
                 name, "data_subscription"
@@ -2028,31 +2028,6 @@ class StrategyManager:
             symbol_value = push_state.get("symbol") or self._get_strategy_setting(
                 name, "primary_symbol"
             )
-            if is_receiving and was_awaiting:
-                strategy_logger.info(
-                    "Data push is now receiving data",
-                    strategy=name,
-                    subscription=push_state.get("subscription"),
-                    symbol=push_state.get("symbol"),
-                )
-                self._record_data_push_event(
-                    name,
-                    "已开始接收DOM数据",
-                    level="info",
-                    reason="正在接收数据",
-                )
-            if is_receiving:
-                push_state.pop("restart_requested", None)
-                self._set_data_push_reason(name, "正在接收数据")
-
-            awaiting_data = was_awaiting
-            if is_receiving or not active_flag:
-                if awaiting_data:
-                    push_state["awaiting_data"] = False
-                awaiting_data = False
-                push_state.pop("_last_gap_warning_at", None)
-                if not active_flag:
-                    self._set_data_push_reason(name, "推送已停止")
 
             last_data_ts = status.get("last_data_timestamp")
             last_data_iso: Optional[str] = None
@@ -2069,6 +2044,91 @@ class StrategyManager:
                 except (TypeError, ValueError):
                     numeric_last = None
 
+            processed_raw = status.get("processed_count")
+            try:
+                processed_count = int(processed_raw)
+            except (TypeError, ValueError):
+                processed_count = None
+
+            last_processed_update = float(push_state.get("_last_processed_update", 0.0) or 0.0)
+            prev_processed = push_state.get("_last_processed_count")
+            awaiting_data = was_awaiting
+
+            if processed_count is not None:
+                if prev_processed is None or processed_count > prev_processed:
+                    push_state["_last_processed_count"] = processed_count
+                    last_processed_update = now_ts
+                    push_state["_last_processed_update"] = last_processed_update
+                    if awaiting_data:
+                        push_state["awaiting_data"] = False
+                        awaiting_data = False
+                        push_state.pop("_last_gap_warning_at", None)
+                elif last_processed_update == 0.0 and prev_processed is not None:
+                    last_processed_update = now_ts
+                    push_state["_last_processed_update"] = last_processed_update
+            elif last_processed_update > 0:
+                pass
+
+            activity_candidates: List[float] = []
+            if numeric_last and numeric_last > 0:
+                activity_candidates.append(numeric_last)
+            if last_processed_update > 0:
+                activity_candidates.append(last_processed_update)
+            activity_ts = max(activity_candidates) if activity_candidates else None
+
+            receiving_grace = self.settings.get("data_push_receiving_grace", 12.0)
+            try:
+                receiving_grace = float(receiving_grace)
+            except (TypeError, ValueError):
+                receiving_grace = 12.0
+            receiving_grace = max(5.0, receiving_grace)
+
+            recent_activity = bool(activity_ts and (now_ts - activity_ts) <= receiving_grace)
+            if recent_activity and not status.get("is_receiving_data"):
+                status["is_receiving_data"] = True
+
+            is_receiving = bool(status.get("is_receiving_data"))
+            if is_receiving and was_awaiting:
+                strategy_logger.info(
+                    "Data push is now receiving data",
+                    strategy=name,
+                    subscription=push_state.get("subscription"),
+                    symbol=push_state.get("symbol"),
+                )
+                self._record_data_push_event(
+                    name,
+                    "已开始接收DOM数据",
+                    level="info",
+                    reason="正在接收数据",
+                )
+            if is_receiving:
+                push_state.pop("restart_requested", None)
+                self._set_data_push_reason(name, "正在接收数据")
+                awaiting_data = False
+            elif awaiting_data and recent_activity:
+                # Fallback: treat recent activity as receiving even if runtime delayed update
+                awaiting_data = False
+                push_state["awaiting_data"] = False
+
+            if is_receiving or not active_flag:
+                if awaiting_data:
+                    push_state["awaiting_data"] = False
+                awaiting_data = False
+                push_state.pop("_last_gap_warning_at", None)
+                if not active_flag:
+                    self._set_data_push_reason(name, "推送已停止")
+
+            if activity_ts:
+                try:
+                    candidate_iso = to_local_iso(
+                        ensure_local_timezone(datetime.fromtimestamp(activity_ts))
+                    )
+                except Exception:  # pragma: no cover - defensive guard
+                    candidate_iso = None
+                if candidate_iso:
+                    last_data_iso = candidate_iso
+                numeric_last = activity_ts
+
             payload = {
                 "enabled": bool(push_state.get("enabled")),
                 "active": bool(push_state.get("active")),
@@ -2084,7 +2144,6 @@ class StrategyManager:
                 push_state["last_data_timestamp"] = None
 
             if active_flag and not is_receiving:
-                now_ts = time.time()
                 last_warning_at = float(push_state.get("_last_gap_warning_at", 0.0) or 0.0)
                 if numeric_last is not None and numeric_last > 0:
                     elapsed = max(0.0, now_ts - numeric_last)
