@@ -108,9 +108,8 @@ class OrderManager:
     def _initialize_database(self):
         """初始化数据库表结构"""
         try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
-                
+            with self.db_manager.cursor() as cursor:
+
                 # 创建新的 orders 表
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS orders (
@@ -203,7 +202,6 @@ class OrderManager:
                     cursor.execute("ALTER TABLE orders ADD COLUMN pnl REAL")
                     order_logger.info("Added pnl column to orders table")
                 
-                conn.commit()
                 order_logger.info("Orders table initialized successfully")
                 
         except Exception as e:
@@ -243,13 +241,40 @@ class OrderManager:
         self.orders[order.order_id] = order
         return order
 
+    def _ensure_order_cached(self, order_id: str) -> Optional[Order]:
+        """确保指定订单已加载到内存缓存。"""
+
+        existing = self.orders.get(order_id)
+        if existing is not None:
+            return existing
+
+        try:
+            with self.db_manager.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT order_id, symbol, action, quantity, order_type, price,
+                           status, created_at, updated_at, executed_at, fill_price,
+                           order_source, strategy_name, rule_id, parent_order_id,
+                           exchange, sec_type, notes, commission, pnl, is_deleted
+                    FROM orders
+                    WHERE order_id = ?
+                    LIMIT 1
+                    """,
+                    (order_id,),
+                )
+                row = cursor.fetchone()
+            if row:
+                return self._row_to_order(row)
+        except Exception as exc:
+            order_logger.error(f"Failed to load order {order_id} from database: {exc}")
+        return None
+
     def _fetch_orders_from_database(self,
                                     limit: Optional[int] = None,
                                     start_date: Optional[datetime] = None) -> List[Order]:
         """按需从数据库获取订单，避免全量加载导致的性能问题。"""
         try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
+            with self.db_manager.cursor() as cursor:
                 query = """
                     SELECT order_id, symbol, action, quantity, order_type, price,
                            status, created_at, updated_at, executed_at, fill_price,
@@ -287,8 +312,7 @@ class OrderManager:
     def _load_orders_from_database(self):
         """从数据库加载订单到内存"""
         try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
+            with self.db_manager.cursor() as cursor:
                 cursor.execute("""
                     SELECT order_id, symbol, action, quantity, order_type, price,
                            status, created_at, updated_at, executed_at, fill_price,
@@ -473,13 +497,12 @@ class OrderManager:
         """更新订单状态"""
         try:
             # 统一标准化为字符串，避免传入 int 导致无法匹配内存订单
-            self._load_orders_from_database()
             order_id = str(order_id)
-            if order_id not in self.orders:
+            order = self._ensure_order_cached(order_id)
+            if order is None:
                 order_logger.warning(f"Order {order_id} not found for status update")
                 return False
-            
-            order = self.orders[order_id]
+
             old_status = order.status
             
             # 防止订单状态回退：定义状态优先级
@@ -912,13 +935,12 @@ class OrderManager:
             
             # 更新数据库中的订单ID
             try:
-                with sqlite3.connect(self.db_manager.db_path) as conn:
-                    conn.execute(
+                with self.db_manager.cursor() as cursor:
+                    cursor.execute(
                         "UPDATE orders SET order_id = ? WHERE order_id = ?",
                         (new_order_id, old_order_id)
                     )
-                    conn.commit()
-                    
+
                 order_logger.info(f"成功更新订单ID: {old_order_id} -> {new_order_id}")
                 return True
                 
@@ -937,8 +959,7 @@ class OrderManager:
     def _save_order_to_database(self, order: Order):
         """保存订单到数据库"""
         try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
+            with self.db_manager.cursor() as cursor:
                 cursor.execute(
                     """
                     INSERT INTO orders
@@ -959,7 +980,6 @@ class OrderManager:
                         order.sec_type, order.notes, order.commission, order.is_deleted
                     )
                 )
-                conn.commit()
                 order_logger.debug(f"Order {order.order_id} saved to database")
         except sqlite3.IntegrityError as e:
             if "UNIQUE constraint failed: orders.order_id" in str(e):
@@ -977,11 +997,10 @@ class OrderManager:
     def _update_order_in_database(self, order: Order):
         """更新数据库中的订单"""
         try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
+            with self.db_manager.cursor() as cursor:
                 cursor.execute(
                     """
-                    UPDATE orders SET 
+                    UPDATE orders SET
                         symbol=?, action=?, quantity=?, order_type=?, price=?, status=?,
                         updated_at=?, executed_at=?, fill_price=?, order_source=?,
                         strategy_name=?, rule_id=?, parent_order_id=?, exchange=?,
@@ -999,7 +1018,6 @@ class OrderManager:
                         order.order_id
                     )
                 )
-                conn.commit()
                 order_logger.debug(f"Order {order.order_id} updated in database (commission/pnl preserved when None)")
         except Exception as e:
             order_logger.error(f"Error updating order {order.order_id} in database: {e}")
