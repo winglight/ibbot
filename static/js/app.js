@@ -406,6 +406,8 @@ class TradingApp {
         this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
         this.strategyChartInstance = null;
         this.strategyChartState = this.createDefaultStrategyChartState();
+        this.strategyDetailsState = this.createEmptyStrategyDetailsState();
+        this.strategyDetailsTabListenerBound = false;
         // 渲染监控图表时使用的定时器句柄，防止重复渲染导致死循环
         this.monitorChartRenderTimeout = null;
         // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制
@@ -8471,6 +8473,20 @@ class TradingApp {
         };
     }
 
+    createEmptyStrategyDetailsState() {
+        return {
+            name: null,
+            basicInfo: null,
+            strategyType: null,
+            initialSymbol: '',
+            defaultTabTarget: '#charts',
+            tabLoaded: {},
+            fetches: {},
+            internalInfo: null,
+            preloadedRiskSettings: null,
+        };
+    }
+
     getStrategyChartState() {
         if (!this.strategyChartState) {
             this.strategyChartState = this.createDefaultStrategyChartState();
@@ -9378,818 +9394,1086 @@ class TradingApp {
 
     async openStrategyDetails(name) {
         try {
-            this.currentStrategyDetails = name;
-            const nameEl = document.getElementById('detailsStrategyName');
-            if (nameEl) nameEl.textContent = name;
-            let s = null;
-            try {
-                const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}`);
-                if (res.success) s = res.strategy;
-            } catch {}
+            this.prepareStrategyDetailsModal(name);
+            this.ensureStrategyDetailsTabListener();
+            this.showStrategyDetailsModal();
+            await this.initializeStrategyDetailsContent(name);
+            this.activateStrategyDetailsDefaultTab();
+            await this.requestActiveStrategyDetailsTabLoad();
+        } catch (error) {
+            console.error('Open details error:', error);
+            this.showAlert('danger', 'Failed to open strategy details');
+        }
+    }
 
-            const initialSymbol = this.resolveStrategySymbol(s);
-            this.setupStrategyChartTab();
-            this.resetStrategyChartState({
-                keepControls: true,
-                currentStrategy: name,
-                symbol: initialSymbol || ''
+    initializeStrategyDetailsState(name) {
+        this.strategyDetailsState = this.createEmptyStrategyDetailsState();
+        this.strategyDetailsState.name = name;
+    }
+
+    prepareStrategyDetailsModal(name) {
+        this.initializeStrategyDetailsState(name);
+        this.currentStrategyDetails = name;
+
+        const typeEl = document.getElementById('detailsStrategyType');
+        if (typeEl) typeEl.textContent = '-';
+        const trigEl = document.getElementById('detailsTriggerCount');
+        if (trigEl) trigEl.textContent = '0';
+        const lastEl = document.getElementById('detailsLastTriggered');
+        if (lastEl) lastEl.textContent = '-';
+
+        const titleEl = document.getElementById('detailsStrategyName');
+        if (titleEl) {
+            const newTitle = titleEl.cloneNode(true);
+            titleEl.parentNode.replaceChild(newTitle, titleEl);
+            newTitle.textContent = name;
+            newTitle.title = '双击可重命名';
+            newTitle.style.cursor = 'text';
+            newTitle.ondblclick = () => {
+                const original = newTitle.textContent || name;
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'form-control form-control-sm d-inline-block';
+                input.style.width = Math.max(120, original.length * 9) + 'px';
+                input.value = original;
+                newTitle.replaceWith(input);
+                input.focus();
+                const commit = async () => {
+                    const newName = input.value.trim();
+                    if (!newName || newName === original) {
+                        input.replaceWith(newTitle);
+                        newTitle.textContent = original;
+                        return;
+                    }
+                    try {
+                        await this.apiCall(`/strategies/${encodeURIComponent(original)}/rename`, {
+                            method: 'POST',
+                            body: JSON.stringify({ new_name: newName, rename_file: false }),
+                        });
+                        this.showAlert('success', `策略已重命名为 ${newName}`);
+                        newTitle.textContent = newName;
+                        this.currentStrategyDetails = newName;
+                        input.replaceWith(newTitle);
+                        if (this.strategiesManager?.loadStrategies) {
+                            this.strategiesManager.loadStrategies();
+                        }
+                    } catch (err) {
+                        console.error('Rename strategy error:', err);
+                        this.showAlert('danger', '重命名失败');
+                        input.replaceWith(newTitle);
+                        newTitle.textContent = original;
+                    }
+                };
+                input.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        commit();
+                    } else if (event.key === 'Escape') {
+                        event.preventDefault();
+                        input.replaceWith(newTitle);
+                        newTitle.textContent = original;
+                    }
+                });
+                input.addEventListener('blur', commit);
+            };
+        }
+
+        const kpiIds = ['kpiPnL', 'kpiWinRate', 'kpiMaxDD', 'kpiSharpe', 'kpiTrades', 'kpiAvgDur'];
+        kpiIds.forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = '--';
+        });
+
+        const customSection = document.getElementById('customRangeSection');
+        if (customSection) customSection.style.display = 'none';
+        const startInput = document.getElementById('perfStart');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('perfEnd');
+        if (endInput) endInput.value = '';
+
+        const rangeSelect = document.getElementById('performanceRange');
+        if (rangeSelect) {
+            const newSelect = rangeSelect.cloneNode(true);
+            rangeSelect.parentNode.replaceChild(newSelect, rangeSelect);
+            newSelect.value = '1d';
+            newSelect.addEventListener('change', async () => {
+                if (customSection) customSection.style.display = newSelect.value === 'custom' ? '' : 'none';
+                if (newSelect.value !== 'custom') {
+                    await this.triggerStrategyDetailsTabLoad('#charts', { force: true }).catch(() => {});
+                }
             });
-            const chartState = this.getStrategyChartState();
-            if (initialSymbol) {
-                chartState.symbol = initialSymbol;
+        }
+
+        const applyBtn = document.getElementById('applyCustomRangeBtn');
+        if (applyBtn) {
+            const newBtn = applyBtn.cloneNode(true);
+            applyBtn.parentNode.replaceChild(newBtn, applyBtn);
+            newBtn.addEventListener('click', async () => {
+                await this.triggerStrategyDetailsTabLoad('#charts', { force: true }).catch(() => {});
+            });
+        }
+
+        ['cumulativePnLChart', 'drawdownChart', 'pnlDistributionChart', 'winLossChart'].forEach((chartId) => {
+            this.ensureChartDestroyed(chartId);
+            const canvas = document.getElementById(chartId);
+            if (canvas && canvas.getContext) {
+                const ctx = canvas.getContext('2d');
+                if (ctx) {
+                    ctx.clearRect(0, 0, canvas.width || canvas.offsetWidth || 0, canvas.height || canvas.offsetHeight || 0);
+                }
             }
-            if (chartState.symbol) {
-                this.loadStrategyChart(name, {
-                    symbol: chartState.symbol,
-                    forceExecutions: true
-                }).catch((err) => console.warn('Failed to load strategy chart:', err));
-            } else {
-                this.updateStrategyChartStatus('缺少标的');
-            }
-            const typeEl = document.getElementById('detailsStrategyType');
-            const trigEl = document.getElementById('detailsTriggerCount');
-            const lastEl = document.getElementById('detailsLastTriggered');
-            if (typeEl) typeEl.textContent = s?.strategy_type || '-';
-            if (trigEl) trigEl.textContent = s?.trigger_count ?? 0;
-            if (lastEl) lastEl.textContent = s?.last_triggered ? new Date(s.last_triggered).toLocaleString() : '-';
+        });
 
-            const isInternal = s?.strategy_type === 'internal';
-            const summaryWrap = document.getElementById('summary-tab-wrap');
-            const riskWrap = document.getElementById('risk-settings-tab-wrap');
-            const ordersWrap = document.getElementById('internal-orders-tab-wrap');
-            const execWrap = document.getElementById('executions-tab-wrap');
-            const apiWrap = document.getElementById('api-examples-tab-wrap');
-            const summaryPane = document.getElementById('summary');
-            const riskPane = document.getElementById('risk-settings');
-            const ordersPane = document.getElementById('internal-orders');
-            const chartsTabText = document.getElementById('charts-tab-text');
-            if (isInternal) {
-                this.ensureSummaryControls();
-                this.ensureRiskSettingsControls();
-                summaryWrap?.classList.remove('d-none');
-                riskWrap?.classList.remove('d-none');
-                ordersWrap?.classList.remove('d-none');
-                execWrap?.classList.add('d-none');
-                apiWrap?.classList.add('d-none');
-                summaryPane?.classList.remove('d-none');
-                riskPane?.classList.remove('d-none');
-                ordersPane?.classList.remove('d-none');
-                if (chartsTabText) chartsTabText.textContent = 'Visual Metrics';
-                try { new bootstrap.Tab(document.getElementById('summary-tab')).show(); } catch (e) { console.warn('Tab show failed', e); }
+        const summaryWrap = document.getElementById('summary-tab-wrap');
+        const riskWrap = document.getElementById('risk-settings-tab-wrap');
+        const ordersWrap = document.getElementById('internal-orders-tab-wrap');
+        const execWrap = document.getElementById('executions-tab-wrap');
+        const apiWrap = document.getElementById('api-examples-tab-wrap');
+        const summaryPane = document.getElementById('summary');
+        const riskPane = document.getElementById('risk-settings');
+        const ordersPane = document.getElementById('internal-orders');
+        summaryWrap?.classList.add('d-none');
+        riskWrap?.classList.add('d-none');
+        ordersWrap?.classList.add('d-none');
+        execWrap?.classList.remove('d-none');
+        apiWrap?.classList.remove('d-none');
+        summaryPane?.classList.add('d-none');
+        riskPane?.classList.add('d-none');
+        ordersPane?.classList.add('d-none');
 
-                const symbolInput = document.getElementById('summaryPrimarySymbolInput');
-                const dataSelect = document.getElementById('summaryDataFeedSelect');
-                const pushStatusEl = document.getElementById('summaryDataPushStatus');
-                const pushSwitch = document.getElementById('summaryDataPushSwitch');
-                if (pushStatusEl) pushStatusEl.textContent = '未推送';
-                if (pushSwitch) pushSwitch.checked = false;
-                this.data_push_state = {};
-                this.summaryPushAwaitingData = false;
-                if (this.summaryPushAwaitingTimer) {
-                    clearTimeout(this.summaryPushAwaitingTimer);
-                    this.summaryPushAwaitingTimer = null;
-                }
-                this.currentRiskSettings = null;
-                this.updateRiskSettingsStatus('loading');
-                const fallbackSymbol = s?.primary_symbol || '';
-                if (symbolInput) {
-                    symbolInput.value = fallbackSymbol || '';
-                    this.summaryPrimaryCurrent = fallbackSymbol ? fallbackSymbol.toUpperCase() : null;
-                    this.updateSummaryPrimaryStatus(fallbackSymbol ? 'saved' : 'empty');
-                }
-                const fallbackSub = s?.data_subscription || '';
-                this.summaryDataFeedCurrent = fallbackSub || null;
-                if (dataSelect) {
-                    dataSelect.value = fallbackSub || 'market_data';
-                }
+        const chartsTabText = document.getElementById('charts-tab-text');
+        if (chartsTabText) chartsTabText.textContent = 'Charts';
 
+        const summaryLists = [
+            ['summaryHighlights', '暂无摘要'],
+            ['summaryRiskParams', '暂无数据'],
+            ['summaryPositionSettings', '暂无限制'],
+            ['summarySchedule', '暂无排程'],
+        ];
+        summaryLists.forEach(([id, placeholder]) => {
+            const el = document.getElementById(id);
+            if (el) el.innerHTML = `<li class=\"text-muted\">${placeholder}</li>`;
+        });
+        const summaryDataLog = document.getElementById('summaryDataLogList');
+        if (summaryDataLog) summaryDataLog.innerHTML = '<li class="text-muted">暂无记录</li>';
+
+        const summaryParamBody = document.querySelector('#summaryParameterTable tbody');
+        if (summaryParamBody) {
+            summaryParamBody.innerHTML = '<tr><td colspan="4" class="text-muted">打开 Summary 标签后加载</td></tr>';
+        }
+        const summaryRiskBody = document.querySelector('#summaryRiskTable tbody');
+        if (summaryRiskBody) {
+            summaryRiskBody.innerHTML = '';
+        }
+
+        const symbolInput = document.getElementById('summaryPrimarySymbolInput');
+        if (symbolInput) {
+            symbolInput.value = '';
+            this.summaryPrimaryCurrent = null;
+            this.updateSummaryPrimaryStatus('empty');
+        }
+        const dataSelect = document.getElementById('summaryDataFeedSelect');
+        if (dataSelect) dataSelect.value = 'market_data';
+        const pushSwitch = document.getElementById('summaryDataPushSwitch');
+        if (pushSwitch) pushSwitch.checked = false;
+        const pushStatusEl = document.getElementById('summaryDataPushStatus');
+        if (pushStatusEl) pushStatusEl.textContent = '未推送';
+
+        const summaryStatusIds = [
+            'summaryStatusReceiving',
+            'summaryStatusRuntime',
+            'summaryStatusProcessed',
+            'summaryStatusThresholdHits',
+            'summaryStatusBuySignals',
+            'summaryStatusSellSignals',
+        ];
+        summaryStatusIds.forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = '-';
+        });
+        this.summaryStatusTarget = null;
+
+        this.data_push_state = {};
+        this.summaryPushAwaitingData = false;
+        if (this.summaryPushAwaitingTimer) {
+            clearTimeout(this.summaryPushAwaitingTimer);
+            this.summaryPushAwaitingTimer = null;
+        }
+        this.summaryDataFeedCurrent = null;
+
+        const riskForm = document.getElementById('riskSettingsForm');
+        if (riskForm) riskForm.reset();
+        this.currentRiskSettings = null;
+        this.updateRiskSettingsStatus('default', '加载风控设置后显示。');
+
+        const ordersBody = document.querySelector('#internalOrdersTable tbody');
+        if (ordersBody) {
+            ordersBody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">等待加载</td></tr>';
+        }
+        this.internalStrategyOrders = [];
+
+        const execBody = document.querySelector('#executionsTable tbody');
+        if (execBody) {
+            execBody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">等待加载</td></tr>';
+        }
+        const execHead = document.querySelector('#executionsTable thead tr');
+        if (execHead) {
+            execHead.innerHTML = `
+              <th>ID</th>
+              <th>Symbol</th>
+              <th>Created At</th>
+              <th>Action</th>
+              <th>Qty</th>
+              <th>Price</th>
+              <th>Status</th>
+              <th>PnL</th>
+              <th>Commission</th>
+            `;
+        }
+        const pagination = document.getElementById('executionsPagination');
+        if (pagination) {
+            pagination.innerHTML = '<li class="page-item disabled"><span class="page-link">-</span></li>';
+        }
+        this.executionsPagination.currentPage = 1;
+        this.executionsPagination.totalItems = 0;
+        this.executionsPagination.allExecutions = [];
+
+        const pageSizeSelect = document.getElementById('executionsPageSize');
+        if (pageSizeSelect) {
+            const newSelect = pageSizeSelect.cloneNode(true);
+            pageSizeSelect.parentNode.replaceChild(newSelect, pageSizeSelect);
+            newSelect.value = String(this.executionsPagination.pageSize || this.strategyExecutionsDefaultLimit);
+            newSelect.addEventListener('change', async () => {
+                const newSize = parseInt(newSelect.value, 10) || this.strategyExecutionsDefaultLimit;
+                this.executionsPagination.pageSize = newSize;
+                this.executionsPagination.currentPage = 1;
+                await this.triggerStrategyDetailsTabLoad('#executions', { force: true }).catch(() => {});
+                if (this.strategyDetailsState?.strategyType === 'internal') {
+                    await this.triggerStrategyDetailsTabLoad('#internal-orders', { force: true }).catch(() => {});
+                }
+                await this.triggerStrategyDetailsTabLoad('#charts', { force: true }).catch(() => {});
+            });
+        }
+
+        const refreshBtn = document.getElementById('refreshExecutionsBtn');
+        if (refreshBtn) {
+            refreshBtn.disabled = true;
+            refreshBtn.title = 'WebSocket updates executions automatically';
+        }
+
+        const clearBtn = document.getElementById('clearExecutionsBtn');
+        if (clearBtn) {
+            const newClear = clearBtn.cloneNode(true);
+            clearBtn.parentNode.replaceChild(newClear, clearBtn);
+            newClear.addEventListener('click', async () => {
                 try {
-                    const infoRes = await this.apiCall(`/strategies/${encodeURIComponent(name)}/internal-info`);
-                    if (infoRes.success) {
-                        const info = infoRes.strategy || {};
-                        const descEl = document.getElementById('summaryDescription');
-                        const pathEl = document.getElementById('summaryPath');
-                        const highlightsEl = document.getElementById('summaryHighlights');
-                        const riskParamEl = document.getElementById('summaryRiskParams');
-                        if (descEl) descEl.textContent = info.description || '';
-                        if (pathEl) pathEl.textContent = info.file_path || '';
-                        const resolvedSymbol = info.primary_symbol || s?.primary_symbol || '';
-                        if (symbolInput) {
-                            symbolInput.value = resolvedSymbol || '';
-                            this.summaryPrimaryCurrent = resolvedSymbol ? resolvedSymbol.toUpperCase() : null;
-                            this.updateSummaryPrimaryStatus(resolvedSymbol ? 'saved' : 'empty');
-                        }
-                        if (resolvedSymbol) {
-                            this.updateStrategyChartSymbol(resolvedSymbol, { ensureLoaded: true });
-                        }
-                        if (highlightsEl) {
-                            const points = Array.isArray(info.summary_points) ? info.summary_points : [];
-                            if (points.length) {
-                                highlightsEl.innerHTML = '';
-                                points.forEach(text => {
-                                    const li = document.createElement('li');
-                                    li.textContent = text;
-                                    highlightsEl.appendChild(li);
-                                });
-                            } else {
-                                highlightsEl.innerHTML = '<li class="text-muted">No additional highlights</li>';
-                            }
-                        }
-                        if (riskParamEl) {
-                            const params = info.risk_parameters || {};
-                            const mappings = {
-                                trend_threshold: 'Trend Threshold',
-                                cooldown_seconds: 'Cooldown',
-                                max_loss_streak: 'Breaker (Max Loss Streak)',
-                                default_quantity: 'Base Quantity',
-                                signal_frequency_seconds: 'Execution Frequency'
-                            };
-                            const entries = Object.entries(params).filter(([, value]) => value !== null && value !== undefined);
-                            if (entries.length) {
-                                riskParamEl.innerHTML = '';
-                                entries.forEach(([key, value]) => {
-                                    const label = mappings[key] || key;
-                                    const displayValue = typeof value === 'number' && !Number.isNaN(value)
-                                        ? (key === 'trend_threshold' ? value.toFixed(2) : value)
-                                        : value;
-                                    const li = document.createElement('li');
-                                    li.innerHTML = `<span class="text-muted">${label}:</span> <span class="fw-semibold">${displayValue}</span>`;
-                                    riskParamEl.appendChild(li);
-                                });
-                            } else {
-                                riskParamEl.innerHTML = '<li class="text-muted">No dedicated parameters</li>';
-                            }
-                        }
-                        if (isInternal && info.strategy_risk_settings) {
-                            this.currentRiskSettings = info.strategy_risk_settings;
-                            this.renderRiskSettingsForm(info.strategy_risk_settings);
-                            this.updateRiskSettingsStatus('loaded');
-                        } else if (isInternal) {
-                            await this.loadStrategyRiskSettings(name);
-                        }
-                        const paramTableBody = document.querySelector('#summaryParameterTable tbody');
-                        if (paramTableBody) {
-                            paramTableBody.innerHTML = '';
-                            const schemaSource = Array.isArray(info.configurable_parameters) && info.configurable_parameters.length
-                                ? info.configurable_parameters
-                                : (Array.isArray(info.parameters) ? info.parameters : []);
-                            const schema = Array.isArray(schemaSource) ? schemaSource : [];
-                            const formatValue = (param, key) => {
-                                const raw = param?.[key];
-                                if (raw === null || raw === undefined) return '-';
-                                if (param?.type === 'bool') {
-                                    return raw ? 'On' : 'Off';
-                                }
-                                if (typeof raw === 'number') {
-                                    return Number.isFinite(raw) ? raw : '-';
-                                }
-                                return raw;
-                            };
-                            const buildRangeText = (param) => {
-                                const parts = [];
-                                if (param?.min !== undefined && param.min !== null) parts.push(`≥ ${param.min}`);
-                                if (param?.max !== undefined && param.max !== null) parts.push(`≤ ${param.max}`);
-                                let range = parts.join(' / ');
-                                if (param?.allow_null) {
-                                    range = range ? `${range}; allow null` : 'Allow null';
-                                }
-                                return range || '-';
-                            };
-                            const startInlineEdit = (cell, param) => {
-                                if (!param?.name) return;
-                                if (cell.dataset.editing === '1') return;
-                                cell.dataset.editing = '1';
-                                const originalValue = param.value;
-                                const originalDisplay = formatValue(param, 'value');
-                                let isSaving = false;
-                                const cleanup = () => {
-                                    cell.dataset.editing = '0';
-                                    cell.classList.remove('opacity-75');
-                                };
-                                const revert = () => {
-                                    param.value = originalValue;
-                                    cell.innerHTML = '';
-                                    cell.textContent = originalDisplay;
-                                    cleanup();
-                                };
+                    const currentName = document.getElementById('detailsStrategyName')?.textContent || name;
+                    if (!currentName) return;
+                    if (!confirm(`确定要清空策略 "${currentName}" 的全部执行记录吗？此操作不可撤销！`)) {
+                        return;
+                    }
+                    await this.apiCall(`/strategies/${encodeURIComponent(currentName)}/executions`, { method: 'DELETE' });
+                    this.clearStrategyExecutionsCache(currentName);
+                    this.executionsPagination.allExecutions = [];
+                    this.executionsPagination.totalItems = 0;
+                    this.executionsPagination.currentPage = 1;
+                    await this.triggerStrategyDetailsTabLoad('#executions', { force: true }).catch(() => {});
+                    await this.triggerStrategyDetailsTabLoad('#charts', { force: true }).catch(() => {});
+                    if (this.strategyDetailsState?.strategyType === 'internal') {
+                        await this.triggerStrategyDetailsTabLoad('#internal-orders', { force: true }).catch(() => {});
+                    }
+                    this.showAlert('success', '已清空该策略的执行记录');
+                } catch (error) {
+                    console.error('Clear executions error:', error);
+                    this.showAlert('danger', '清空执行记录失败');
+                }
+            });
+        }
 
-                                let editor;
-                                const choices = Array.isArray(param?.choices) ? param.choices : null;
-                                if (param?.type === 'bool' || (choices && choices.length)) {
-                                    const select = document.createElement('select');
-                                    select.className = 'form-select form-select-sm';
-                                    if (choices && choices.length) {
-                                        choices.forEach((choice) => {
-                                            const opt = document.createElement('option');
-                                            const hasValue = choice && typeof choice === 'object' && 'value' in choice;
-                                            const rawValue = hasValue ? choice.value : choice;
-                                            const label = choice && typeof choice === 'object' && 'label' in choice
-                                                ? (choice.label ?? rawValue)
-                                                : rawValue;
-                                            const normalizedValue = rawValue === null || rawValue === undefined ? '' : String(rawValue);
-                                            opt.value = normalizedValue;
-                                            opt.textContent = label === null || label === undefined ? normalizedValue : String(label);
-                                            select.appendChild(opt);
-                                        });
-                                        if (param.allow_null) {
-                                            const opt = document.createElement('option');
-                                            opt.value = '';
-                                            opt.textContent = '（留空）';
-                                            select.appendChild(opt);
-                                        }
-                                        const current = param.value;
-                                        if (current === null || current === undefined) {
-                                            select.value = '';
-                                        } else {
-                                            const currentStr = typeof current === 'object' ? current?.value : String(current);
-                                            if (Array.from(select.options).some(opt => opt.value == currentStr)) {
-                                                select.value = currentStr;
-                                            }
-                                        }
-                                    } else {
-                                        const trueOpt = document.createElement('option');
-                                        trueOpt.value = 'true';
-                                        trueOpt.textContent = 'On';
-                                        const falseOpt = document.createElement('option');
-                                        falseOpt.value = 'false';
-                                        falseOpt.textContent = 'Off';
-                                        select.appendChild(trueOpt);
-                                        select.appendChild(falseOpt);
-                                        if (param.allow_null) {
-                                            const nullOpt = document.createElement('option');
-                                            nullOpt.value = 'null';
-                                            nullOpt.textContent = '（留空）';
-                                            select.appendChild(nullOpt);
-                                        }
-                                        const current = param.value;
-                                        if (current === null || current === undefined) {
-                                            select.value = 'null';
-                                        } else {
-                                            select.value = current ? 'true' : 'false';
-                                        }
-                                    }
-                                    editor = select;
-                                } else {
-                                    const input = document.createElement('input');
-                                    input.className = 'form-control form-control-sm';
-                                    input.type = (param?.type === 'int' || param?.type === 'float') ? 'number' : 'text';
-                                    if (param?.step !== undefined && param.step !== null) input.step = param.step;
-                                    if (param?.min !== undefined && param.min !== null) input.min = param.min;
-                                    if (param?.max !== undefined && param.max !== null) input.max = param.max;
-                                    if (param?.allow_null) {
-                                        input.placeholder = '（留空）';
-                                    }
-                                    const current = param.value;
-                                    input.value = (current === null || current === undefined) ? '' : current;
-                                    editor = input;
-                                }
+        const exportBtn = document.getElementById('exportExecutionsBtn');
+        if (exportBtn) {
+            const newExport = exportBtn.cloneNode(true);
+            exportBtn.parentNode.replaceChild(newExport, exportBtn);
+            newExport.addEventListener('click', () => {
+                const currentName = document.getElementById('detailsStrategyName')?.textContent || name;
+                if (currentName) {
+                    this.exportExecutionsCsv(currentName);
+                }
+            });
+        }
 
-                                cell.innerHTML = '';
-                                cell.appendChild(editor);
-                                cell.classList.add('opacity-75');
-                                editor.focus();
-                                if (editor.select) {
-                                    editor.select();
-                                }
-
-                                const handleBlur = () => {
-                                    revert();
-                                };
-                                editor.addEventListener('blur', handleBlur);
-
-                                const commit = async () => {
-                                    if (isSaving) return;
-                                    editor.removeEventListener('blur', handleBlur);
-                                    let raw;
-                                    let newValue;
-                                    if (param?.type === 'bool' && editor instanceof HTMLSelectElement) {
-                                        raw = editor.value;
-                                        if (raw === 'null') {
-                                            if (param.allow_null) {
-                                                newValue = null;
-                                            } else {
-                                                this.showAlert('danger', `${param.label || param.name} 不允许为空`);
-                                                editor.addEventListener('blur', handleBlur);
-                                                editor.focus();
-                                                return;
-                                            }
-                                        } else {
-                                            newValue = raw === 'true' || raw === '1';
-                                        }
-                                    } else if (choices && editor instanceof HTMLSelectElement) {
-                                        raw = editor.value;
-                                        if ((raw === '' || raw === null) && param.allow_null) {
-                                            newValue = null;
-                                        } else if (param?.type === 'int') {
-                                            const parsed = parseInt(raw, 10);
-                                            if (!Number.isFinite(parsed)) {
-                                                this.showAlert('danger', `${param.label || param.name} 需要整数数值`);
-                                                editor.addEventListener('blur', handleBlur);
-                                                editor.focus();
-                                                return;
-                                            }
-                                            newValue = parsed;
-                                        } else if (param?.type === 'float') {
-                                            const parsed = parseFloat(raw);
-                                            if (!Number.isFinite(parsed)) {
-                                                this.showAlert('danger', `${param.label || param.name} 需要数值`);
-                                                editor.addEventListener('blur', handleBlur);
-                                                editor.focus();
-                                                return;
-                                            }
-                                            newValue = parsed;
-                                        } else {
-                                            newValue = raw;
-                                        }
-                                    } else {
-                                        raw = editor.value;
-                                        if ((raw === '' || raw === null || raw === undefined)) {
-                                            if (param?.allow_null) {
-                                                newValue = null;
-                                            } else {
-                                                this.showAlert('danger', `${param.label || param.name} 不能为空`);
-                                                editor.addEventListener('blur', handleBlur);
-                                                editor.focus();
-                                                return;
-                                            }
-                                        } else if (param?.type === 'int') {
-                                            const parsed = parseInt(raw, 10);
-                                            if (!Number.isFinite(parsed)) {
-                                                this.showAlert('danger', `${param.label || param.name} 需要整数数值`);
-                                                editor.addEventListener('blur', handleBlur);
-                                                editor.focus();
-                                                return;
-                                            }
-                                            newValue = parsed;
-                                        } else if (param?.type === 'float') {
-                                            const parsed = parseFloat(raw);
-                                            if (!Number.isFinite(parsed)) {
-                                                this.showAlert('danger', `${param.label || param.name} 需要数值`);
-                                                editor.addEventListener('blur', handleBlur);
-                                                editor.focus();
-                                                return;
-                                            }
-                                            newValue = parsed;
-                                        } else {
-                                            newValue = raw;
-                                        }
-                                    }
-
-                                    if ((param?.type === 'int' || param?.type === 'float') && newValue !== null && newValue !== undefined) {
-                                        if (param?.min !== undefined && param.min !== null && newValue < param.min) {
-                                            this.showAlert('danger', `${param.label || param.name} 需 ≥ ${param.min}`);
-                                            editor.addEventListener('blur', handleBlur);
-                                            editor.focus();
-                                            return;
-                                        }
-                                        if (param?.max !== undefined && param.max !== null && newValue > param.max) {
-                                            this.showAlert('danger', `${param.label || param.name} 需 ≤ ${param.max}`);
-                                            editor.addEventListener('blur', handleBlur);
-                                            editor.focus();
-                                            return;
-                                        }
-                                    }
-
-                                    const unchanged = (originalValue === null || originalValue === undefined)
-                                        ? (newValue === null || newValue === undefined)
-                                        : (newValue === originalValue);
-                                    if (unchanged) {
-                                        revert();
-                                        return;
-                                    }
-
-                                    try {
-                                        isSaving = true;
-                                        if ('disabled' in editor) editor.disabled = true;
-                                        const payload = { parameters: { [param.name]: newValue } };
-                                        const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}`, {
-                                            method: 'PUT',
-                                            body: JSON.stringify(payload)
-                                        });
-                                        if (!res?.success) {
-                                            throw new Error('Update failed');
-                                        }
-                                        param.value = newValue;
-                                        cell.innerHTML = '';
-                                        cell.textContent = formatValue(param, 'value');
-                                        cleanup();
-                                        this.showAlert('success', `${param.label || param.name} 已更新`);
-                                    } catch (err) {
-                                        console.error('Failed to update parameter', err);
-                                        this.showAlert('danger', `${param.label || param.name} 更新失败`);
-                                        revert();
-                                    } finally {
-                                        isSaving = false;
-                                    }
-                                };
-
-                                if (editor instanceof HTMLSelectElement) {
-                                    editor.addEventListener('change', () => commit());
-                                }
-
-                                editor.addEventListener('keydown', (ev) => {
-                                    if (ev.key === 'Enter') {
-                                        ev.preventDefault();
-                                        commit();
-                                    } else if (ev.key === 'Escape') {
-                                        ev.preventDefault();
-                                        editor.removeEventListener('blur', handleBlur);
-                                        revert();
-                                    }
-                                });
-                            };
-                            if (schema.length) {
-                                schema.forEach((param) => {
-                                    const tr = document.createElement('tr');
-                                    if (param?.description) tr.title = param.description;
-                                    const nameCell = document.createElement('td');
-                                    nameCell.textContent = param?.label || param?.name || '-';
-                                    const valueCell = document.createElement('td');
-                                    valueCell.textContent = formatValue(param, 'value');
-                                    if (param?.name) {
-                                        valueCell.title = '双击编辑，回车保存';
-                                        valueCell.style.cursor = 'text';
-                                        valueCell.classList.add('align-middle');
-                                        valueCell.addEventListener('dblclick', () => startInlineEdit(valueCell, param));
-                                    }
-                                    const defaultCell = document.createElement('td');
-                                    defaultCell.textContent = formatValue(param, 'default');
-                                    const rangeCell = document.createElement('td');
-                                    rangeCell.textContent = buildRangeText(param);
-                                    tr.appendChild(nameCell);
-                                    tr.appendChild(valueCell);
-                                    tr.appendChild(defaultCell);
-                                    tr.appendChild(rangeCell);
-                                    paramTableBody.appendChild(tr);
-                                });
-                            } else {
-                                const row = document.createElement('tr');
-                                const cell = document.createElement('td');
-                                cell.colSpan = 4;
-                                cell.className = 'text-muted';
-                                cell.textContent = 'No configurable parameters';
-                                row.appendChild(cell);
-                                paramTableBody.appendChild(row);
-                            }
+        const resetBtn = document.getElementById('resetStrategyDataBtn');
+        if (resetBtn) {
+            const newReset = resetBtn.cloneNode(true);
+            resetBtn.parentNode.replaceChild(newReset, resetBtn);
+            newReset.addEventListener('click', async () => {
+                const currentName = document.getElementById('detailsStrategyName')?.textContent || name;
+                if (!currentName) return;
+                if (!confirm(`确定要重置策略 "${currentName}" 的全部订单与统计数据吗？此操作不可撤销！`)) {
+                    return;
+                }
+                const originalHtml = newReset.innerHTML;
+                newReset.disabled = true;
+                newReset.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Resetting…';
+                try {
+                    const res = await this.apiCall(`/strategies/${encodeURIComponent(currentName)}/reset`, { method: 'POST' });
+                    if (!res?.success) {
+                        throw new Error(res?.error || res?.detail || '重置策略数据失败');
+                    }
+                    this.clearStrategyExecutionsCache(currentName);
+                    this.strategyDetailsState.tabLoaded = {};
+                    await Promise.allSettled([
+                        this.triggerStrategyDetailsTabLoad('#executions', { force: true }),
+                        this.triggerStrategyDetailsTabLoad('#charts', { force: true }),
+                        this.triggerStrategyDetailsTabLoad('#pnl-calendar', { force: true }),
+                        this.triggerStrategyDetailsTabLoad('#summary', { force: true }),
+                        this.triggerStrategyDetailsTabLoad('#internal-orders', { force: true }),
+                    ]);
+                    try {
+                        const detailRes = await this.apiCall(`/strategies/${encodeURIComponent(currentName)}`);
+                        if (detailRes?.success) {
+                            this.updateStrategyDetailsHeader(detailRes.strategy || {});
                         }
-                        const subKey = info.data_subscription || s?.data_subscription || '';
-                        this.summaryDataFeedCurrent = subKey || null;
-                        if (dataSelect) {
-                            dataSelect.value = subKey || 'market_data';
-                        }
-                        const positionList = document.getElementById('summaryPositionSettings');
-                        if (positionList) {
-                            const timing = info.position_settings || {};
-                            positionList.innerHTML = '';
-                            const entries = [];
-                            if (timing.position_add_cooldown_minutes) {
-                                entries.push(['Add Cooldown', `${timing.position_add_cooldown_minutes} min`]);
-                            }
-                            if (timing.close_before_close_minutes) {
-                                entries.push(['Exit Before Close', `${timing.close_before_close_minutes} min`]);
-                            }
-                            if (entries.length) {
-                                entries.forEach(([label, value]) => {
-                                    const li = document.createElement('li');
-                                    li.innerHTML = `<span class="text-muted">${label}:</span> <span class="fw-semibold">${value}</span>`;
-                                    positionList.appendChild(li);
-                                });
-                            } else {
-                                positionList.innerHTML = '<li class="text-muted">No timing limits</li>';
-                            }
-                        }
-                        const schedList = document.getElementById('summarySchedule');
-                        if (schedList) {
-                            schedList.innerHTML = '';
-                            (info.schedule || []).forEach(item => {
-                                const li = document.createElement('li');
-                                li.textContent = `${item.time || ''} ${item.action || ''} ${item.qty || ''} ${item.symbol || ''}`.trim();
-                                schedList.appendChild(li);
-                            });
-                        }
-                        const riskBody = document.querySelector('#summaryRiskTable tbody');
-                        if (riskBody) {
-                            riskBody.innerHTML = '';
-                            const rr = info.risk_rules || {};
-                            Object.keys(rr).forEach(sym => {
-                                const rule = rr[sym] || {};
-                                const tr = document.createElement('tr');
-                                tr.innerHTML = `<td>${sym}</td><td>${rule.stop_loss_price ?? ''}</td><td>${rule.take_profit_price ?? ''}</td>`;
-                                riskBody.appendChild(tr);
-                            });
-                        }
+                    } catch (refreshErr) {
+                        console.warn('Failed to refresh strategy info after reset', refreshErr);
+                        this.updateStrategyDetailsHeader(null);
+                    }
+                    if (this.strategiesManager?.loadStrategies) {
+                        await this.strategiesManager.loadStrategies({ force: true }).catch((err) => {
+                            console.warn('Failed to refresh strategies list after reset', err);
+                        });
+                    }
+                    const successMessage = res?.message || '策略订单与统计数据已重置';
+                    this.showAlert('success', successMessage);
+                } catch (error) {
+                    console.error('Reset strategy data error:', error);
+                    this.showAlert('danger', error?.message || '重置策略数据失败');
+                } finally {
+                    newReset.disabled = false;
+                    newReset.innerHTML = originalHtml;
+                }
+            });
+        }
+
+        const deleteBtn = document.getElementById('deleteStrategyFromDetails');
+        if (deleteBtn) {
+            const newDelete = deleteBtn.cloneNode(true);
+            deleteBtn.parentNode.replaceChild(newDelete, deleteBtn);
+            newDelete.addEventListener('click', async () => {
+                const currentName = document.getElementById('detailsStrategyName')?.textContent || name;
+                if (!currentName) return;
+                await this.deleteStrategy(currentName);
+                const modalEl = document.getElementById('strategyDetailsModal');
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                if (modal) modal.hide();
+            });
+        }
+
+        const calendarContainer = document.getElementById('pnlCalendarContainer');
+        if (calendarContainer) {
+            calendarContainer.innerHTML = '<div class="text-muted text-center py-4">打开 PnL Calendar 标签以加载数据</div>';
+        }
+
+        const apiContainer = document.getElementById('apiExampleContent');
+        if (apiContainer) {
+            apiContainer.innerHTML = '<p class="text-muted">打开 API Examples 标签查看示例。</p>';
+        }
+
+        this.setupStrategyChartTab();
+        this.resetStrategyChartState({ keepControls: false, resetSymbol: true });
+    }
+
+    ensureStrategyDetailsTabListener() {
+        if (this.strategyDetailsTabListenerBound) return;
+        const tabs = document.getElementById('strategyDetailsTabs');
+        if (!tabs) return;
+        tabs.addEventListener('shown.bs.tab', (event) => {
+            const target = event.target?.getAttribute('data-bs-target') || event.target?.dataset?.bsTarget;
+            if (target) {
+                this.triggerStrategyDetailsTabLoad(target).catch(() => {});
+            }
+        });
+        this.strategyDetailsTabListenerBound = true;
+    }
+
+    showStrategyDetailsModal() {
+        const modalEl = document.getElementById('strategyDetailsModal');
+        if (!modalEl) return;
+        const modal = bootstrap.Modal?.getOrCreateInstance
+            ? bootstrap.Modal.getOrCreateInstance(modalEl)
+            : new bootstrap.Modal(modalEl);
+        try {
+            modal.show();
+        } catch (err) {
+            console.warn('Failed to show strategy details modal:', err);
+        }
+    }
+
+    async initializeStrategyDetailsContent(name) {
+        const strategy = await this.fetchStrategyBasicInfo(name);
+        if (this.strategyDetailsState.name !== name) {
+            return;
+        }
+        this.strategyDetailsState.basicInfo = strategy || null;
+        this.updateStrategyDetailsHeader(strategy);
+        this.configureStrategyDetailsTabs(strategy);
+        this.setupStrategyChartState(strategy, name);
+    }
+
+    updateStrategyDetailsHeader(strategy) {
+        const typeEl = document.getElementById('detailsStrategyType');
+        const trigEl = document.getElementById('detailsTriggerCount');
+        const lastEl = document.getElementById('detailsLastTriggered');
+        if (typeEl) typeEl.textContent = strategy?.strategy_type || '-';
+        if (trigEl) trigEl.textContent = strategy?.trigger_count ?? 0;
+        if (lastEl) {
+            lastEl.textContent = strategy?.last_triggered
+                ? new Date(strategy.last_triggered).toLocaleString()
+                : '-';
+        }
+    }
+
+    configureStrategyDetailsTabs(strategy) {
+        const isInternal = (strategy?.strategy_type || '').toLowerCase() === 'internal';
+        const summaryWrap = document.getElementById('summary-tab-wrap');
+        const riskWrap = document.getElementById('risk-settings-tab-wrap');
+        const ordersWrap = document.getElementById('internal-orders-tab-wrap');
+        const execWrap = document.getElementById('executions-tab-wrap');
+        const apiWrap = document.getElementById('api-examples-tab-wrap');
+        const summaryPane = document.getElementById('summary');
+        const riskPane = document.getElementById('risk-settings');
+        const ordersPane = document.getElementById('internal-orders');
+        const chartsTabText = document.getElementById('charts-tab-text');
+
+        if (isInternal) {
+            summaryWrap?.classList.remove('d-none');
+            riskWrap?.classList.remove('d-none');
+            ordersWrap?.classList.remove('d-none');
+            execWrap?.classList.add('d-none');
+            apiWrap?.classList.add('d-none');
+            summaryPane?.classList.remove('d-none');
+            riskPane?.classList.remove('d-none');
+            ordersPane?.classList.remove('d-none');
+            if (chartsTabText) chartsTabText.textContent = 'Visual Metrics';
+            this.updateRiskSettingsStatus('loading');
+            this.strategyDetailsState.defaultTabTarget = '#summary';
+        } else {
+            summaryWrap?.classList.add('d-none');
+            riskWrap?.classList.add('d-none');
+            ordersWrap?.classList.add('d-none');
+            execWrap?.classList.remove('d-none');
+            apiWrap?.classList.remove('d-none');
+            summaryPane?.classList.add('d-none');
+            riskPane?.classList.add('d-none');
+            ordersPane?.classList.add('d-none');
+            if (chartsTabText) chartsTabText.textContent = 'Charts';
+            this.currentRiskSettings = null;
+            this.updateRiskSettingsStatus('default', '风控设置将在内部策略中显示。');
+            this.strategyDetailsState.defaultTabTarget = '#charts';
+        }
+
+        this.strategyDetailsState.strategyType = isInternal ? 'internal' : (strategy?.strategy_type || 'external');
+    }
+
+    setupStrategyChartState(strategy, name) {
+        const initialSymbol = this.resolveStrategySymbol(strategy) || '';
+        this.strategyDetailsState.initialSymbol = initialSymbol;
+        this.resetStrategyChartState({
+            keepControls: true,
+            currentStrategy: name,
+            symbol: initialSymbol || '',
+            resetSymbol: !initialSymbol,
+        });
+        const state = this.getStrategyChartState();
+        if (initialSymbol) {
+            state.symbol = initialSymbol;
+        }
+    }
+
+    activateStrategyDetailsDefaultTab() {
+        const state = this.strategyDetailsState;
+        const target = state?.defaultTabTarget || '#charts';
+        const button = document.querySelector(`#strategyDetailsTabs button[data-bs-target="${target}"]`);
+        if (!button) return;
+        try {
+            const tabInstance = bootstrap.Tab?.getOrCreateInstance
+                ? bootstrap.Tab.getOrCreateInstance(button)
+                : new bootstrap.Tab(button);
+            tabInstance.show();
+        } catch (err) {
+            console.warn('Tab show failed', err);
+        }
+    }
+
+    async requestActiveStrategyDetailsTabLoad(options = {}) {
+        const active = document.querySelector('#strategyDetailsTabs .nav-link.active');
+        if (!active) return;
+        const target = active.getAttribute('data-bs-target') || active.dataset?.bsTarget;
+        if (target) {
+            await this.triggerStrategyDetailsTabLoad(target, options);
+        }
+    }
+
+    async triggerStrategyDetailsTabLoad(targetSelector, options = {}) {
+        const state = this.strategyDetailsState;
+        if (!state || !state.name) return;
+        const key = (targetSelector || '').replace(/^#/, '');
+        if (!key) return;
+        if (!options.force && state.tabLoaded[key]) return;
+        const loaders = {
+            summary: (opts) => this.loadStrategySummaryTab(opts),
+            'risk-settings': (opts) => this.loadStrategyRiskTab(opts),
+            'internal-orders': (opts) => this.loadStrategyInternalOrdersTab(opts),
+            charts: (opts) => this.loadStrategyChartsTab(opts),
+            'strategy-chart': (opts) => this.loadStrategyStrategyChartTab(opts),
+            executions: (opts) => this.loadStrategyExecutionsTab(opts),
+            'pnl-calendar': (opts) => this.loadStrategyPnlCalendarTab(opts),
+            'api-examples': () => this.loadStrategyApiExamplesTab(),
+        };
+        const loader = loaders[key];
+        if (!loader) return;
+        try {
+            await loader(options);
+            state.tabLoaded[key] = true;
+        } catch (err) {
+            console.error(`Failed to load strategy details tab ${targetSelector}:`, err);
+            state.tabLoaded[key] = false;
+        }
+    }
+
+    async fetchStrategyBasicInfo(name) {
+        const state = this.strategyDetailsState;
+        if (!state || state.name !== name) return null;
+        if (!state.fetches.basicInfo) {
+            state.fetches.basicInfo = (async () => {
+                try {
+                    const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}`);
+                    if (res?.success) {
+                        return res.strategy || null;
+                    }
+                } catch (err) {
+                    console.error('Failed to load strategy info:', err);
+                }
+                return null;
+            })();
+        }
+        try {
+            return await state.fetches.basicInfo;
+        } catch (err) {
+            state.fetches.basicInfo = null;
+            throw err;
+        }
+    }
+
+    async fetchStrategyInternalInfo(name) {
+        const state = this.strategyDetailsState;
+        if (!state || state.name !== name) return null;
+        if (!state.fetches.internalInfo) {
+            state.fetches.internalInfo = (async () => {
+                try {
+                    const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/internal-info`);
+                    if (res?.success) {
+                        return res.strategy || {};
                     }
                 } catch (err) {
                     console.error('Failed to load internal strategy info:', err);
                 }
-                if (isInternal && !this.currentRiskSettings) {
-                    await this.loadStrategyRiskSettings(name);
-                }
-                await this.loadStrategyStatus(name, { force: true });
-            } else {
-                summaryWrap?.classList.add('d-none');
-                riskWrap?.classList.add('d-none');
-                ordersWrap?.classList.add('d-none');
-                execWrap?.classList.remove('d-none');
-                apiWrap?.classList.remove('d-none');
-                summaryPane?.classList.add('d-none');
-                riskPane?.classList.add('d-none');
-                ordersPane?.classList.add('d-none');
-                this.currentRiskSettings = null;
-                this.updateRiskSettingsStatus('default', '风控设置将在内部策略中显示。');
-                if (chartsTabText) chartsTabText.textContent = 'Charts';
-                this.summaryPushAwaitingData = false;
-                this.data_push_state = {};
-                if (this.summaryPushAwaitingTimer) {
-                    clearTimeout(this.summaryPushAwaitingTimer);
-                    this.summaryPushAwaitingTimer = null;
-                }
-                try { new bootstrap.Tab(document.getElementById('charts-tab')).show(); } catch (e) { console.warn('Tab show failed', e); }
-            }
-
-            // API Examples
-            const container = document.getElementById('apiExampleContent');
-            if (container) {
-                if (s?.strategy_type === 'external') {
-                    const endpoint = s.api_endpoint || '/api/strategy';
-                    const samplePayload = { symbol: 'AAPL', action: 'BUY', quantity: 10, price: 190.12, meta: { note: 'optional' } };
-                    const payloadStr = JSON.stringify(samplePayload).replace(/\"/g, '\\\"');
-                    const curl = `curl -X POST \"${endpoint}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d \"${payloadStr}\"`;
-                    container.innerHTML = `
-                      <div class="mb-2"><span class="badge bg-primary">external</span> endpoint: <code>${endpoint}</code></div>
-                      <pre class="bg-light p-3"><code>${curl}</code></pre>
-                      <p class="text-muted">如果在策略设置中开启鉴权，需要在请求体中加入 <code>{ token: &lt;TOKEN&gt; }</code> 字段，其中 TOKEN 来自策略设置</p>`;
-                } else {
-                    container.innerHTML = '<p class="text-muted">API examples are only available for external strategies.</p>';
-                }
-            }
-
-            const modalElForDetails = document.getElementById('strategyDetailsModal');
-            if (modalElForDetails) {
-                const modal = (bootstrap.Modal.getOrCreateInstance ? bootstrap.Modal.getOrCreateInstance(modalElForDetails) : new bootstrap.Modal(modalElForDetails));
-                try { modal.show(); } catch (e) { console.warn('Failed to show strategy details modal:', e); }
-            }
-
-            // 标题内联重命名：双击编辑，回车提交
-            const titleNameEl = document.getElementById('detailsStrategyName');
-            if (titleNameEl) {
-                // 解除旧事件（克隆替换避免重复绑定）
-                const newTitle = titleNameEl.cloneNode(true);
-                titleNameEl.parentNode.replaceChild(newTitle, titleNameEl);
-                newTitle.title = '双击可重命名';
-                newTitle.style.cursor = 'text';
-                newTitle.ondblclick = () => {
-                    const oldName = newTitle.textContent || name;
-                    const input = document.createElement('input');
-                    input.type = 'text';
-                    input.className = 'form-control form-control-sm d-inline-block';
-                    input.style.width = Math.max(120, oldName.length * 9) + 'px';
-                    input.value = oldName;
-                    newTitle.replaceWith(input);
-                    input.focus();
-                    const commit = async () => {
-                        const newName = input.value.trim();
-                        if (!newName || newName === oldName) {
-                            input.replaceWith(newTitle);
-                            newTitle.textContent = oldName;
-                            return;
-                        }
-                        try {
-                            await this.apiCall(`/strategies/${encodeURIComponent(oldName)}/rename`, {
-                                method: 'POST',
-                                body: JSON.stringify({ new_name: newName, rename_file: false })
-                            });
-                            this.showAlert('success', `策略已重命名为 ${newName}`);
-                            newTitle.textContent = newName;
-                            input.replaceWith(newTitle);
-                            // 刷新策略列表
-                            this.strategiesManager.loadStrategies();
-                        } catch (e) {
-                            console.error('Rename strategy error:', e);
-                            this.showAlert('danger', '重命名失败');
-                            input.replaceWith(newTitle);
-                            newTitle.textContent = oldName;
-                        }
-                    };
-                    input.addEventListener('keydown', (ev) => {
-                        if (ev.key === 'Enter') commit();
-                        if (ev.key === 'Escape') {
-                            input.replaceWith(newTitle);
-                            newTitle.textContent = oldName;
-                        }
-                    });
-                    input.addEventListener('blur', commit);
-                };
-            }
-
-            const rangeSel = document.getElementById('performanceRange');
-            const customSection = document.getElementById('customRangeSection');
-            if (rangeSel && customSection) {
-                rangeSel.value = '1d';
-                rangeSel.onchange = () => {
-                    customSection.style.display = rangeSel.value === 'custom' ? '' : 'none';
-                    if (rangeSel.value !== 'custom') {
-                        this.loadStrategyPerformance(name, { range: rangeSel.value });
-                    }
-                };
-            }
-            const applyBtn = document.getElementById('applyCustomRangeBtn');
-            if (applyBtn) {
-                applyBtn.onclick = () => {
-                    const start = document.getElementById('perfStart').value;
-                    const end = document.getElementById('perfEnd').value;
-                    if (start && end) {
-                        this.loadStrategyPerformance(name, { range: 'custom', start, end });
-                    }
-                };
-            }
-
-            // Pagination controls and export
-            const pageSizeSelect = document.getElementById('executionsPageSize');
-            if (pageSizeSelect) {
-                pageSizeSelect.value = String(this.executionsPagination.pageSize);
-                pageSizeSelect.onchange = async () => {
-                    const newSize = parseInt(pageSizeSelect.value, 10) || this.strategyExecutionsDefaultLimit;
-                    this.executionsPagination.pageSize = newSize;
-                    this.executionsPagination.currentPage = 1;
-                    await this.loadStrategyExecutions(name, { limit: newSize, force: true });
-                    const currentRange = rangeSel ? rangeSel.value : '1d';
-                    if (currentRange === 'custom') {
-                        const startInput = document.getElementById('perfStart');
-                        const endInput = document.getElementById('perfEnd');
-                        const startVal = startInput?.value;
-                        const endVal = endInput?.value;
-                        if (startVal && endVal) {
-                            this.loadStrategyPerformance(name, { range: 'custom', start: startVal, end: endVal });
-                        } else {
-                            this.loadStrategyPerformance(name, { range: '1d' });
-                        }
-                    } else {
-                        this.loadStrategyPerformance(name, { range: currentRange });
-                    }
-                    if (isInternal) {
-                        this.loadInternalStrategyOrders(name, { limit: newSize });
-                    }
-                };
-            }
-            const exportBtn = document.getElementById('exportExecutionsBtn');
-            if (exportBtn) {
-                exportBtn.onclick = () => this.exportExecutionsCsv(name);
-            }
-
-            const resetBtn = document.getElementById('resetStrategyDataBtn');
-            if (resetBtn) {
-                const clonedReset = resetBtn.cloneNode(true);
-                resetBtn.parentNode.replaceChild(clonedReset, resetBtn);
-                clonedReset.addEventListener('click', async () => {
-                    const curName = document.getElementById('detailsStrategyName')?.textContent || name;
-                    if (!curName) return;
-                    if (!confirm(`确定要重置策略 "${curName}" 的全部订单与统计数据吗？此操作不可撤销！`)) {
-                        return;
-                    }
-                    const originalHtml = clonedReset.innerHTML;
-                    clonedReset.disabled = true;
-                    clonedReset.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Resetting…';
-                    try {
-                        const res = await this.apiCall(`/strategies/${encodeURIComponent(curName)}/reset`, { method: 'POST' });
-                        if (!res?.success) {
-                            const message = res?.error || res?.detail || '重置策略数据失败';
-                            throw new Error(message);
-                        }
-
-                        this.clearStrategyExecutionsCache(curName);
-                        const currentRange = document.getElementById('performanceRange')?.value || '1d';
-                        const refreshTasks = [
-                            this.loadStrategyExecutions(curName, { executions: [], force: true }),
-                            this.loadInternalStrategyOrders(curName, { executions: [], force: true }),
-                            this.loadStrategyPerformance(curName, { range: currentRange, executions: [] }),
-                            this.loadPnLCalendar(curName),
-                        ];
-                        await Promise.allSettled(refreshTasks);
-
-                        try {
-                            const detailRes = await this.apiCall(`/strategies/${encodeURIComponent(curName)}`);
-                            if (detailRes?.success) {
-                                const strategyInfo = detailRes.strategy || {};
-                                const trigEl = document.getElementById('detailsTriggerCount');
-                                if (trigEl) trigEl.textContent = strategyInfo.trigger_count ?? 0;
-                                const lastEl = document.getElementById('detailsLastTriggered');
-                                if (lastEl) {
-                                    lastEl.textContent = strategyInfo.last_triggered
-                                        ? new Date(strategyInfo.last_triggered).toLocaleString()
-                                        : '-';
-                                }
-                                const typeEl = document.getElementById('detailsStrategyType');
-                                if (typeEl && strategyInfo.strategy_type) {
-                                    typeEl.textContent = strategyInfo.strategy_type;
-                                }
-                            }
-                        } catch (refreshErr) {
-                            console.warn('Failed to refresh strategy info after reset', refreshErr);
-                            const trigEl = document.getElementById('detailsTriggerCount');
-                            if (trigEl) trigEl.textContent = '0';
-                            const lastEl = document.getElementById('detailsLastTriggered');
-                            if (lastEl) lastEl.textContent = '-';
-                        }
-
-                        const perfCells = this.strategyPerformanceCells?.get(curName);
-                        if (perfCells) {
-                            perfCells.pnlCell.textContent = '$0.00';
-                            perfCells.tradesCell.textContent = '0';
-                        }
-                        if (this.strategiesManager && typeof this.strategiesManager.loadStrategies === 'function') {
-                            try {
-                                await this.strategiesManager.loadStrategies({ force: true });
-                            } catch (refreshListErr) {
-                                console.warn('Failed to refresh strategies list after reset', refreshListErr);
-                            }
-                        }
-
-                        const successMessage = res?.message || '策略订单与统计数据已重置';
-                        this.showAlert('success', successMessage);
-                    } catch (error) {
-                        console.error('Reset strategy data error:', error);
-                        const errMsg = error?.message || '重置策略数据失败';
-                        this.showAlert('danger', errMsg);
-                    } finally {
-                        clonedReset.disabled = false;
-                        clonedReset.innerHTML = originalHtml;
-                    }
-                });
-            }
-
-            // 删除策略按钮
-            const delBtn = document.getElementById('deleteStrategyFromDetails');
-            if (delBtn) {
-                // 解绑旧事件
-                const cloned = delBtn.cloneNode(true);
-                delBtn.parentNode.replaceChild(cloned, delBtn);
-                cloned.addEventListener('click', async () => {
-                    const curName = document.getElementById('detailsStrategyName')?.textContent || name;
-                    if (!curName) return;
-                    await this.deleteStrategy(curName);
-                    // 删除成功后关闭弹窗
-                    const modalEl = document.getElementById('strategyDetailsModal');
-                    const inst = bootstrap.Modal.getInstance(modalEl);
-                    inst && inst.hide();
-                });
-            }
-            
-            // WebSocket updates executions automatically
-            const refreshBtn = document.getElementById('refreshExecutionsBtn');
-            if (refreshBtn) {
-                refreshBtn.disabled = true;
-                refreshBtn.title = 'WebSocket updates executions automatically';
-            }
-
-            const clearBtn = document.getElementById('clearExecutionsBtn');
-            if (clearBtn) {
-                clearBtn.onclick = async () => {
-                    try {
-                        const strategy = document.getElementById('detailsStrategyName')?.textContent || name;
-                        if (!strategy) return;
-                        if (!confirm(`确定要清空策略 "${strategy}" 的全部执行记录吗？此操作不可撤销！`)) {
-                            return;
-                        }
-                        await this.apiCall(`/strategies/${encodeURIComponent(strategy)}/executions`, { method: 'DELETE' });
-                        this.clearStrategyExecutionsCache(strategy);
-                        this.executionsPagination.allExecutions = [];
-                        this.executionsPagination.totalItems = 0;
-                        this.executionsPagination.currentPage = 1;
-                        this.renderExecutionsTable();
-                        this.renderExecutionsPagination();
-                        this.showAlert('success', '已清空该策略的执行记录');
-                    } catch (e) {
-                        console.error('Clear executions error:', e);
-                        this.showAlert('danger', '清空执行记录失败');
-                    }
-                };
-            }
-
-            const calendarPromise = this.loadPnLCalendar(name);
-            const executionLimit = Math.max(this.strategyExecutionsDefaultLimit, this.executionsPagination.pageSize || 0);
-            let executionData = [];
-            try {
-                executionData = await this.fetchStrategyExecutions(name, { limit: executionLimit, force: true });
-            } catch (err) {
-                console.error('Prefetch strategy executions error:', err);
-                executionData = [];
-            }
-            this.applyStrategyChartOrders(executionData, { redraw: true });
-            const loaders = [
-                this.loadStrategyPerformance(name, { range: '1d', executions: executionData }),
-                this.loadStrategyExecutions(name, { executions: executionData }),
-                calendarPromise
-            ];
-            if (isInternal) {
-                loaders.push(this.loadInternalStrategyOrders(name, { executions: executionData }));
-            }
-            await Promise.all(loaders);
-        } catch (e) {
-            console.error('Open details error:', e);
-            this.showAlert('danger', 'Failed to open strategy details');
+                return null;
+            })();
+        }
+        try {
+            return await state.fetches.internalInfo;
+        } catch (err) {
+            state.fetches.internalInfo = null;
+            throw err;
         }
     }
+
+    async loadStrategySummaryTab() {
+        const state = this.strategyDetailsState;
+        if (!state || state.strategyType !== 'internal') return;
+        const name = state.name;
+        if (!name) return;
+
+        this.ensureSummaryControls();
+
+        const baseInfo = state.basicInfo || {};
+        const fallbackSymbol = baseInfo.primary_symbol || state.initialSymbol || '';
+        const symbolInput = document.getElementById('summaryPrimarySymbolInput');
+        if (symbolInput) {
+            symbolInput.value = fallbackSymbol || '';
+            this.summaryPrimaryCurrent = fallbackSymbol ? fallbackSymbol.toUpperCase() : null;
+            this.updateSummaryPrimaryStatus(fallbackSymbol ? 'saved' : 'empty');
+        }
+        const fallbackSub = baseInfo.data_subscription || '';
+        const dataSelect = document.getElementById('summaryDataFeedSelect');
+        this.summaryDataFeedCurrent = fallbackSub || null;
+        if (dataSelect) dataSelect.value = fallbackSub || 'market_data';
+
+        const pushSwitch = document.getElementById('summaryDataPushSwitch');
+        if (pushSwitch) pushSwitch.checked = false;
+        const pushStatusEl = document.getElementById('summaryDataPushStatus');
+        if (pushStatusEl) pushStatusEl.textContent = '未推送';
+        this.data_push_state = {};
+        this.summaryPushAwaitingData = false;
+        if (this.summaryPushAwaitingTimer) {
+            clearTimeout(this.summaryPushAwaitingTimer);
+            this.summaryPushAwaitingTimer = null;
+        }
+
+        try {
+            const info = await this.fetchStrategyInternalInfo(name);
+            if (info) {
+                state.internalInfo = info;
+                const descEl = document.getElementById('summaryDescription');
+                if (descEl) descEl.textContent = info.description || '';
+                const pathEl = document.getElementById('summaryPath');
+                if (pathEl) pathEl.textContent = info.file_path || '';
+
+                const resolvedSymbol = info.primary_symbol || fallbackSymbol || '';
+                if (symbolInput) {
+                    symbolInput.value = resolvedSymbol || '';
+                    this.summaryPrimaryCurrent = resolvedSymbol ? resolvedSymbol.toUpperCase() : null;
+                    this.updateSummaryPrimaryStatus(resolvedSymbol ? 'saved' : 'empty');
+                }
+                if (resolvedSymbol) {
+                    this.updateStrategyChartSymbol(resolvedSymbol, { ensureLoaded: false });
+                }
+
+                const highlightsEl = document.getElementById('summaryHighlights');
+                if (highlightsEl) {
+                    const points = Array.isArray(info.summary_points) ? info.summary_points : [];
+                    if (points.length) {
+                        highlightsEl.innerHTML = '';
+                        points.forEach((text) => {
+                            const li = document.createElement('li');
+                            li.textContent = text;
+                            highlightsEl.appendChild(li);
+                        });
+                    } else {
+                        highlightsEl.innerHTML = '<li class="text-muted">No additional highlights</li>';
+                    }
+                }
+
+                const riskParamEl = document.getElementById('summaryRiskParams');
+                if (riskParamEl) {
+                    const params = info.risk_parameters || {};
+                    const mappings = {
+                        trend_threshold: 'Trend Threshold',
+                        cooldown_seconds: 'Cooldown',
+                        max_loss_streak: 'Breaker (Max Loss Streak)',
+                        default_quantity: 'Base Quantity',
+                        signal_frequency_seconds: 'Execution Frequency',
+                    };
+                    const entries = Object.entries(params).filter(([, value]) => value !== null && value !== undefined);
+                    if (entries.length) {
+                        riskParamEl.innerHTML = '';
+                        entries.forEach(([key, value]) => {
+                            const label = mappings[key] || key;
+                            const displayValue = typeof value === 'number' && !Number.isNaN(value)
+                                ? (key === 'trend_threshold' ? value.toFixed(2) : value)
+                                : value;
+                            const li = document.createElement('li');
+                            li.innerHTML = `<span class="text-muted">${label}:</span> <span class="fw-semibold">${displayValue}</span>`;
+                            riskParamEl.appendChild(li);
+                        });
+                    } else {
+                        riskParamEl.innerHTML = '<li class="text-muted">No dedicated parameters</li>';
+                    }
+                }
+
+                state.preloadedRiskSettings = info.strategy_risk_settings || null;
+
+                const paramTableBody = document.querySelector('#summaryParameterTable tbody');
+                if (paramTableBody) {
+                    paramTableBody.innerHTML = '';
+                    const schemaSource = Array.isArray(info.configurable_parameters) && info.configurable_parameters.length
+                        ? info.configurable_parameters
+                        : (Array.isArray(info.parameters) ? info.parameters : []);
+                    const schema = Array.isArray(schemaSource) ? schemaSource : [];
+                    const formatValue = (param, key) => {
+                        const raw = param?.[key];
+                        if (raw === null || raw === undefined) return '-';
+                        if (param?.type === 'bool') {
+                            return raw ? 'On' : 'Off';
+                        }
+                        if (typeof raw === 'number') {
+                            return Number.isFinite(raw) ? raw : '-';
+                        }
+                        return raw;
+                    };
+                    const buildRangeText = (param) => {
+                        const parts = [];
+                        if (param?.min !== undefined && param.min !== null) parts.push(`≥ ${param.min}`);
+                        if (param?.max !== undefined && param.max !== null) parts.push(`≤ ${param.max}`);
+                        let range = parts.join(' / ');
+                        if (param?.allow_null) {
+                            range = range ? `${range}; allow null` : 'Allow null';
+                        }
+                        return range || '-';
+                    };
+                    const startInlineEdit = (cell, param) => {
+                        if (!param?.name) return;
+                        if (cell.dataset.editing === '1') return;
+                        cell.dataset.editing = '1';
+                        const originalValue = param.value;
+                        const originalDisplay = formatValue(param, 'value');
+                        let isSaving = false;
+                        const cleanup = () => {
+                            cell.dataset.editing = '0';
+                            cell.classList.remove('opacity-75');
+                        };
+                        const revert = () => {
+                            param.value = originalValue;
+                            cell.innerHTML = '';
+                            cell.textContent = originalDisplay;
+                            cleanup();
+                        };
+
+                        let editor;
+                        const choices = Array.isArray(param?.choices) ? param.choices : null;
+                        if (param?.type === 'bool' || (choices && choices.length)) {
+                            const select = document.createElement('select');
+                            select.className = 'form-select form-select-sm';
+                            if (choices && choices.length) {
+                                choices.forEach((choice) => {
+                                    const opt = document.createElement('option');
+                                    const hasValue = choice && typeof choice === 'object' && 'value' in choice;
+                                    const rawValue = hasValue ? choice.value : choice;
+                                    const label = choice && typeof choice === 'object' && 'label' in choice
+                                        ? (choice.label ?? rawValue)
+                                        : rawValue;
+                                    const normalizedValue = rawValue === null || rawValue === undefined ? '' : String(rawValue);
+                                    opt.value = normalizedValue;
+                                    opt.textContent = label === null || label === undefined ? normalizedValue : String(label);
+                                    select.appendChild(opt);
+                                });
+                                if (param.allow_null) {
+                                    const opt = document.createElement('option');
+                                    opt.value = '';
+                                    opt.textContent = '（留空）';
+                                    select.appendChild(opt);
+                                }
+                                const current = param.value;
+                                if (current === null || current === undefined) {
+                                    select.value = '';
+                                } else {
+                                    const currentStr = typeof current === 'object' ? current?.value : String(current);
+                                    if (Array.from(select.options).some((opt) => opt.value == currentStr)) {
+                                        select.value = currentStr;
+                                    }
+                                }
+                            } else {
+                                const trueOpt = document.createElement('option');
+                                trueOpt.value = 'true';
+                                trueOpt.textContent = 'On';
+                                const falseOpt = document.createElement('option');
+                                falseOpt.value = 'false';
+                                falseOpt.textContent = 'Off';
+                                select.appendChild(trueOpt);
+                                select.appendChild(falseOpt);
+                                if (param.allow_null) {
+                                    const nullOpt = document.createElement('option');
+                                    nullOpt.value = 'null';
+                                    nullOpt.textContent = '（留空）';
+                                    select.appendChild(nullOpt);
+                                }
+                                const current = param.value;
+                                if (current === null || current === undefined) {
+                                    select.value = 'null';
+                                } else {
+                                    select.value = current ? 'true' : 'false';
+                                }
+                            }
+                            editor = select;
+                        } else {
+                            const input = document.createElement('input');
+                            input.className = 'form-control form-control-sm';
+                            input.type = (param?.type === 'int' || param?.type === 'float') ? 'number' : 'text';
+                            if (param?.step !== undefined && param.step !== null) input.step = param.step;
+                            if (param?.min !== undefined && param.min !== null) input.min = param.min;
+                            if (param?.max !== undefined && param.max !== null) input.max = param.max;
+                            if (param?.allow_null) {
+                                input.placeholder = '（留空）';
+                            }
+                            if (param.value !== undefined && param.value !== null) {
+                                input.value = String(param.value);
+                            } else {
+                                input.value = '';
+                            }
+                            editor = input;
+                        }
+
+                        cell.innerHTML = '';
+                        cell.appendChild(editor);
+                        editor.focus();
+                        cell.classList.add('opacity-75');
+
+                        const commit = async () => {
+                            if (isSaving) return;
+                            isSaving = true;
+                            let newValue = editor.value;
+                            if (editor instanceof HTMLSelectElement) {
+                                if (param?.type === 'bool' && editor.options.length <= 3) {
+                                    if (newValue === 'true') {
+                                        param.value = true;
+                                    } else if (newValue === 'false') {
+                                        param.value = false;
+                                    } else {
+                                        param.value = null;
+                                    }
+                                } else if (param.allow_null && newValue === '') {
+                                    param.value = null;
+                                } else if (param?.type === 'int') {
+                                    const parsed = Number.parseInt(newValue, 10);
+                                    param.value = Number.isNaN(parsed) ? param.value : parsed;
+                                } else if (param?.type === 'float') {
+                                    const parsed = Number.parseFloat(newValue);
+                                    param.value = Number.isNaN(parsed) ? param.value : parsed;
+                                } else {
+                                    param.value = newValue;
+                                }
+                            } else {
+                                if (newValue === '') {
+                                    param.value = param.allow_null ? null : param.value;
+                                } else if (param?.type === 'int') {
+                                    const parsed = Number.parseInt(newValue, 10);
+                                    if (Number.isNaN(parsed)) {
+                                        revert();
+                                        return;
+                                    }
+                                    param.value = parsed;
+                                } else if (param?.type === 'float') {
+                                    const parsed = Number.parseFloat(newValue);
+                                    if (Number.isNaN(parsed)) {
+                                        revert();
+                                        return;
+                                    }
+                                    param.value = parsed;
+                                } else {
+                                    param.value = newValue;
+                                }
+                            }
+
+                            try {
+                                await this.apiCall(`/strategies/${encodeURIComponent(name)}/internal-info/parameter`, {
+                                    method: 'POST',
+                                    body: JSON.stringify({
+                                        name: param.name,
+                                        value: param.value,
+                                    }),
+                                });
+                                cell.textContent = formatValue(param, 'value');
+                                cleanup();
+                            } catch (error) {
+                                console.error('Update parameter error:', error);
+                                this.showAlert('danger', '更新参数失败');
+                                revert();
+                            } finally {
+                                isSaving = false;
+                            }
+                        };
+
+                        const handleBlur = () => {
+                            editor.removeEventListener('blur', handleBlur);
+                            commit();
+                        };
+                        editor.addEventListener('blur', handleBlur);
+
+                        if (editor instanceof HTMLSelectElement) {
+                            editor.addEventListener('change', () => commit());
+                        }
+
+                        editor.addEventListener('keydown', (event) => {
+                            if (event.key === 'Enter') {
+                                event.preventDefault();
+                                commit();
+                            } else if (event.key === 'Escape') {
+                                event.preventDefault();
+                                editor.removeEventListener('blur', handleBlur);
+                                revert();
+                            }
+                        });
+                    };
+
+                    if (schema.length) {
+                        schema.forEach((param) => {
+                            const tr = document.createElement('tr');
+                            if (param?.description) tr.title = param.description;
+                            const nameCell = document.createElement('td');
+                            nameCell.textContent = param?.label || param?.name || '-';
+                            const valueCell = document.createElement('td');
+                            valueCell.textContent = formatValue(param, 'value');
+                            if (param?.name) {
+                                valueCell.title = '双击编辑，回车保存';
+                                valueCell.style.cursor = 'text';
+                                valueCell.classList.add('align-middle');
+                                valueCell.addEventListener('dblclick', () => startInlineEdit(valueCell, param));
+                            }
+                            const defaultCell = document.createElement('td');
+                            defaultCell.textContent = formatValue(param, 'default');
+                            const rangeCell = document.createElement('td');
+                            rangeCell.textContent = buildRangeText(param);
+                            tr.appendChild(nameCell);
+                            tr.appendChild(valueCell);
+                            tr.appendChild(defaultCell);
+                            tr.appendChild(rangeCell);
+                            paramTableBody.appendChild(tr);
+                        });
+                    } else {
+                        const row = document.createElement('tr');
+                        const cell = document.createElement('td');
+                        cell.colSpan = 4;
+                        cell.className = 'text-muted';
+                        cell.textContent = 'No configurable parameters';
+                        row.appendChild(cell);
+                        paramTableBody.appendChild(row);
+                    }
+                }
+
+                const subKey = info.data_subscription || fallbackSub || '';
+                this.summaryDataFeedCurrent = subKey || null;
+                if (dataSelect) dataSelect.value = subKey || 'market_data';
+
+                const positionList = document.getElementById('summaryPositionSettings');
+                if (positionList) {
+                    const timing = info.position_settings || {};
+                    positionList.innerHTML = '';
+                    const entries = [];
+                    if (timing.position_add_cooldown_minutes) {
+                        entries.push(['Add Cooldown', `${timing.position_add_cooldown_minutes} min`]);
+                    }
+                    if (timing.close_before_close_minutes) {
+                        entries.push(['Exit Before Close', `${timing.close_before_close_minutes} min`]);
+                    }
+                    if (entries.length) {
+                        entries.forEach(([label, value]) => {
+                            const li = document.createElement('li');
+                            li.innerHTML = `<span class="text-muted">${label}:</span> <span class="fw-semibold">${value}</span>`;
+                            positionList.appendChild(li);
+                        });
+                    } else {
+                        positionList.innerHTML = '<li class="text-muted">No timing limits</li>';
+                    }
+                }
+
+                const schedList = document.getElementById('summarySchedule');
+                if (schedList) {
+                    schedList.innerHTML = '';
+                    (info.schedule || []).forEach((item) => {
+                        const li = document.createElement('li');
+                        li.textContent = `${item.time || ''} ${item.action || ''} ${item.qty || ''} ${item.symbol || ''}`.trim();
+                        schedList.appendChild(li);
+                    });
+                }
+
+                const riskBody = document.querySelector('#summaryRiskTable tbody');
+                if (riskBody) {
+                    riskBody.innerHTML = '';
+                    const rr = info.risk_rules || {};
+                    Object.keys(rr).forEach((sym) => {
+                        const rule = rr[sym] || {};
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `<td>${sym}</td><td>${rule.stop_loss_price ?? ''}</td><td>${rule.take_profit_price ?? ''}</td>`;
+                        riskBody.appendChild(tr);
+                    });
+                }
+            }
+        } catch (err) {
+            console.error('Failed to load internal strategy info:', err);
+        }
+
+        await this.loadStrategyStatus(name, { force: true });
+    }
+
+    async loadStrategyRiskTab() {
+        if (this.strategyDetailsState.strategyType !== 'internal') {
+            return;
+        }
+        this.ensureRiskSettingsControls();
+        const name = this.strategyDetailsState.name;
+        if (!name) return;
+        if (this.strategyDetailsState.preloadedRiskSettings) {
+            this.currentRiskSettings = this.strategyDetailsState.preloadedRiskSettings;
+            this.renderRiskSettingsForm(this.currentRiskSettings);
+            this.updateRiskSettingsStatus('loaded');
+            return;
+        }
+        await this.loadStrategyRiskSettings(name);
+    }
+
+    async loadStrategyInternalOrdersTab() {
+        if (this.strategyDetailsState.strategyType !== 'internal') return;
+        const name = this.strategyDetailsState.name;
+        if (!name) return;
+        await this.loadInternalStrategyOrders(name, { limit: this.executionsPagination.pageSize || this.strategyExecutionsDefaultLimit, force: true });
+    }
+
+    async loadStrategyChartsTab() {
+        const name = this.strategyDetailsState.name;
+        if (!name) return;
+        const rangeSelect = document.getElementById('performanceRange');
+        let range = rangeSelect ? rangeSelect.value : '1d';
+        let start = null;
+        let end = null;
+        if (range === 'custom') {
+            start = document.getElementById('perfStart')?.value || null;
+            end = document.getElementById('perfEnd')?.value || null;
+            if (!start || !end) {
+                range = '1d';
+                start = null;
+                end = null;
+            }
+        }
+        await this.loadStrategyPerformance(name, { range, start, end });
+    }
+
+    async loadStrategyStrategyChartTab() {
+        const state = this.getStrategyChartState();
+        if (!state.currentStrategy) return;
+        if (!state.symbol) {
+            this.updateStrategyChartStatus('缺少标的');
+            return;
+        }
+        await this.loadStrategyChart(state.currentStrategy, {
+            symbol: state.symbol,
+            forceExecutions: true,
+        });
+    }
+
+    async loadStrategyExecutionsTab() {
+        const name = this.strategyDetailsState.name;
+        if (!name) return;
+        const limit = this.executionsPagination.pageSize || this.strategyExecutionsDefaultLimit;
+        await this.loadStrategyExecutions(name, { limit, force: true });
+    }
+
+    async loadStrategyPnlCalendarTab() {
+        const name = this.strategyDetailsState.name;
+        if (!name) return;
+        await this.loadPnLCalendar(name);
+    }
+
+    loadStrategyApiExamplesTab() {
+        const container = document.getElementById('apiExampleContent');
+        if (!container) return;
+        const strategy = this.strategyDetailsState.basicInfo;
+        if (strategy?.strategy_type === 'external') {
+            const endpoint = strategy.api_endpoint || '/api/strategy';
+            const samplePayload = { symbol: 'AAPL', action: 'BUY', quantity: 10, price: 190.12, meta: { note: 'optional' } };
+            const payloadStr = JSON.stringify(samplePayload).replace(/\"/g, '\\"');
+            const curl = `curl -X POST \"${endpoint}\" \
+  -H \"Content-Type: application/json\" \
+  -d \"${payloadStr}\"`;
+            container.innerHTML = `
+              <div class="mb-2"><span class="badge bg-primary">external</span> endpoint: <code>${endpoint}</code></div>
+              <pre class="bg-light p-3"><code>${curl}</code></pre>
+              <p class="text-muted">如果在策略设置中开启鉴权，需要在请求体中加入 <code>{ token: &lt;TOKEN&gt; }</code> 字段，其中 TOKEN 来自策略设置</p>`;
+        } else {
+            container.innerHTML = '<p class="text-muted">API examples are only available for external strategies.</p>';
+        }
+    }
+
 
     getStrategyExecutionsCacheKey(name, limit) {
         return `${name}::${limit}`;
