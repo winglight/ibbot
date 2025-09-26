@@ -530,6 +530,9 @@ class IBKRClient:
         ibkr_logger.debug(f"get_real_time_data called for {symbol} in thread: {current_thread.name}")
         
         try:
+            symbol_upper = symbol.upper()
+            is_index_future = symbol_upper in INDEX_FUTURE_SYMBOLS
+
             # 1. 首先检查缓存，提供快速响应
             if symbol in self.price_cache:
                 cached_time = self.price_cache_timestamp.get(symbol)
@@ -558,9 +561,9 @@ class IBKRClient:
                 return None
             
             # 4. 创建合约
-            if symbol == 'MNQ':
+            if is_index_future:
                 ibkr_logger.debug(f"Creating future contract for {symbol}")
-                contract = self.get_future_contract(symbol, 'CME')
+                contract = self.get_future_contract(symbol_upper, 'CME')
             else:
                 ibkr_logger.debug(f"Creating stock contract for {symbol}")
                 contract = self.get_stock_contract(symbol, exchange)
@@ -579,8 +582,8 @@ class IBKRClient:
                 return None
             
             # 6. 非阻塞方式检查数据，避免阻塞主线程
-            # 对于期货合约（如MNQ），增加等待时间
-            max_wait = 3.0 if symbol == 'MNQ' else 1.0  # 减少最大等待时间
+            # 对于指数期货合约，增加等待时间
+            max_wait = 3.0 if is_index_future else 1.0  # 减少最大等待时间
             wait_interval = 0.1  # 减少检查间隔
             waited = 0.0
             result_payload = None
