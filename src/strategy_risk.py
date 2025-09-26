@@ -20,7 +20,7 @@ import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
@@ -69,6 +69,7 @@ class StrategyRiskManager:
         self._positions_cache: Dict[str, Any] = {"timestamp": 0.0, "data": []}
         self._positions_cache_ttl = 2.0
         self._pending_closes: set[Tuple[str, str]] = set()
+        self._runtime_strategy_symbols: Dict[str, Set[str]] = defaultdict(set)
         self._monitor_scheduler = AsyncIOScheduler()
         self._monitor_job_id = "strategy_risk_monitor"
 
@@ -275,6 +276,8 @@ class StrategyRiskManager:
 
         positions = await self._get_strategy_positions(strategy_name)
         symbol_upper = symbol.upper()
+        if symbol_upper:
+            self._runtime_strategy_symbols[strategy_name].add(symbol_upper)
         if not any(pos.symbol == symbol_upper for pos in positions):
             positions.append(
                 StrategyPosition(
@@ -332,8 +335,12 @@ class StrategyRiskManager:
         except Exception:
             return
         if math.isclose(new_position or 0.0, 0.0, abs_tol=1e-9):
-            self._loss_start_times.get(strategy_name, {}).pop(symbol.upper(), None)
-            self._pending_closes.discard((strategy_name, symbol.upper()))
+            symbol_upper = symbol.upper()
+            self._loss_start_times.get(strategy_name, {}).pop(symbol_upper, None)
+            self._pending_closes.discard((strategy_name, symbol_upper))
+            symbols = self._runtime_strategy_symbols.get(strategy_name)
+            if symbols is not None:
+                symbols.discard(symbol_upper)
 
     # ------------------------------------------------------------------
     async def _monitor_positions(self) -> None:
@@ -479,6 +486,10 @@ class StrategyRiskManager:
             for name in getattr(self.strategy_manager, "strategies", {}).keys():
                 symbols = self._resolve_strategy_symbols(name)
                 for sym in symbols:
+                    symbol_to_strategy[sym].append(name)
+        for name, symbols in self._runtime_strategy_symbols.items():
+            for sym in symbols:
+                if name not in symbol_to_strategy[sym]:
                     symbol_to_strategy[sym].append(name)
 
         for item in raw_positions:
