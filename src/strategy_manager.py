@@ -114,6 +114,7 @@ class StrategyManager:
         self.scheduler = AsyncIOScheduler()
         self._heartbeat_job_id = "strategy_manager_heartbeat"
         self._heartbeat_interval_seconds = 300
+        self._data_push_log_limit = 20
 
         # 加载数据
         self._load_from_database()
@@ -279,6 +280,36 @@ class StrategyManager:
         else:  # pragma: no cover - fallback for sync contexts
             asyncio.run(coro)
 
+    def _record_data_push_event(
+        self,
+        strategy_name: str,
+        message: str,
+        *,
+        level: str = "info",
+        reason: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append an entry to the in-memory data push event log."""
+
+        state = self.data_push_state.setdefault(strategy_name, {})
+        entry: Dict[str, Any] = {
+            "timestamp": now_local().isoformat(timespec="seconds"),
+            "level": level,
+            "message": message,
+        }
+        if details:
+            entry["details"] = details
+        log_entries: List[Dict[str, Any]] = state.setdefault("event_log", [])  # type: ignore[assignment]
+        log_entries.append(entry)
+        if len(log_entries) > self._data_push_log_limit:
+            del log_entries[:-self._data_push_log_limit]
+        if reason is not None:
+            state["status_reason"] = reason
+
+    def _set_data_push_reason(self, strategy_name: str, reason: Optional[str]) -> None:
+        state = self.data_push_state.setdefault(strategy_name, {})
+        state["status_reason"] = reason
+
     def _notify_scheduler_state(self, state: str) -> None:
         """Send scheduler state change notifications when enabled."""
         manager = self.notification_manager
@@ -355,6 +386,8 @@ class StrategyManager:
         except Exception as exc:
             strategy_logger.warning(f"Failed to cleanup existing scheduler jobs: {exc}")
         for strategy in self.strategies.values():
+            if strategy.strategy_type != "internal":
+                continue
             if not strategy.enabled or not strategy.schedule:
                 continue
             for idx, item in enumerate(strategy.schedule):
@@ -1134,12 +1167,23 @@ class StrategyManager:
         if not stored_subscription:
             state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
             state.pop("_last_gap_warning_at", None)
+            reason = "未配置数据订阅"
+            self._record_data_push_event(
+                strategy_name,
+                "数据推送启动失败：未配置订阅",
+                level="warning",
+                reason=reason,
+            )
             strategy_logger.warning(
                 "Data push request rejected - subscription missing",
                 strategy=strategy_name,
                 requested_action="enable" if enabled else "disable",
             )
-            return {"success": False, "error": "No subscription configured"}
+            return {
+                "success": False,
+                "error": "No subscription configured",
+                "status_reason": reason,
+            }
 
         # Determine target symbol
         target_symbol = symbol or state.get("symbol") or getattr(record, "primary_symbol", None)
@@ -1163,12 +1207,23 @@ class StrategyManager:
             if not target_symbol:
                 state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
                 state.pop("_last_gap_warning_at", None)
+                reason = "未设置主交易标的"
+                self._record_data_push_event(
+                    strategy_name,
+                    "数据推送启动失败：缺少主交易标的",
+                    level="warning",
+                    reason=reason,
+                )
                 strategy_logger.warning(
                     "Data push enable failed - primary symbol missing",
                     strategy=strategy_name,
                     subscription=stored_subscription,
                 )
-                return {"success": False, "error": "Primary symbol required"}
+                return {
+                    "success": False,
+                    "error": "Primary symbol required",
+                    "status_reason": reason,
+                }
 
             ok = False
             error: Optional[str] = None
@@ -1246,6 +1301,14 @@ class StrategyManager:
                 })
                 state.pop("_last_gap_warning_at", None)
                 state.pop("restart_requested", None)
+                reason = f"启动失败：{error}" if error else "启动失败"
+                self._record_data_push_event(
+                    strategy_name,
+                    "数据推送启动失败",
+                    level="error",
+                    reason=reason,
+                    details={"error": error} if error else None,
+                )
                 strategy_logger.error(
                     "Failed to enable data push",
                     strategy=strategy_name,
@@ -1253,7 +1316,11 @@ class StrategyManager:
                     symbol=target_symbol,
                     error=error or "Failed to start data push",
                 )
-                payload = {"success": False, "error": error or "Failed to start data push"}
+                payload = {
+                    "success": False,
+                    "error": error or "Failed to start data push",
+                    "status_reason": reason,
+                }
                 return payload
 
             runtime = self.internal_strategies_runtime.get(strategy_name)
@@ -1295,6 +1362,16 @@ class StrategyManager:
                 state.pop("_last_restart_attempt", None)
             state.pop("restart_requested", None)
             state.pop("_last_gap_warning_at", None)
+            reason_text = "已启动推送，等待数据"
+            if force_restart:
+                reason_text = "重新订阅后等待数据"
+            self._record_data_push_event(
+                strategy_name,
+                "数据推送已启动",
+                level="info",
+                reason=reason_text,
+                details={"subscription": stored_subscription, "symbol": target_symbol},
+            )
             strategy_logger.info(
                 "Data push enabled",
                 strategy=strategy_name,
@@ -1308,6 +1385,7 @@ class StrategyManager:
                 "symbol": target_symbol,
                 "awaiting_data": True,
                 "last_data_timestamp": None,
+                "status_reason": reason_text,
             }
 
         # Disable
@@ -1331,6 +1409,12 @@ class StrategyManager:
         state.pop("_last_gap_warning_at", None)
         state.pop("_last_restart_attempt", None)
         state.pop("restart_requested", None)
+        self._record_data_push_event(
+            strategy_name,
+            "数据推送已停止",
+            level="info",
+            reason="推送已停止",
+        )
         strategy_logger.info(
             "Data push disabled",
             strategy=strategy_name,
@@ -1344,6 +1428,7 @@ class StrategyManager:
             "symbol": target_symbol,
             "awaiting_data": False,
             "last_data_timestamp": None,
+            "status_reason": "推送已停止",
         }
 
     async def restore_data_push_states(self) -> None:
@@ -1950,8 +2035,15 @@ class StrategyManager:
                     subscription=push_state.get("subscription"),
                     symbol=push_state.get("symbol"),
                 )
+                self._record_data_push_event(
+                    name,
+                    "已开始接收DOM数据",
+                    level="info",
+                    reason="正在接收数据",
+                )
             if is_receiving:
                 push_state.pop("restart_requested", None)
+                self._set_data_push_reason(name, "正在接收数据")
 
             awaiting_data = was_awaiting
             if is_receiving or not active_flag:
@@ -1959,6 +2051,8 @@ class StrategyManager:
                     push_state["awaiting_data"] = False
                 awaiting_data = False
                 push_state.pop("_last_gap_warning_at", None)
+                if not active_flag:
+                    self._set_data_push_reason(name, "推送已停止")
 
             last_data_ts = status.get("last_data_timestamp")
             last_data_iso: Optional[str] = None
@@ -2005,6 +2099,13 @@ class StrategyManager:
                                 processed=status.get("processed_count"),
                             )
                             push_state["_last_gap_warning_at"] = now_ts
+                            self._record_data_push_event(
+                                name,
+                                "检测到数据中断",
+                                level="warning",
+                                reason="检测到数据中断，准备重试",
+                                details={"seconds_since_last": round(elapsed, 1)},
+                            )
 
                         restart_ts = float(push_state.get("_last_restart_attempt", 0.0) or 0.0)
                         restart_setting = self.settings.get("data_push_restart_cooldown", 90)
@@ -2028,6 +2129,13 @@ class StrategyManager:
                             push_state["_last_restart_attempt"] = now_ts
                             push_state["awaiting_data"] = True
                             push_state["restart_requested"] = True
+                            self._record_data_push_event(
+                                name,
+                                "触发重新订阅以恢复数据",
+                                level="info",
+                                reason="重新订阅后等待数据",
+                            )
+                            self._set_data_push_reason(name, "重新订阅后等待数据")
                             self._request_data_push_activation(
                                 name,
                                 subscription=subscription_value,
@@ -2042,8 +2150,20 @@ class StrategyManager:
                         symbol=push_state.get("symbol"),
                     )
                     push_state["_last_gap_warning_at"] = now_ts
+                    self._record_data_push_event(
+                        name,
+                        "推送活跃但尚未收到时间戳",
+                        level="warning",
+                        reason="已启动推送，等待数据",
+                    )
+                    self._set_data_push_reason(name, "已启动推送，等待数据")
 
             status["data_push"] = payload
+            if push_state.get("status_reason"):
+                payload["status_reason"] = push_state.get("status_reason")
+                status["data_push_reason"] = push_state.get("status_reason")
+            if push_state.get("event_log"):
+                status["data_push_logs"] = list(push_state.get("event_log", []))
 
         return status
 

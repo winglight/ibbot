@@ -317,11 +317,16 @@ async def set_strategy_data_push_api(
         "awaiting_data": bool(state_snapshot.get("awaiting_data")),
         "last_data_timestamp": state_snapshot.get("last_data_timestamp")
         or result.get("last_data_timestamp"),
+        "status_reason": state_snapshot.get("status_reason") or result.get("status_reason"),
     }
 
     if not result.get("success"):
         error_message = result.get("error") or "Failed to update data push state"
-        return {"success": False, "error": error_message, "state": state_payload}
+        return {
+            "success": False,
+            "error": error_message,
+            "state": state_payload,
+        }
 
     return {"success": True, "state": state_payload}
 

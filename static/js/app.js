@@ -761,6 +761,7 @@ class TradingApp {
         const sellEl = document.getElementById('summaryStatusSellSignals');
         const statusPush = document.getElementById('summaryDataPushStatus');
         const pushSwitch = document.getElementById('summaryDataPushSwitch');
+        const logList = document.getElementById('summaryDataLogList');
 
         this.summaryStatusLoading = false;
         this.summaryStatusTarget = targetName;
@@ -773,6 +774,7 @@ class TradingApp {
             buyEl && (buyEl.textContent = '-');
             sellEl && (sellEl.textContent = '-');
             if (statusPush) statusPush.textContent = '未推送';
+            if (logList) logList.innerHTML = '<li class="text-muted">暂无记录</li>';
             this.summaryPushAwaitingData = false;
             this.data_push_state = {};
             if (this.summaryPushAwaitingTimer) {
@@ -783,7 +785,15 @@ class TradingApp {
         }
 
         const status = payload.status || {};
-        receivingEl.textContent = status.is_receiving_data ? 'Yes' : 'No';
+        const pushState = status.data_push || {};
+        const reasonText = status.data_push_reason || pushState.status_reason || '';
+        if (status.is_receiving_data) {
+            receivingEl.textContent = 'Yes';
+        } else if (reasonText) {
+            receivingEl.textContent = `No — ${reasonText}`;
+        } else {
+            receivingEl.textContent = 'No';
+        }
         runtimeEl && (runtimeEl.textContent =
             typeof status.runtime_seconds === 'number'
                 ? this.formatRuntimeDuration(status.runtime_seconds)
@@ -793,7 +803,6 @@ class TradingApp {
         buyEl && (buyEl.textContent = status.buy_signals ?? '-');
         sellEl && (sellEl.textContent = status.sell_signals ?? '-');
 
-        const pushState = status.data_push || {};
         let awaitingData = !!pushState.awaiting_data;
         if (status.is_receiving_data) {
             awaitingData = false;
@@ -822,9 +831,40 @@ class TradingApp {
         }
         if (statusPush) {
             if (pushState.active) {
-                statusPush.textContent = awaitingData ? '等待DOM数据…' : '已推送';
+                if (!awaitingData && reasonText) {
+                    statusPush.textContent = reasonText;
+                } else {
+                    statusPush.textContent = awaitingData ? '等待DOM数据…' : '已推送';
+                }
             } else {
-                statusPush.textContent = '未推送';
+                statusPush.textContent = reasonText || '未推送';
+            }
+        }
+
+        const logs = Array.isArray(status.data_push_logs) ? status.data_push_logs : [];
+        if (logList) {
+            if (!logs.length) {
+                logList.innerHTML = '<li class="text-muted">暂无记录</li>';
+            } else {
+                const items = logs.map((entry, idx) => {
+                    if (!entry || typeof entry !== 'object') return '';
+                    const level = String(entry.level || 'info').toLowerCase();
+                    let badgeClass = 'bg-secondary';
+                    if (level === 'error') badgeClass = 'bg-danger';
+                    else if (level === 'warning') badgeClass = 'bg-warning text-dark';
+                    const timestamp = entry.timestamp ? `<span class="text-muted me-2">${this.escapeHtml(String(entry.timestamp))}</span>` : '';
+                    const message = this.escapeHtml(String(entry.message || ''));
+                    let detailHtml = '';
+                    if (entry.details && typeof entry.details === 'object') {
+                        const detailParts = Object.entries(entry.details).map(([key, value]) => `${this.escapeHtml(String(key))}=${this.escapeHtml(String(value ?? ''))}`);
+                        if (detailParts.length) {
+                            detailHtml = `<div class="text-muted ms-4">${detailParts.join(', ')}</div>`;
+                        }
+                    }
+                    const borderClass = idx === 0 ? '' : ' border-top';
+                    return `<li class="py-2${borderClass}"><span class="badge ${badgeClass} me-2">${level.toUpperCase()}</span>${timestamp}${message}${detailHtml}</li>`;
+                }).filter(Boolean);
+                logList.innerHTML = items.join('') || '<li class="text-muted">暂无记录</li>';
             }
         }
 
@@ -835,6 +875,8 @@ class TradingApp {
             symbol: pushState.symbol,
             awaiting_data: awaitingData,
             last_data_timestamp: pushState.last_data_timestamp || null,
+            status_reason: reasonText || null,
+            logs,
         };
 
         return true;
@@ -7336,13 +7378,18 @@ class TradingApp {
             });
             const state = res?.state || {};
             const awaitingData = !!state.awaiting_data && !!state.active;
+            const stateReason = state.status_reason || '';
             this.summaryPushAwaitingData = awaitingData;
             if (switchEl) switchEl.checked = !!state.active;
             if (statusEl) {
                 if (state.active) {
-                    statusEl.textContent = awaitingData ? '等待DOM数据…' : '已推送';
+                    if (!awaitingData && stateReason) {
+                        statusEl.textContent = stateReason;
+                    } else {
+                        statusEl.textContent = awaitingData ? '等待DOM数据…' : '已推送';
+                    }
                 } else {
-                    statusEl.textContent = '未推送';
+                    statusEl.textContent = stateReason || '未推送';
                 }
             }
             this.data_push_state = {
@@ -7352,6 +7399,7 @@ class TradingApp {
                 symbol: state.symbol,
                 awaiting_data: awaitingData,
                 last_data_timestamp: state.last_data_timestamp || null,
+                status_reason: stateReason || null,
             };
             if (!res?.success) {
                 const message = res?.error || 'Failed to update data push state';
