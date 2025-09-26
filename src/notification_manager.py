@@ -16,10 +16,13 @@ EVENT_TOKEN_TO_LABEL = {
     'risk_rule': 'Risk Rule',
     'risk_triggered': 'Risk Rule',
     'risk_rule_deactivated': 'Risk Rule Deactivated',
+    'risk_circuit_breaker': 'Risk Circuit Breaker',
     'take_profit': 'Take Profit Triggered',
     'stop_loss': 'Stop Loss Triggered',
     'strategy_started': 'Strategy Started',
     'strategy_stopped': 'Strategy Stopped',
+    'queue_status': 'Queue Status',
+    'queue_warning': 'Queue Warning',
     'dom_level_3': 'DOM Level 3',
     'dom_level_4': 'DOM Level 4',
     'trading_reminder': 'Trading Reminder',
@@ -39,11 +42,14 @@ DEFAULT_EVENT_TOKENS: List[str] = [
     'position_opened',
     'position_closed',
     'risk_rule',
+    'risk_circuit_breaker',
     'risk_rule_deactivated',
     'take_profit',
     'stop_loss',
     'strategy_started',
     'strategy_stopped',
+    'queue_status',
+    'queue_warning',
     'dom_level_3',
     'dom_level_4',
     'trading_reminder',
@@ -86,6 +92,9 @@ class NotificationManager:
             'connection_connected': 'general',
             'connection_disconnected': 'general',
             'connection_problem': 'general',
+            'queue_started': 'queue_status',
+            'queue_stopped': 'queue_status',
+            'queue_state': 'queue_status',
         }
         if lowered in alias_map:
             return alias_map[lowered]
@@ -93,6 +102,8 @@ class NotificationManager:
         if lowered.startswith('risk_'):
             if lowered == 'risk_rule_deactivated':
                 return 'risk_rule_deactivated'
+            if lowered == 'risk_circuit_breaker':
+                return 'risk_circuit_breaker'
             return 'risk_rule'
 
         if lowered.startswith('take_profit'):
@@ -106,6 +117,11 @@ class NotificationManager:
 
         if lowered.startswith('strategy_stopped'):
             return 'strategy_stopped'
+
+        if lowered.startswith('queue_warning'):
+            return 'queue_warning'
+        if lowered.startswith('queue_'):
+            return 'queue_status'
 
         return 'general'
 

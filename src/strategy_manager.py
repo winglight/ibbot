@@ -18,7 +18,7 @@ from threading import RLock
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, List, Optional, Any, TYPE_CHECKING, Set, Tuple, Iterable, Union
+from typing import Dict, List, Optional, Any, TYPE_CHECKING, Set, Tuple, Iterable, Union, Coroutine
 from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -84,6 +84,7 @@ class StrategyManager:
         # Dependencies - will be injected
         self.risk_manager = None
         self.queue_manager = None
+        self.notification_manager = None
 
         # 内存缓存，从数据库加载
         self.strategies: Dict[str, Strategy] = {}
@@ -110,17 +111,23 @@ class StrategyManager:
 
         # 调度器
         self.scheduler = AsyncIOScheduler()
+        self._heartbeat_job_id = "strategy_manager_heartbeat"
+        self._heartbeat_interval_seconds = 300
 
         # 加载数据
         self._load_from_database()
 
-    def set_dependencies(self, risk_manager=None, queue_manager=None):
+    def set_dependencies(self, risk_manager=None, queue_manager=None, notification_manager=None):
         """Set dependency objects for strategy manager"""
         self.risk_manager = risk_manager
         self.queue_manager = queue_manager
+        if notification_manager:
+            self.notification_manager = notification_manager
         strategy_logger.info(
-            f"Dependencies set for StrategyManager: risk_manager={'initialized' if risk_manager else 'None'}, "
-            f"queue_manager={'initialized' if queue_manager else 'None'}"
+            "Dependencies set for StrategyManager",
+            risk_manager="initialized" if risk_manager else "None",
+            queue_manager="initialized" if queue_manager else "None",
+            notification_manager="initialized" if notification_manager else "None",
         )
 
         # Propagate dependencies to runtime strategies
@@ -144,6 +151,7 @@ class StrategyManager:
         self._event_loop = loop
         self._start_scheduler()
         strategy_logger.info("Strategy manager started")
+        self._notify_scheduler_state("started")
 
     def stop(self):
         """Stop strategy manager scheduler"""
@@ -151,6 +159,7 @@ class StrategyManager:
             if self.scheduler.running:
                 self.scheduler.shutdown()
                 strategy_logger.info("Strategy manager scheduler stopped")
+                self._notify_scheduler_state("stopped")
         except Exception as e:
             strategy_logger.error(f"Error stopping strategy manager scheduler: {e}")
 
@@ -182,7 +191,124 @@ class StrategyManager:
         if not self.scheduler.running:
             self.scheduler.start()
             strategy_logger.info("Strategy manager scheduler started")
+        self._schedule_scheduler_heartbeat()
         self.schedule_strategy_orders()
+
+    def _schedule_scheduler_heartbeat(self) -> None:
+        """Ensure the scheduler heartbeat job is registered."""
+        try:
+            existing_job = self.scheduler.get_job(self._heartbeat_job_id)
+            if existing_job:
+                return
+            self.scheduler.add_job(
+                self._emit_scheduler_heartbeat,
+                "interval",
+                seconds=self._heartbeat_interval_seconds,
+                id=self._heartbeat_job_id,
+                replace_existing=True,
+            )
+            strategy_logger.debug(
+                f"Scheduler heartbeat job registered every {self._heartbeat_interval_seconds} seconds"
+            )
+        except Exception as exc:
+            strategy_logger.warning(f"Failed to register scheduler heartbeat: {exc}")
+
+    def _emit_scheduler_heartbeat(self) -> None:
+        """Emit a heartbeat log with scheduler and queue metrics."""
+        heartbeat_logger = strategy_logger.bind(event="scheduler_heartbeat")
+        if not self.scheduler.running:
+            heartbeat_logger.warning("Scheduler heartbeat skipped because scheduler is not running")
+            return
+
+        enabled_names = self.get_enabled_strategy_names()
+        enabled_count = len(enabled_names)
+
+        next_run_iso = None
+        try:
+            jobs = [job for job in self.scheduler.get_jobs() if job.id != self._heartbeat_job_id]
+            next_run_times = [ensure_local_timezone(job.next_run_time) for job in jobs if job.next_run_time]
+            if next_run_times:
+                next_run_iso = min(next_run_times).isoformat()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            heartbeat_logger.warning(f"Failed to inspect scheduler jobs: {exc}")
+
+        queue_metrics: Dict[str, Any] = {}
+        oldest_pending_age = None
+        try:
+            if self.queue_manager:
+                queue_metrics = self.queue_manager.get_queue_status()
+                oldest = getattr(self.queue_manager, "get_oldest_pending_task_info", None)
+                if callable(oldest):
+                    info = oldest()
+                    if info:
+                        oldest_pending_age = info.get("age_seconds")
+        except Exception as exc:  # pragma: no cover - defensive guard
+            heartbeat_logger.warning(f"Failed to gather queue metrics: {exc}")
+
+        heartbeat_logger.info(
+            "Scheduler heartbeat emitted",
+            enabled_strategies=enabled_count,
+            strategy_names=enabled_names,
+            next_run=next_run_iso,
+            queue_pending=queue_metrics.get("pending_count"),
+            queue_processing=queue_metrics.get("processing_count"),
+            queue_failed=queue_metrics.get("failed_count"),
+            oldest_pending_seconds=oldest_pending_age,
+        )
+
+    def _schedule_notification(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Dispatch coroutine-based notifications safely."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self._event_loop
+
+        if loop and loop.is_running():
+            loop.create_task(coro)
+        else:  # pragma: no cover - fallback for sync contexts
+            asyncio.run(coro)
+
+    def _notify_scheduler_state(self, state: str) -> None:
+        """Send scheduler state change notifications when enabled."""
+        manager = self.notification_manager
+        if manager is None:
+            try:
+                import core as core_module  # type: ignore
+
+                manager = getattr(core_module, "notification_manager", None)
+            except Exception:  # pragma: no cover - defensive guard
+                manager = None
+
+        if manager is None:
+            return
+
+        enabled_names = self.get_enabled_strategy_names()
+        enabled_count = len(enabled_names)
+        message = (
+            "策略调度器已启动" if state == "started" else "策略调度器已停止"
+        )
+        details = f"启用策略: {enabled_count}" + (
+            f" ({', '.join(enabled_names)})" if enabled_names else ""
+        )
+
+        coro = manager.send_notification(
+            message=f"{message}\n{details}",
+            event_type=f"strategy_{state}",
+            scheduler_state=state,
+            enabled_strategy_count=enabled_count,
+            enabled_strategies=enabled_names,
+        )
+        try:
+            self._schedule_notification(coro)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            strategy_logger.warning(f"Failed to dispatch scheduler notification: {exc}")
+
+    def get_enabled_strategy_names(self) -> List[str]:
+        """Return names of strategies currently marked as enabled."""
+        try:
+            return [name for name, strat in self.strategies.items() if strat.enabled]
+        except Exception:  # pragma: no cover - defensive guard
+            return []
 
     def _invalidate_strategies_cache(self) -> None:
         with self._strategies_cache_lock:
@@ -208,9 +334,15 @@ class StrategyManager:
         if not self.scheduler:
             return
         try:
-            self.scheduler.remove_all_jobs()
-        except Exception:
-            pass
+            for job in self.scheduler.get_jobs():
+                if job.id == self._heartbeat_job_id:
+                    continue
+                try:
+                    self.scheduler.remove_job(job.id)
+                except Exception as exc:
+                    strategy_logger.debug(f"Failed to remove scheduler job {job.id}: {exc}")
+        except Exception as exc:
+            strategy_logger.warning(f"Failed to cleanup existing scheduler jobs: {exc}")
         for strategy in self.strategies.values():
             if not strategy.enabled or not strategy.schedule:
                 continue
@@ -255,6 +387,7 @@ class StrategyManager:
                     misfire_grace_time=10,
                     max_instances=1,
                 )
+        self._schedule_scheduler_heartbeat()
 
     def register_internal_strategy(self, strategy_instance: "BaseStrategy") -> None:
         """Register a runtime-managed internal strategy instance."""

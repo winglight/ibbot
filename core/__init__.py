@@ -32,7 +32,11 @@ risk_manager = RiskManager(notification_manager=notification_manager)
 strategy_manager = StrategyManager()
 
 try:
-    strategy_manager.set_dependencies(risk_manager=risk_manager, queue_manager=queue_manager)
+    strategy_manager.set_dependencies(
+        risk_manager=risk_manager,
+        queue_manager=queue_manager,
+        notification_manager=notification_manager,
+    )
 except Exception:
     pass
 
@@ -57,6 +61,7 @@ try:
         strategy_manager=strategy_manager,
         websocket_manager=websocket_manager,
         order_manager=order_manager,
+        notification_manager=notification_manager,
     )
 except Exception:
     pass
