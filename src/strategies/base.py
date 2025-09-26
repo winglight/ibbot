@@ -32,6 +32,7 @@ class BaseStrategy:
         order_manager: Optional[Any] = None,
         queue_manager: Optional[Any] = None,
         risk_manager: Optional[Any] = None,
+        strategy_risk_manager: Optional[Any] = None,
         notification_manager: Optional[Any] = None,
     ) -> None:
         """Inject runtime dependencies."""
@@ -44,6 +45,8 @@ class BaseStrategy:
             self.queue_manager = queue_manager
         if risk_manager is not None:
             self.risk_manager = risk_manager
+        if strategy_risk_manager is not None:
+            setattr(self, "strategy_risk_manager", strategy_risk_manager)
         if notification_manager is not None:
             self.notification_manager = notification_manager
 
