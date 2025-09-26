@@ -77,7 +77,7 @@ async def get_notification_settings(
         default_events_labels = list(dict.fromkeys(token_to_label.values()))
 
         def events_to_labels(events: Optional[List[Any]]) -> List[str]:
-            if not isinstance(events, list) or not events:
+            if not isinstance(events, list):
                 return default_events_labels.copy()
             labels: List[str] = []
             for item in events:
@@ -194,7 +194,7 @@ async def update_notification_settings(
         for ch in ("chrome", "telegram"):
             ch_cfg = settings.get(ch) or {}
             evs = ch_cfg.get("events")
-            if not isinstance(evs, list) or not evs:
+            if not isinstance(evs, list):
                 # 如果没有提供事件列表，默认保存所有事件（使用令牌）
                 ch_cfg["events"] = list(dict.fromkeys(token_to_label.keys()))
             else:
