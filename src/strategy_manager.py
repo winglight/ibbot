@@ -85,6 +85,7 @@ class StrategyManager:
         self.risk_manager = None
         self.queue_manager = None
         self.notification_manager = None
+        self.strategy_risk_manager = None
 
         # 内存缓存，从数据库加载
         self.strategies: Dict[str, Strategy] = {}
@@ -117,17 +118,26 @@ class StrategyManager:
         # 加载数据
         self._load_from_database()
 
-    def set_dependencies(self, risk_manager=None, queue_manager=None, notification_manager=None):
+    def set_dependencies(
+        self,
+        risk_manager=None,
+        queue_manager=None,
+        notification_manager=None,
+        strategy_risk_manager=None,
+    ):
         """Set dependency objects for strategy manager"""
         self.risk_manager = risk_manager
         self.queue_manager = queue_manager
         if notification_manager:
             self.notification_manager = notification_manager
+        if strategy_risk_manager:
+            self.strategy_risk_manager = strategy_risk_manager
         strategy_logger.info(
             "Dependencies set for StrategyManager",
             risk_manager="initialized" if risk_manager else "None",
             queue_manager="initialized" if queue_manager else "None",
             notification_manager="initialized" if notification_manager else "None",
+            strategy_risk_manager="initialized" if strategy_risk_manager else "None",
         )
 
         # Propagate dependencies to runtime strategies
@@ -137,6 +147,7 @@ class StrategyManager:
                     strategy_manager=self,
                     risk_manager=self.risk_manager,
                     queue_manager=self.queue_manager,
+                    strategy_risk_manager=self.strategy_risk_manager,
                 )
             except Exception as exc:  # pragma: no cover - defensive guard
                 strategy_logger.warning(f"Failed to propagate dependencies to {strategy.name}: {exc}")
@@ -1868,7 +1879,31 @@ class StrategyManager:
         if position_settings:
             strategy["position_settings"] = position_settings
 
+        if self.strategy_risk_manager:
+            try:
+                strategy["strategy_risk_settings"] = self.strategy_risk_manager.get_settings(name)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    "Failed to load strategy risk settings",
+                    strategy=name,
+                    error=str(exc),
+                )
+
         return strategy
+
+    def get_strategy_risk_settings(self, name: str) -> Dict[str, Any]:
+        if name not in self.strategies:
+            return {}
+        if not self.strategy_risk_manager:
+            return {}
+        return self.strategy_risk_manager.get_settings(name)
+
+    def update_strategy_risk_settings(self, name: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        if name not in self.strategies:
+            raise ValueError("Strategy not found")
+        if not self.strategy_risk_manager:
+            raise ValueError("Strategy risk manager not configured")
+        return self.strategy_risk_manager.update_settings(name, updates)
 
     def get_internal_strategy_status(self, name: str) -> Optional[Dict[str, Any]]:
         """Return runtime status metrics for an internal strategy."""
@@ -2228,6 +2263,24 @@ class StrategyManager:
                     f"Position limit exceeded for {symbol_code}: {numeric_new_position} > {max_position}"
                 )
 
+        if self.strategy_risk_manager:
+            try:
+                allowed, reason = await self.strategy_risk_manager.evaluate_order(
+                    strategy_name=strategy_name,
+                    symbol=symbol_code,
+                    action=action,
+                    quantity=float(quantity or 0.0),
+                    current_position=current_position,
+                    new_position=new_position,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    "Strategy risk evaluation failed", strategy=strategy_name, symbol=symbol_code, error=str(exc)
+                )
+            else:
+                if not allowed:
+                    raise ValueError(reason or "Strategy risk control blocked the order")
+
         return {
             "symbol": symbol_code,
             "current_position": current_position,
@@ -2269,6 +2322,21 @@ class StrategyManager:
             numeric_position = None
 
         await self._update_auto_close_schedule(strategy_name, symbol_code, numeric_position)
+
+        if self.strategy_risk_manager and numeric_position is not None:
+            try:
+                await self.strategy_risk_manager.record_execution(
+                    strategy_name=strategy_name,
+                    symbol=symbol_code,
+                    new_position=numeric_position,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    "Failed to update strategy risk execution state",
+                    strategy=strategy_name,
+                    symbol=symbol_code,
+                    error=str(exc),
+                )
 
     async def _update_auto_close_schedule(self, strategy_name: str, symbol: str, position: Optional[float]) -> None:
         close_setting = self._get_strategy_setting(strategy_name, "close_before_close_minutes")

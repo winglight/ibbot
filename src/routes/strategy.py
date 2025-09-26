@@ -19,6 +19,7 @@ from src.models import (
     ExternalStrategyOrderRequest,
     StrategyRenameRequest,
     StrategyDataPushRequest,
+    StrategyRiskSettings,
 )
 
 router = APIRouter()
@@ -231,6 +232,36 @@ async def get_internal_strategy_info_api(name: str, user: Optional[str] = Depend
     if not info:
         raise HTTPException(status_code=404, detail="Strategy not found")
     return {"success": True, "strategy": info}
+
+
+@router.get("/api/strategies/{name}/risk-settings")
+async def get_strategy_risk_settings_api(name: str, user: Optional[str] = Depends(get_current_user)):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    if name not in strategy_manager.strategies:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    settings = strategy_manager.get_strategy_risk_settings(name)
+    return {"success": True, "settings": settings}
+
+
+@router.put("/api/strategies/{name}/risk-settings")
+async def update_strategy_risk_settings_api(
+    name: str,
+    payload: StrategyRiskSettings,
+    user: Optional[str] = Depends(get_current_user),
+): 
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    if name not in strategy_manager.strategies:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    try:
+        updated = strategy_manager.update_strategy_risk_settings(name, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(f"Failed to update strategy risk settings for {name}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to update risk settings") from exc
+    return {"success": True, "settings": updated}
 
 
 @router.get("/api/strategies/{name}/status")

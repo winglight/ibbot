@@ -15,13 +15,15 @@ from src.dom_service import get_dom_service
 from src.strategies.dom_strategy import DOMStrategy
 from src.dom_dependencies import DOMConfig, get_dom_processor
 import src.dom_dependencies as dom_dependencies
+from src.strategy_risk import StrategyRiskManager
 
 # Initialize shared instances
 telegram_notifier = TelegramNotifier()
+db_manager = get_db_manager()
 notification_manager = NotificationManager(
     telegram_notifier=telegram_notifier,
     websocket_manager=websocket_manager,
-    db_manager=get_db_manager(),
+    db_manager=db_manager,
 )
 
 dom_config = dom_dependencies.dom_config
@@ -30,12 +32,17 @@ depth_subscriber = dom_dependencies.depth_subscriber
 
 risk_manager = RiskManager(notification_manager=notification_manager)
 strategy_manager = StrategyManager()
+strategy_risk_manager = StrategyRiskManager(
+    db_manager=db_manager,
+    notification_manager=notification_manager,
+)
 
 try:
     strategy_manager.set_dependencies(
         risk_manager=risk_manager,
         queue_manager=queue_manager,
         notification_manager=notification_manager,
+        strategy_risk_manager=strategy_risk_manager,
     )
 except Exception:
     pass
@@ -66,6 +73,16 @@ try:
 except Exception:
     pass
 
+try:
+    strategy_risk_manager.set_dependencies(
+        strategy_manager=strategy_manager,
+        queue_manager=queue_manager,
+        notification_manager=notification_manager,
+    )
+    strategy_risk_manager.start()
+except Exception:
+    pass
+
 # Register the DOM internal strategy so it loads automatically
 dom_strategy = None
 try:
@@ -76,6 +93,7 @@ try:
         order_manager=order_manager,
         queue_manager=queue_manager,
         risk_manager=risk_manager,
+        strategy_risk_manager=strategy_risk_manager,
         notification_manager=notification_manager,
     )
     strategy_manager.register_internal_strategy(dom_strategy)

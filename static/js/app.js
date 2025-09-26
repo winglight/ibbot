@@ -418,6 +418,9 @@ class TradingApp {
         this.authRole = localStorage.getItem('user_role') || 'admin';
         this.isReadOnly = localStorage.getItem('is_read_only') === '1';
         this.lastReadOnlyWarningAt = 0;
+        this.riskSettingsInitialized = false;
+        this.currentRiskSettings = null;
+        this.riskSettingsSaving = false;
 
         // Internal strategy summary helpers
         this.summaryControlsInitialized = false;
@@ -7025,6 +7028,22 @@ class TradingApp {
         }
     }
 
+    ensureRiskSettingsControls() {
+        if (this.riskSettingsInitialized) return;
+        this.riskSettingsInitialized = true;
+        const form = document.getElementById('riskSettingsForm');
+        if (form) {
+            form.addEventListener('submit', (event) => {
+                event.preventDefault();
+                this.handleRiskSettingsSave();
+            });
+        }
+        const resetBtn = document.getElementById('riskSettingsResetBtn');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', () => this.handleRiskSettingsReset());
+        }
+    }
+
     async handleSummaryPrimarySymbolChange() {
         if (this.summaryPrimarySaving) return;
         const name = this.currentStrategyDetails;
@@ -7081,6 +7100,163 @@ class TradingApp {
             statusEl.textContent = '';
             statusEl.classList.remove('text-danger');
         }
+    }
+
+    updateRiskSettingsStatus(state, message) {
+        const statusEl = document.getElementById('riskSettingsStatus');
+        if (!statusEl) return;
+        statusEl.classList.remove('text-danger');
+        if (state === 'loading') {
+            statusEl.textContent = '正在加载风控参数...';
+        } else if (state === 'saving') {
+            statusEl.textContent = '正在保存风控设置...';
+        } else if (state === 'error') {
+            statusEl.textContent = message || '保存失败，请稍后重试。';
+            statusEl.classList.add('text-danger');
+        } else if (state === 'reset') {
+            statusEl.textContent = '已恢复到最近保存的设置。';
+        } else if (state === 'loaded') {
+            statusEl.textContent = '风控设置已载入。';
+        } else if (state === 'saved') {
+            statusEl.textContent = '风控设置已保存。';
+        } else {
+            statusEl.textContent = message || '风控设置';
+        }
+    }
+
+    renderRiskSettingsForm(settings = {}) {
+        const maxInput = document.getElementById('riskMaxPositions');
+        const forbidSwitch = document.getElementById('riskForbidAddOnLoss');
+        const timeInput = document.getElementById('riskLossTimeThreshold');
+        const pnlInput = document.getElementById('riskLossPnlThreshold');
+        const notifySwitch = document.getElementById('riskNotifyOnTrigger');
+        const maxValue = settings.max_positions;
+        if (maxInput) {
+            maxInput.value = (maxValue === null || maxValue === undefined) ? '' : maxValue;
+        }
+        if (forbidSwitch) {
+            forbidSwitch.checked = settings.forbid_add_on_loss !== false;
+        }
+        const timeValue = settings.loss_time_threshold;
+        if (timeInput) {
+            timeInput.value = (timeValue === null || timeValue === undefined) ? '' : timeValue;
+        }
+        const pnlValue = settings.loss_pnl_threshold;
+        if (pnlInput) {
+            pnlInput.value = (pnlValue === null || pnlValue === undefined) ? '' : pnlValue;
+        }
+        if (notifySwitch) {
+            notifySwitch.checked = settings.notify_on_trigger !== false;
+        }
+    }
+
+    async loadStrategyRiskSettings(name) {
+        this.updateRiskSettingsStatus('loading');
+        this.currentRiskSettings = null;
+        try {
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/risk-settings`);
+            if (!res?.success) {
+                throw new Error(res?.detail || 'Failed to load risk settings');
+            }
+            this.currentRiskSettings = res.settings || {};
+            this.renderRiskSettingsForm(this.currentRiskSettings);
+            this.updateRiskSettingsStatus('loaded');
+        } catch (error) {
+            console.error('Failed to load strategy risk settings', error);
+            this.updateRiskSettingsStatus('error', '无法加载风控设置。');
+        }
+    }
+
+    async handleRiskSettingsSave() {
+        if (this.riskSettingsSaving) return;
+        const name = this.currentStrategyDetails;
+        if (!name) return;
+        const maxInput = document.getElementById('riskMaxPositions');
+        const forbidSwitch = document.getElementById('riskForbidAddOnLoss');
+        const timeInput = document.getElementById('riskLossTimeThreshold');
+        const pnlInput = document.getElementById('riskLossPnlThreshold');
+        const notifySwitch = document.getElementById('riskNotifyOnTrigger');
+
+        const payload = {};
+        if (maxInput) {
+            const raw = maxInput.value?.trim();
+            if (raw) {
+                const parsed = Number.parseInt(raw, 10);
+                if (!Number.isNaN(parsed) && parsed >= 0) {
+                    payload.max_positions = parsed;
+                } else {
+                    this.showAlert('danger', '持仓数量上限需为非负整数');
+                    return;
+                }
+            } else {
+                payload.max_positions = null;
+            }
+        }
+        if (forbidSwitch) {
+            payload.forbid_add_on_loss = !!forbidSwitch.checked;
+        }
+        if (timeInput) {
+            const raw = timeInput.value?.trim();
+            if (raw) {
+                const parsed = Number.parseInt(raw, 10);
+                if (Number.isNaN(parsed) || parsed < 0) {
+                    this.showAlert('danger', '浮亏持续时间需为非负整数');
+                    return;
+                }
+                payload.loss_time_threshold = parsed;
+            } else {
+                payload.loss_time_threshold = null;
+            }
+        }
+        if (pnlInput) {
+            const raw = pnlInput.value?.trim();
+            if (raw) {
+                const parsed = Number.parseFloat(raw);
+                if (Number.isNaN(parsed)) {
+                    this.showAlert('danger', '浮亏判定阈值格式不正确');
+                    return;
+                }
+                payload.loss_pnl_threshold = parsed;
+            } else {
+                payload.loss_pnl_threshold = null;
+            }
+        }
+        if (notifySwitch) {
+            payload.notify_on_trigger = !!notifySwitch.checked;
+        }
+
+        this.riskSettingsSaving = true;
+        this.updateRiskSettingsStatus('saving');
+        try {
+            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/risk-settings`, {
+                method: 'PUT',
+                body: JSON.stringify(payload),
+            });
+            if (!res?.success) {
+                throw new Error(res?.detail || 'Failed to save risk settings');
+            }
+            this.currentRiskSettings = res.settings || payload;
+            this.renderRiskSettingsForm(this.currentRiskSettings);
+            this.updateRiskSettingsStatus('saved');
+            this.showToast('success', '风控设置已保存');
+        } catch (error) {
+            console.error('Failed to save strategy risk settings', error);
+            this.updateRiskSettingsStatus('error', error?.message);
+            this.showAlert('danger', '保存风控设置失败，请稍后重试。');
+        } finally {
+            this.riskSettingsSaving = false;
+        }
+    }
+
+    async handleRiskSettingsReset() {
+        if (this.riskSettingsSaving) return;
+        if (!this.currentStrategyDetails) return;
+        if (!this.currentRiskSettings) {
+            await this.loadStrategyRiskSettings(this.currentStrategyDetails);
+            return;
+        }
+        this.renderRiskSettingsForm(this.currentRiskSettings);
+        this.updateRiskSettingsStatus('reset');
     }
 
     async handleSummaryDataFeedChange() {
@@ -8876,19 +9052,24 @@ class TradingApp {
 
             const isInternal = s?.strategy_type === 'internal';
             const summaryWrap = document.getElementById('summary-tab-wrap');
+            const riskWrap = document.getElementById('risk-settings-tab-wrap');
             const ordersWrap = document.getElementById('internal-orders-tab-wrap');
             const execWrap = document.getElementById('executions-tab-wrap');
             const apiWrap = document.getElementById('api-examples-tab-wrap');
             const summaryPane = document.getElementById('summary');
+            const riskPane = document.getElementById('risk-settings');
             const ordersPane = document.getElementById('internal-orders');
             const chartsTabText = document.getElementById('charts-tab-text');
             if (isInternal) {
                 this.ensureSummaryControls();
+                this.ensureRiskSettingsControls();
                 summaryWrap?.classList.remove('d-none');
+                riskWrap?.classList.remove('d-none');
                 ordersWrap?.classList.remove('d-none');
                 execWrap?.classList.add('d-none');
                 apiWrap?.classList.add('d-none');
                 summaryPane?.classList.remove('d-none');
+                riskPane?.classList.remove('d-none');
                 ordersPane?.classList.remove('d-none');
                 if (chartsTabText) chartsTabText.textContent = 'Visual Metrics';
                 try { new bootstrap.Tab(document.getElementById('summary-tab')).show(); } catch (e) { console.warn('Tab show failed', e); }
@@ -8905,6 +9086,8 @@ class TradingApp {
                     clearTimeout(this.summaryPushAwaitingTimer);
                     this.summaryPushAwaitingTimer = null;
                 }
+                this.currentRiskSettings = null;
+                this.updateRiskSettingsStatus('loading');
                 const fallbackSymbol = s?.primary_symbol || '';
                 if (symbolInput) {
                     symbolInput.value = fallbackSymbol || '';
@@ -8973,6 +9156,13 @@ class TradingApp {
                             } else {
                                 riskParamEl.innerHTML = '<li class="text-muted">No dedicated parameters</li>';
                             }
+                        }
+                        if (isInternal && info.strategy_risk_settings) {
+                            this.currentRiskSettings = info.strategy_risk_settings;
+                            this.renderRiskSettingsForm(info.strategy_risk_settings);
+                            this.updateRiskSettingsStatus('loaded');
+                        } else if (isInternal) {
+                            await this.loadStrategyRiskSettings(name);
                         }
                         const paramTableBody = document.querySelector('#summaryParameterTable tbody');
                         if (paramTableBody) {
@@ -9329,14 +9519,21 @@ class TradingApp {
                 } catch (err) {
                     console.error('Failed to load internal strategy info:', err);
                 }
+                if (isInternal && !this.currentRiskSettings) {
+                    await this.loadStrategyRiskSettings(name);
+                }
                 await this.loadStrategyStatus(name, { force: true });
             } else {
                 summaryWrap?.classList.add('d-none');
+                riskWrap?.classList.add('d-none');
                 ordersWrap?.classList.add('d-none');
                 execWrap?.classList.remove('d-none');
                 apiWrap?.classList.remove('d-none');
                 summaryPane?.classList.add('d-none');
+                riskPane?.classList.add('d-none');
                 ordersPane?.classList.add('d-none');
+                this.currentRiskSettings = null;
+                this.updateRiskSettingsStatus('default', '风控设置将在内部策略中显示。');
                 if (chartsTabText) chartsTabText.textContent = 'Charts';
                 this.summaryPushAwaitingData = false;
                 this.data_push_state = {};
