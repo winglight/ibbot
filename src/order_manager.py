@@ -271,15 +271,16 @@ class OrderManager:
 
     def _fetch_orders_from_database(self,
                                     limit: Optional[int] = None,
-                                    start_date: Optional[datetime] = None) -> List[Order]:
-        """按需从数据库获取订单，避免全量加载导致的性能问题。"""
+                                    start_date: Optional[datetime] = None,
+                                    offset: Optional[int] = None,
+                                    return_total: bool = False) -> Any:
+        """按需从数据库获取订单，避免全量加载导致的性能问题。
+
+        当 ``return_total`` 为 ``True`` 时，同时返回符合条件的总记录数。
+        """
         try:
             with self.db_manager.cursor() as cursor:
-                query = """
-                    SELECT order_id, symbol, action, quantity, order_type, price,
-                           status, created_at, updated_at, executed_at, fill_price,
-                           order_source, strategy_name, rule_id, parent_order_id,
-                           exchange, sec_type, notes, commission, pnl, is_deleted
+                base_query = """
                     FROM orders
                     WHERE is_deleted = 0
                 """
@@ -287,16 +288,34 @@ class OrderManager:
 
                 if start_date:
                     start_dt = ensure_local_timezone(start_date)
-                    query += " AND created_at >= ?"
+                    base_query += " AND created_at >= ?"
                     params.append(start_dt.isoformat())
 
-                query += " ORDER BY created_at DESC"
+                count_total: Optional[int] = None
+                if return_total:
+                    count_query = "SELECT COUNT(*) " + base_query
+                    cursor.execute(count_query, list(params))
+                    row = cursor.fetchone()
+                    count_total = int(row[0]) if row and row[0] is not None else 0
+
+                query = "SELECT order_id, symbol, action, quantity, order_type, price, " \
+                        "status, created_at, updated_at, executed_at, fill_price, " \
+                        "order_source, strategy_name, rule_id, parent_order_id, " \
+                        "exchange, sec_type, notes, commission, pnl, is_deleted " + base_query + " ORDER BY created_at DESC"
+
+                query_params: List[Any] = list(params)
 
                 if limit:
                     query += " LIMIT ?"
-                    params.append(limit)
+                    query_params.append(limit)
+                elif offset and offset > 0:
+                    query += " LIMIT -1"
 
-                cursor.execute(query, params)
+                if offset and offset > 0:
+                    query += " OFFSET ?"
+                    query_params.append(offset)
+
+                cursor.execute(query, query_params)
                 rows = cursor.fetchall()
 
             orders: List[Order] = []
@@ -304,6 +323,8 @@ class OrderManager:
                 order = self._row_to_order(row)
                 if order:
                     orders.append(order)
+            if return_total:
+                return orders, (count_total or 0)
             return orders
         except Exception as e:
             order_logger.error(f"Error fetching orders from database: {e}")
@@ -823,13 +844,20 @@ class OrderManager:
                   order_source: Optional[str] = None,
                   strategy_name: Optional[str] = None,
                   limit: Optional[int] = None,
-                  start_date: Optional[datetime] = None) -> List[Order]:
+                  start_date: Optional[datetime] = None,
+                  offset: Optional[int] = None,
+                  return_total: bool = False) -> Any:
         """获取订单列表"""
         simple_filter = not any([symbol, status, order_source, strategy_name])
 
         # 对于常见的“近期订单”请求（仅限制数量或起始时间）直接从数据库分页读取，避免全量加载。
-        if simple_filter and (limit is not None or start_date is not None):
-            return self._fetch_orders_from_database(limit=limit, start_date=start_date)
+        if simple_filter and (limit is not None or start_date is not None or offset):
+            return self._fetch_orders_from_database(
+                limit=limit,
+                start_date=start_date,
+                offset=offset,
+                return_total=return_total,
+            )
 
         self._load_orders_from_database()
         orders = list(self.orders.values())
@@ -847,14 +875,22 @@ class OrderManager:
             orders = [o for o in orders if o.order_source == order_source]
         if strategy_name:
             orders = [o for o in orders if o.strategy_name == strategy_name]
-        
+
         # 按创建时间降序排列
         orders.sort(key=lambda x: x.created_at, reverse=True)
-        
+
+        total_count = len(orders)
+
+        if offset and offset > 0:
+            orders = orders[offset:]
+
         # 限制数量
         if limit:
             orders = orders[:limit]
-        
+
+        if return_total:
+            return orders, total_count
+
         return orders
 
     def get_active_orders(self) -> List[Order]:

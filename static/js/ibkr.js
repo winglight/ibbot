@@ -194,9 +194,12 @@ class IBKRConnectionManager {
         const defaultStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
         const payload = {
             type: 'request_orders_snapshot',
-            limit: Number.isFinite(options.limit) ? Number(options.limit) : 50,
+            limit: Number.isFinite(options.limit) ? Number(options.limit) : 10,
             start_date: options.startDate || defaultStart,
         };
+        if (Number.isFinite(options.page)) {
+            payload.page = Math.max(1, Number(options.page));
+        }
         if (options.force) payload.force = true;
         if (options.useCache === false) payload.use_cache = false;
         const result = this._sendThrottled('orders_snapshot', payload, {

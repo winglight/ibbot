@@ -443,7 +443,10 @@
             <div class="col-md-6">
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-list"></i> Orders</h5>
+                        <h5 class="mb-0 d-flex align-items-center gap-2">
+                            <i class="fas fa-list"></i>
+                            <span>Orders</span>
+                        </h5>
                         <div class="d-flex align-items-center gap-2">
                             <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="orders" aria-hidden="true">
                                 <i class="fas fa-circle-notch fa-spin"></i>
@@ -451,7 +454,9 @@
                             <button class="btn btn-sm btn-primary me-2" id="placeOrderBtn">
                                 <i class="fas fa-plus"></i> Place Order
                             </button>
-
+                            <button class="btn btn-sm btn-danger" id="cancelAllOrdersBtn" title="Cancel All Orders">
+                                <i class="fas fa-times"></i>
+                            </button>
                         </div>
                     </div>
                     <div class="card-body">
@@ -475,10 +480,16 @@
                                 <tbody></tbody>
                             </table>
                         </div>
-                        <div class="mt-2">
-                            <button class="btn btn-sm btn-danger" id="cancelAllOrdersBtn">
-                                <i class="fas fa-times"></i> Cancel All
-                            </button>
+                        <div class="d-flex justify-content-between align-items-center mt-3" id="ordersPaginationControls">
+                            <div class="text-muted small" id="ordersPaginationInfo">&nbsp;</div>
+                            <div class="btn-group btn-group-sm" role="group" aria-label="Orders pagination">
+                                <button type="button" class="btn btn-outline-secondary" id="ordersPrevPageBtn" title="Previous page">
+                                    <i class="fas fa-chevron-left"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary" id="ordersNextPageBtn" title="Next page">
+                                    <i class="fas fa-chevron-right"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
