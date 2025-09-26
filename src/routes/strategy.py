@@ -20,6 +20,7 @@ from src.models import (
     StrategyRenameRequest,
     StrategyDataPushRequest,
     StrategyRiskSettings,
+    StrategyParameterUpdateRequest,
 )
 
 router = APIRouter()
@@ -232,6 +233,28 @@ async def get_internal_strategy_info_api(name: str, user: Optional[str] = Depend
     if not info:
         raise HTTPException(status_code=404, detail="Strategy not found")
     return {"success": True, "strategy": info}
+
+
+@router.post("/api/strategies/{name}/internal-info/parameter")
+async def update_strategy_parameter_api(
+    name: str,
+    payload: StrategyParameterUpdateRequest,
+    user: Optional[str] = Depends(get_current_user),
+):
+    if not strategy_manager:
+        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+
+    try:
+        parameter = strategy_manager.update_strategy_parameter(
+            name, payload.parameter_name, payload.value
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(f"Failed to update strategy parameter for {name}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to update parameter") from exc
+
+    return {"success": True, "parameter": parameter}
 
 
 @router.get("/api/strategies/{name}/risk-settings")

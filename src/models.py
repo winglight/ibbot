@@ -204,6 +204,15 @@ class StrategyRiskSettings(BaseModel):
             return None
         return float(value)
 
+
+class StrategyParameterUpdateRequest(BaseModel):
+    """Update request for a single strategy parameter."""
+
+    parameter_name: str = Field(..., alias="name")
+    value: Any = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
 # 新增：风险配置更新请求模型
 class RiskConfigUpdateRequest(BaseModel):
     risk_per_trade_r: Optional[float] = None

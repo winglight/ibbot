@@ -2054,6 +2054,62 @@ class StrategyManager:
             raise ValueError("Strategy risk manager not configured")
         return self.strategy_risk_manager.update_settings(name, updates)
 
+    def update_strategy_parameter(self, name: str, parameter_name: str, value: Any) -> Dict[str, Any]:
+        """Update and persist a single runtime strategy parameter."""
+
+        if name not in self.strategies:
+            raise ValueError("Strategy not found")
+
+        runtime = self.internal_strategies_runtime.get(name)
+        if runtime is None:
+            runtime = self._load_internal_strategy_runtime(self.strategies.get(name))
+
+        if runtime is None:
+            raise ValueError("Strategy runtime unavailable")
+
+        getter = getattr(runtime, "get_parameter_definitions", None)
+        updater = getattr(runtime, "apply_parameter_updates", None)
+        describer = getattr(runtime, "describe_parameters", None)
+
+        if not callable(getter) or not callable(updater):
+            raise ValueError("Strategy does not support parameter updates")
+
+        definitions = getter() or {}
+        if parameter_name not in definitions:
+            raise ValueError(f"Unknown parameter '{parameter_name}'")
+
+        applied = updater({parameter_name: value})
+
+        settings_to_save: Dict[str, Any] = {}
+        settings_to_remove: Set[str] = set()
+        for key, applied_value in applied.items():
+            storage_key = f"{name}_param_{key}"
+            if applied_value is None:
+                settings_to_remove.add(storage_key)
+            else:
+                settings_to_save[storage_key] = applied_value
+
+        self._persist_strategy_settings(settings_to_save, settings_to_remove)
+
+        parameter_payload: Dict[str, Any] = {}
+        if callable(describer):
+            try:
+                schema = describer() or []
+            except Exception:
+                schema = []
+            if isinstance(schema, list):
+                for entry in schema:
+                    if isinstance(entry, dict) and entry.get("name") == parameter_name:
+                        parameter_payload = dict(entry)
+                        break
+
+        if not parameter_payload:
+            parameter_payload = dict(definitions.get(parameter_name, {}))
+            parameter_payload["name"] = parameter_name
+            parameter_payload["value"] = applied.get(parameter_name)
+
+        return parameter_payload
+
     def get_internal_strategy_status(self, name: str) -> Optional[Dict[str, Any]]:
         """Return runtime status metrics for an internal strategy."""
 
