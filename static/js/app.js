@@ -3169,6 +3169,73 @@ class TradingApp {
         }
     }
 
+    async closePosition(symbol, options = {}) {
+        const { positionQty: rawQty = null, skipConfirm = false } = options || {};
+        const normalizedSymbol = typeof symbol === 'string' ? symbol.trim() : '';
+        if (!normalizedSymbol) {
+            return false;
+        }
+
+        const lookupSymbol = normalizedSymbol.toUpperCase();
+        let qty = rawQty;
+        if (qty === null || typeof qty === 'undefined') {
+            const positionInfo = this.dataManager?.getPosition?.(lookupSymbol) || this.dataManager?.getPosition?.(normalizedSymbol);
+            if (positionInfo) {
+                qty = positionInfo.position;
+            }
+        }
+        qty = Number(qty);
+        if (!Number.isFinite(qty) || Math.abs(qty) < 1e-9) {
+            this.showAlert('warning', '当前无持仓，无法平仓');
+            return false;
+        }
+
+        if (!skipConfirm) {
+            const confirmed = confirm(`确认平仓 ${lookupSymbol}？\n持仓量: ${qty}\n将以市价单全部平仓`);
+            if (!confirmed) {
+                return false;
+            }
+        }
+
+        try {
+            const response = await this.apiCall('/close_position', {
+                method: 'POST',
+                body: JSON.stringify({ symbol: normalizedSymbol })
+            });
+
+            if (response?.success) {
+                const actionText = response.action || 'CLOSE';
+                const quantityText = Number.isFinite(response.quantity) ? response.quantity : qty;
+                const orderIdText = response.order_id ? ` (订单ID: ${response.order_id})` : '';
+                this.showAlert('success', `平仓订单已提交: ${actionText} ${quantityText} ${lookupSymbol}${orderIdText}`);
+                await this.loadPortfolio();
+                this.loadOrders();
+
+                const monitorSymbol = (this.currentMonitor?.symbol || '').trim();
+                if (monitorSymbol && monitorSymbol.toUpperCase() === lookupSymbol && typeof this.syncMonitorModalData === 'function') {
+                    try {
+                        await this.syncMonitorModalData(lookupSymbol);
+                    } catch (syncErr) {
+                        console.warn('Failed to sync monitor modal after close position:', syncErr);
+                    }
+                }
+                return true;
+            }
+
+            const failureReason = (response && response.message) ? response.message : '未知错误';
+            this.showAlert('danger', `平仓失败: ${failureReason}`);
+        } catch (err) {
+            if (err?.isReadOnly) {
+                return false;
+            }
+            console.error('平仓失败:', err);
+            const message = err?.message || err;
+            this.showAlert('danger', `平仓失败: ${message}`);
+        }
+
+        return false;
+    }
+
     async openMonitorModal(symbol, positionQty = 0, currentPrice = 0, avgCost = 0, pnl = 0, pnlPercent = 0) {
         try {
             // 获取最新订单以确定建仓/加仓时间
@@ -3660,36 +3727,9 @@ class TradingApp {
                 // 平仓按钮事件
                 const closePositionBtn = document.getElementById('closePositionBtn');
                 if (closePositionBtn) {
-                    closePositionBtn.onclick = async () => {
-                        if (!this.currentMonitor || this.currentMonitor.positionQty === 0) {
-                            this.showAlert('warning', '当前无持仓，无法平仓');
-                            return;
-                        }
-                        
-                        const confirmed = confirm(`确认平仓 ${symbol}？\n持仓量: ${this.currentMonitor.positionQty}\n将以市价单全部平仓`);
-                        if (!confirmed) return;
-                        
-                        try {
-                            const response = await this.apiCall('/close_position', {
-                                method: 'POST',
-                                body: JSON.stringify({ symbol })
-                            });
-                            
-                            if (response.success) {
-                                this.showAlert('success', `平仓订单已提交: ${response.action} ${response.quantity} ${symbol} (订单ID: ${response.order_id})`);
-                                // 刷新持仓和订单数据
-                                await this.loadPortfolio();
-                                this.loadOrders();
-                                // 刷新监控弹窗数据
-                                await this.syncMonitorModalData(symbol);
-                            } else {
-                                this.showAlert('danger', `平仓失败: ${response.message || '未知错误'}`);
-                            }
-                        } catch (err) {
-                            console.error('平仓失败:', err);
-                            this.showAlert('danger', `平仓失败: ${err.message || err}`);
-                        }
-                    };
+                    closePositionBtn.onclick = () => this.closePosition(symbol, {
+                        positionQty: this.currentMonitor?.positionQty ?? 0
+                    });
                 }
                 
                 // 反向下单按钮事件

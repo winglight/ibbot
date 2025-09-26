@@ -48,6 +48,9 @@ class PortfolioManager {
                         <button class="btn btn-sm btn-outline-success" onclick="app.openMonitorModal('${pos.symbol}', ${pos.position}, ${pos.current_price}, ${pos.avg_cost}, ${pos.unrealized_pnl}, ${pos.unrealized_pnl_percent})" title="Monitor">
                             <i class="fas fa-eye"></i>
                         </button>
+                        <button class="btn btn-sm btn-outline-danger ms-1" onclick="app.closePosition('${pos.symbol}', { positionQty: ${Number(pos.position) || 0}, source: 'portfolio' })" title="平仓">
+                            <i class="fas fa-times-circle"></i>
+                        </button>
                     </td>
                 </tr>
             `).join('');
