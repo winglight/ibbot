@@ -75,6 +75,96 @@ class StrategyRiskManager:
         self._load_settings_from_db()
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            value = int(value)
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "":
+                return None
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError):
+            return None
+        return number if number >= 0 else None
+
+    @staticmethod
+    def _coerce_float(value: Any, *, allow_none: bool, default: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None if allow_none else default
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "":
+                return None if allow_none else default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None if allow_none else default
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"", "none"}:
+                return None
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+        return bool(value)
+
+    def _coerce_setting_value(self, key: str, value: Any) -> Any:
+        if value is None:
+            return None
+        if key == "max_positions":
+            return self._coerce_int(value)
+        if key == "loss_time_threshold":
+            return self._coerce_float(value, allow_none=True, default=None)
+        if key == "loss_pnl_threshold":
+            return self._coerce_float(
+                value,
+                allow_none=False,
+                default=DEFAULT_STRATEGY_SETTINGS["loss_pnl_threshold"],
+            )
+        if key in {"forbid_add_on_loss", "notify_on_trigger"}:
+            return self._coerce_bool(value)
+        return value
+
+    def _normalize_settings_map(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(config)
+        normalized["max_positions"] = self._coerce_int(config.get("max_positions"))
+        normalized["loss_time_threshold"] = self._coerce_float(
+            config.get("loss_time_threshold"), allow_none=True, default=None
+        )
+        normalized["loss_pnl_threshold"] = self._coerce_float(
+            config.get("loss_pnl_threshold"),
+            allow_none=False,
+            default=DEFAULT_STRATEGY_SETTINGS["loss_pnl_threshold"],
+        )
+        forbid = self._coerce_bool(config.get("forbid_add_on_loss"))
+        notify = self._coerce_bool(config.get("notify_on_trigger"))
+        normalized["forbid_add_on_loss"] = (
+            forbid
+            if forbid is not None
+            else DEFAULT_STRATEGY_SETTINGS["forbid_add_on_loss"]
+        )
+        normalized["notify_on_trigger"] = (
+            notify
+            if notify is not None
+            else DEFAULT_STRATEGY_SETTINGS["notify_on_trigger"]
+        )
+        return normalized
+
+    # ------------------------------------------------------------------
     def set_dependencies(self, *, strategy_manager=None, queue_manager=None, notification_manager=None) -> None:
         if strategy_manager is not None:
             self.strategy_manager = strategy_manager
@@ -112,7 +202,7 @@ class StrategyRiskManager:
         base = DEFAULT_STRATEGY_SETTINGS.copy()
         custom = self._settings.get(strategy_name) or {}
         base.update({k: v for k, v in custom.items() if v is not None})
-        return base
+        return self._normalize_settings_map(base)
 
     # ------------------------------------------------------------------
     def update_settings(self, strategy_name: str, updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -126,8 +216,9 @@ class StrategyRiskManager:
                 continue
             if value == "":
                 value = None
-            if current.get(key) != value:
-                current[key] = value
+            coerced = self._coerce_setting_value(key, value)
+            if current.get(key) != coerced:
+                current[key] = coerced
                 changed = True
 
         if changed:
@@ -142,7 +233,15 @@ class StrategyRiskManager:
             if isinstance(stored, dict):
                 for name, config in stored.items():
                     if isinstance(config, dict):
-                        self._settings[name] = dict(config)
+                        normalized: Dict[str, Any] = {}
+                        for key, value in config.items():
+                            if key not in DEFAULT_STRATEGY_SETTINGS:
+                                continue
+                            coerced = self._coerce_setting_value(key, value)
+                            if coerced is not None:
+                                normalized[key] = coerced
+                        if normalized:
+                            self._settings[name] = normalized
         except Exception as exc:  # pragma: no cover - defensive guard
             strategy_risk_logger.warning(f"Failed to load strategy risk settings: {exc}")
 
