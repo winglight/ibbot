@@ -6,6 +6,7 @@
             this.app = app;
             this.notificationHistory = [];
             this.settingsListenersAttached = false;
+            this.clearingNotifications = false;
             if (this.app) {
                 this.app.filterNotificationHistory = this.filterNotificationHistory.bind(this);
             }
@@ -95,9 +96,33 @@
         }
         
         // 清除所有通知
-        clearNotifications() {
-            this.app.notifications = [];
-            this.updateNotificationPanel();
+        async clearNotifications() {
+            if (this.clearingNotifications) return;
+
+            this.clearingNotifications = true;
+            try {
+                const response = await this.app.apiCall('/notifications/history', { method: 'DELETE' });
+                if (!response?.success) {
+                    throw new Error(response?.detail || response?.message || 'Unknown error');
+                }
+
+                const cleared = response?.cleared ?? 0;
+                this.app.notifications = [];
+                this.notificationHistory = [];
+                this.renderNotificationHistoryRows([]);
+                this.updateNotificationPanel();
+                await this.loadNotificationHistory();
+
+                const successMessage = cleared > 0
+                    ? `Cleared ${cleared} notification${cleared === 1 ? '' : 's'}`
+                    : 'Notification history already empty';
+                this.app.showAlert('success', successMessage);
+            } catch (error) {
+                console.error('Failed to clear notification history:', error);
+                this.app.showAlert('danger', `Failed to clear notification history: ${error.message}`);
+            } finally {
+                this.clearingNotifications = false;
+            }
         }
         
         // 移除单个通知
