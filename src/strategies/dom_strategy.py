@@ -48,6 +48,7 @@ class DOMStrategy(BaseStrategy):
         structure_tolerance_ticks: float = 2.0,
         min_signal_conditions: int = 3,
         signal_frequency_seconds: float = 60.0,
+        min_processing_interval: float = 0.05,
     ) -> None:
         super().__init__(name=name, description=description)
         self.symbol = symbol.upper() if symbol else None
@@ -58,6 +59,7 @@ class DOMStrategy(BaseStrategy):
         self.structure_tolerance_ticks = max(0.0, float(structure_tolerance_ticks))
         self.min_signal_conditions = max(1, int(min_signal_conditions))
         self.signal_frequency_seconds = max(0.0, float(signal_frequency_seconds))
+        self.min_processing_interval = max(0.0, float(min_processing_interval))
         self.dom_service: Optional[Any] = None
         self.breaker_tripped: bool = False
         self.loss_streak: int = 0
@@ -76,6 +78,7 @@ class DOMStrategy(BaseStrategy):
         self._buy_signals: int = 0
         self._sell_signals: int = 0
         self._price_extremes: Dict[str, Dict[str, float]] = {}
+        self._last_metrics_processed_at: float = 0.0
         self.file_path = "src/strategies/dom_strategy.py"
         self.summary_points = [
             "仅在中间价触达支撑/压力区并满足≥3条盘口确认条件时入场",
@@ -154,6 +157,15 @@ class DOMStrategy(BaseStrategy):
                     "label": "Fallback Quantity",
                     "description": "风险管理无法计算仓位时使用的默认合约数。",
                 },
+                "min_processing_interval": {
+                    "type": "float",
+                    "default": 0.05,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "label": "Metrics Sampling Interval (s)",
+                    "description": "最短盘口采样间隔，限制策略处理频率减轻事件循环压力。",
+                    "step": 0.01,
+                },
             }
         )
 
@@ -204,6 +216,7 @@ class DOMStrategy(BaseStrategy):
         self._sell_signals = 0
         self._price_extremes.clear()
         self._last_execution_times.clear()
+        self._last_metrics_processed_at = 0.0
         if not self._listener_attached:
             self.dom_service.add_listener(self._on_dom_metrics)
             self._listener_attached = True
@@ -284,6 +297,13 @@ class DOMStrategy(BaseStrategy):
         if price_float is None:
             return
         self._update_price_extremes(symbol_code, price_float, now, tick_size)
+        if (
+            not first_tick
+            and self.min_processing_interval > 0.0
+            and (now - self._last_metrics_processed_at) < self.min_processing_interval
+        ):
+            return
+        self._last_metrics_processed_at = now
         direction, satisfied = self._evaluate_signal(symbol_code, metrics, price_float, tick_size, now)
         if direction == 0:
             self._last_signal_direction = 0
