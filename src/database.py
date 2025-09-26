@@ -1034,11 +1034,11 @@ class DatabaseManager:
 
             database_logger.debug(f"Notification history saved: {channel} - {event_type}")
     
-    def load_notification_history(self, channel: str = None, status: str = None, 
+    def load_notification_history(self, channel: str = None, status: str = None,
                                  since: str = None, limit: int = 100) -> List[Dict[str, Any]]:
         """加载通知历史"""
         with self._cursor() as cursor:
-            
+
             # 构建查询条件
             conditions = []
             params = []
@@ -1086,12 +1086,21 @@ class DatabaseManager:
             
             database_logger.debug(f"Loaded notification history: {len(history)} records")
             return history
-    
-    def update_notification_status(self, notification_id: int, status: str, 
+
+    def clear_notification_history(self) -> int:
+        """清空通知历史记录"""
+        with self._cursor() as cursor:
+            cursor.execute("DELETE FROM notification_history")
+            deleted = cursor.rowcount or 0
+
+        database_logger.info(f"Cleared {deleted} notification history records")
+        return deleted
+
+    def update_notification_status(self, notification_id: int, status: str,
                                   error_message: str = None, retry_count: int = None):
         """更新通知状态"""
         with self._cursor() as cursor:
-            
+
             updates = ["status = ?"]
             params = [status]
             

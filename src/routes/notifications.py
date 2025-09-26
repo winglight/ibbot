@@ -258,6 +258,21 @@ async def get_notification_history(
         logger.error(f"Get notification history error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.delete("/api/notifications/history")
+async def clear_notification_history(
+    user: Optional[str] = Depends(get_current_user)
+):
+    """清空通知历史"""
+    try:
+        db = get_db_manager()
+        deleted = db.clear_notification_history()
+        return {"success": True, "cleared": deleted}
+    except Exception as e:
+        logger.error(f"Clear notification history error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/api/notifications/test")
 async def test_notification(
     req: NotificationTestRequest,
