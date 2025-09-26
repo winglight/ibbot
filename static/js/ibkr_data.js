@@ -7,6 +7,7 @@ class IBKRDataManager {
         this.app = app;
         this.positions = [];
         this.priceCache = new Map();
+        this.priceRequestPromises = new Map();
         this.priceCacheTimeout = 30000; // 30秒缓存
         this.dailySummaryLoading = false;
         this.dailySummaryChart = null;
@@ -517,7 +518,7 @@ class IBKRDataManager {
     async getCachedPrice(symbol) {
         const cacheKey = symbol.toUpperCase();
         const now = Date.now();
-        
+
         // 检查缓存
         if (this.priceCache.has(cacheKey)) {
             const cached = this.priceCache.get(cacheKey);
@@ -525,35 +526,45 @@ class IBKRDataManager {
                 return cached.price;
             }
         }
-        
-        // 缓存过期或不存在，重新获取
-        try {
-            const response = await this.app.apiCall('/current_price', {
-                method: 'POST',
-                body: JSON.stringify({
-                    symbol: symbol,
-                    exchange: 'SMART'
-                }),
-                allowReadOnly: true,
-                // 此接口为轻量级非关键查询：缩短超时并禁用重试，避免前端长时间等待
-                timeout: 6000,
-                maxRetries: 0
-            });
-            
-            if (response.success && response.price) {
-                // 更新缓存
-                this.priceCache.set(cacheKey, {
-                    price: response.price,
-                    timestamp: now
-                });
-                
-                return response.price;
-            }
-        } catch (error) {
-            // /current_price接口不重要，静默处理错误
+
+        if (this.priceRequestPromises.has(cacheKey)) {
+            return this.priceRequestPromises.get(cacheKey);
         }
-        
-        return null;
+
+        const fetchPromise = (async () => {
+            try {
+                const response = await this.app.apiCall('/current_price', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        symbol: symbol,
+                        exchange: 'SMART'
+                    }),
+                    allowReadOnly: true,
+                    // 此接口为轻量级非关键查询：缩短超时并禁用重试，避免前端长时间等待
+                    timeout: 6000,
+                    maxRetries: 0
+                });
+
+                if (response.success && response.price) {
+                    // 更新缓存
+                    this.priceCache.set(cacheKey, {
+                        price: response.price,
+                        timestamp: Date.now()
+                    });
+
+                    return response.price;
+                }
+            } catch (error) {
+                // /current_price接口不重要，静默处理错误
+            } finally {
+                this.priceRequestPromises.delete(cacheKey);
+            }
+
+            return null;
+        })();
+
+        this.priceRequestPromises.set(cacheKey, fetchPromise);
+        return fetchPromise;
     }
 
     /**
