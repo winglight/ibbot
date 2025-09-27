@@ -1330,7 +1330,16 @@ class RiskManager:
         """自动同步所有活跃订单状态和成交价格（包括市价单和限价单）"""
         try:
             client = self._get_ibkr_client()
-            if client is None or not hasattr(client, 'ib'):
+            if client is None:
+                return
+
+            # If the underlying IBKR connection is unavailable, skip syncs to
+            # avoid spamming errors while the auto-reconnect logic does its job.
+            if not getattr(client, "is_connected", lambda: False)():
+                return
+
+            ib_instance = getattr(client, "ib", None)
+            if ib_instance is None or not getattr(ib_instance, "isConnected", lambda: False)():
                 return
             # 定期清理警告记录，避免内存泄漏（每100次调用清理一次）
             if len(self.warned_order_downgrades) > 100:
@@ -1361,7 +1370,7 @@ class RiskManager:
                     trade = None
                     
                     # 查找对应的trade
-                    for t in client.ib.trades():
+                    for t in ib_instance.trades():
                         if t.order.orderId == order_id_int:
                             trade = t
                             break
