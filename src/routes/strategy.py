@@ -9,6 +9,10 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
 
 from src.utils import now_local, parse_local_datetime
+from src.utils.strategy_cache import (
+    get_daily_pnl as cache_get_daily_pnl,
+    get_strategy_stats as cache_get_strategy_stats,
+)
 
 from core import strategy_manager, queue_manager, order_manager
 from .auth import get_current_user
@@ -462,6 +466,24 @@ async def get_strategy_daily_pnl(
 ):
     if 'order_manager' not in globals() or not order_manager:
         raise HTTPException(status_code=500, detail="Order manager not initialized")
+
+    if not force_refresh:
+        try:
+            cache_stats = await cache_get_strategy_stats(name)
+        except Exception:
+            cache_stats = {}
+        if cache_stats and not cache_stats.get("stale"):
+            try:
+                pnl_rows = await cache_get_daily_pnl(name)
+            except Exception:
+                pnl_rows = None
+            if pnl_rows is not None:
+                return {
+                    "success": True,
+                    "pnl": pnl_rows,
+                    "from_cache": True,
+                    "cache_age": 0.0,
+                }
 
     global _daily_pnl_cache_lock
     if _daily_pnl_cache_lock is None:

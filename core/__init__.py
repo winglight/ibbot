@@ -1,3 +1,5 @@
+import asyncio
+
 from src.connection_manager import connection_manager, ConnectionConfig
 from src.ibkr_client import IBKRClient
 from src.telegram_notifier import TelegramNotifier
@@ -18,6 +20,7 @@ from src.strategies.dom_strategy import DOMStrategy
 from src.dom_dependencies import DOMConfig, get_dom_processor
 import src.dom_dependencies as dom_dependencies
 from src.strategy_risk import StrategyRiskManager
+from src.cache import init_redis, get_redis_client
 
 # Initialize shared instances
 telegram_notifier = TelegramNotifier()
@@ -46,6 +49,13 @@ atr_trailing_service = ATRTrailingService(
 )
 
 try:
+    asyncio.run(init_redis())
+except Exception as exc:  # pragma: no cover - defensive guard
+    logger.warning(f"Redis initialisation skipped: {exc}")
+
+redis_client = get_redis_client()
+
+try:
     strategy_manager.set_dependencies(
         risk_manager=risk_manager,
         queue_manager=queue_manager,
@@ -54,6 +64,11 @@ try:
     )
 except Exception:
     pass
+
+try:
+    strategy_manager.rebuild_strategy_cache(block=True)
+except Exception as exc:  # pragma: no cover - defensive guard
+    logger.warning(f"Failed to rebuild strategy cache during bootstrap: {exc}")
 
 order_manager = get_order_manager()
 try:

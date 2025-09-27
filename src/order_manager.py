@@ -20,6 +20,7 @@ from .utils import (
     parse_local_datetime,
     to_local_iso,
 )
+from .utils.strategy_cache import record_filled_order as cache_record_filled_order
 
 class OrderStatus(Enum):
     """订单状态枚举"""
@@ -573,10 +574,21 @@ class OrderManager:
             
             # 更新数据库
             self._update_order_in_database(order)
-            
+
             # 记录日志
             order_logger.info(f"📊 订单状态更新: {order_id} | {old_status} → {status} | 成交价: {fill_price or 'N/A'}")
-            
+
+            if status == OrderStatus.FILLED.value:
+                try:
+                    self._schedule_async(
+                        cache_record_filled_order(order),
+                        "Strategy cache update",
+                    )
+                except Exception as exc:
+                    order_logger.debug(
+                        f"Failed to enqueue strategy cache update for order {order_id}: {exc}"
+                    )
+
             # 如果订单状态变为Filled，发送通知
             if status == OrderStatus.FILLED.value and old_status != OrderStatus.FILLED.value:
                 self._send_filled_notifications(order)

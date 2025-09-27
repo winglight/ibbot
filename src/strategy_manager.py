@@ -18,7 +18,19 @@ from threading import RLock
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, List, Optional, Any, TYPE_CHECKING, Set, Tuple, Iterable, Union, Coroutine
+from typing import (
+    Dict,
+    List,
+    Optional,
+    Any,
+    TYPE_CHECKING,
+    Set,
+    Tuple,
+    Iterable,
+    Union,
+    Coroutine,
+    Sequence,
+)
 from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -31,6 +43,12 @@ from .utils import (
     parse_local_datetime,
     slugify_strategy_name,
     to_local_iso,
+)
+from .utils.strategy_cache import (
+    clear_strategy_cache,
+    compute_performance_metrics as cache_compute_performance,
+    get_strategy_stats as cache_get_strategy_stats,
+    rebuild_strategy_cache as cache_rebuild_strategy_cache,
 )
 
 DEFAULT_STRATEGY_PATH = "src/strategies/"
@@ -101,6 +119,7 @@ class StrategyManager:
             Tuple[str, Optional[str], Optional[str], bool]
         ] = []
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._background_tasks: Set[asyncio.Task] = set()
         self._strategies_cache: Dict[str, Any] = {
             "data": None,
             "expires_at": 0.0,
@@ -154,6 +173,151 @@ class StrategyManager:
                 )
             except Exception as exc:  # pragma: no cover - defensive guard
                 strategy_logger.warning(f"Failed to propagate dependencies to {strategy.name}: {exc}")
+
+    def _schedule_cache_coroutine(
+        self, coro: Coroutine[Any, Any, Any], *, block: bool = False
+    ) -> None:
+        """Execute or schedule a coroutine used for cache maintenance."""
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            task = loop.create_task(coro)
+            self._background_tasks.add(task)
+
+            def _cleanup(task: asyncio.Task) -> None:
+                self._background_tasks.discard(task)
+                if task.cancelled():
+                    return
+                try:
+                    task.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(
+                        "Strategy cache task failed",
+                        error=str(exc),
+                    )
+
+            task.add_done_callback(_cleanup)
+            if block:
+                strategy_logger.warning(
+                    "Cache coroutine requested with block=True while event loop running; scheduled asynchronously.",
+                )
+            return
+
+        target_loop = self._event_loop
+        if target_loop and target_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, target_loop)
+            if block:
+                try:
+                    future.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(
+                        "Strategy cache coroutine failed", error=str(exc)
+                    )
+            return
+
+        try:
+            asyncio.run(coro)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            strategy_logger.warning(
+                "Strategy cache coroutine failed during synchronous execution",
+                error=str(exc),
+            )
+
+    def rebuild_strategy_cache(
+        self, strategy_names: Optional[Sequence[str]] = None, *, block: bool = False
+    ) -> None:
+        """Rebuild cached strategy statistics from the database."""
+
+        if strategy_names is None:
+            names = list(self.strategies.keys())
+        else:
+            names = [name for name in strategy_names if name in self.strategies]
+
+        if not names:
+            return
+
+        async def _rebuild() -> None:
+            for name in names:
+                try:
+                    orders = await asyncio.to_thread(
+                        self.db_manager.load_strategy_orders,
+                        name,
+                        'strategy',
+                        None,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(
+                        "Failed to load strategy orders for cache rebuild",
+                        strategy=name,
+                        error=str(exc),
+                    )
+                    await clear_strategy_cache(name)
+                    continue
+
+                await cache_rebuild_strategy_cache(name, orders)
+
+        self._schedule_cache_coroutine(_rebuild(), block=block)
+
+    def _get_cached_stats(self, strategy_names: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+        if not strategy_names:
+            return {}
+
+        async def _collect() -> Dict[str, Dict[str, Any]]:
+            payload: Dict[str, Dict[str, Any]] = {}
+            for name in strategy_names:
+                stats = await cache_get_strategy_stats(name)
+                if stats:
+                    payload[name] = stats
+            return payload
+
+        try:
+            return asyncio.run(_collect())
+        except RuntimeError:
+            target_loop = self._event_loop
+            if target_loop and target_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(_collect(), target_loop)
+                try:
+                    return future.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.debug(
+                        "Failed to gather cached stats via event loop",
+                        error=str(exc),
+                    )
+            return {}
+
+    def _compute_cached_performance(
+        self,
+        strategy: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        async def _compute() -> Dict[str, Any]:
+            return await cache_compute_performance(
+                strategy, start_date=start_date, end_date=end_date
+            )
+
+        try:
+            return asyncio.run(_compute())
+        except RuntimeError:
+            target_loop = self._event_loop
+            if target_loop and target_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(_compute(), target_loop)
+                try:
+                    return future.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.debug(
+                        "Failed to compute cached performance via event loop",
+                        strategy=strategy,
+                        error=str(exc),
+                    )
+            return None
+
+    def _clear_strategy_cache(self, strategy: str, *, block: bool = False) -> None:
+        self._schedule_cache_coroutine(clear_strategy_cache(strategy), block=block)
 
     def start(self):
         """Start strategy manager scheduler"""
@@ -1906,15 +2070,27 @@ class StrategyManager:
         if name in self.strategies:
             strategy = self.strategies[name]
             strategy_dict = asdict(strategy)
-            order_stats = self.db_manager.get_strategy_order_stats([strategy.name], 'strategy')
-            stats = order_stats.get(strategy.name, {})
-            strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
-            last_created_at = stats.get('last_created_at')
-            if last_created_at:
-                parsed_time = parse_local_datetime(last_created_at)
-                strategy_dict['last_triggered'] = parsed_time or last_created_at
+            cache_stats = self._get_cached_stats((strategy.name,)).get(strategy.name)
+            if cache_stats and not cache_stats.get("stale"):
+                strategy_dict['trigger_count'] = int(cache_stats.get('filled_count', 0) or 0)
+                last_created_at = cache_stats.get('last_trigger_ts')
+                if last_created_at:
+                    parsed_time = parse_local_datetime(last_created_at)
+                    strategy_dict['last_triggered'] = parsed_time or last_created_at
+                else:
+                    strategy_dict['last_triggered'] = None
             else:
-                strategy_dict['last_triggered'] = None
+                order_stats = self.db_manager.get_strategy_order_stats([strategy.name], 'strategy')
+                stats = order_stats.get(strategy.name, {})
+                strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
+                last_created_at = stats.get('last_created_at')
+                if last_created_at:
+                    parsed_time = parse_local_datetime(last_created_at)
+                    strategy_dict['last_triggered'] = parsed_time or last_created_at
+                else:
+                    strategy_dict['last_triggered'] = None
+                if cache_stats and cache_stats.get("stale"):
+                    strategy_dict['cache_stale'] = True
             # Convert datetime objects to strings for JSON serialization
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
                 strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
@@ -2997,6 +3173,8 @@ class StrategyManager:
 
             strategy_logger.info(f"Renamed strategy: {old_name} -> {normalized_new}")
             self._invalidate_strategies_cache()
+            self._clear_strategy_cache(old_name)
+            self.rebuild_strategy_cache([normalized_new])
             self.restart_scheduler()
             return True
         except Exception as e:
@@ -3088,10 +3266,17 @@ if __name__ == "__main__":
             ):
                 return deepcopy(cache["data"])
 
-        if strategy_names:
+        cached_stats = self._get_cached_stats(strategy_names)
+        missing_for_db = [
+            name
+            for name in strategy_names
+            if name not in cached_stats or cached_stats[name].get("stale")
+        ]
+
+        if missing_for_db:
             try:
                 order_stats = self.db_manager.get_strategy_order_stats(
-                    strategy_names, order_source='strategy'
+                    missing_for_db, order_source='strategy'
                 )
             except Exception as exc:
                 strategy_logger.warning(
@@ -3104,14 +3289,26 @@ if __name__ == "__main__":
         result: List[Dict[str, Any]] = []
         for strategy in self.strategies.values():
             strategy_dict = asdict(strategy)
-            stats = order_stats.get(strategy.name, {})
-            strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
-            last_created_at = stats.get('last_created_at')
-            if last_created_at:
-                parsed_time = parse_local_datetime(last_created_at)
-                strategy_dict['last_triggered'] = parsed_time or last_created_at
+            cache_snapshot = cached_stats.get(strategy.name)
+            if cache_snapshot and not cache_snapshot.get("stale"):
+                strategy_dict['trigger_count'] = int(cache_snapshot.get('filled_count', 0) or 0)
+                last_created_at = cache_snapshot.get('last_trigger_ts')
+                if last_created_at:
+                    parsed_time = parse_local_datetime(last_created_at)
+                    strategy_dict['last_triggered'] = parsed_time or last_created_at
+                else:
+                    strategy_dict['last_triggered'] = None
             else:
-                strategy_dict['last_triggered'] = None
+                stats = order_stats.get(strategy.name, {})
+                strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
+                last_created_at = stats.get('last_created_at')
+                if last_created_at:
+                    parsed_time = parse_local_datetime(last_created_at)
+                    strategy_dict['last_triggered'] = parsed_time or last_created_at
+                else:
+                    strategy_dict['last_triggered'] = None
+                if cache_snapshot and cache_snapshot.get("stale"):
+                    strategy_dict['cache_stale'] = True
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
                 strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
             if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
@@ -3195,6 +3392,7 @@ if __name__ == "__main__":
 
             strategy_logger.info(f"Deleted strategy: {name}")
             self._invalidate_strategies_cache()
+            self._clear_strategy_cache(name)
             return True
         except Exception as e:
             strategy_logger.error(f"Failed to delete strategy {name}: {e}")
@@ -3220,6 +3418,8 @@ if __name__ == "__main__":
             f"Strategy data reset: {name}, removed {deleted} persisted orders"
         )
         self._invalidate_strategies_cache()
+        self._clear_strategy_cache(name)
+        self.rebuild_strategy_cache([name])
         return {"deleted_orders": int(deleted or 0)}
 
             
@@ -3237,6 +3437,16 @@ if __name__ == "__main__":
     def get_strategy_performance(self, strategy_name: str, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> Dict[str, Any]:
         """Get strategy performance metrics based on orders"""
         try:
+            cache_stats = self._get_cached_stats((strategy_name,)).get(strategy_name)
+            if cache_stats and not cache_stats.get("stale"):
+                cached_metrics = self._compute_cached_performance(
+                    strategy_name,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if cached_metrics is not None:
+                    return cached_metrics
+
             orders = self.db_manager.load_strategy_orders(strategy_name, 'strategy', limit=1000)
             if start_date:
                 orders = [o for o in orders if o.timestamp and parse_local_datetime(o.timestamp) >= start_date]
