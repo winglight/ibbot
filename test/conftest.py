@@ -1,114 +1,93 @@
+import importlib
 import os
-import sys
-import time
-import subprocess
-from typing import Optional
+import shutil
+from pathlib import Path
+from typing import Dict
 
 import pytest
+from fastapi.testclient import TestClient
 
-try:
-    from . import http_client as requests
-except ImportError:
-    import http_client as requests
+# 固定测试环境变量，避免依赖外部 .env
+os.environ.setdefault("ADMIN_USERNAME", "admin")
+os.environ.setdefault("ADMIN_PASSWORD", "admin123")
+os.environ.setdefault("VISITOR_USERNAME", "visitor")
+os.environ.setdefault("VISITOR_PASSWORD", "visitor123")
+os.environ.setdefault("JWT_SECRET", "unit-test-secret")
+os.environ.setdefault("AUTO_CONNECT", "false")
 
-
-# Prevent real order placement whenever the pytest suite is executed.  The
-# production server can opt-in to real trading by explicitly setting
-# ``IBBOT_DISABLE_TRADING=0`` before starting.
-os.environ.setdefault("IBBOT_DISABLE_TRADING", "1")
-
-
-def _base_url() -> str:
-    return os.getenv("API_BASE_URL", "http://localhost:8000")
-
-
-def _is_server_up() -> bool:
-    try:
-        r = requests.get(f"{_base_url()}/api-docs.json", timeout=2)
-        return r.status_code in (200, 404)
-    except Exception:
-        return False
+DATABASE_BASENAME = "trading_bot.db"
 
 
 @pytest.fixture(scope="session", autouse=True)
-def server():
-    """Ensure FastAPI server is running on localhost:8000 for API tests.
-    If not running, start a uvicorn subprocess and stop it after the session.
-    """
-    if os.getenv("IBBOT_SKIP_SERVER", "0") == "1":
-        yield
-        return
-    if _is_server_up():
-        # Assume external server provided
-        yield
-        return
+def isolate_database(tmp_path_factory):
+    """备份并重置 data/trading_bot.db，测试结束后恢复。"""
 
-    env = os.environ.copy()
-    env.setdefault("ADMIN_USERNAME", "admin")
-    env.setdefault("ADMIN_PASSWORD", "change_me")
-    env.setdefault("IBBOT_DISABLE_TRADING", "1")
+    data_dir = Path("data")
+    data_dir.mkdir(exist_ok=True)
+    backup_dir = tmp_path_factory.mktemp("db-backup")
+    backups: list[tuple[Path, Path]] = []
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "uvicorn",
-        "main:app",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8000",
-        "--log-level",
-        "warning",
-    ]
-    proc = subprocess.Popen(cmd, env=env)
+    def _copy_if_exists(filename: str) -> None:
+        src = data_dir / filename
+        if src.exists():
+            dst = backup_dir / filename
+            shutil.copy(src, dst)
+            backups.append((src, dst))
+            src.unlink()
 
-    # Wait for server to be ready
-    for _ in range(80):  # up to ~40s
-        if _is_server_up():
-            break
-        time.sleep(0.5)
-    else:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            pass
-        pytest.fail("Failed to start local test server on http://localhost:8000")
+    for suffix in ("", "-wal", "-shm"):
+        _copy_if_exists(f"{DATABASE_BASENAME}{suffix}")
 
     yield
 
-    # Teardown server if we started it
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    # 清理测试产生的数据库文件
+    for suffix in ("", "-wal", "-shm"):
+        test_file = data_dir / f"{DATABASE_BASENAME}{suffix}"
+        if test_file.exists():
+            test_file.unlink()
 
-
-def _login(username: str, password: str) -> Optional[str]:
-    try:
-        resp = requests.post(
-            f"{_base_url()}/api/login",
-            json={"username": username, "password": password},
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            return None
-        return resp.json().get("access_token")
-    except Exception:
-        return None
+    # 还原原始数据库
+    for target, backup in backups:
+        shutil.copy(backup, target)
 
 
 @pytest.fixture(scope="session")
-def token(server) -> str:
-    """Session-scoped auth token for tests that require Authorization header."""
-    username = os.getenv("ADMIN_USERNAME", "admin")
-    password = os.getenv("ADMIN_PASSWORD", "change_me")
+def app(isolate_database):  # type: ignore[unused-ignore]
+    import main
 
-    # Retry a few times in case server just started
-    for _ in range(10):
-        tok = _login(username, password)
-        if tok:
-            return tok
-        time.sleep(0.5)
-    pytest.fail("无法获取认证令牌: /api/login 未返回有效 token")
+    importlib.reload(main)
+    return main.app
+
+
+@pytest.fixture(scope="session")
+def client(app):
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def _login(client: TestClient, username: str, password: str) -> Dict[str, str]:
+    response = client.post(
+        "/api/login",
+        json={"username": username, "password": password},
+    )
+    response.raise_for_status()
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture()
+def admin_headers(client: TestClient) -> Dict[str, str]:
+    return _login(
+        client,
+        os.environ["ADMIN_USERNAME"],
+        os.environ["ADMIN_PASSWORD"],
+    )
+
+
+@pytest.fixture()
+def visitor_headers(client: TestClient) -> Dict[str, str]:
+    return _login(
+        client,
+        os.environ["VISITOR_USERNAME"],
+        os.environ["VISITOR_PASSWORD"],
+    )
