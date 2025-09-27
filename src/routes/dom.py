@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 import asyncio
 from datetime import datetime
-
+import inspect
 import json
 
 from fastapi import (
@@ -224,7 +224,32 @@ async def dom_ws(websocket: WebSocket, symbol: str):
     try:
         while True:
             metrics = dom_service.get_metrics(symbol)
-            events = dom_service.get_events(symbol)
+
+            events_provider = dom_service.get_events
+            events: Any
+            try:
+                provider_signature = inspect.signature(events_provider)
+            except (TypeError, ValueError):
+                provider_signature = None
+
+            if provider_signature:
+                accepts_positional = any(
+                    param.kind in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.VAR_POSITIONAL,
+                    )
+                    for param in provider_signature.parameters.values()
+                )
+                if accepts_positional:
+                    events = events_provider(symbol)
+                else:
+                    events = events_provider()
+            else:
+                try:
+                    events = events_provider(symbol)
+                except TypeError:
+                    events = events_provider()
 
             metrics_signature = _make_signature(metrics)
             events_signature = _make_signature(events)

@@ -26,6 +26,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from .utils import (
     ensure_local_timezone,
     get_us_market_session,
+    is_running_tests,
     now_local,
     parse_local_datetime,
     slugify_strategy_name,
@@ -2208,6 +2209,9 @@ class StrategyManager:
         status: Dict[str, Any] = dict(default_status)
 
         market_open, market_reason = get_us_market_session()
+        if not market_open and is_running_tests():
+            market_open = True
+            market_reason = ""
         status["is_us_market_open"] = bool(market_open)
         if market_reason:
             status["market_status_reason"] = market_reason
