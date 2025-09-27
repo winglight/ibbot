@@ -2682,15 +2682,47 @@ class TradingApp {
             const existing = scripts.find((script) => script.src && script.src.includes('chartjs-chart-financial'));
 
             if (existing) {
-                if (existing.dataset.loaded === 'true' || existing.readyState === 'complete') {
-                    resolve(true);
-                    return;
-                }
-                existing.addEventListener('load', () => {
+                const markLoaded = () => {
                     existing.dataset.loaded = 'true';
                     resolve(true);
+                };
+
+                const checkReady = () => {
+                    if (this.candlestickSupported) {
+                        return true;
+                    }
+                    try {
+                        if (this.registerCandlestickControllers()) {
+                            this.candlestickSupported = true;
+                            return true;
+                        }
+                    } catch (err) {
+                        console.warn('Candlestick controller registration check failed:', err);
+                    }
+                    if (existing.dataset.loaded === 'true') {
+                        return true;
+                    }
+                    const readyState = existing.readyState;
+                    return readyState === 'complete' || readyState === 'loaded';
+                };
+
+                if (checkReady()) {
+                    markLoaded();
+                    return;
+                }
+
+                existing.addEventListener('load', () => {
+                    console.log('[Chart] Existing candlestick script load event triggered');
+                    markLoaded();
                 }, { once: true });
                 existing.addEventListener('error', (err) => reject(err || new Error(`Failed to load ${normalizedUrl}`)), { once: true });
+
+                setTimeout(() => {
+                    if (checkReady()) {
+                        console.log('[Chart] Candlestick plugin already available on existing script');
+                        markLoaded();
+                    }
+                }, 0);
                 return;
             }
 
@@ -9338,6 +9370,13 @@ class TradingApp {
         state.loading = true;
         this.updateStrategyChartButtons();
         this.updateStrategyChartStatus('加载中...');
+        console.log('[StrategyChart] 开始加载策略K线数据', {
+            name,
+            symbol: state.symbol,
+            interval: state.interval,
+            duration: state.duration,
+            options
+        });
         if (container && !this.strategyChartInstance) {
             container.innerHTML = '<div class="text-center text-muted py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2">加载图表数据中...</p></div>';
         }
@@ -9381,7 +9420,14 @@ class TradingApp {
                 timeout: 70000
             });
 
+            console.log('[StrategyChart] 图表数据接口返回', {
+                success: !!response,
+                points: Array.isArray(response?.data) ? response.data.length : null,
+                loadTokenMatches: state.loadToken === loadToken
+            });
+
             if (state.loadToken !== loadToken) {
+                console.log('[StrategyChart] loadToken 已变化，放弃当前渲染');
                 return;
             }
 
@@ -9397,6 +9443,7 @@ class TradingApp {
             }
 
             const pluginReady = await pluginPromise;
+            console.log('[StrategyChart] 蜡烛图插件状态', { pluginReady });
             if (!pluginReady) {
                 this.destroyStrategyChart();
                 if (container) {
@@ -9409,6 +9456,7 @@ class TradingApp {
             }
 
             const bars = this.normalizeStrategyChartBars(response.data);
+            console.log('[StrategyChart] 归一化后的K线数量', { count: bars.length });
             if (!bars.length) {
                 this.destroyStrategyChart();
                 if (container) {
