@@ -1,6 +1,7 @@
 import asyncio
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional
 
 import pandas as pd
@@ -17,6 +18,13 @@ from src.models import (
     CurrentPriceRequest,
 )
 from src.utils import now_local, to_local_iso, to_local_time
+from src.data_layer import (
+    DataSubscriptionRequest,
+    DataSourceError,
+    get_data_layer_mode,
+    get_data_source_manager,
+    is_legacy_mode,
+)
 
 router = APIRouter()
 
@@ -25,6 +33,92 @@ CURRENT_PRICE_CACHE_ONLY = os.getenv("CURRENT_PRICE_CACHE_ONLY", "False").lower(
 historical_data_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_DURATION_MINUTES = 1  # 缓存1分钟
 INDEX_FUTURE_ROOTS = {"ES", "MES", "NQ", "MNQ", "YM", "MYM", "RTY", "M2K", "VX"}
+NY_TZ = ZoneInfo("America/New_York")
+
+_data_layer_manager = None
+
+_BAR_SIZE_TO_INTERVAL = {
+    "1 sec": "1s",
+    "1 secs": "1s",
+    "1 second": "1s",
+    "1 seconds": "1s",
+    "5 sec": "5s",
+    "5 secs": "5s",
+    "5 second": "5s",
+    "5 seconds": "5s",
+    "1 min": "1m",
+    "1 mins": "1m",
+    "1 minute": "1m",
+    "1 minutes": "1m",
+    "5 min": "5m",
+    "5 mins": "5m",
+    "5 minute": "5m",
+    "5 minutes": "5m",
+}
+
+
+def _get_data_layer_manager():
+    global _data_layer_manager
+    if _data_layer_manager is not None:
+        return _data_layer_manager
+    try:
+        _data_layer_manager = get_data_source_manager()
+        return _data_layer_manager
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to initialise data source manager: %s", exc)
+        return None
+
+
+def _map_bar_size_to_interval(bar_size: str) -> Optional[str]:
+    if not bar_size:
+        return None
+    key = bar_size.strip().lower()
+    return _BAR_SIZE_TO_INTERVAL.get(key)
+
+
+def _filter_candles_by_duration(
+    candles: List[Dict[str, Any]], duration_minutes: int
+) -> List[Dict[str, Any]]:
+    if duration_minutes <= 0:
+        return candles
+    cutoff = now_local() - timedelta(minutes=duration_minutes)
+    filtered: List[Dict[str, Any]] = []
+    for candle in candles:
+        ts_ns = candle.get("interval_end_ns") or candle.get("interval_start_ns")
+        if ts_ns is None:
+            filtered.append(candle)
+            continue
+        try:
+            ts = datetime.fromtimestamp(int(ts_ns) / 1_000_000_000, tz=NY_TZ)
+        except Exception:
+            filtered.append(candle)
+            continue
+        if ts >= cutoff:
+            filtered.append(candle)
+    return filtered
+
+
+def _candles_to_records(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for candle in candles:
+        ts_ns = candle.get("interval_end_ns") or candle.get("interval_start_ns")
+        if ts_ns is not None:
+            try:
+                ts = datetime.fromtimestamp(int(ts_ns) / 1_000_000_000, tz=NY_TZ)
+            except Exception:
+                ts = now_local()
+        else:
+            ts = now_local()
+        record = {
+            "date": to_local_iso(ts),
+            "open": candle.get("open"),
+            "high": candle.get("high"),
+            "low": candle.get("low"),
+            "close": candle.get("close"),
+            "volume": candle.get("volume"),
+        }
+        records.append(record)
+    return records
 
 
 def _require_ib_client():
@@ -88,10 +182,19 @@ async def get_historical_data(
     user: Optional[str] = Depends(get_current_user),
 ):
     """获取历史数据"""
-    if not connection_manager.is_connected():
+    mode = get_data_layer_mode()
+    manager = None if is_legacy_mode(mode) else _get_data_layer_manager()
+
+    if manager is None and not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
-    ib_client = _require_ib_client()
+    ib_client = None
+    if manager is None or connection_manager.is_connected():
+        try:
+            ib_client = _require_ib_client()
+        except HTTPException:
+            if manager is None:
+                raise
 
     try:
         _clean_expired_cache()
@@ -151,6 +254,47 @@ async def get_historical_data(
             }
 
         loop = asyncio.get_event_loop()
+
+        # Unified data layer attempt ----------------------------------
+        interval_key = _map_bar_size_to_interval(request.bar_size)
+        duration_minutes = _parse_duration_to_minutes(request.duration)
+        if manager and interval_key:
+            try:
+                candles = await manager.history(
+                    DataSubscriptionRequest(
+                        channel="market.tick",
+                        symbol=(request.symbol or "").upper(),
+                        interval=interval_key,
+                        options={"exchange": request.exchange},
+                    )
+                )
+            except DataSourceError as exc:
+                logger.debug("Unified history unavailable for %s: %s", request.symbol, exc)
+                candles = []
+            except Exception as exc:
+                logger.exception("Unified history error for %s: %s", request.symbol, exc)
+                candles = []
+
+            if candles:
+                candles = _filter_candles_by_duration(candles, duration_minutes)
+                records = _candles_to_records(candles)
+                if records:
+                    historical_data_cache[cache_key] = {
+                        "data": records,
+                        "timestamp": now,
+                        "expires_at": now + timedelta(minutes=CACHE_DURATION_MINUTES),
+                    }
+                    return {
+                        "success": True,
+                        "data": records,
+                        "filename": None,
+                        "rows": len(records),
+                        "source": "data_layer",
+                    }
+
+        if ib_client is None:
+            raise HTTPException(status_code=404, detail="No data found")
+
         try:
             df = await asyncio.wait_for(
                 loop.run_in_executor(
@@ -227,7 +371,10 @@ async def get_chart_data(
 ):
     """获取图表数据"""
     try:
-        if not connection_manager.is_connected():
+        mode = get_data_layer_mode()
+        manager = None if is_legacy_mode(mode) else _get_data_layer_manager()
+
+        if manager is None and not connection_manager.is_connected():
             reason = None
             try:
                 reason = connection_manager.get_last_connect_error()
@@ -313,17 +460,66 @@ async def get_chart_data(
                 }
 
         # 3) 需要拉取新数据（强制刷新或缓存不足）
-        ib_client = getattr(core, "ibkr_client", None)
-        if ib_client is None or not connection_manager.is_connected():
-            reason = None
+        interval_key = _map_bar_size_to_interval(request.bar_size)
+        duration_minutes = _parse_duration_to_minutes(request.duration)
+
+        unified_chart: Optional[List[Dict[str, Any]]] = None
+        if manager and interval_key:
             try:
-                reason = connection_manager.get_last_connect_error()
-            except Exception:
-                reason = None
-            detail = "Not connected to IBKR"
-            if reason:
-                detail = f"{detail}: {reason}"
-            raise HTTPException(status_code=400, detail=detail)
+                candles = await manager.history(
+                    DataSubscriptionRequest(
+                        channel="market.tick",
+                        symbol=(request.symbol or "").upper(),
+                        interval=interval_key,
+                        options={"exchange": request.exchange},
+                    )
+                )
+            except DataSourceError as exc:
+                logger.debug("Unified chart history unavailable for %s: %s", request.symbol, exc)
+                candles = []
+            except Exception as exc:
+                logger.exception("Unified chart history error for %s: %s", request.symbol, exc)
+                candles = []
+
+            if candles:
+                candles = _filter_candles_by_duration(candles, duration_minutes)
+                records = _candles_to_records(candles)
+                if records:
+                    chart_data = []
+                    for row in records:
+                        chart_data.append(
+                            {
+                                "time": row["date"],
+                                "open": float(row.get("open", 0) or 0),
+                                "high": float(row.get("high", 0) or 0),
+                                "low": float(row.get("low", 0) or 0),
+                                "close": float(row.get("close", 0) or 0),
+                                "volume": int(row.get("volume", 0) or 0),
+                            }
+                        )
+                    unified_chart = chart_data
+
+        if unified_chart:
+            expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
+            historical_data_cache[cache_key] = {
+                "data": unified_chart,
+                "timestamp": now,
+                "expires_at": expires_at,
+            }
+            return {
+                "success": True,
+                "data": unified_chart,
+                "symbol": request.symbol,
+                "duration": request.duration,
+                "bar_size": request.bar_size,
+            }
+
+        if not connection_manager.is_connected():
+            raise HTTPException(status_code=400, detail="Not connected to IBKR")
+
+        ib_client = getattr(core, "ibkr_client", None)
+        if ib_client is None:
+            raise HTTPException(status_code=400, detail="IBKR client unavailable")
 
         df = await ib_client.get_historical_data(
             symbol=request.symbol,
@@ -515,6 +711,8 @@ async def get_current_price(
 ):
     """获取当前价格 - 轻量级接口"""
     ib_client = getattr(core, "ibkr_client", None)
+    mode = get_data_layer_mode()
+    manager = None if is_legacy_mode(mode) else _get_data_layer_manager()
 
     if CURRENT_PRICE_CACHE_ONLY:
         if ib_client and hasattr(ib_client, "price_cache") and request.symbol in ib_client.price_cache:
@@ -534,6 +732,30 @@ async def get_current_price(
             "timestamp": now_local().isoformat(),
             "error": "Cache-only mode: no cached price",
         }
+
+    if manager:
+        try:
+            snapshot = await manager.snapshot(
+                DataSubscriptionRequest(
+                    channel="market.tick",
+                    symbol=(request.symbol or "").upper(),
+                    options={"exchange": request.exchange},
+                )
+            )
+        except DataSourceError as exc:
+            logger.debug("Unified snapshot unavailable for %s: %s", request.symbol, exc)
+            snapshot = {}
+        except Exception as exc:
+            logger.exception("Unified snapshot error for %s: %s", request.symbol, exc)
+            snapshot = {}
+        if snapshot and snapshot.get("last"):
+            return {
+                "success": True,
+                "symbol": request.symbol,
+                "price": snapshot["last"],
+                "timestamp": now_local().isoformat(),
+                "source": "data_layer",
+            }
 
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")

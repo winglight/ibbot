@@ -1,6 +1,6 @@
 import asyncio
 import itertools
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,6 +14,15 @@ from loguru import logger
 from zoneinfo import ZoneInfo
 
 from src.utils import is_trading_disabled, now_local, to_local_time
+from src.data_layer import (
+    DataSubscriptionRequest,
+    DataSubscriptionToken,
+    DataSourceError,
+    get_data_layer_mode,
+    get_data_source_manager,
+    is_dual_mode,
+    is_legacy_mode,
+)
 
 # Module-specific logger for ibkr_client
 ibkr_logger = logger.bind(module="ibkr_client", request_id="-")
@@ -99,6 +108,8 @@ class IBKRClient:
         self.price_cache_ttl_seconds = 5  # 减少到5秒，确保实时按钮能获取最新价格
         # 映射reqId到订单ID，用于错误处理
         self.req_id_to_order_id = {}
+        self._data_layer_manager = None
+        self._market_data_tokens: Dict[str, DataSubscriptionToken] = {}
 
         # Positions cache to smooth transient portfolio emptiness (e.g., after reconnect)
         # 防止IBKR偶发返回空portfolio快照导致前端仓位闪烁或误判
@@ -135,6 +146,7 @@ class IBKRClient:
     
     def disconnect(self):
         """断开连接"""
+        self._schedule_market_data_cleanup()
         self.connection_manager.disconnect()
 
     def is_connected(self) -> bool:
@@ -524,7 +536,32 @@ class IBKRClient:
             ibkr_logger.info(f"Historical data saved to {filename} (fallback)")
     
     async def get_real_time_data(self, symbol: str, exchange: str = 'SMART'):
-        """获取实时数据 - 优化版本避免阻塞"""
+        """获取实时行情，支持统一数据层或回退旧实现。"""
+
+        mode = get_data_layer_mode()
+        if is_legacy_mode(mode):
+            return await self._get_real_time_data_legacy(symbol, exchange)
+
+        try:
+            result = await self._get_real_time_data_unified(symbol, exchange)
+            if result or not is_dual_mode(mode):
+                return result
+            ibkr_logger.debug(
+                "Unified real-time data empty, falling back to legacy",
+                symbol=symbol,
+                exchange=exchange,
+            )
+        except DataSourceError as exc:
+            ibkr_logger.warning(
+                "Unified real-time data unavailable: {}", exc, symbol=symbol
+            )
+        except Exception as exc:
+            ibkr_logger.exception("Unified real-time data error: {}", exc)
+
+        return await self._get_real_time_data_legacy(symbol, exchange)
+
+    async def _get_real_time_data_legacy(self, symbol: str, exchange: str = 'SMART'):
+        """获取实时数据 - 兼容旧实现"""
         import threading
         current_thread = threading.current_thread()
         ibkr_logger.debug(f"get_real_time_data called for {symbol} in thread: {current_thread.name}")
@@ -707,6 +744,116 @@ class IBKRClient:
                     'error': str(e)
                 }
             return None
+
+    async def _get_real_time_data_unified(self, symbol: str, exchange: str = 'SMART') -> Optional[Dict[str, Any]]:
+        manager = self._ensure_data_layer_manager()
+        if manager is None:
+            return None
+
+        symbol_key = (symbol or '').strip().upper()
+        if not symbol_key:
+            return None
+
+        options: Dict[str, Any] = {"exchange": exchange}
+        if symbol_key in INDEX_FUTURE_SYMBOLS:
+            options["sec_type"] = "FUT"
+
+        request = DataSubscriptionRequest(
+            channel="market.tick",
+            symbol=symbol_key,
+            options=options,
+        )
+
+        token = self._market_data_tokens.get(symbol_key)
+        if token is None:
+            token = await manager.subscribe(request)
+            self._market_data_tokens[symbol_key] = token
+
+        snapshot = await manager.snapshot(request)
+        if not snapshot:
+            await asyncio.sleep(0.1)
+            snapshot = await manager.snapshot(request)
+            if not snapshot:
+                return None
+
+        ts_ns = snapshot.get("ts_ns")
+        timestamp_iso: Optional[str]
+        if ts_ns is not None:
+            try:
+                ts_int = int(ts_ns)
+            except (TypeError, ValueError):
+                ts_int = None
+            if ts_int is not None:
+                ts_dt = datetime.fromtimestamp(ts_int / 1_000_000_000, tz=timezone.utc)
+                timestamp_iso = to_local_time(ts_dt)
+            else:
+                timestamp_iso = to_local_time(datetime.now(NY_TZ))
+        else:
+            timestamp_iso = to_local_time(datetime.now(NY_TZ))
+
+        result = {
+            'symbol': symbol,
+            'last': self._sanitize_float(snapshot.get('last')),
+            'bid': self._sanitize_float(snapshot.get('bid')),
+            'ask': self._sanitize_float(snapshot.get('ask')),
+            'volume': self._sanitize_float(snapshot.get('volume')),
+            'timestamp': timestamp_iso,
+            'market_state': snapshot.get('market_state'),
+            'source': 'unified',
+        }
+        if ts_ns is not None:
+            try:
+                result['ts_ns'] = int(ts_ns)
+            except (TypeError, ValueError):
+                pass
+
+        self.price_cache[symbol] = result['last']
+        self.price_cache_timestamp[symbol] = now_local()
+        return result
+
+    def _ensure_data_layer_manager(self):
+        if self._data_layer_manager is None:
+            try:
+                self._data_layer_manager = get_data_source_manager()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                ibkr_logger.warning("Failed to initialise data source manager: {}", exc)
+                return None
+        return self._data_layer_manager
+
+    async def _release_market_data_subscriptions(self) -> None:
+        if not self._market_data_tokens:
+            return
+        manager = self._data_layer_manager
+        tokens = list(self._market_data_tokens.items())
+        self._market_data_tokens.clear()
+        if not manager:
+            return
+        for symbol_key, token in tokens:
+            try:
+                await manager.unsubscribe(token)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                ibkr_logger.debug(
+                    "Failed to unsubscribe market data token for {}: {}",
+                    symbol_key,
+                    exc,
+                )
+
+    def _schedule_market_data_cleanup(self) -> None:
+        if not self._market_data_tokens:
+            return
+
+        async def _cleanup():
+            await self._release_market_data_subscriptions()
+
+        try:
+            asyncio.run(_cleanup())
+        except RuntimeError:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                return
+            if loop.is_running():
+                loop.create_task(_cleanup())
 
     async def place_market_order(self, symbol: str, quantity: int,
                            action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:

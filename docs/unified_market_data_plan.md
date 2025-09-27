@@ -135,6 +135,7 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
   - Dual 模式：同时调用新旧路径并比对（仅用于 QA），异常写入监控。
 - `DOMService`：通过 `EventBus` 订阅 `dom.depth/dom.metrics`，暂留 `_listeners` 以兼容旧调用；在统一模式下 `_listeners` 迁移为对 EventBus 的订阅代理。
 - `StrategyManager`：读取 `DataSourceManager` 提供的快照或通过 `EventBus` 接收实时事件；策略配置中新增 `data_layer_mode` 覆盖全局默认。
+- `/api/historical_data` 与 `/api/current_price` API 优先读取统一数据层快照/历史，失败时再降级到 IBKR 实时/历史查询。
 
 ## Development Plan
 ### Phase 0 – Preparation & Baseline
