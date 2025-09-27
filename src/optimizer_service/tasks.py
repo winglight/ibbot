@@ -62,6 +62,8 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
         total = max(engine.estimated_total(), 1)
         results: List[OptimizationResultItem] = []
         fail_reasons: List[str] = []
+        unique_fail_reasons: set[str] = set()
+        failed_combination_count = 0
         best_result: Tuple[float, OptimizationResultItem] | None = None
         started_at = datetime.utcnow()
         start_perf = perf_counter()
@@ -86,8 +88,12 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
                 if (best_result is None) or metric_sharpe > best_result[0]:
                     best_result = (metric_sharpe, outcome.result)
             else:
+                failed_combination_count += 1
                 reason = outcome.fail_reason or "未知原因"
-                fail_reasons.append(_format_fail_reason(reason, outcome.parameters))
+                formatted_reason = _format_fail_reason(reason, outcome.parameters)
+                if formatted_reason not in unique_fail_reasons:
+                    unique_fail_reasons.add(formatted_reason)
+                    fail_reasons.append(formatted_reason)
                 store.append_fail_reason(task_id, reason)
 
         if not results:
@@ -116,7 +122,7 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
             best_metrics.get("max_drawdown", 0.0),
         )
         sorted_results = sorted(results, key=lambda r: r.metrics.get("sharpe", 0.0), reverse=True)
-        actual_total = len(results) + len(fail_reasons)
+        actual_total = len(results) + failed_combination_count
         runtime_summary = compute_runtime_summary(
             started_at,
             completed_at,
@@ -135,7 +141,7 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
                 "best_annual_return": round(best_metrics.get("annual_return", 0.0), 4),
                 "tested_combinations": actual_total,
                 "successful_combinations": len(results),
-                "failed_combinations": len(fail_reasons),
+                "failed_combinations": failed_combination_count,
                 "generated_at": datetime.utcnow().isoformat() + "Z",
                 "runtime": runtime_summary,
                 "annual_return_distribution": return_distribution,

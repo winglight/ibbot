@@ -437,6 +437,10 @@ class OptimizerApp {
 
     async openReportModal(planId) {
         try {
+            const plan = this.state.plans.find((item) => item.id === planId);
+            const planTitle = plan?.name
+                ? `${this.escapeHtml(String(plan.name))} - 计划报告`
+                : '计划报告';
             const res = await fetch(`/api/optimize/plans/${planId}/reports`);
             if (!res.ok) throw new Error('failed to load reports');
             const data = await res.json();
@@ -444,7 +448,7 @@ class OptimizerApp {
             const content = `
                 <div class="modal-panel">
                     <header>
-                        <h3>计划报告</h3>
+                        <h3>${planTitle}</h3>
                         <button class="btn btn-ghost" data-modal-close>关闭</button>
                     </header>
                     <main>
@@ -580,13 +584,23 @@ class OptimizerApp {
     }
 
     renderFailReasons(report) {
-        const fails = report.report?.fail_reasons ?? [];
+        const rawFails = report.report?.fail_reasons ?? [];
+        const seen = new Set();
+        const fails = [];
+        rawFails.forEach((item) => {
+            if (item === null || item === undefined) return;
+            const text = String(item).trim();
+            if (!text) return;
+            if (seen.has(text)) return;
+            seen.add(text);
+            fails.push(text);
+        });
         if (!fails.length) return '';
         return `
             <div style="margin-top:1rem;">
                 <h4 style="margin-bottom:0.5rem;">失败组合</h4>
                 <ul style="list-style:disc; padding-left:1.5rem; color:#94a3b8;">
-                    ${fails.map((item) => `<li>${item}</li>`).join('')}
+                    ${fails.map((item) => `<li>${this.escapeHtml(item)}</li>`).join('')}
                 </ul>
             </div>
         `;
