@@ -112,12 +112,34 @@ class IBKRClient:
                 pass
             return float(default)
 
+    @staticmethod
+    def _parse_env_bool(key: str, default: bool) -> bool:
+        raw = os.getenv(key)
+        if raw is None:
+            return bool(default)
+
+        try:
+            cleaned = raw.split('#', 1)[0].strip().lower()
+        except Exception:
+            return bool(default)
+
+        if cleaned == "":
+            return bool(default)
+
+        return cleaned in {"1", "true", "yes", "y", "on"}
+
     def __init__(self):
         self.connection_manager = connection_manager
 
         # 设置ConnectionManager对IBKRClient的弱引用，用于错误处理
         import weakref
         self.connection_manager._ibkr_client_ref = weakref.ref(self)
+
+        self._process_restart_enabled = self._parse_env_bool(
+            "IBKR_ENABLE_PROCESS_RESTART",
+            False,
+        )
+        self._self_restart_suppressed_logged = False
 
         self.order_backup_file = "data/orders_backup.csv"
         self._ensure_backup_directory()
@@ -331,6 +353,7 @@ class IBKRClient:
         self._gateway_restart_triggered = False
         self._self_restart_triggered = False
         self._needs_cleanup = False
+        self._self_restart_suppressed_logged = False
 
         task = self._reconnect_task
         if task and not task.done():
@@ -441,6 +464,14 @@ class IBKRClient:
             await self._restart_ib_gateway_container(elapsed)
 
         if not self._self_restart_triggered and elapsed >= self._self_restart_timeout:
+            if not self._process_restart_enabled:
+                if not self._self_restart_suppressed_logged:
+                    ibkr_logger.error(
+                        "IBKR reconnect timeout exceeded but process restart is disabled; "
+                        "set IBKR_ENABLE_PROCESS_RESTART=true to allow automatic restarts."
+                    )
+                    self._self_restart_suppressed_logged = True
+                return
             self._self_restart_triggered = True
             reason = (
                 f"IBKR reconnection failed for {int(elapsed)}s after {self._reconnect_attempt} attempts"

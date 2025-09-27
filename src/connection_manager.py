@@ -61,6 +61,22 @@ def _get_env_float(key: str, default: float) -> float:
             pass
         return float(default)
 
+
+def _get_env_bool(key: str, default: bool) -> bool:
+    val = os.getenv(key)
+    if val is None:
+        return bool(default)
+
+    try:
+        cleaned = val.split('#', 1)[0].strip().lower()
+    except Exception:
+        return bool(default)
+
+    if cleaned == "":
+        return bool(default)
+
+    return cleaned in {"1", "true", "yes", "y", "on"}
+
 @dataclass
 class ConnectionConfig:
     """连接配置类"""
@@ -111,6 +127,8 @@ class ConnectionManager:
         self._project_root = Path(__file__).resolve().parents[1]
         self._pre_restart_script = self._project_root / "vps-setup" / "quick-start.sh"
         self._pre_restart_attempted = False
+        self._process_restart_enabled = _get_env_bool("IBKR_ENABLE_PROCESS_RESTART", False)
+        self._restart_suppressed_logged = False
         
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
@@ -653,6 +671,7 @@ class ConnectionManager:
                 self._failed_connect_attempts = 0
                 self._restart_pending = False
                 self._pre_restart_attempted = False
+            self._restart_suppressed_logged = False
             return
 
         if self._max_failed_connect_attempts <= 0:
@@ -677,14 +696,29 @@ class ConnectionManager:
             self._trigger_restart(attempts, threshold)
 
     def _trigger_restart(self, attempts: int, threshold: int) -> None:
+        restart_allowed = self._process_restart_enabled
+
         with self._connect_attempt_lock:
             if self._restart_pending:
                 return
-            self._restart_pending = True
+            if restart_allowed:
+                self._restart_pending = True
+
         last_error = self._last_connect_error
         reason = f"IBKR connect failed {attempts} times (threshold={threshold})"
         if last_error:
             reason = f"{reason}: {last_error}"
+
+        if not restart_allowed:
+            if not self._restart_suppressed_logged:
+                connection_logger.error(
+                    "Exceeded maximum IBKR connect retries but process restart is disabled; "
+                    "set IBKR_ENABLE_PROCESS_RESTART=true to re-enable automatic restarts."
+                )
+                self._restart_suppressed_logged = True
+            with self._connect_attempt_lock:
+                self._failed_connect_attempts = 0
+            return
 
         self._run_pre_restart_script()
 

@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import copy
 import threading
+import atexit
 from datetime import datetime
 from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
 from collections import defaultdict
@@ -131,6 +132,7 @@ class DOMService:
         self._last_start_error_status: int = 200
         self._start_tasks: Dict[str, asyncio.Task[bool]] = {}
         self._start_tasks_lock = Lock()
+        self._shutdown_event = threading.Event()
         self._auto_start_symbol: Optional[str] = None
         self._auto_start_num_rows: int = max(
             5, min(int(getattr(dom_config, "max_levels", 10) or 10), 30)
@@ -181,6 +183,8 @@ class DOMService:
                         5, min(int(defaults.limit), 30)
                     )
                 self._start_auto_start_worker()
+
+        atexit.register(self._handle_process_shutdown)
 
     # --------------------------------------------------------------
     def _on_depth_update(self, symbol: str, data: Dict) -> None:
@@ -1036,6 +1040,12 @@ class DOMService:
         target_symbol = self._unregister_active_symbol(symbol_key) or symbol
         return self._stop_stream_blocking(target_symbol, symbol_key)
 
+    def _handle_process_shutdown(self) -> None:
+        try:
+            self._shutdown_event.set()
+        except Exception:
+            pass
+
     def _start_auto_start_worker(self) -> None:
         if not self._auto_start_symbol or self._auto_start_worker_started:
             return
@@ -1049,6 +1059,8 @@ class DOMService:
             attempts = 0
             max_attempts = 40
             while attempts < max_attempts:
+                if self._shutdown_event.is_set():
+                    return
                 attempts += 1
                 if self.is_stream_active(symbol) or self.is_start_in_progress(symbol):
                     return
@@ -1058,12 +1070,18 @@ class DOMService:
                             logger.info("Auto-started DOM depth stream", symbol=symbol)
                             return
                     except Exception as exc:
+                        if self._shutdown_event.is_set():
+                            return
+                        message = str(exc)
+                        if isinstance(exc, RuntimeError) and "interpreter shutdown" in message.lower():
+                            return
                         logger.warning(
                             "Auto-start DOM stream attempt failed",
                             symbol=symbol,
-                            error=str(exc),
+                            error=message,
                         )
-                time.sleep(3)
+                if self._shutdown_event.wait(3.0):
+                    return
 
         threading.Thread(
             target=_worker,

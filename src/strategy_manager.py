@@ -3517,6 +3517,7 @@ if __name__ == "__main__":
                 if cached_metrics is not None:
                     return cached_metrics
 
+            trigger_rebuild = not cache_stats or cache_stats.get("stale")
             orders = self.db_manager.load_strategy_orders(strategy_name, 'strategy', limit=1000)
             if start_date:
                 orders = [o for o in orders if o.timestamp and parse_local_datetime(o.timestamp) >= start_date]
@@ -3535,60 +3536,70 @@ if __name__ == "__main__":
             total_commission = sum(commission_values) if commission_values else 0
             total_executions = len(orders)
             if total_executions == 0:
-                return {'total_executions': 0, 'total_pnl': 0, 'avg_pnl': 0,
-                        'winning_trades': 0, 'losing_trades': 0, 'win_rate': 0,
-                        'max_drawdown': 0, 'sharpe_ratio': 0, 'avg_trade_duration': 0,
-                        'total_commission': 0}
-            total_pnl = sum(pnl_values)
-            avg_pnl = total_pnl / len(pnl_values) if pnl_values else 0
-            winning_trades = len([p for p in pnl_values if p > 0])
-            losing_trades = len([p for p in pnl_values if p < 0])
-            win_rate = (winning_trades / len(pnl_values) * 100) if pnl_values else 0
-            cumulative = []
-            run_total = 0
-            for p in pnl_values:
-                run_total += p
-                cumulative.append(run_total)
-            max_drawdown = 0
-            if cumulative:
-                peak = cumulative[0]
-                for value in cumulative:
-                    if value > peak:
-                        peak = value
-                    drawdown = peak - value
-                    if drawdown > max_drawdown:
-                        max_drawdown = drawdown
-            sharpe_ratio = 0
-            if pnl_values and len(pnl_values) > 1:
-                import statistics
-                std_dev = statistics.stdev(pnl_values)
-                if std_dev != 0:
-                    sharpe_ratio = (avg_pnl / std_dev) * (len(pnl_values) ** 0.5)
-            durations: List[float] = []
-            for order in orders:
-                status = getattr(order, "status", "")
-                if isinstance(status, str) and status.lower() != "filled":
-                    continue
+                metrics = {
+                    'total_executions': 0,
+                    'total_pnl': 0,
+                    'avg_pnl': 0,
+                    'winning_trades': 0,
+                    'losing_trades': 0,
+                    'win_rate': 0,
+                    'max_drawdown': 0,
+                    'sharpe_ratio': 0,
+                    'avg_trade_duration': 0,
+                    'total_commission': 0,
+                }
+            else:
+                total_pnl = sum(pnl_values)
+                avg_pnl = total_pnl / len(pnl_values) if pnl_values else 0
+                winning_trades = len([p for p in pnl_values if p > 0])
+                losing_trades = len([p for p in pnl_values if p < 0])
+                win_rate = (winning_trades / len(pnl_values) * 100) if pnl_values else 0
+                cumulative = []
+                run_total = 0
+                for p in pnl_values:
+                    run_total += p
+                    cumulative.append(run_total)
+                max_drawdown = 0
+                if cumulative:
+                    peak = cumulative[0]
+                    for value in cumulative:
+                        if value > peak:
+                            peak = value
+                        drawdown = peak - value
+                        if drawdown > max_drawdown:
+                            max_drawdown = drawdown
+                sharpe_ratio = 0
+                if pnl_values and len(pnl_values) > 1:
+                    import statistics
+                    std_dev = statistics.stdev(pnl_values)
+                    if std_dev != 0:
+                        sharpe_ratio = (avg_pnl / std_dev) * (len(pnl_values) ** 0.5)
+                durations: List[float] = []
+                for order in orders:
+                    status = getattr(order, "status", "")
+                    if isinstance(status, str) and status.lower() != "filled":
+                        continue
 
-                created_raw = getattr(order, "timestamp", None)
-                executed_raw = getattr(order, "executed_at", None)
-                created_dt = parse_local_datetime(created_raw) if created_raw else None
-                executed_dt = parse_local_datetime(executed_raw) if executed_raw else None
+                    created_raw = getattr(order, "timestamp", None)
+                    executed_raw = getattr(order, "executed_at", None)
+                    created_dt = parse_local_datetime(created_raw) if created_raw else None
+                    executed_dt = parse_local_datetime(executed_raw) if executed_raw else None
 
-                # 对于缺失成交时间的订单，使用创建时间作为结束时间，确保不会产生负值
-                if created_dt and not executed_dt:
-                    executed_dt = created_dt
+                    # 对于缺失成交时间的订单，使用创建时间作为结束时间，确保不会产生负值
+                    if created_dt and not executed_dt:
+                        executed_dt = created_dt
 
-                if not created_dt or not executed_dt:
-                    continue
+                    if not created_dt or not executed_dt:
+                        continue
 
-                duration_seconds = (executed_dt - created_dt).total_seconds()
-                if duration_seconds >= 0:
-                    durations.append(duration_seconds)
+                    duration_seconds = (executed_dt - created_dt).total_seconds()
+                    if duration_seconds >= 0:
+                        durations.append(duration_seconds)
 
-            avg_trade_duration = sum(durations) / len(durations) if durations else 0
+                avg_trade_duration = sum(durations) / len(durations) if durations else 0
 
-            return {'total_executions': total_executions,
+                metrics = {
+                    'total_executions': total_executions,
                     'total_pnl': total_pnl,
                     'avg_pnl': avg_pnl,
                     'winning_trades': winning_trades,
@@ -3597,7 +3608,16 @@ if __name__ == "__main__":
                     'max_drawdown': max_drawdown,
                     'sharpe_ratio': sharpe_ratio,
                     'avg_trade_duration': avg_trade_duration,
-                    'total_commission': total_commission}
+                    'total_commission': total_commission,
+                }
+
+            if trigger_rebuild:
+                try:
+                    self.rebuild_strategy_cache([strategy_name])
+                except Exception:
+                    pass
+
+            return metrics
         except Exception as e:
             strategy_logger.error(f"Failed to get strategy performance for {strategy_name}: {e}")
             return {}

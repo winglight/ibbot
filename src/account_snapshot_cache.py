@@ -48,8 +48,28 @@ snapshot_logger = logger.bind(module="account_snapshot_cache", request_id="-")
 
 def _get_redis_url() -> str:
     """Return the Redis connection URL from the environment."""
+    # Dedicated override for the snapshot cache so environments can point the
+    # cache at a different Redis instance when needed.
+    explicit_url = os.getenv("ACCOUNT_CACHE_REDIS_URL")
+    if explicit_url:
+        return explicit_url
 
-    return os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+    # Reuse the shared REDIS_URL if defined; otherwise fall back to the data
+    # layer URL (which may already embed a password) and finally construct a
+    # URL from individual host/port/db/password variables.
+    shared_url = os.getenv("REDIS_URL") or os.getenv("DATA_LAYER_REDIS_URL")
+    if shared_url:
+        return shared_url
+
+    host = os.getenv("REDIS_HOST", "127.0.0.1")
+    port = os.getenv("REDIS_PORT", "6379")
+    db = os.getenv("REDIS_DB", "0")
+    password = os.getenv("REDIS_PASSWORD")
+
+    if password:
+        return f"redis://:{password}@{host}:{port}/{db}"
+
+    return f"redis://{host}:{port}/{db}"
 
 
 async def _ensure_client() -> Optional[Redis]:

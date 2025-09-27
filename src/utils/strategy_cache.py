@@ -36,6 +36,10 @@ def _orders_key(strategy: str) -> str:
     return f"{_base_key(strategy)}:orders"
 
 
+def _orders_zset_key(strategy: str) -> str:
+    return f"{_base_key(strategy)}:orders:zset"
+
+
 def _recent_key(strategy: str) -> str:
     return f"{_base_key(strategy)}:recent"
 
@@ -147,6 +151,61 @@ def _parse_snapshot_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     return parse_local_datetime(value)
+
+
+def _snapshot_timestamp(snapshot: Mapping[str, Any]) -> Optional[float]:
+    executed = _parse_snapshot_datetime(snapshot.get("executed_at"))
+    created = _parse_snapshot_datetime(snapshot.get("created_at"))
+    anchor = ensure_local_timezone(executed or created)
+    if anchor is None:
+        return None
+    try:
+        return float(anchor.timestamp())
+    except Exception:
+        return None
+
+
+def _datetime_to_timestamp(value: Optional[datetime]) -> Optional[float]:
+    if value is None:
+        return None
+    anchored = ensure_local_timezone(value)
+    if anchored is None:
+        return None
+    try:
+        return float(anchored.timestamp())
+    except Exception:
+        return None
+
+
+def _filter_orders_by_range(
+    orders: Sequence[Mapping[str, Any]],
+    start_bound: Optional[datetime],
+    end_bound: Optional[datetime],
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for order in orders:
+        executed_at = _parse_snapshot_datetime(order.get("executed_at"))
+        created_at = _parse_snapshot_datetime(order.get("created_at"))
+        anchor = ensure_local_timezone(executed_at or created_at)
+        if anchor is None:
+            continue
+        if start_bound and anchor < start_bound:
+            continue
+        if end_bound and anchor > end_bound:
+            continue
+        if isinstance(order, dict):
+            result.append(dict(order))
+        else:
+            result.append(dict(order))
+    result.sort(
+        key=lambda item: (
+            _parse_snapshot_datetime(item.get("executed_at"))
+            or _parse_snapshot_datetime(item.get("created_at"))
+            or datetime.min.replace(tzinfo=now_local().tzinfo)
+        ),
+        reverse=True,
+    )
+    return result
 
 
 def _prepare_order_map(raw_map: Mapping[str, str]) -> Dict[str, Dict[str, Any]]:
@@ -315,6 +374,7 @@ async def _write_strategy_cache(strategy: str, order_map: Mapping[str, Dict[str,
     pipe = client.pipeline(transaction=True)
     pipe.delete(
         _orders_key(strategy),
+        _orders_zset_key(strategy),
         _stats_key(strategy),
         _recent_key(strategy),
         _daily_hash_key(strategy),
@@ -323,6 +383,16 @@ async def _write_strategy_cache(strategy: str, order_map: Mapping[str, Dict[str,
 
     if orders_serialised:
         pipe.hset(_orders_key(strategy), mapping=orders_serialised)
+
+    if order_map:
+        zset_mapping: Dict[str, float] = {}
+        for order_id, snapshot in order_map.items():
+            score = _snapshot_timestamp(snapshot)
+            if score is None:
+                continue
+            zset_mapping[order_id] = score
+        if zset_mapping:
+            pipe.zadd(_orders_zset_key(strategy), zset_mapping)
 
     if stats:
         pipe.hset(_stats_key(strategy), mapping=stats)
@@ -401,6 +471,7 @@ async def clear_strategy_cache(strategy: str) -> None:
         return
     await client.delete(
         _orders_key(strategy),
+        _orders_zset_key(strategy),
         _stats_key(strategy),
         _recent_key(strategy),
         _daily_hash_key(strategy),
@@ -467,6 +538,62 @@ async def get_strategy_orders(strategy: str) -> List[Dict[str, Any]]:
     return orders
 
 
+async def get_strategy_orders_in_range(
+    strategy: str,
+    *,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    if start_date is None and end_date is None:
+        return await get_strategy_orders(strategy)
+
+    client = await ensure_redis()
+    if client is None:
+        orders = await get_strategy_orders(strategy)
+        start_bound = ensure_local_timezone(start_date) if start_date else None
+        end_bound = ensure_local_timezone(end_date) if end_date else None
+        return _filter_orders_by_range(orders, start_bound, end_bound)
+
+    start_score: float | str
+    end_score: float | str
+
+    start_ts = _datetime_to_timestamp(start_date)
+    end_ts = _datetime_to_timestamp(end_date)
+    start_score = start_ts if start_ts is not None else "-inf"
+    end_score = end_ts if end_ts is not None else "+inf"
+
+    try:
+        order_ids = await client.zrangebyscore(
+            _orders_zset_key(strategy), start_score, end_score
+        )
+    except Exception:
+        order_ids = []
+
+    if not order_ids:
+        orders = await get_strategy_orders(strategy)
+        start_bound = ensure_local_timezone(start_date) if start_date else None
+        end_bound = ensure_local_timezone(end_date) if end_date else None
+        return _filter_orders_by_range(orders, start_bound, end_bound)
+
+    raw_entries = await client.hmget(_orders_key(strategy), order_ids)
+    collected: List[Dict[str, Any]] = []
+    for order_id, payload in zip(order_ids, raw_entries):
+        if not payload:
+            continue
+        try:
+            decoded = json.loads(payload)
+        except Exception:
+            continue
+        if not isinstance(decoded, dict):
+            continue
+        decoded.setdefault("order_id", order_id)
+        collected.append(decoded)
+
+    start_bound = ensure_local_timezone(start_date) if start_date else None
+    end_bound = ensure_local_timezone(end_date) if end_date else None
+    return _filter_orders_by_range(collected, start_bound, end_bound)
+
+
 async def get_recent_fills(strategy: str, limit: int = 20) -> List[Dict[str, Any]]:
     client = await ensure_redis()
     if client is None:
@@ -518,7 +645,13 @@ async def compute_performance_metrics(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    orders = await get_strategy_orders(strategy)
+    orders: List[Dict[str, Any]] = []
+    if start_date or end_date:
+        orders = await get_strategy_orders_in_range(
+            strategy, start_date=start_date, end_date=end_date
+        )
+    if not orders:
+        orders = await get_strategy_orders(strategy)
     if not orders:
         return _empty_performance()
 

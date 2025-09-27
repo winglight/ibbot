@@ -405,6 +405,7 @@ class TradingApp {
         this.candlestickLoader = null;
         this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
         this.strategyChartInstance = null;
+        this.strategyChartFallbackNotified = false;
         this.strategyChartState = this.createDefaultStrategyChartState();
         this.strategyDetailsState = this.createEmptyStrategyDetailsState();
         this.strategyDetailsTabListenerBound = false;
@@ -8566,18 +8567,19 @@ class TradingApp {
             duration: '1 D',
             fullBars: [],
             orders: [],
-            visibleCount: 0,
-            isRealtime: false,
-            realtimeTimer: null,
-            isReplaying: false,
-            replayTimer: null,
-            loadToken: null,
-            loading: false,
-            slEnabled: false,
-            tpEnabled: false,
-            currentSlPrice: null,
-            currentTpPrice: null,
-        };
+        visibleCount: 0,
+        isRealtime: false,
+        realtimeTimer: null,
+        isReplaying: false,
+        replayTimer: null,
+        loadToken: null,
+        loading: false,
+        slEnabled: false,
+        tpEnabled: false,
+        currentSlPrice: null,
+        currentTpPrice: null,
+        useCandlestick: true,
+    };
     }
 
     createEmptyStrategyDetailsState() {
@@ -8872,6 +8874,7 @@ class TradingApp {
         state.visibleCount = 0;
         state.loadToken = null;
         state.loading = false;
+        state.useCandlestick = true;
         if (!options.preserveCanvas) {
             this.destroyStrategyChart();
             const container = document.getElementById('strategyChartContainer');
@@ -9076,18 +9079,48 @@ class TradingApp {
             extraParts.push(options.extraStatus);
         }
 
+        const useCandles = state.useCandlestick !== false && this.candlestickSupported;
+        const desiredType = useCandles ? 'candlestick' : 'line';
+        if (!useCandles) {
+            extraParts.push('折线展示');
+        }
+        const lineSeries = ohlc.map((bar) => ({ x: bar.x, y: bar.c }));
+        if (this.strategyChartInstance && this.strategyChartInstance.config?.type !== desiredType) {
+            this.destroyStrategyChart();
+        }
+
+        const baseDatasetConfigForUpdate = useCandles
+            ? {
+                type: 'candlestick',
+                label: `${state.symbol || ''} OHLC`,
+                data: ohlc,
+                yAxisID: 'y',
+                parsing: false,
+            }
+            : {
+                type: 'line',
+                label: `${state.symbol || ''} Close`,
+                data: lineSeries,
+                yAxisID: 'y',
+                parsing: false,
+                borderColor: 'rgba(54, 162, 235, 0.85)',
+                backgroundColor: 'rgba(54, 162, 235, 0.12)',
+                borderWidth: 1.5,
+                pointRadius: 0,
+                pointHoverRadius: 2,
+                spanGaps: true,
+                tension: 0.2,
+                fill: false,
+            };
+
+        const baseDatasetForCreation = { ...baseDatasetConfigForUpdate };
+
         if (!this.strategyChartInstance) {
             this.strategyChartInstance = new Chart(ctx, {
-                type: 'candlestick',
+                type: desiredType,
                 data: {
                     datasets: [
-                        {
-                            type: 'candlestick',
-                            label: `${state.symbol || ''} OHLC`,
-                            data: ohlc,
-                            yAxisID: 'y',
-                            parsing: false
-                        },
+                        baseDatasetForCreation,
                         {
                             type: 'bar',
                             label: 'Volume',
@@ -9096,7 +9129,7 @@ class TradingApp {
                             backgroundColor: 'rgba(99, 102, 241, 0.35)',
                             borderColor: 'rgba(79, 70, 229, 0.7)',
                             borderWidth: 1,
-                            parsing: false
+                            parsing: false,
                         },
                         {
                             type: 'scatter',
@@ -9123,9 +9156,9 @@ class TradingApp {
                                             return `买入 ${raw.price.toFixed(2)} @ ${when}`;
                                         }
                                         return `买入 ${context.parsed.y}`;
-                                    }
-                                }
-                            }
+                                    },
+                                },
+                            },
                         },
                         {
                             type: 'scatter',
@@ -9152,9 +9185,9 @@ class TradingApp {
                                             return `卖出 ${raw.price.toFixed(2)} @ ${when}`;
                                         }
                                         return `卖出 ${context.parsed.y}`;
-                                    }
-                                }
-                            }
+                                    },
+                                },
+                            },
                         },
                         {
                             type: 'line',
@@ -9174,8 +9207,8 @@ class TradingApp {
                             tooltip: {
                                 callbacks: {
                                     label: (context) => `止损 ${this.formatNumber(context.parsed.y)}`,
-                                }
-                            }
+                                },
+                            },
                         },
                         {
                             type: 'line',
@@ -9195,10 +9228,10 @@ class TradingApp {
                             tooltip: {
                                 callbacks: {
                                     label: (context) => `止盈 ${this.formatNumber(context.parsed.y)}`,
-                                }
-                            }
-                        }
-                    ]
+                                },
+                            },
+                        },
+                    ],
                 },
                 options: {
                     responsive: true,
@@ -9206,53 +9239,55 @@ class TradingApp {
                     animation: false,
                     interaction: {
                         intersect: false,
-                        mode: 'nearest'
+                        mode: 'nearest',
                     },
                     plugins: {
                         legend: {
                             display: true,
-                            position: 'top'
+                            position: 'top',
                         },
                         tooltip: {
                             intersect: false,
-                            mode: 'nearest'
-                        }
+                            mode: 'nearest',
+                        },
                     },
                     scales: {
                         x: {
                             type: 'time',
                             adapters: {
-                                date: { locale: 'zh-CN' }
+                                date: { locale: 'zh-CN' },
                             },
                             time: {
                                 unit: this.getStrategyChartTimeUnit(state.interval),
-                                tooltipFormat: 'MMM dd HH:mm'
+                                tooltipFormat: 'MMM dd HH:mm',
                             },
                             ticks: {
                                 maxRotation: 45,
-                                autoSkip: true
-                            }
+                                autoSkip: true,
+                            },
                         },
                         y: {
                             position: 'left',
                             title: {
                                 display: true,
-                                text: 'Price'
-                            }
+                                text: 'Price',
+                            },
                         },
                         volume: {
                             position: 'right',
                             grid: { display: false },
                             ticks: { display: false },
                             title: { display: true, text: 'Volume' },
-                            max: maxVolume ? maxVolume * 1.1 : undefined
-                        }
-                    }
-                }
+                            max: maxVolume ? maxVolume * 1.1 : undefined,
+                        },
+                    },
+                },
             });
         } else {
             const datasets = this.strategyChartInstance.data.datasets || [];
-            if (datasets[0]) datasets[0].data = ohlc;
+            if (datasets[0]) {
+                Object.assign(datasets[0], baseDatasetConfigForUpdate);
+            }
             if (datasets[1]) datasets[1].data = volumeData;
             if (datasets[2]) datasets[2].data = buyOrders;
             if (datasets[3]) datasets[3].data = sellOrders;
@@ -9264,6 +9299,7 @@ class TradingApp {
                 datasets[5].data = tpLine;
                 datasets[5].hidden = !tpLine.length;
             }
+            this.strategyChartInstance.config.type = desiredType;
             const xScale = this.strategyChartInstance.options?.scales?.x;
             if (xScale) {
                 xScale.time = xScale.time || {};
@@ -9452,15 +9488,9 @@ class TradingApp {
 
             const pluginReady = await pluginPromise;
             console.log('[StrategyChart] 蜡烛图插件状态', { pluginReady });
+            state.useCandlestick = Boolean(pluginReady);
             if (!pluginReady) {
-                this.destroyStrategyChart();
-                if (container) {
-                    container.innerHTML = '<div class="alert alert-danger mb-0">蜡烛图组件加载失败，请稍后刷新重试。</div>';
-                }
-                state.fullBars = [];
-                state.visibleCount = 0;
-                this.updateStrategyChartStatus('图表组件加载失败');
-                return;
+                console.warn('[StrategyChart] Candlestick plugin unavailable, falling back to line chart.');
             }
 
             const bars = this.normalizeStrategyChartBars(response.data);

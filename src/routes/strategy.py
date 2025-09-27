@@ -490,6 +490,33 @@ async def get_strategy_daily_pnl(
 
     if not force_refresh:
         try:
+            cached_rows = await cache_get_daily_pnl(name)
+        except Exception:
+            cached_rows = None
+        if cached_rows:
+            cache_age = 0.0
+            try:
+                stats_meta = await cache_get_strategy_stats(name)
+            except Exception:
+                stats_meta = {}
+            updated_iso = stats_meta.get("updated_at") if isinstance(stats_meta, dict) else None
+            if updated_iso:
+                updated_dt = parse_local_datetime(updated_iso)
+                if updated_dt is not None:
+                    try:
+                        age_seconds = (now_local() - updated_dt).total_seconds()
+                        cache_age = max(0.0, float(age_seconds))
+                    except Exception:
+                        cache_age = 0.0
+            return {
+                "success": True,
+                "pnl": cached_rows,
+                "from_cache": True,
+                "cache_age": cache_age,
+            }
+
+    if not force_refresh:
+        try:
             cache_stats = await cache_get_strategy_stats(name)
         except Exception:
             cache_stats = {}
@@ -747,4 +774,3 @@ async def clear_strategy_executions(name: str, user: Optional[str] = Depends(get
     except Exception as e:
         logger.error(f"Clear strategy executions error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
