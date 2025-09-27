@@ -12,10 +12,15 @@ import os
 import re
 import sys
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import pandas as pd
 from zoneinfo import ZoneInfo
+
+try:  # Optional dependency for accurate US market calendars
+    import pandas_market_calendars as mcal
+except ImportError:  # pragma: no cover - fallback when dependency missing
+    mcal = None
 
 
 # Timezone helpers -----------------------------------------------------------
@@ -27,6 +32,8 @@ from zoneinfo import ZoneInfo
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 NY_TZ = ZoneInfo("America/New_York")
+
+_NYSE_CALENDAR = None
 
 
 def now_local() -> datetime:
@@ -86,6 +93,81 @@ def to_local_time(value: Any) -> str:
         return ensure_local_timezone(dt).isoformat()
     except Exception:
         return str(value)
+
+
+# Market session helpers ----------------------------------------------------
+
+def _ensure_nyse_calendar():
+    """Return a cached pandas-market-calendars instance for XNYS."""
+
+    global _NYSE_CALENDAR
+    if _NYSE_CALENDAR is not None or mcal is None:
+        return _NYSE_CALENDAR
+
+    try:
+        _NYSE_CALENDAR = mcal.get_calendar("XNYS")
+    except Exception:  # pragma: no cover - defensive guard for missing data files
+        _NYSE_CALENDAR = None
+    return _NYSE_CALENDAR
+
+
+def get_us_market_session(dt: Optional[datetime] = None) -> Tuple[bool, str]:
+    """Return whether US equities market is open along with a human reason.
+
+    Parameters
+    ----------
+    dt:
+        Datetime to evaluate.  Defaults to ``now`` in New York time.
+
+    Returns
+    -------
+    Tuple[bool, str]
+        ``(is_open, reason)`` where ``reason`` explains why the market is
+        closed.  When the market is open the reason is an empty string.
+    """
+
+    when = dt or datetime.now(NY_TZ)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=NY_TZ)
+    else:
+        when = when.astimezone(NY_TZ)
+
+    weekday = when.weekday()
+    if weekday >= 5:
+        return False, "周末休市"
+
+    calendar = _ensure_nyse_calendar()
+    if calendar is not None:
+        try:
+            schedule = calendar.schedule(start_date=when.date(), end_date=when.date())
+        except Exception:  # pragma: no cover - fallback path
+            schedule = None
+        if schedule is None or schedule.empty:
+            return False, "节假日休市"
+
+        market_open = schedule.iloc[0]["market_open"].tz_convert(NY_TZ)
+        market_close = schedule.iloc[0]["market_close"].tz_convert(NY_TZ)
+        if when < market_open:
+            return False, "盘前休市"
+        if when > market_close:
+            return False, "盘后休市"
+        return True, ""
+
+    # Fallback when pandas-market-calendars isn't available.
+    open_time = when.replace(hour=9, minute=30, second=0, microsecond=0)
+    close_time = when.replace(hour=16, minute=0, second=0, microsecond=0)
+    if when < open_time:
+        return False, "盘前休市"
+    if when > close_time:
+        return False, "盘后休市"
+    return True, ""
+
+
+def is_us_market_open(dt: Optional[datetime] = None) -> bool:
+    """Convenience wrapper returning the market open flag only."""
+
+    is_open, _reason = get_us_market_session(dt)
+    return is_open
 
 
 # Other helpers --------------------------------------------------------------

@@ -764,6 +764,8 @@ class TradingApp {
         const statusPush = document.getElementById('summaryDataPushStatus');
         const pushSwitch = document.getElementById('summaryDataPushSwitch');
         const logList = document.getElementById('summaryDataLogList');
+        const slPriceEl = document.getElementById('summaryStatusStopLoss');
+        const tpPriceEl = document.getElementById('summaryStatusTakeProfit');
 
         this.summaryStatusLoading = false;
         this.summaryStatusTarget = targetName;
@@ -775,6 +777,8 @@ class TradingApp {
             thresholdEl && (thresholdEl.textContent = '-');
             buyEl && (buyEl.textContent = '-');
             sellEl && (sellEl.textContent = '-');
+            slPriceEl && (slPriceEl.textContent = '-');
+            tpPriceEl && (tpPriceEl.textContent = '-');
             if (statusPush) statusPush.textContent = '未推送';
             if (logList) logList.innerHTML = '<li class="text-muted">暂无记录</li>';
             this.summaryPushAwaitingData = false;
@@ -783,12 +787,51 @@ class TradingApp {
                 clearTimeout(this.summaryPushAwaitingTimer);
                 this.summaryPushAwaitingTimer = null;
             }
+            this.setStrategyChartRiskLevels({ slEnabled: false, tpEnabled: false, slPrice: null, tpPrice: null });
             return true;
         }
 
         const status = payload.status || {};
         const pushState = status.data_push || {};
         const reasonText = status.data_push_reason || pushState.status_reason || '';
+        const slEnabled = Boolean(status.sl_enabled);
+        const tpEnabled = Boolean(status.tp_enabled);
+        const rawSlPrice = status.sl_price;
+        const rawTpPrice = status.tp_price;
+        const slPriceNumber = (slEnabled && rawSlPrice !== null && rawSlPrice !== undefined)
+            ? Number(rawSlPrice)
+            : null;
+        const tpPriceNumber = (tpEnabled && rawTpPrice !== null && rawTpPrice !== undefined)
+            ? Number(rawTpPrice)
+            : null;
+        if (slPriceEl) {
+            if (slEnabled) {
+                if (Number.isFinite(slPriceNumber)) {
+                    slPriceEl.textContent = `$${this.formatNumber(slPriceNumber)}`;
+                } else {
+                    slPriceEl.textContent = '—';
+                }
+            } else {
+                slPriceEl.textContent = '未启用';
+            }
+        }
+        if (tpPriceEl) {
+            if (tpEnabled) {
+                if (Number.isFinite(tpPriceNumber)) {
+                    tpPriceEl.textContent = `$${this.formatNumber(tpPriceNumber)}`;
+                } else {
+                    tpPriceEl.textContent = '—';
+                }
+            } else {
+                tpPriceEl.textContent = '未启用';
+            }
+        }
+        this.setStrategyChartRiskLevels({
+            slEnabled,
+            tpEnabled,
+            slPrice: Number.isFinite(slPriceNumber) ? slPriceNumber : null,
+            tpPrice: Number.isFinite(tpPriceNumber) ? tpPriceNumber : null,
+        });
         if (status.is_receiving_data) {
             receivingEl.textContent = 'Yes';
         } else if (reasonText) {
@@ -7471,6 +7514,8 @@ class TradingApp {
         const thresholdEl = document.getElementById('summaryStatusThresholdHits');
         const buyEl = document.getElementById('summaryStatusBuySignals');
         const sellEl = document.getElementById('summaryStatusSellSignals');
+        const slPriceEl = document.getElementById('summaryStatusStopLoss');
+        const tpPriceEl = document.getElementById('summaryStatusTakeProfit');
 
         receivingEl.textContent = '…';
         runtimeEl && (runtimeEl.textContent = '…');
@@ -7478,6 +7523,8 @@ class TradingApp {
         thresholdEl && (thresholdEl.textContent = '…');
         buyEl && (buyEl.textContent = '…');
         sellEl && (sellEl.textContent = '…');
+        slPriceEl && (slPriceEl.textContent = '…');
+        tpPriceEl && (tpPriceEl.textContent = '…');
 
         if (this.ibkrManager && typeof this.ibkrManager.requestStrategyStatus === 'function') {
             const result = this.ibkrManager.requestStrategyStatus({
@@ -8493,7 +8540,11 @@ class TradingApp {
             isReplaying: false,
             replayTimer: null,
             loadToken: null,
-            loading: false
+            loading: false,
+            slEnabled: false,
+            tpEnabled: false,
+            currentSlPrice: null,
+            currentTpPrice: null,
         };
     }
 
@@ -8889,6 +8940,51 @@ class TradingApp {
         }
     }
 
+    setStrategyChartRiskLevels(levels = {}) {
+        const state = this.getStrategyChartState();
+        const normalizePrice = (value) => {
+            const num = Number(value);
+            return Number.isFinite(num) ? num : null;
+        };
+
+        let changed = false;
+
+        if (typeof levels.slEnabled === 'boolean') {
+            if (state.slEnabled !== levels.slEnabled) {
+                state.slEnabled = levels.slEnabled;
+                changed = true;
+            }
+        }
+        if (typeof levels.tpEnabled === 'boolean') {
+            if (state.tpEnabled !== levels.tpEnabled) {
+                state.tpEnabled = levels.tpEnabled;
+                changed = true;
+            }
+        }
+
+        if ('slPrice' in levels || 'sl_price' in levels) {
+            const value = 'slPrice' in levels ? levels.slPrice : levels.sl_price;
+            const next = state.slEnabled ? normalizePrice(value) : null;
+            if (state.currentSlPrice !== next) {
+                state.currentSlPrice = next;
+                changed = true;
+            }
+        }
+
+        if ('tpPrice' in levels || 'tp_price' in levels) {
+            const value = 'tpPrice' in levels ? levels.tpPrice : levels.tp_price;
+            const next = state.tpEnabled ? normalizePrice(value) : null;
+            if (state.currentTpPrice !== next) {
+                state.currentTpPrice = next;
+                changed = true;
+            }
+        }
+
+        if (changed && this.strategyChartInstance && state.fullBars && state.fullBars.length) {
+            this.renderStrategyChart();
+        }
+    }
+
     renderStrategyChart(options = {}) {
         const state = this.getStrategyChartState();
         const container = document.getElementById('strategyChartContainer');
@@ -8923,6 +9019,14 @@ class TradingApp {
         const sellOrders = visibleOrders
             .filter((order) => order.side === 'sell')
             .map((order) => ({ x: order.time, y: order.price, order }));
+        const slPrice = state.slEnabled ? state.currentSlPrice : null;
+        const tpPrice = state.tpEnabled ? state.currentTpPrice : null;
+        const slLine = Number.isFinite(slPrice)
+            ? ohlc.map((bar) => ({ x: bar.x, y: slPrice }))
+            : [];
+        const tpLine = Number.isFinite(tpPrice)
+            ? ohlc.map((bar) => ({ x: bar.x, y: tpPrice }))
+            : [];
         const maxVolume = volumeData.reduce((acc, point) => Math.max(acc, point.y || 0), 0);
         const extraParts = [];
         if (visibleOrders.length) {
@@ -9011,6 +9115,48 @@ class TradingApp {
                                     }
                                 }
                             }
+                        },
+                        {
+                            type: 'line',
+                            label: 'Stop Loss',
+                            data: slLine,
+                            yAxisID: 'y',
+                            parsing: false,
+                            borderColor: 'rgba(220, 53, 69, 0.75)',
+                            borderWidth: 1.5,
+                            borderDash: [6, 4],
+                            pointRadius: 0,
+                            pointHoverRadius: 0,
+                            fill: false,
+                            stepped: 'after',
+                            spanGaps: true,
+                            hidden: !slLine.length,
+                            tooltip: {
+                                callbacks: {
+                                    label: (context) => `止损 ${this.formatNumber(context.parsed.y)}`,
+                                }
+                            }
+                        },
+                        {
+                            type: 'line',
+                            label: 'Take Profit',
+                            data: tpLine,
+                            yAxisID: 'y',
+                            parsing: false,
+                            borderColor: 'rgba(25, 135, 84, 0.75)',
+                            borderWidth: 1.5,
+                            borderDash: [6, 4],
+                            pointRadius: 0,
+                            pointHoverRadius: 0,
+                            fill: false,
+                            stepped: 'after',
+                            spanGaps: true,
+                            hidden: !tpLine.length,
+                            tooltip: {
+                                callbacks: {
+                                    label: (context) => `止盈 ${this.formatNumber(context.parsed.y)}`,
+                                }
+                            }
                         }
                     ]
                 },
@@ -9070,6 +9216,14 @@ class TradingApp {
             if (datasets[1]) datasets[1].data = volumeData;
             if (datasets[2]) datasets[2].data = buyOrders;
             if (datasets[3]) datasets[3].data = sellOrders;
+            if (datasets[4]) {
+                datasets[4].data = slLine;
+                datasets[4].hidden = !slLine.length;
+            }
+            if (datasets[5]) {
+                datasets[5].data = tpLine;
+                datasets[5].hidden = !tpLine.length;
+            }
             const xScale = this.strategyChartInstance.options?.scales?.x;
             if (xScale) {
                 xScale.time = xScale.time || {};
