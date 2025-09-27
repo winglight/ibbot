@@ -14,6 +14,7 @@ from src.atr_trailing_service import ATRTrailingService
 from loguru import logger
 
 from src.notification_manager import NotificationManager
+from src.account_snapshot_service import AccountSnapshotService
 from src.dom_processor import DOMProcessor
 from src.dom_service import get_dom_service
 from src.strategies.dom_strategy import DOMStrategy
@@ -125,3 +126,5 @@ except Exception as exc:  # pragma: no cover - defensive guard
 
 # IBKR client is created on demand
 ibkr_client = None
+
+account_snapshot_service = AccountSnapshotService()

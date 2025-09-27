@@ -3,13 +3,19 @@ from datetime import datetime
 import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from loguru import logger
 
 from src.utils import now_local, parse_local_datetime, NY_TZ
+from src.account_snapshot_cache import (
+    read_account_info_snapshot,
+    read_positions_snapshot,
+    write_account_info_snapshot,
+    write_positions_snapshot,
+)
 
 import core
 from core import connection_manager
@@ -18,10 +24,56 @@ from .auth import get_current_user
 
 router = APIRouter()
 
-# Positions cache to reduce IBKR API calls
-positions_cache = {}
-positions_cache_timestamp = None
-POSITIONS_CACHE_TTL = 5  # seconds
+
+def _compute_cache_age(updated_at: Optional[str]) -> Optional[float]:
+    dt = parse_local_datetime(updated_at)
+    if not dt:
+        return None
+    try:
+        delta = now_local() - dt
+        seconds = delta.total_seconds()
+    except Exception:
+        return None
+    return max(0.0, seconds)
+
+
+def _snapshot_response(
+    snapshot: Optional[Dict[str, Any]],
+    *,
+    data_key: str,
+    connected: bool,
+    from_cache: bool,
+    warning: Optional[str] = None,
+    data_override: Any = None,
+    default: Any = None,
+) -> Dict[str, Any]:
+    data = default
+    if data_override is not None:
+        data = data_override
+    elif snapshot is not None and "data" in snapshot:
+        data = snapshot.get("data")
+
+    response: Dict[str, Any] = {
+        "success": True,
+        data_key: data if data is not None else default,
+        "from_cache": from_cache,
+        "connected": connected,
+        "cache_updated_at": snapshot.get("updated_at") if snapshot else None,
+        "cache_age_seconds": _compute_cache_age(
+            snapshot.get("updated_at") if snapshot else None
+        ),
+        "cache_source": snapshot.get("source") if snapshot else None,
+        "stale": snapshot.get("stale", False) if snapshot else False,
+    }
+
+    if snapshot and snapshot.get("stale_reason"):
+        response["stale_reason"] = snapshot.get("stale_reason")
+    if snapshot and snapshot.get("stale_at"):
+        response["stale_at"] = snapshot.get("stale_at")
+    if warning:
+        response["warning"] = warning
+
+    return response
 
 
 def _get_active_ib_client():
@@ -83,20 +135,44 @@ async def backfill_commissions(
 
 
 @router.get("/api/account_info")
-async def get_account_info(user: Optional[str] = Depends(get_current_user)):
-    """Retrieve IBKR account information."""
-    # 未连接时返回 400，并附带结构化错误信息
-    if not connection_manager or not connection_manager.is_connected():
+async def get_account_info(
+    user: Optional[str] = Depends(get_current_user),
+    force_refresh: bool = False,
+):
+    """Retrieve IBKR account information, preferring cached snapshots."""
+
+    snapshot = await read_account_info_snapshot()
+    is_connected = bool(connection_manager and connection_manager.is_connected())
+
+    if snapshot and not force_refresh:
+        return _snapshot_response(
+            snapshot,
+            data_key="account_info",
+            connected=is_connected,
+            from_cache=True,
+            default={},
+        )
+
+    if not is_connected:
+        if snapshot:
+            logger.warning(
+                "Not connected to IBKR, returning cached account_info snapshot"
+            )
+            return _snapshot_response(
+                snapshot,
+                data_key="account_info",
+                connected=False,
+                from_cache=True,
+                default={},
+                warning="Not connected to IBKR",
+            )
+
         last_err = None
         try:
-            last_err = (
-                connection_manager.get_last_connect_error()
-                if connection_manager
-                else None
-            )
+            last_err = connection_manager.get_last_connect_error()
         except Exception:
             last_err = None
-        logger.warning("Not connected to IBKR, returning 400 for account_info")
+        logger.warning("Not connected to IBKR and no cache available for account_info")
         return JSONResponse(
             status_code=400,
             content={
@@ -112,18 +188,57 @@ async def get_account_info(user: Optional[str] = Depends(get_current_user)):
         logger.error("IBKR client unavailable while connection manager reports connected")
         raise HTTPException(status_code=503, detail="IBKR client unavailable")
 
+    service = getattr(core, "account_snapshot_service", None)
+    reason = "api_force" if force_refresh else "api_miss"
+
     try:
-        try:
+        if service:
+            info = await asyncio.wait_for(
+                service.refresh_account_info(reason=reason), timeout=10.0
+            )
+        else:
             info = await asyncio.wait_for(
                 ib_client.get_account_info(), timeout=10.0
             )
-        except asyncio.TimeoutError:
-            logger.warning("Account info request timed out")
-            return {"success": False, "connected": True, "error": "Account info request timed out"}
-        return {"success": True, "connected": True, "account_info": info}
+            await write_account_info_snapshot(info or {}, reason)
+    except asyncio.TimeoutError:
+        logger.warning("Account info request timed out")
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="account_info",
+                connected=is_connected,
+                from_cache=True,
+                default={},
+                warning="Account info request timed out, showing cached data",
+            )
+        return {
+            "success": False,
+            "connected": True,
+            "error": "Account info request timed out",
+        }
     except Exception as e:
         logger.error(f"Get account info error: {e}")
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="account_info",
+                connected=is_connected,
+                from_cache=True,
+                default={},
+                warning="Account info request failed, showing cached data",
+            )
         raise HTTPException(status_code=500, detail=str(e))
+
+    refreshed_snapshot = await read_account_info_snapshot()
+    return _snapshot_response(
+        refreshed_snapshot,
+        data_key="account_info",
+        connected=is_connected,
+        from_cache=False,
+        default={},
+        data_override=info,
+    )
 
 
 @router.get("/api/positions")
@@ -131,12 +246,37 @@ async def get_positions(
     user: Optional[str] = Depends(get_current_user),
     fast: bool = True,
     use_cache: bool = True,
+    force_refresh: bool = False,
 ):
-    """Retrieve current positions with optional caching."""
-    global positions_cache, positions_cache_timestamp
+    """Retrieve current positions, preferring Redis snapshots."""
 
-    if not connection_manager or not connection_manager.is_connected():
-        logger.warning("Not connected to IBKR, returning empty positions list")
+    snapshot = await read_positions_snapshot()
+    is_connected = bool(connection_manager and connection_manager.is_connected())
+    force_refresh = force_refresh or not use_cache
+
+    if snapshot and not force_refresh:
+        return _snapshot_response(
+            snapshot,
+            data_key="positions",
+            connected=is_connected,
+            from_cache=True,
+            default=[],
+        )
+
+    if not is_connected:
+        if snapshot:
+            logger.warning(
+                "Not connected to IBKR, returning cached positions snapshot"
+            )
+            return _snapshot_response(
+                snapshot,
+                data_key="positions",
+                connected=False,
+                from_cache=True,
+                default=[],
+                warning="Not connected to IBKR",
+            )
+        logger.warning("Not connected to IBKR and no cached positions available")
         return {
             "success": True,
             "positions": [],
@@ -149,58 +289,54 @@ async def get_positions(
         logger.error("IBKR client unavailable while fetching positions")
         raise HTTPException(status_code=503, detail="IBKR client unavailable")
 
+    service = getattr(core, "account_snapshot_service", None)
+    reason = "api_force" if force_refresh else "api_miss"
+
     try:
-        current_time = now_local()
-        if use_cache and positions_cache and positions_cache_timestamp:
-            cache_age = (current_time - positions_cache_timestamp).total_seconds()
-            if cache_age < POSITIONS_CACHE_TTL:
-                logger.debug(f"Using positions cache, age: {cache_age:.1f}s")
-                return {
-                    "success": True,
-                    "positions": positions_cache,
-                    "from_cache": True,
-                }
-
-        try:
+        if service:
             positions = await asyncio.wait_for(
-                ib_client.get_positions(fast=fast), timeout=5.0
+                service.refresh_positions(reason=reason, fast=fast),
+                timeout=10.0,
             )
-            positions_cache = positions
-            positions_cache_timestamp = current_time
-            return {"success": True, "positions": positions, "from_cache": False}
-        except asyncio.TimeoutError:
-            if positions_cache:
-                logger.warning(
-                    "Positions request timed out, returning cached data"
-                )
-                return {
-                    "success": True,
-                    "positions": positions_cache,
-                    "from_cache": True,
-                    "cache_warning": "Request timed out, showing cached data",
-                }
-            else:
-                logger.warning(
-                    "Positions request timed out and no cache available"
-                )
-                return {
-                    "success": False,
-                    "error": "Positions request timed out",
-                }
-
+        else:
+            positions = await asyncio.wait_for(
+                ib_client.get_positions(fast=fast), timeout=10.0
+            )
+            await write_positions_snapshot(positions or [], reason)
+    except asyncio.TimeoutError:
+        logger.warning("Positions request timed out")
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="positions",
+                connected=is_connected,
+                from_cache=True,
+                default=[],
+                warning="Positions request timed out, showing cached data",
+            )
+        return {"success": False, "error": "Positions request timed out"}
     except Exception as e:
-        if positions_cache:
-            logger.error(
-                f"Get positions error: {e}, returning cached data"
-            )
-            return {
-                "success": True,
-                "positions": positions_cache,
-                "from_cache": True,
-                "cache_warning": "Error occurred, showing cached data",
-            }
         logger.error(f"Get positions error: {e}")
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="positions",
+                connected=is_connected,
+                from_cache=True,
+                default=[],
+                warning="Positions request failed, showing cached data",
+            )
         raise HTTPException(status_code=500, detail=str(e))
+
+    refreshed_snapshot = await read_positions_snapshot()
+    return _snapshot_response(
+        refreshed_snapshot,
+        data_key="positions",
+        connected=is_connected,
+        from_cache=False,
+        default=[],
+        data_override=positions,
+    )
 
 
 @router.get("/api/account/daily-summary")
