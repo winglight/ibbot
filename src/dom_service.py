@@ -4,13 +4,28 @@ import asyncio
 import inspect
 import copy
 import threading
-from typing import Dict, List, Optional, Any, Callable, DefaultDict
+from datetime import datetime
+from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
 from collections import defaultdict
 from threading import Lock
+
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 
 from src.connection_manager import connection_manager
+from src.data_layer import (
+    DataSubscriptionRequest,
+    DataSubscriptionToken,
+    DataSourceError,
+    EventEnvelope,
+    get_data_layer_mode,
+    is_dual_mode,
+    is_legacy_mode,
+    is_unified_mode,
+)
+from src.data_layer.event_bus import BusSubscriptionToken
+from src.data_layer.bootstrap import get_data_source_manager
 from src.dom_cache import DomCacheManager
 from src.dom_dependencies import (
     dom_config,
@@ -47,6 +62,30 @@ DEFAULT_TUNER_PARAMETERS = {
     "reversal_window_sec": 60,
     "session_timezone": "America/New_York",
 }
+
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+UTC_TZ = ZoneInfo("UTC")
+
+
+def _to_local_iso(value: Optional[Any]) -> str:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = None
+        if value is not None:
+            text = str(value)
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(text)
+            except Exception:  # pragma: no cover - defensive guard
+                dt = None
+        if dt is None:
+            dt = datetime.now(UTC_TZ)
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC_TZ)
+    return dt.astimezone(LOCAL_TZ).isoformat()
 
 
 class DOMService:
@@ -85,6 +124,9 @@ class DOMService:
         self._previous_signal_flags: DefaultDict[str, Dict[str, bool]] = defaultdict(
             lambda: {"long": False, "short": False}
         )
+        self._data_layer_manager = None
+        self._data_layer_tokens: Dict[str, DataSubscriptionToken] = {}
+        self._data_layer_subscription: Optional[BusSubscriptionToken] = None
         self._last_start_error: Optional[str] = None
         self._last_start_error_status: int = 200
         self._start_tasks: Dict[str, asyncio.Task[bool]] = {}
@@ -639,6 +681,122 @@ class DOMService:
             return next(iter(self._processors.values()))
         return self.processor
 
+    def _is_data_layer_enabled(self) -> bool:
+        return not is_legacy_mode(get_data_layer_mode())
+
+    def _is_dual_mode_enabled(self) -> bool:
+        return is_dual_mode(get_data_layer_mode())
+
+    def _ensure_data_layer_manager(self):
+        if not self._is_data_layer_enabled():
+            return None
+        if self._data_layer_manager is None:
+            try:
+                self._data_layer_manager = get_data_source_manager()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.error("Failed to initialise data layer manager: {}", exc)
+                self._last_start_error = str(exc) or "Failed to initialise data layer"
+                self._last_start_error_status = 500
+                return None
+        return self._data_layer_manager
+
+    def _ensure_data_layer_subscription(self) -> None:
+        manager = self._ensure_data_layer_manager()
+        if manager is None:
+            return
+        if self._data_layer_subscription is not None:
+            return
+
+        self._data_layer_subscription = manager.event_bus.subscribe(
+            "dom.depth", self._handle_dom_depth_event
+        )
+
+    async def _handle_dom_depth_event(self, envelope: EventEnvelope) -> None:
+        symbol = (envelope.symbol or "").upper()
+        if not symbol:
+            return
+
+        payload = dict(envelope.payload or {})
+        payload.setdefault("symbol", symbol)
+        payload.setdefault("ts_ns", envelope.ts_ns or time.time_ns())
+        payload["timestamp"] = _to_local_iso(payload.get("timestamp"))
+        self._on_depth_update(symbol, payload)
+
+    def _run_sync_coroutine(self, coro: Awaitable[bool]) -> bool:
+        loop = self._loop
+        if loop and loop.is_running() and not loop.is_closed():
+            return bool(asyncio.run_coroutine_threadsafe(coro, loop).result())
+        return bool(asyncio.run(coro))
+
+    async def _start_stream_unified(
+        self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
+    ) -> bool:
+        self._last_start_error = None
+        self._last_start_error_status = 200
+        symbol_key = (symbol or "").upper()
+        if not symbol_key:
+            self._last_start_error = "Missing symbol"
+            self._last_start_error_status = 400
+            return False
+
+        if not connection_manager.is_connected():
+            reason = "IBKR connection not active"
+            try:
+                last_error = connection_manager.get_last_connect_error()
+                if last_error:
+                    reason = f"{reason}: {last_error}"
+            except Exception:
+                pass
+            self._last_start_error = reason
+            self._last_start_error_status = 400
+            logger.warning("Unified DOM depth stream start rejected", symbol=symbol_key)
+            return False
+
+        manager = self._ensure_data_layer_manager()
+        if manager is None:
+            return False
+
+        self._ensure_data_layer_subscription()
+
+        if force_restart:
+            token = self._data_layer_tokens.pop(symbol_key, None)
+            if token is not None:
+                try:
+                    await manager.unsubscribe(token)
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.debug(
+                        "Failed to unsubscribe existing DOM stream during restart",
+                        symbol=symbol_key,
+                        error=str(exc),
+                    )
+        elif symbol_key in self._data_layer_tokens:
+            return True
+
+        request = DataSubscriptionRequest(
+            channel="dom.depth",
+            symbol=symbol_key,
+            options={"num_rows": num_rows, "force_restart": force_restart},
+        )
+        try:
+            token = await manager.subscribe(request)
+        except DataSourceError as exc:
+            message = str(exc) or "Failed to start DOM depth stream"
+            self._last_start_error = message
+            self._last_start_error_status = 500
+            logger.warning(
+                "Unified DOM depth subscription failed",
+                symbol=symbol_key,
+                error=message,
+            )
+            return False
+
+        self._data_layer_tokens[symbol_key] = token
+        self._active_symbol = symbol_key
+        self._active_symbol_original = symbol
+        self._register_active_symbol(symbol_key, symbol)
+        logger.info("Unified DOM depth stream started", symbol=symbol_key, num_rows=num_rows)
+        return True
+
     def _start_stream_blocking(
         self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
     ) -> bool:
@@ -750,6 +908,17 @@ class DOMService:
         loop = asyncio.get_running_loop()
         self._loop = loop
         self._ensure_cleanup_task(loop)
+        mode = get_data_layer_mode()
+        if not is_legacy_mode(mode):
+            result = await self._start_stream_unified(
+                symbol, num_rows, force_restart=force_restart
+            )
+            if result or not is_dual_mode(mode):
+                return result
+            logger.warning(
+                "Unified DOM stream failed in dual mode; falling back to legacy",
+                symbol=symbol,
+            )
         return await asyncio.to_thread(
             self._start_stream_blocking, symbol, num_rows, force_restart=force_restart
         )
@@ -791,6 +960,12 @@ class DOMService:
     def start(
         self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
     ) -> bool:
+        if self._is_data_layer_enabled():
+            return self._run_sync_coroutine(
+                self._start_stream_unified(
+                    symbol, num_rows, force_restart=force_restart
+                )
+            )
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -826,6 +1001,21 @@ class DOMService:
 
         removed_symbol = self._unregister_active_symbol(symbol_key)
 
+        if self._is_data_layer_enabled():
+            manager = self._ensure_data_layer_manager()
+            token = self._data_layer_tokens.pop(symbol_key, None)
+            if manager and token is not None:
+                try:
+                    await manager.unsubscribe(token)
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.debug(
+                        "Unified DOM unsubscribe failed", symbol=symbol_key, error=str(exc)
+                    )
+            if manager and not self._data_layer_tokens and self._data_layer_subscription:
+                manager.event_bus.unsubscribe(self._data_layer_subscription)
+                self._data_layer_subscription = None
+            return bool(token or had_pending)
+
         if not self._loop or self._loop.is_closed():
             try:
                 self._loop = asyncio.get_running_loop()
@@ -840,6 +1030,8 @@ class DOMService:
         return bool(result or had_pending)
 
     def stop(self, symbol: str) -> bool:
+        if self._is_data_layer_enabled():
+            return self._run_sync_coroutine(self.stop_stream(symbol))
         symbol_key = (symbol or "").upper()
         target_symbol = self._unregister_active_symbol(symbol_key) or symbol
         return self._stop_stream_blocking(target_symbol, symbol_key)
