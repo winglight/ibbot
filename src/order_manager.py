@@ -674,6 +674,45 @@ class OrderManager:
                 "Risk rule deactivation"
             )
 
+            # 异步刷新账户与持仓快照，确保API能够快速返回最新数据
+            try:
+                import core  # 延迟导入避免循环依赖
+
+                snapshot_service = getattr(core, "account_snapshot_service", None)
+                if snapshot_service:
+                    snapshot_service.notify_fill()
+                    self._schedule_async(
+                        snapshot_service.refresh_both(
+                            reason="fill_event", fast_positions=True
+                        ),
+                        "Account snapshot refresh after fill",
+                    )
+                else:
+                    async def _refresh_fallback():
+                        ib_client = getattr(core, "ibkr_client", None)
+                        if ib_client is None:
+                            return
+                        from .account_snapshot_cache import (
+                            write_account_info_snapshot,
+                            write_positions_snapshot,
+                        )
+
+                        account_info = await ib_client.get_account_info()
+                        positions = await ib_client.get_positions(fast=True)
+                        await write_account_info_snapshot(
+                            account_info or {}, "fill_event"
+                        )
+                        await write_positions_snapshot(positions or [], "fill_event")
+
+                    self._schedule_async(
+                        _refresh_fallback(),
+                        "Account snapshot refresh after fill (fallback)",
+                    )
+            except Exception as refresh_exc:
+                order_logger.warning(
+                    f"Failed to refresh account snapshots after fill: {refresh_exc}"
+                )
+
         except Exception as e:
             order_logger.error(f"发送订单成交通知失败: {e}")
     

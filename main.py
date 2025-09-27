@@ -64,6 +64,7 @@ from core import (
     queue_manager,
     websocket_manager,
     order_manager,
+    account_snapshot_service,
 )
 
 # Authentication and routers
@@ -176,6 +177,12 @@ async def lifespan(app: FastAPI):
         main_logger.warning(f"Risk manager startup warning: {e}")
 
     try:
+        account_snapshot_service.start()
+        main_logger.info("Account snapshot service started during application startup")
+    except Exception as e:
+        main_logger.warning(f"Account snapshot service startup warning: {e}")
+
+    try:
         strategy_manager.start()
         await strategy_manager.restore_data_push_states()
         main_logger.info("Strategy manager initialized during application startup")
@@ -209,6 +216,12 @@ async def lifespan(app: FastAPI):
             main_logger.info("Risk manager scheduler shutdown")
     except Exception as e:
         main_logger.warning(f"Risk manager shutdown warning: {e}")
+
+    try:
+        await account_snapshot_service.stop()
+        main_logger.info("Account snapshot service stopped")
+    except Exception as e:
+        main_logger.warning(f"Account snapshot service shutdown warning: {e}")
 
 # 重新创建带有lifespan的FastAPI应用
 app = FastAPI(title="IBKR Trading Bot", version="1.0.0", lifespan=lifespan)

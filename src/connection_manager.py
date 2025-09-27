@@ -321,7 +321,28 @@ class ConnectionManager:
                     def error_handler(reqId, errorCode, errorString, advancedOrderRejectJson=""):
                         """处理IBKR错误，特别是订单相关错误"""
                         connection_logger.info(f"IBKR Error - ReqId: {reqId}, Code: {errorCode}, Message: {errorString}")
-                        
+
+                        try:
+                            import core  # 延迟导入避免循环依赖
+
+                            snapshot_service = getattr(core, "account_snapshot_service", None)
+                            if snapshot_service:
+                                connection_loss_codes = {1100, 1300, 2103, 2105, 2110}
+                                connection_restore_codes = {1101, 1102, 1301, 2104, 2106, 2111}
+
+                                if errorCode in connection_loss_codes:
+                                    snapshot_service.flag_connection_loss(
+                                        errorString or f"IBKR error {errorCode}"
+                                    )
+                                elif errorCode in connection_restore_codes:
+                                    snapshot_service.request_immediate_refresh(
+                                        reason="connection_restored"
+                                    )
+                        except Exception as snapshot_err:  # pragma: no cover - 防御性日志
+                            connection_logger.debug(
+                                f"Snapshot service notification failed: {snapshot_err}"
+                            )
+
                         # 检查是否是订单相关错误
                         if reqId and reqId > 0:  # reqId > 0 通常表示订单相关
                             # 常见的订单错误代码：
@@ -522,6 +543,19 @@ class ConnectionManager:
                 self.connected = True
                 account_type = "Paper" if self.config.paper_trading else "Live"
                 connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
+
+                try:
+                    import core
+
+                    snapshot_service = getattr(core, "account_snapshot_service", None)
+                    if snapshot_service:
+                        snapshot_service.request_immediate_refresh(
+                            reason="connection_established"
+                        )
+                except Exception as notify_err:  # pragma: no cover - defensive logging
+                    connection_logger.debug(
+                        f"Failed to notify snapshot service after connect: {notify_err}"
+                    )
                 
                 # 保存事件循环引用
                 self._loop = loop
@@ -780,6 +814,17 @@ class ConnectionManager:
             self.ib = None
             self._loop = None
             self._connection_thread = None
+
+            try:
+                import core
+
+                snapshot_service = getattr(core, "account_snapshot_service", None)
+                if snapshot_service:
+                    snapshot_service.flag_connection_loss("disconnected")
+            except Exception as notify_err:  # pragma: no cover - defensive logging
+                connection_logger.debug(
+                    f"Failed to notify snapshot service on disconnect: {notify_err}"
+                )
         except Exception as e:
             connection_logger.error(f"Disconnect error: {e}")
 

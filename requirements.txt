@@ -6,6 +6,7 @@ pandas
 numpy
 httpx
 apscheduler
+redis
 python-telegram-bot
 python-multipart
 aiofiles
