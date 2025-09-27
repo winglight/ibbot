@@ -21,6 +21,9 @@ from .utils import (
     to_local_iso,
 )
 from .utils.strategy_cache import record_filled_order as cache_record_filled_order
+from .utils.account_pnl_cache import (
+    record_account_fill as cache_record_account_fill,
+)
 
 class OrderStatus(Enum):
     """订单状态枚举"""
@@ -584,9 +587,13 @@ class OrderManager:
                         cache_record_filled_order(order),
                         "Strategy cache update",
                     )
+                    self._schedule_async(
+                        cache_record_account_fill(order),
+                        "Account PnL cache update",
+                    )
                 except Exception as exc:
                     order_logger.debug(
-                        f"Failed to enqueue strategy cache update for order {order_id}: {exc}"
+                        f"Failed to enqueue cache updates for order {order_id}: {exc}"
                     )
 
             # 如果订单状态变为Filled，发送通知

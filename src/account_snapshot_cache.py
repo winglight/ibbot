@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -33,7 +34,8 @@ try:  # ``redis`` is optional during testing; callers should handle ``None``
 except Exception:  # pragma: no cover - redis is optional in some tests
     Redis = None  # type: ignore
 
-from .utils import now_local, to_local_iso
+from .utils import now_local, to_local_iso, parse_local_datetime
+from .utils.account_pnl_cache import write_net_liquidation_snapshot
 
 
 SNAPSHOT_ACCOUNT_INFO_KEY = "account:info"
@@ -169,7 +171,44 @@ async def _mark_snapshot_stale(key: str, reason: str) -> None:
 async def write_account_info_snapshot(data: Dict[str, Any], source: str) -> bool:
     """Persist account information to Redis."""
 
-    return await _write_snapshot(SNAPSHOT_ACCOUNT_INFO_KEY, data, source, stale=False)
+    success = await _write_snapshot(SNAPSHOT_ACCOUNT_INFO_KEY, data, source, stale=False)
+
+    if success:
+        net_value: Optional[float] = None
+        for key in ("net_liquidation", "netLiquidation", "net_liquidation_value"):
+            if key not in data:
+                continue
+            try:
+                candidate = float(data[key])
+            except (TypeError, ValueError):
+                continue
+            net_value = candidate
+            break
+
+        if net_value is not None:
+            timestamp = None
+            for ts_key in ("timestamp", "updated_at", "received_at", "refreshed_at"):
+                raw_ts = data.get(ts_key)
+                if isinstance(raw_ts, datetime):
+                    timestamp = raw_ts
+                    break
+                if isinstance(raw_ts, str):
+                    parsed = parse_local_datetime(raw_ts)
+                    if parsed is not None:
+                        timestamp = parsed
+                        break
+            try:
+                await write_net_liquidation_snapshot(
+                    net_value,
+                    source=source,
+                    timestamp=timestamp,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                snapshot_logger.debug(
+                    "Failed to update net liquidation snapshot", error=str(exc)
+                )
+
+    return success
 
 
 async def write_positions_snapshot(data: Any, source: str) -> bool:

@@ -1870,8 +1870,12 @@ class IBKRClient:
                             from .utils.strategy_cache import (
                                 record_filled_order as cache_record_filled_order,
                             )
+                            from .utils.account_pnl_cache import (
+                                record_account_fill as cache_record_account_fill,
+                            )
 
                             await cache_record_filled_order(order)
+                            await cache_record_account_fill(order)
                     except Exception as cache_err:
                         connection_logger.debug(
                             f"Strategy cache update skipped for order {oid}: {cache_err}"
