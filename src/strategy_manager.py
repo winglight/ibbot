@@ -128,6 +128,10 @@ class StrategyManager:
         self._strategies_cache_lock = RLock()
         self._strategies_cache_ttl = 5.0
 
+        self._internal_info_cache: Dict[str, Dict[str, Any]] = {}
+        self._internal_info_cache_lock = RLock()
+        self._internal_info_cache_ttl = 5.0
+
         # 认证token（用于外部策略访问）
         self.auth_token = None
 
@@ -2184,8 +2188,73 @@ class StrategyManager:
 
         return snapshot
 
+    def _get_cached_internal_strategy_info(
+        self, name: str, allow_expired: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        with self._internal_info_cache_lock:
+            entry = self._internal_info_cache.get(name)
+            if not entry:
+                return None
+            expires_at = entry.get("expires_at", 0.0)
+            if expires_at <= time.monotonic() and not allow_expired:
+                return None
+            data = entry.get("data")
+            if not isinstance(data, dict):
+                return None
+            cached = deepcopy(data)
+            if not allow_expired:
+                cached.pop("stale", None)
+            return cached
+
+    def _store_internal_strategy_info_cache(
+        self, name: str, info: Dict[str, Any]
+    ) -> None:
+        if not info:
+            return
+        with self._internal_info_cache_lock:
+            self._internal_info_cache[name] = {
+                "data": deepcopy(info),
+                "expires_at": time.monotonic() + self._internal_info_cache_ttl,
+            }
+
+    def get_cached_internal_strategy_info(self, name: str) -> Optional[Dict[str, Any]]:
+        cached = self._get_cached_internal_strategy_info(name, allow_expired=True)
+        if cached:
+            cached["stale"] = True
+            return cached
+
+        record = self.strategies.get(name)
+        if not record or record.strategy_type != "internal":
+            return None
+
+        snapshot = self.get_strategy_snapshot(name)
+        if not snapshot or snapshot.get("strategy_type") != "internal":
+            return None
+
+        runtime = self.internal_strategies_runtime.get(name)
+        if runtime:
+            try:
+                self._attach_parameter_schema(name, snapshot, runtime)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    "Failed to attach parameter schema for cached snapshot",
+                    strategy=name,
+                    error=str(exc),
+                )
+                snapshot.setdefault("parameters", [])
+                snapshot.setdefault("configurable_parameters", [])
+        else:
+            snapshot.setdefault("parameters", [])
+            snapshot.setdefault("configurable_parameters", [])
+
+        snapshot["stale"] = True
+        return snapshot
+
     def get_internal_strategy_info(self, name: str) -> Optional[Dict[str, Any]]:
         """Return consolidated information for an internal strategy"""
+        cached = self._get_cached_internal_strategy_info(name)
+        if cached:
+            return cached
         record = self.strategies.get(name)
         if record and record.strategy_type == "internal":
             self._load_internal_strategy_runtime(record)
@@ -2294,6 +2363,7 @@ class StrategyManager:
                     error=str(exc),
                 )
 
+        self._store_internal_strategy_info_cache(name, strategy)
         return strategy
 
     def get_strategy_risk_settings(self, name: str) -> Dict[str, Any]:

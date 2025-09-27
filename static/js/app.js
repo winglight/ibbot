@@ -8590,8 +8590,16 @@ class TradingApp {
             tabLoaded: {},
             fetches: {},
             internalInfo: null,
+            internalInfoCached: false,
             preloadedRiskSettings: null,
         };
+    }
+
+    getStrategyFromCache(name) {
+        if (!Array.isArray(this.strategies) || !name) {
+            return null;
+        }
+        return this.strategies.find((item) => item && item.name === name) || null;
     }
 
     getStrategyChartState() {
@@ -10052,14 +10060,23 @@ class TradingApp {
     }
 
     async initializeStrategyDetailsContent(name) {
+        const cached = this.getStrategyFromCache(name);
+        if (cached) {
+            this.strategyDetailsState.basicInfo = cached;
+            this.updateStrategyDetailsHeader(cached);
+            this.configureStrategyDetailsTabs(cached);
+            this.setupStrategyChartState(cached, name);
+        }
+
         const strategy = await this.fetchStrategyBasicInfo(name);
         if (this.strategyDetailsState.name !== name) {
             return;
         }
-        this.strategyDetailsState.basicInfo = strategy || null;
-        this.updateStrategyDetailsHeader(strategy);
-        this.configureStrategyDetailsTabs(strategy);
-        this.setupStrategyChartState(strategy, name);
+        const resolved = strategy || cached || null;
+        this.strategyDetailsState.basicInfo = resolved;
+        this.updateStrategyDetailsHeader(resolved);
+        this.configureStrategyDetailsTabs(resolved);
+        this.setupStrategyChartState(resolved, name);
     }
 
     updateStrategyDetailsHeader(strategy) {
@@ -10223,15 +10240,22 @@ class TradingApp {
         const state = this.strategyDetailsState;
         if (!state || state.name !== name) return null;
         if (!state.fetches.internalInfo) {
+            state.internalInfoCached = false;
             state.fetches.internalInfo = (async () => {
                 try {
                     const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/internal-info`);
                     if (res?.success) {
-                        return res.strategy || {};
+                        if (!this.strategyDetailsState || this.strategyDetailsState.name !== name) {
+                            return null;
+                        }
+                        const info = res.strategy || {};
+                        state.internalInfoCached = Boolean(res.cached || info?.stale);
+                        return info;
                     }
                 } catch (err) {
                     console.error('Failed to load internal strategy info:', err);
                 }
+                state.internalInfoCached = false;
                 return null;
             })();
         }
@@ -10239,6 +10263,7 @@ class TradingApp {
             return await state.fetches.internalInfo;
         } catch (err) {
             state.fetches.internalInfo = null;
+            state.internalInfoCached = false;
             throw err;
         }
     }
@@ -10250,6 +10275,14 @@ class TradingApp {
         if (!name) return;
 
         this.ensureSummaryControls();
+
+        const infoStatus = document.getElementById('summaryInfoStatus');
+        if (infoStatus) {
+            infoStatus.textContent = '';
+            infoStatus.classList.add('d-none');
+            infoStatus.classList.remove('alert-danger');
+            infoStatus.classList.add('alert-warning');
+        }
 
         const baseInfo = state.basicInfo || {};
         const fallbackSymbol = baseInfo.primary_symbol || state.initialSymbol || '';
@@ -10279,6 +10312,20 @@ class TradingApp {
             const info = await this.fetchStrategyInternalInfo(name);
             if (info) {
                 state.internalInfo = info;
+                if (infoStatus) {
+                    const usedCached = Boolean(state.internalInfoCached || info?.stale);
+                    if (usedCached) {
+                        infoStatus.textContent = '显示缓存的策略信息，可能不是最新。';
+                        infoStatus.classList.remove('d-none');
+                        infoStatus.classList.remove('alert-danger');
+                        infoStatus.classList.add('alert-warning');
+                    } else {
+                        infoStatus.textContent = '';
+                        infoStatus.classList.add('d-none');
+                        infoStatus.classList.remove('alert-danger');
+                        infoStatus.classList.add('alert-warning');
+                    }
+                }
                 const descEl = document.getElementById('summaryDescription');
                 if (descEl) descEl.textContent = info.description || '';
                 const pathEl = document.getElementById('summaryPath');
@@ -10632,6 +10679,11 @@ class TradingApp {
                         riskBody.appendChild(tr);
                     });
                 }
+            } else if (infoStatus) {
+                infoStatus.textContent = '暂时无法加载策略内部信息。';
+                infoStatus.classList.remove('d-none');
+                infoStatus.classList.remove('alert-warning');
+                infoStatus.classList.add('alert-danger');
             }
         } catch (err) {
             console.error('Failed to load internal strategy info:', err);

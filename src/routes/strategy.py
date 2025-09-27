@@ -234,8 +234,28 @@ async def get_strategy_api(name: str, user: Optional[str] = Depends(get_current_
 async def get_internal_strategy_info_api(name: str, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    info = strategy_manager.get_internal_strategy_info(name)
+    loop = asyncio.get_running_loop()
+    try:
+        info = await asyncio.wait_for(
+            loop.run_in_executor(None, strategy_manager.get_internal_strategy_info, name),
+            timeout=6.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "get_internal_strategy_info timed out; serving cached snapshot", strategy=name
+        )
+        cached = strategy_manager.get_cached_internal_strategy_info(name)
+        if cached:
+            return {"success": True, "strategy": cached, "cached": True}
+        raise HTTPException(status_code=504, detail="Timed out loading strategy info")
+    except Exception as exc:
+        logger.error(f"Failed to load internal strategy info for {name}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to load strategy info") from exc
+
     if not info:
+        cached = strategy_manager.get_cached_internal_strategy_info(name)
+        if cached:
+            return {"success": True, "strategy": cached, "cached": True}
         raise HTTPException(status_code=404, detail="Strategy not found")
     return {"success": True, "strategy": info}
 
