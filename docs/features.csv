@@ -1,75 +1,23 @@
 功能模块,功能名称,功能描述,实现状态,优先级,技术栈,相关文件
-用户认证,JWT登录,基于JWT令牌的用户认证系统,已完成,高,FastAPI + JWT,main.py
-用户认证,会话管理,用户登录状态管理和令牌验证,已完成,高,FastAPI + JWT,main.py
-连接管理,IBKR连接,连接到Interactive Brokers TWS/Gateway,已完成,高,ib_insync,src/connection_manager.py
-连接管理,连接状态监控,实时监控IBKR连接状态,已完成,高,ib_insync,src/connection_manager.py
-连接管理,自动重连,连接断开时自动重连机制,已完成,中,ib_insync,src/connection_manager.py
-市场数据,实时价格,获取股票/期货实时价格数据,已完成,高,ib_insync,src/ibkr_client.py
-市场数据,历史数据,获取历史K线数据并保存,已完成,高,ib_insync + pandas,src/ibkr_client.py
-市场数据,图表数据,获取用于图表展示的价格数据,已完成,中,ib_insync,src/ibkr_client.py
-市场数据,价格缓存,实时价格数据缓存机制,已完成,中,Python dict,src/ibkr_client.py
-交易功能,市价单,提交市价买卖订单,已完成,高,ib_insync,src/ibkr_client.py
-交易功能,限价单,提交限价买卖订单,已完成,高,ib_insync,src/ibkr_client.py
-交易功能,多市场支持,支持股票(STK)和期货(FUT)交易,已完成,高,ib_insync,src/ibkr_client.py
-交易功能,订单管理,查看、取消、修改订单状态,已完成,高,ib_insync,src/ibkr_client.py
-交易功能,批量取消,一键取消所有待执行订单,已完成,中,ib_insync,src/ibkr_client.py
-交易功能,订单备份,订单数据CSV备份机制,已完成,中,CSV,src/ibkr_client.py
-账户管理,账户信息,查看账户ID、资金、P&L等信息,已完成,高,ib_insync,src/ibkr_client.py
-账户管理,持仓查询,查看当前持仓和盈亏情况,已完成,高,ib_insync,src/ibkr_client.py
-账户管理,资金检查,下单前验证资金充足性,已完成,高,ib_insync,src/risk_manager.py
-风险管理,止损止盈,基于价格的自动止损止盈,已完成,高,ib_insync,src/risk_manager.py
-风险管理,百分比止损,基于百分比的动态止损,已完成,高,Python,src/risk_manager.py
-风险管理,多级风险阈值,3%警告8%平仓等多级风险控制,已完成,高,Python,src/risk_manager.py
-风险管理,实时监控,持仓风险实时监控和处理,已完成,高,AsyncIO + APScheduler,src/risk_manager.py
-风险管理,订单队列,FIFO订单队列确保执行顺序,已完成,中,Python Queue,src/risk_manager.py
-风险管理,风险规则管理,添加、删除、修改风险规则,已完成,高,SQLite,src/risk_manager.py
-策略系统,外部策略,HTTP API调用外部策略服务（/api/strategy 异步入队，支持令牌认证）,已完成,高,FastAPI + HTTP,main.py; src/strategy_manager.py; src/queue_manager.py
-策略系统,内部策略,Python脚本策略执行,已完成,中,Python importlib,src/strategy_manager.py
-策略系统,策略管理,策略的增删改查和启用禁用,已完成,高,SQLite,src/strategy_manager.py
-策略系统,执行记录,策略执行历史和P&L跟踪,已完成,高,SQLite,src/strategy_manager.py
-策略系统,性能分析,策略收益率和风险指标计算,已完成,中,Python,src/strategy_manager.py
-策略系统,认证机制,策略API访问令牌管理,已完成,中,HMAC,src/strategy_manager.py
-策略系统,策略模板,自动生成策略代码模板,已完成,低,Python,src/strategy_manager.py
-Web界面,响应式设计,基于Bootstrap的现代化UI,已完成,高,Bootstrap + CSS,static/index.html
-Web界面,实时更新,WebSocket实时数据推送,已完成,高,WebSocket + JavaScript,static/app.js
-Web界面,交易面板,Web端交易操作界面,已完成,高,HTML + JavaScript,static/index.html
-Web界面,风险管理面板,Web端风险规则设置界面,已完成,高,HTML + JavaScript,static/index.html
-Web界面,策略管理面板,Web端策略管理界面,已完成,高,HTML + JavaScript,static/index.html
-Web界面,图表展示,价格图表和数据可视化,已完成,中,Chart.js,static/app.js
-Web界面,日志查看,Web端系统日志查看,已完成,中,HTML + JavaScript,static/app.js
-通知系统,Telegram集成,Telegram机器人消息推送,已完成,高,python-telegram-bot,src/telegram_notifier.py
-通知系统,多级通知,信息、警告、错误分级通知,已完成,中,python-telegram-bot,src/telegram_notifier.py
-通知系统,交易通知,订单执行状态实时通知,已完成,高,python-telegram-bot,src/telegram_notifier.py
-通知系统,风险警报,风险事件触发时的紧急通知,已完成,高,python-telegram-bot,src/telegram_notifier.py
-通知系统,每日摘要,自动生成和发送账户日报,已完成,中,python-telegram-bot,src/telegram_notifier.py
-数据管理,SQLite数据库,统一的数据存储和管理,已完成,高,SQLite3,src/database.py
-数据管理,数据迁移,从CSV/JSON自动迁移到数据库,已完成,中,SQLite3 + Python,src/database.py
-数据管理,订单存储,订单数据的持久化存储,已完成,高,SQLite3,src/database.py
-数据管理,风险规则存储,风险规则的数据库存储,已完成,高,SQLite3,src/database.py
-数据管理,策略数据存储,策略配置和执行记录存储,已完成,高,SQLite3,src/database.py
-数据管理,历史数据存储,市场历史数据CSV存储,已完成,中,CSV + pandas,src/ibkr_client.py
-队列系统,FIFO队列管理,先进先出的任务队列管理,已完成,高,Python Queue,src/queue_manager.py
-队列系统,异步任务处理,非阻塞的任务执行机制,已完成,高,AsyncIO + Threading,src/queue_manager.py
-队列系统,任务重试机制,失败任务自动重试最多3次,已完成,高,Python,src/queue_manager.py
-队列系统,任务状态跟踪,实时监控任务状态变化,已完成,高,Python,src/queue_manager.py
-队列系统,错误处理,详细的错误信息记录和处理,已完成,中,Python,src/queue_manager.py
-队列系统,队列状态查询,获取队列统计信息和任务详情（字段：is_running、pending_count、processing_count、completed_count、failed_count、total_tasks、max_concurrent_tasks）,已完成,中,FastAPI,main.py
-队列系统,策略订单队列,策略订单异步队列处理,已完成,高,Python Queue,src/queue_manager.py
-系统管理,日志记录,结构化日志记录和管理,已完成,高,loguru,全局
-系统管理,配置管理,环境变量和配置文件管理,已完成,高,python-dotenv,main.py
-系统管理,错误处理,全局异常处理和错误恢复,已完成,高,Python try-catch,全局
-系统管理,性能监控,系统性能指标监控,部分完成,中,Python,全局
-系统管理,健康检查,系统组件健康状态检查,部分完成,中,FastAPI,main.py
-部署运维,Docker支持,容器化部署支持,已完成,中,Docker,Dockerfile; docker/
-部署运维,自动化脚本,启动和安装自动化脚本,已完成,中,Shell,start.sh
-部署运维,Compose编排,开发与生产编排文件,已完成,中,Docker Compose,docker/docker-compose.yml; docker/docker-compose.prod.yml
-部署运维,IB Gateway安装,自动安装IB Gateway脚本,已完成,低,Shell,install_ib_gateway.sh
-部署运维,网络隧道,支持网络隧道配置,已完成,低,YAML,tunnel/config.yaml
-安全性,API认证,所有API端点的认证保护,已完成,高,JWT,main.py
-安全性,CORS配置,跨域请求安全配置,已完成,中,FastAPI CORS,main.py
-安全性,密钥管理,敏感信息环境变量管理,已完成,高,dotenv,main.py
-安全性,输入验证,API请求参数验证,已完成,高,Pydantic,main.py
-扩展性,插件系统,策略插件扩展机制,已完成,中,Python importlib,src/strategy_manager.py
-扩展性,API扩展,RESTful API扩展能力,已完成,高,FastAPI,main.py
-扩展性,数据库扩展,数据模型扩展能力,已完成,中,SQLite + dataclass,src/database.py
-扩展性,通知扩展,多种通知方式扩展,部分完成,低,抽象接口,src/telegram_notifier.py
+用户认证,JWT登录,使用可配置的管理员与访客账户发放JWT令牌并支持访客只读限制,已完成,高,FastAPI + python-jose,src/routes/auth.py; main.py
+连接管理,IBKR连接编排,集中管理连接配置、超时保护与重连错误缓存,已完成,高,ib_insync + asyncio,src/connection_manager.py; src/routes/connection.py
+连接管理,连接状态广播,连接或断开后向WebSocket广播连接状态与账户快照,已完成,高,FastAPI + asyncio,src/routes/connection.py; core/websocket_manager.py
+市场数据,历史数据接口,按需拉取K线与图表数据并规范化返回结构,已完成,高,FastAPI + pandas,src/routes/market_data.py; src/ibkr_client.py
+市场数据,实时价格流,统一的行情流服务支持WebSocket与REST查询最新价,已完成,高,asyncio,src/market_data_stream.py; src/routes/market_data.py
+DOM分析,深度行情服务,封装深度订阅、缓存与报警通知,已完成,高,FastAPI + asyncio,src/dom_service.py; src/routes/dom.py
+DOM分析,参数调优,集成优化器与自动化调度接口,已完成,中,scikit-learn + 自定义优化器,src/dom_optimizer.py; src/routes/dom.py
+订单管理,订单路由与风控联动,统一下单、撤单、反手与批量取消并校验风控限制,已完成,高,ib_insync + FastAPI,src/order_manager.py; src/routes/orders.py
+订单管理,订单历史同步,支持佣金补录与外部同步策略,已完成,中,SQLite + pandas,src/routes/orders.py; src/database.py
+风险控制,风险规则管理,提供风控规则CRUD、阈值与ATR跟踪,已完成,高,FastAPI + APScheduler,src/risk_manager.py; src/routes/risk.py
+风险控制,动态仓位计算,根据风险预算与波动率自动计算下单手数,已完成,高,Python,src/risk_manager.py
+策略系统,内部策略管理,加载内置策略、启停、重置与绩效统计,已完成,高,FastAPI + SQLite,src/strategy_manager.py; src/routes/strategy.py
+策略系统,外部策略入队,对外暴露签名验证的下单接口并接入任务队列,已完成,高,FastAPI,src/routes/strategy.py; src/queue_manager.py
+策略系统,策略风险联动,策略风险监控与通知集成,已完成,中,Python,src/strategy_risk.py; src/routes/strategy.py
+通知系统,统一通知控制台,集中管理浏览器与Telegram通知配置及发送历史,已完成,中,FastAPI + SQLite,src/notification_manager.py; src/routes/notifications.py
+消息推送,Telegram机器人,可选的Telegram推送通道及自检接口,已完成,中,python-telegram-bot,src/telegram_notifier.py; src/routes/notifications.py
+队列系统,异步任务队列,持久化FIFO队列支持失败重试与队列心跳监控,已完成,高,asyncio,src/queue_manager.py; src/routes/queue.py
+数据层,数据库管理器,统一管理订单、风控、策略等SQLite存储并提供快照服务,已完成,高,SQLite + dataclasses,src/database.py; src/account_snapshot_service.py
+缓存,Redis可选缓存,在Redis可用时提供共享缓存与流水记录,部分可用,中,redis.asyncio,src/cache.py
+WebSocket,实时消息聚合,多频道推送账户、队列、DOM与策略事件,已完成,中,FastAPI + websockets,src/websocket_manager.py; src/routes/websocket.py
+部署,容器化部署,提供开发与生产docker-compose及Cloudflare隧道示例,已完成,中,Docker,docker/Dockerfile; docker/docker-compose.yml; docker/docker-compose.prod.yml
+运维,远程部署脚本,快速在VPS创建依赖、端口转发与上下文,已完成,中,Bash,vps-setup/*.sh; vps-setup/README.md
