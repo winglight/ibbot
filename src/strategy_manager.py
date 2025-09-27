@@ -25,6 +25,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .utils import (
     ensure_local_timezone,
+    get_us_market_session,
     now_local,
     parse_local_datetime,
     slugify_strategy_name,
@@ -1147,6 +1148,44 @@ class StrategyManager:
     def get_data_push_state(self, strategy_name: str) -> Dict[str, Any]:
         return dict(self.data_push_state.get(strategy_name, {}))
 
+    def _schedule_data_push_disable(
+        self,
+        strategy_name: str,
+        *,
+        subscription: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> None:
+        """Schedule disabling a data push from synchronous contexts."""
+
+        async def _disable() -> None:
+            try:
+                await self.set_data_push(
+                    strategy_name,
+                    False,
+                    subscription=subscription,
+                    symbol=symbol,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Failed to auto-stop data push for {strategy_name}: {exc}"
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            loop.create_task(_disable())
+            return
+
+        target_loop = self._event_loop if self._event_loop and self._event_loop.is_running() else None
+        if target_loop:
+            asyncio.run_coroutine_threadsafe(_disable(), target_loop)
+            return
+
+        asyncio.run(_disable())
+
     async def set_data_push(
         self,
         strategy_name: str,
@@ -1268,6 +1307,46 @@ class StrategyManager:
         dom_service = None
 
         if enabled:
+            market_open, session_reason = get_us_market_session()
+            if not market_open:
+                reason = session_reason or "美股休市"
+                state.update(
+                    {
+                        "enabled": False,
+                        "active": False,
+                        "subscription": stored_subscription,
+                        "symbol": target_symbol,
+                        "awaiting_data": False,
+                        "last_data_timestamp": None,
+                    }
+                )
+                state.pop("_last_gap_warning_at", None)
+                state.pop("_last_restart_attempt", None)
+                state.pop("restart_requested", None)
+                self._set_data_push_reason(strategy_name, reason)
+                self._record_data_push_event(
+                    strategy_name,
+                    "美股休市，推送已暂停",
+                    level="info",
+                    reason=reason,
+                )
+                strategy_logger.info(
+                    "Data push blocked due to market closure",
+                    strategy=strategy_name,
+                    subscription=stored_subscription,
+                    symbol=target_symbol,
+                    reason=reason,
+                )
+                return {
+                    "success": True,
+                    "active": False,
+                    "subscription": stored_subscription,
+                    "symbol": target_symbol,
+                    "awaiting_data": False,
+                    "last_data_timestamp": None,
+                    "status_reason": reason,
+                    "market_closed": True,
+                }
             if not target_symbol:
                 state.update({"enabled": False, "active": False, "awaiting_data": False, "last_data_timestamp": None})
                 state.pop("_last_gap_warning_at", None)
@@ -2128,6 +2207,26 @@ class StrategyManager:
 
         status: Dict[str, Any] = dict(default_status)
 
+        market_open, market_reason = get_us_market_session()
+        status["is_us_market_open"] = bool(market_open)
+        if market_reason:
+            status["market_status_reason"] = market_reason
+
+        def _coerce_price(value: Any) -> Optional[float]:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        sl_enabled = bool(self._get_strategy_setting(name, "sl_enabled", False))
+        tp_enabled = bool(self._get_strategy_setting(name, "tp_enabled", False))
+        raw_sl = self._get_strategy_setting(name, "sl_price") if sl_enabled else None
+        raw_tp = self._get_strategy_setting(name, "tp_price") if tp_enabled else None
+        status["sl_enabled"] = sl_enabled
+        status["tp_enabled"] = tp_enabled
+        status["sl_price"] = _coerce_price(raw_sl) if sl_enabled else None
+        status["tp_price"] = _coerce_price(raw_tp) if tp_enabled else None
+
         if callable(status_provider):
             try:
                 runtime_status = status_provider()
@@ -2208,6 +2307,23 @@ class StrategyManager:
                 status["is_receiving_data"] = True
 
             is_receiving = bool(status.get("is_receiving_data"))
+            if not market_open:
+                active_flag = False
+                awaiting_data = False
+                push_state["active"] = False
+                push_state["awaiting_data"] = False
+                closed_reason = market_reason or "美股休市"
+                self._set_data_push_reason(name, closed_reason)
+                status["data_push_reason"] = closed_reason
+                status.setdefault("data_push", {})["status_reason"] = closed_reason
+                status["data_push_market_closed"] = True
+                if push_state.get("enabled"):
+                    self._schedule_data_push_disable(
+                        name,
+                        subscription=subscription_value,
+                        symbol=symbol_value,
+                    )
+
             if is_receiving and was_awaiting:
                 strategy_logger.info(
                     "Data push is now receiving data",
