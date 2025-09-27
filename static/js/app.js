@@ -9667,6 +9667,10 @@ class TradingApp {
                 input.addEventListener('blur', commit);
             };
         }
+        const symbolWrap = document.getElementById('detailsPrimarySymbolWrap');
+        if (symbolWrap) symbolWrap.classList.add('d-none');
+        const symbolEl = document.getElementById('detailsPrimarySymbol');
+        if (symbolEl) symbolEl.textContent = '';
 
         const kpiIds = ['kpiPnL', 'kpiWinRate', 'kpiMaxDD', 'kpiSharpe', 'kpiTrades', 'kpiAvgDur'];
         kpiIds.forEach((id) => {
@@ -10020,6 +10024,18 @@ class TradingApp {
             lastEl.textContent = strategy?.last_triggered
                 ? new Date(strategy.last_triggered).toLocaleString()
                 : '-';
+        }
+        const symbolWrap = document.getElementById('detailsPrimarySymbolWrap');
+        const symbolEl = document.getElementById('detailsPrimarySymbol');
+        if (symbolWrap && symbolEl) {
+            const symbol = this.resolveStrategySymbol(strategy);
+            if (symbol) {
+                symbolEl.textContent = symbol;
+                symbolWrap.classList.remove('d-none');
+            } else {
+                symbolEl.textContent = '';
+                symbolWrap.classList.add('d-none');
+            }
         }
     }
 
