@@ -8802,7 +8802,7 @@ class TradingApp {
                         forceExecutions: !Array.isArray(chartState.orders) || !chartState.orders.length
                     }).catch((err) => console.warn('Failed to load strategy chart on tab show:', err));
                 } else {
-                    this.renderStrategyChart({ redraw: false });
+                    this.renderStrategyChart({ redraw: true, forceResize: true });
                     this.updateStrategyChartStatus();
                 }
             });
@@ -9283,6 +9283,15 @@ class TradingApp {
                     },
                 },
             });
+            if (options.forceResize) {
+                requestAnimationFrame(() => {
+                    try {
+                        this.strategyChartInstance?.resize();
+                    } catch (err) {
+                        console.warn('Strategy chart resize failed after init:', err);
+                    }
+                });
+            }
         } else {
             const datasets = this.strategyChartInstance.data.datasets || [];
             if (datasets[0]) {
@@ -9309,7 +9318,15 @@ class TradingApp {
             if (volumeScale) {
                 volumeScale.max = maxVolume ? maxVolume * 1.1 : undefined;
             }
-            this.strategyChartInstance.update('none');
+            const updateMode = options.redraw === true ? 'default' : 'none';
+            this.strategyChartInstance.update(updateMode);
+            if (options.forceResize && typeof this.strategyChartInstance.resize === 'function') {
+                try {
+                    this.strategyChartInstance.resize();
+                } catch (err) {
+                    console.warn('Strategy chart resize failed:', err);
+                }
+            }
         }
 
         this.updateStrategyChartStatus(extraParts.join(' · '));

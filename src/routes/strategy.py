@@ -11,8 +11,10 @@ from loguru import logger
 from src.utils import now_local, parse_local_datetime
 from src.utils.account_pnl_cache import rebuild_account_daily_cache_from_db
 from src.utils.strategy_cache import (
+    compute_performance_metrics as cache_compute_performance,
     get_daily_pnl as cache_get_daily_pnl,
     get_strategy_stats as cache_get_strategy_stats,
+    rebuild_strategy_cache as cache_rebuild_strategy_cache,
 )
 
 from core import strategy_manager, queue_manager, order_manager
@@ -34,6 +36,8 @@ EXECUTIONS_CACHE_TTL = 2.0
 DAILY_PNL_CACHE_TTL = 30.0
 EXECUTIONS_FETCH_TIMEOUT = 3.0
 DAILY_PNL_FETCH_TIMEOUT = 3.5
+PERFORMANCE_CACHE_TTL = 30.0
+PERFORMANCE_FETCH_TIMEOUT = 4.0
 
 _executions_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
 _executions_cache_lock: Optional[asyncio.Lock] = None
@@ -42,6 +46,126 @@ _executions_fetch_tasks: Dict[Tuple[str, int], asyncio.Task] = {}
 _daily_pnl_cache: Dict[str, Dict[str, Any]] = {}
 _daily_pnl_cache_lock: Optional[asyncio.Lock] = None
 _daily_pnl_fetch_tasks: Dict[str, asyncio.Task] = {}
+
+
+def _make_performance_cache_key(
+    name: str,
+    range_value: str,
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
+) -> str:
+    if range_value == "custom":
+        start_token = start_date.isoformat() if isinstance(start_date, datetime) else ""
+        end_token = end_date.isoformat() if isinstance(end_date, datetime) else ""
+    else:
+        start_token = ""
+        end_token = ""
+    return f"{name}::{range_value}::{start_token}::{end_token}"
+
+
+async def _ensure_strategy_cache_populated(name: str) -> Dict[str, Any]:
+    """Ensure Redis-backed caches for ``name`` exist before expensive queries."""
+
+    stats = await cache_get_strategy_stats(name)
+    if stats:
+        return stats
+
+    lock = _strategy_cache_rebuild_locks.setdefault(name, asyncio.Lock())
+    async with lock:
+        stats = await cache_get_strategy_stats(name)
+        if stats:
+            return stats
+
+        db = get_db_manager()
+        try:
+            orders = await asyncio.to_thread(
+                db.load_strategy_orders,
+                name,
+                "strategy",
+                None,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning(
+                "Failed to load strategy orders for cache rebuild",
+                strategy=name,
+                error=str(exc),
+            )
+            orders = []
+
+        try:
+            await cache_rebuild_strategy_cache(name, orders)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning(
+                "Strategy cache rebuild failed",
+                strategy=name,
+                error=str(exc),
+            )
+
+        return await cache_get_strategy_stats(name)
+
+
+async def _load_strategy_performance(
+    name: str,
+    cache_key: str,
+    *,
+    range_value: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    await _ensure_strategy_cache_populated(name)
+
+    try:
+        metrics = await cache_compute_performance(
+            name, start_date=start_date, end_date=end_date
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning(
+            "Cached strategy performance computation failed",
+            strategy=name,
+            error=str(exc),
+        )
+        metrics = {}
+
+    if not metrics:
+        try:
+            metrics = await asyncio.to_thread(
+                strategy_manager.get_strategy_performance,
+                name,
+                start_date,
+                end_date,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.error(
+                "Fallback strategy performance computation failed",
+                strategy=name,
+                error=str(exc),
+            )
+            metrics = {}
+
+    payload: Dict[str, Any] = {
+        "success": True,
+        "metrics": metrics or {},
+        "range": range_value,
+    }
+
+    if _performance_cache_lock is None:
+        raise RuntimeError("Performance cache lock unavailable")
+
+    async with _performance_cache_lock:
+        _performance_cache[cache_key] = {
+            "timestamp": monotonic(),
+            "data": dict(payload),
+        }
+
+    payload["from_cache"] = False
+    payload["cache_age"] = 0.0
+    return payload
+
+_performance_cache: Dict[str, Dict[str, Any]] = {}
+_performance_cache_lock: Optional[asyncio.Lock] = None
+_performance_fetch_tasks: Dict[str, asyncio.Task] = {}
+
+_strategy_cache_rebuild_locks: Dict[str, asyncio.Lock] = {}
 
 
 async def _load_strategy_executions(
@@ -71,9 +195,13 @@ async def _load_strategy_executions(
 
 
 async def _load_strategy_daily_pnl(name: str, cache_key: str) -> Dict[str, Any]:
-    db = get_db_manager()
-    data = await asyncio.to_thread(db.get_strategy_daily_pnl, name)
-    payload: Dict[str, Any] = {"success": True, "pnl": data}
+    stats = await _ensure_strategy_cache_populated(name)
+    rows = await cache_get_daily_pnl(name)
+    if not rows:
+        rows = []
+        if stats:
+            logger.debug("Strategy daily PnL cache empty", strategy=name)
+    payload: Dict[str, Any] = {"success": True, "pnl": rows}
 
     if _daily_pnl_cache_lock is None:
         raise RuntimeError("Daily PnL cache lock unavailable")
@@ -96,12 +224,14 @@ async def invalidate_strategy_cache(strategy_name: Optional[str] = None) -> None
     entries related to the provided strategy are removed.
     """
 
-    global _executions_cache_lock, _daily_pnl_cache_lock
+    global _executions_cache_lock, _daily_pnl_cache_lock, _performance_cache_lock
 
     if _executions_cache_lock is None:
         _executions_cache_lock = asyncio.Lock()
     if _daily_pnl_cache_lock is None:
         _daily_pnl_cache_lock = asyncio.Lock()
+    if _performance_cache_lock is None:
+        _performance_cache_lock = asyncio.Lock()
 
     async with _executions_cache_lock:
         if strategy_name is None:
@@ -114,20 +244,62 @@ async def invalidate_strategy_cache(strategy_name: Optional[str] = None) -> None
     async with _daily_pnl_cache_lock:
         if strategy_name is None:
             _daily_pnl_cache.clear()
+            for task in _daily_pnl_fetch_tasks.values():
+                if not task.done():
+                    task.cancel()
+            _daily_pnl_fetch_tasks.clear()
         else:
             _daily_pnl_cache.pop(strategy_name, None)
+            task = _daily_pnl_fetch_tasks.pop(strategy_name, None)
+            if task and not task.done():
+                task.cancel()
+
+    async with _performance_cache_lock:
+        if strategy_name is None:
+            _performance_cache.clear()
+            for task in _performance_fetch_tasks.values():
+                if not task.done():
+                    task.cancel()
+            _performance_fetch_tasks.clear()
+        else:
+            prefix = f"{strategy_name}::"
+            targets = [key for key in _performance_cache if key.startswith(prefix)]
+            for key in targets:
+                _performance_cache.pop(key, None)
+                task = _performance_fetch_tasks.pop(key, None)
+                if task and not task.done():
+                    task.cancel()
 
 
 def _clear_cache_without_lock(strategy_name: Optional[str] = None) -> None:
     if strategy_name is None:
         _executions_cache.clear()
         _daily_pnl_cache.clear()
+        _performance_cache.clear()
+        for task in _daily_pnl_fetch_tasks.values():
+            if not task.done():
+                task.cancel()
+        _daily_pnl_fetch_tasks.clear()
+        for task in _performance_fetch_tasks.values():
+            if not task.done():
+                task.cancel()
+        _performance_fetch_tasks.clear()
         return
 
     targets = [key for key in _executions_cache if key[0] == strategy_name]
     for target in targets:
         _executions_cache.pop(target, None)
     _daily_pnl_cache.pop(strategy_name, None)
+    task = _daily_pnl_fetch_tasks.pop(strategy_name, None)
+    if task and not task.done():
+        task.cancel()
+    prefix = f"{strategy_name}::"
+    perf_targets = [key for key in _performance_cache if key.startswith(prefix)]
+    for key in perf_targets:
+        _performance_cache.pop(key, None)
+        task = _performance_fetch_tasks.pop(key, None)
+        if task and not task.done():
+            task.cancel()
 
 
 def schedule_strategy_cache_invalidation(strategy_name: Optional[str] = None) -> None:
@@ -442,9 +614,11 @@ async def get_strategy_performance_api(name: str, range: str = "1d", start: Opti
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
 
+    range_value = range or "custom"
+
     try:
-        start_date = None
-        end_date = None
+        start_date: Optional[datetime] = None
+        end_date: Optional[datetime] = None
         if start:
             try:
                 start_date = parse_local_datetime(start)
@@ -455,27 +629,112 @@ async def get_strategy_performance_api(name: str, range: str = "1d", start: Opti
                 end_date = parse_local_datetime(end)
             except Exception:
                 end_date = None
-        
-        # Quick ranges
+
         now = now_local()
-        if range == "1d":
+        if range_value == "1d":
             start_date = now - timedelta(days=1)
-        elif range == "1w":
+            end_date = None
+        elif range_value == "1w":
             start_date = now - timedelta(weeks=1)
-        elif range == "1m":
+            end_date = None
+        elif range_value == "1m":
             start_date = now - timedelta(days=30)
-        elif range == "wtd":
+            end_date = None
+        elif range_value == "wtd":
             start_date = now - timedelta(days=now.weekday())
-        elif range == "mtd":
+            end_date = None
+        elif range_value == "mtd":
             start_date = now.replace(day=1)
-        elif range == "ytd":
+            end_date = None
+        elif range_value == "ytd":
             start_date = now.replace(month=1, day=1)
-        
-        metrics = strategy_manager.get_strategy_performance(name, start_date, end_date)
-        return {"success": True, "metrics": metrics}
-    except Exception as e:
-        logger.error(f"Get strategy performance error: {e}")
-        # 始终返回200，保证前端/测试可继续工作
+            end_date = None
+        else:
+            range_value = "custom"
+
+        global _performance_cache_lock
+        if _performance_cache_lock is None:
+            _performance_cache_lock = asyncio.Lock()
+
+        cache_key = _make_performance_cache_key(
+            name, range_value, start_date, end_date
+        )
+        cached_entry: Optional[Dict[str, Any]] = None
+        now_marker = monotonic()
+
+        async with _performance_cache_lock:
+            entry = _performance_cache.get(cache_key)
+            if entry:
+                age = now_marker - entry.get("timestamp", 0.0)
+                if age < PERFORMANCE_CACHE_TTL:
+                    cached_payload = dict(entry.get("data", {}))
+                    cached_payload["from_cache"] = True
+                    cached_payload["cache_age"] = age
+                    return cached_payload
+                cached_entry = dict(entry)
+
+            fetch_task = _performance_fetch_tasks.get(cache_key)
+            if not fetch_task or fetch_task.done():
+                fetch_task = asyncio.create_task(
+                    _load_strategy_performance(
+                        name,
+                        cache_key,
+                        range_value=range_value,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                )
+
+                def _cleanup(fut: asyncio.Future, key: str = cache_key) -> None:
+                    _performance_fetch_tasks.pop(key, None)
+                    if fut.cancelled():
+                        return
+                    try:
+                        fut.result()
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        logger.warning(
+                            "Strategy performance fetch task failed",
+                            strategy=name,
+                            error=str(exc),
+                        )
+
+                fetch_task.add_done_callback(_cleanup)
+                _performance_fetch_tasks[cache_key] = fetch_task
+
+        try:
+            payload = await asyncio.wait_for(
+                asyncio.shield(fetch_task), timeout=PERFORMANCE_FETCH_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Strategy performance fetch timed out; returning cached snapshot",
+                strategy=name,
+                range=range_value,
+            )
+            if cached_entry:
+                cached_payload = dict(cached_entry.get("data", {})) or {"success": True, "metrics": {}}
+                cached_payload["from_cache"] = True
+                cached_payload["cache_age"] = now_marker - cached_entry.get("timestamp", now_marker)
+                cached_payload["refresh_in_progress"] = True
+                return cached_payload
+            return {
+                "success": True,
+                "metrics": {},
+                "from_cache": True,
+                "refresh_in_progress": True,
+            }
+        except Exception as exc:
+            logger.error(f"Get strategy performance error: {exc}")
+            if cached_entry:
+                cached_payload = dict(cached_entry.get("data", {})) or {"success": True, "metrics": {}}
+                cached_payload["from_cache"] = True
+                cached_payload["cache_warning"] = str(exc)
+                return cached_payload
+            return {"success": True, "metrics": {}}
+
+        return payload
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.error(f"Unhandled strategy performance error: {exc}")
         return {"success": True, "metrics": {}}
 
 
