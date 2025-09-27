@@ -4424,7 +4424,7 @@ class TradingApp {
                         localTime = localTime.plus({ hours: 1 });
                     }
                     const dstLabel = isEasternDst ? (skipDstAdjustment ? 'DST' : 'DST +1h') : '标准';
-                    console.log(`[时间转换] 原始: ${raw} -> 本地时间: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')} (${dstLabel})`);
+                    // console.log(`[时间转换] 原始: ${raw} -> 本地时间: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')} (${dstLabel})`);
                     return localTime.toJSDate();
                 }
             }
