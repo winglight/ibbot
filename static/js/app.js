@@ -2774,6 +2774,25 @@ class TradingApp {
         return this.candlestickLoader;
     }
 
+    async waitForCandlestickPlugin(options = {}) {
+        const { promise = null, timeoutMs = 2500 } = options || {};
+        const timeoutToken = Symbol('candlestick-timeout');
+        try {
+            const result = await Promise.race([
+                Promise.resolve(promise ?? this.ensureCandlestickPlugin()),
+                new Promise((resolve) => setTimeout(() => resolve(timeoutToken), Math.max(0, timeoutMs)))
+            ]);
+            if (result === timeoutToken) {
+                console.warn(`[Chart] Candlestick plugin load timed out after ${timeoutMs}ms; proceeding without it.`);
+                return false;
+            }
+            return !!result;
+        } catch (error) {
+            console.warn('[Chart] Candlestick plugin load failed:', error);
+            return false;
+        }
+    }
+
     updateReadOnlyMode(isReadOnly, role = 'admin', options = {}) {
         const persist = options.persist !== false;
         this.isReadOnly = !!isReadOnly;
@@ -4723,7 +4742,7 @@ class TradingApp {
                 const isCandlestick = chartType === 'candlestick';
 
                 if (isCandlestick) {
-                    const ready = await this.ensureCandlestickPlugin();
+                    const ready = await this.waitForCandlestickPlugin();
                     if (!ready) {
                         chartContainer.innerHTML = '<div class="alert alert-warning mb-0">蜡烛图插件加载中，请稍后重试。</div>';
                         return;
@@ -9503,11 +9522,17 @@ class TradingApp {
                 return;
             }
 
-            const pluginReady = await pluginPromise;
+            const pluginReady = await this.waitForCandlestickPlugin({ promise: pluginPromise });
             console.log('[StrategyChart] 蜡烛图插件状态', { pluginReady });
             state.useCandlestick = Boolean(pluginReady);
             if (!pluginReady) {
-                console.warn('[StrategyChart] Candlestick plugin unavailable, falling back to line chart.');
+                if (!this.strategyChartFallbackNotified) {
+                    console.warn('[StrategyChart] Candlestick plugin unavailable, falling back to line chart.');
+                    this.strategyChartFallbackNotified = true;
+                }
+            }
+            if (pluginReady) {
+                this.strategyChartFallbackNotified = false;
             }
 
             const bars = this.normalizeStrategyChartBars(response.data);
