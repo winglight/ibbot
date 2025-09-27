@@ -33,12 +33,19 @@ async def _send_json(websocket: WebSocket, payload: Dict[str, Any]) -> bool:
     try:
         await websocket.send_text(json.dumps(payload))
         return True
+    except WebSocketDisconnect:
+        logger.debug("Websocket disconnected during send")
+        return False
     except RuntimeError as exc:
         if "Cannot call \"send\" once a close message has been sent" in str(exc):
             logger.debug("Websocket closing; aborting further sends")
             return False
         raise
 
+
+async def _send_or_disconnect(websocket: WebSocket, payload: Dict[str, Any]) -> None:
+    if not await _send_json(websocket, payload):
+        raise WebSocketDisconnect()
 
 
 def _serialise_order(order: Any) -> Dict[str, Any]:
@@ -853,14 +860,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
             elif msg_type == "request_strategies":
                 if 'strategy_manager' not in globals() or strategy_manager is None:
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "type": "strategies_snapshot",
-                                "success": False,
-                                "error": "Strategy manager unavailable",
-                            }
-                        )
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "strategies_snapshot",
+                            "success": False,
+                            "error": "Strategy manager unavailable",
+                        },
                     )
                     continue
 
@@ -871,16 +877,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     if cached:
                         cached_payload = dict(cached)
                         cached_payload["cached"] = True
-                        await websocket.send_text(json.dumps(cached_payload))
+                        await _send_or_disconnect(websocket, cached_payload)
                     else:
-                        await websocket.send_text(
-                            json.dumps(
-                                {
-                                    "type": "strategies_snapshot",
-                                    "success": False,
-                                    "error": "Rate limited",
-                                }
-                            )
+                        await _send_or_disconnect(
+                            websocket,
+                            {
+                                "type": "strategies_snapshot",
+                                "success": False,
+                                "error": "Rate limited",
+                            },
                         )
                     continue
 
@@ -897,41 +902,40 @@ async def websocket_endpoint(websocket: WebSocket):
                         "source": "websocket",
                     }
                     last_responses[key] = payload
-                    await websocket.send_text(json.dumps(payload))
+                    await _send_or_disconnect(websocket, payload)
+                except WebSocketDisconnect:
+                    raise
                 except Exception as exc:
                     logger.warning(f"Failed to stream strategies: {exc}")
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "type": "strategies_snapshot",
-                                "success": False,
-                                "error": str(exc),
-                            }
-                        )
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "strategies_snapshot",
+                            "success": False,
+                            "error": str(exc),
+                        },
                     )
             elif msg_type == "request_strategy_status":
                 if 'strategy_manager' not in globals() or strategy_manager is None:
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "type": "strategy_status",
-                                "success": False,
-                                "error": "Strategy manager unavailable",
-                            }
-                        )
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "strategy_status",
+                            "success": False,
+                            "error": "Strategy manager unavailable",
+                        },
                     )
                     continue
 
                 name = (message.get("name") or "").strip()
                 if not name:
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "type": "strategy_status",
-                                "success": False,
-                                "error": "Strategy name is required",
-                            }
-                        )
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "strategy_status",
+                            "success": False,
+                            "error": "Strategy name is required",
+                        },
                     )
                     continue
 
@@ -942,17 +946,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     if cached:
                         cached_payload = dict(cached)
                         cached_payload["cached"] = True
-                        await websocket.send_text(json.dumps(cached_payload))
+                        await _send_or_disconnect(websocket, cached_payload)
                     else:
-                        await websocket.send_text(
-                            json.dumps(
-                                {
-                                    "type": "strategy_status",
-                                    "success": False,
-                                    "name": name,
-                                    "error": "Rate limited",
-                                }
-                            )
+                        await _send_or_disconnect(
+                            websocket,
+                            {
+                                "type": "strategy_status",
+                                "success": False,
+                                "name": name,
+                                "error": "Rate limited",
+                            },
                         )
                     continue
 
@@ -972,27 +975,31 @@ async def websocket_endpoint(websocket: WebSocket):
                         "source": "websocket",
                     }
                     last_responses[key] = payload
-                    await websocket.send_text(json.dumps(payload))
+                    await _send_or_disconnect(websocket, payload)
+                except WebSocketDisconnect:
+                    raise
                 except Exception as exc:
                     logger.warning(f"Failed to fetch strategy status for {name}: {exc}")
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "type": "strategy_status",
-                                "success": False,
-                                "name": name,
-                                "error": str(exc),
-                            }
-                        )
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "strategy_status",
+                            "success": False,
+                            "name": name,
+                            "error": str(exc),
+                        },
                     )
             elif msg_type == "request_strategy_performance":
                 name = (message.get("name") or "").strip()
                 if not name:
-                    await websocket.send_text(json.dumps({
-                        "type": "strategy_performance",
-                        "success": False,
-                        "error": "Strategy name is required",
-                    }))
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "strategy_performance",
+                            "success": False,
+                            "error": "Strategy name is required",
+                        },
+                    )
                     continue
 
                 range_value = (message.get("range") or "1d").strip()
@@ -1026,14 +1033,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     if cached:
                         cached_payload = dict(cached)
                         cached_payload["cached"] = True
-                        if not await _send_json(websocket, cached_payload):
-                            break
+                        await _send_or_disconnect(websocket, cached_payload)
                     else:
-                        if not await _send_json(
+                        await _send_or_disconnect(
                             websocket,
-                            {"type": "strategy_performance", "success": False, "name": name, "range": range_value, "error": "Rate limited"},
-                        ):
-                            break
+                            {
+                                "type": "strategy_performance",
+                                "success": False,
+                                "name": name,
+                                "range": range_value,
+                                "error": "Rate limited",
+                            },
+                        )
                     continue
 
                 cache_stats = None
@@ -1055,8 +1066,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             "from_cache": True,
                         }
                         last_responses[key] = payload
-                        if not await _send_json(websocket, payload):
-                            break
+                        await _send_or_disconnect(websocket, payload)
                         continue
                     except Exception as exc:
                         logger.debug(
@@ -1084,15 +1094,20 @@ async def websocket_endpoint(websocket: WebSocket):
                         "metrics": metrics,
                     }
                     last_responses[key] = payload
-                    if not await _send_json(websocket, payload):
-                        break
+                    await _send_or_disconnect(websocket, payload)
+                except WebSocketDisconnect:
+                    raise
                 except Exception as exc:
                     logger.warning(f"Failed to fetch strategy performance: {exc}")
-                    if not await _send_json(
+                    await _send_or_disconnect(
                         websocket,
-                        {"type": "strategy_performance", "success": False, "name": name, "error": str(exc)},
-                    ):
-                        break
+                        {
+                            "type": "strategy_performance",
+                            "success": False,
+                            "name": name,
+                            "error": str(exc),
+                        },
+                    )
     except WebSocketDisconnect:
         for task in realtime_tasks.values():
             task.cancel()
