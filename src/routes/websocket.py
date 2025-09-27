@@ -29,6 +29,17 @@ router = APIRouter()
 
 RATE_LIMIT_SECONDS = 15.0
 
+async def _send_json(websocket: WebSocket, payload: Dict[str, Any]) -> bool:
+    try:
+        await websocket.send_text(json.dumps(payload))
+        return True
+    except RuntimeError as exc:
+        if "Cannot call \"send\" once a close message has been sent" in str(exc):
+            logger.debug("Websocket closing; aborting further sends")
+            return False
+        raise
+
+
 
 def _serialise_order(order: Any) -> Dict[str, Any]:
     raw_type = (getattr(order, "order_type", "") or "").upper()
@@ -1015,15 +1026,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     if cached:
                         cached_payload = dict(cached)
                         cached_payload["cached"] = True
-                        await websocket.send_text(json.dumps(cached_payload))
+                        if not await _send_json(websocket, cached_payload):
+                            break
                     else:
-                        await websocket.send_text(json.dumps({
-                            "type": "strategy_performance",
-                            "success": False,
-                            "name": name,
-                            "range": range_value,
-                            "error": "Rate limited",
-                        }))
+                        if not await _send_json(
+                            websocket,
+                            {"type": "strategy_performance", "success": False, "name": name, "range": range_value, "error": "Rate limited"},
+                        ):
+                            break
                     continue
 
                 cache_stats = None
@@ -1045,7 +1055,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             "from_cache": True,
                         }
                         last_responses[key] = payload
-                        await websocket.send_text(json.dumps(payload))
+                        if not await _send_json(websocket, payload):
+                            break
                         continue
                     except Exception as exc:
                         logger.debug(
@@ -1073,15 +1084,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         "metrics": metrics,
                     }
                     last_responses[key] = payload
-                    await websocket.send_text(json.dumps(payload))
+                    if not await _send_json(websocket, payload):
+                        break
                 except Exception as exc:
                     logger.warning(f"Failed to fetch strategy performance: {exc}")
-                    await websocket.send_text(json.dumps({
-                        "type": "strategy_performance",
-                        "success": False,
-                        "name": name,
-                        "error": str(exc),
-                    }))
+                    if not await _send_json(
+                        websocket,
+                        {"type": "strategy_performance", "success": False, "name": name, "error": str(exc)},
+                    ):
+                        break
     except WebSocketDisconnect:
         for task in realtime_tasks.values():
             task.cancel()

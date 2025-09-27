@@ -181,21 +181,30 @@ class DomDepthAdapter(DataSourceAdapter):
 
     def _publish_async(self, envelope: EventEnvelope) -> None:
         loop = self._loop
-        if loop is None or not loop.is_running():
-            logger.debug("Event loop unavailable for DOM depth publish; dropping event")
-            return
-        try:
+        if loop and loop.is_running():
             try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
+                try:
+                    running_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    running_loop = None
 
-            if running_loop is loop:
-                loop.create_task(self.event_bus.publish(envelope))
-            else:
-                def _dispatch() -> None:
+                if running_loop is loop:
                     loop.create_task(self.event_bus.publish(envelope))
+                else:
+                    def _dispatch() -> None:
+                        loop.create_task(self.event_bus.publish(envelope))
 
-                loop.call_soon_threadsafe(_dispatch)
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logger.exception("Failed to publish DOM depth event: {}", exc)
+                    loop.call_soon_threadsafe(_dispatch)
+                return
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.exception("Failed to publish DOM depth event: {}", exc)
+                return
+
+        # Fallback for contexts without a running loop (e.g. synchronous unit tests)
+        try:
+            asyncio.run(self.event_bus.publish(envelope))
+        except RuntimeError as exc:
+            # asyncio.run() cannot be called from a running loop; best effort log and drop
+            logger.debug(
+                "DOM depth publish fallback failed: %s", exc
+            )
