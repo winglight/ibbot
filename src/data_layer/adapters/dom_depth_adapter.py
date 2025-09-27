@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections import deque
 from datetime import datetime
@@ -92,12 +93,23 @@ class DomDepthAdapter(DataSourceAdapter):
                     self._depth_subscriber.stop_depth_stream(symbol)
                 except Exception as exc:  # pragma: no cover - defensive guard
                     logger.debug("Failed to stop depth stream during force_restart: {}", exc)
-            return self._depth_subscriber.start_depth_stream(
-                symbol,
-                _on_update,
-                num_rows=num_rows,
-                force_restart=force_restart,
-            )
+
+            start_fn = getattr(self._depth_subscriber, "start_depth_stream")
+            kwargs = {"num_rows": num_rows}
+
+            try:
+                signature = inspect.signature(start_fn)
+            except (TypeError, ValueError):
+                signature = None
+
+            if signature is None or "force_restart" in signature.parameters:
+                kwargs["force_restart"] = force_restart
+            elif force_restart:
+                logger.debug(
+                    "Depth subscriber does not accept force_restart; ignoring request",
+                )
+
+            return start_fn(symbol, _on_update, **kwargs)
 
         started = await asyncio.to_thread(_start)
         if not started:

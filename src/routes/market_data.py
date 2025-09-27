@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -176,6 +177,47 @@ def _clean_expired_cache() -> None:
         logger.debug(f"Cleaned {len(expired_keys)} expired cache entries")
 
 
+async def _fetch_ib_historical(
+    ib_client,
+    *,
+    symbol: str,
+    duration: str,
+    bar_size: str,
+    exchange: str,
+    timeout: float,
+):
+    """Call IB client's historical data API with coroutine/sync compatibility."""
+
+    method = getattr(ib_client, "get_historical_data", None)
+    if method is None:
+        return None
+
+    if inspect.iscoroutinefunction(method):
+        return await asyncio.wait_for(
+            method(
+                symbol=symbol,
+                duration=duration,
+                bar_size=bar_size,
+                exchange=exchange,
+            ),
+            timeout=timeout,
+        )
+
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(
+            None,
+            lambda: method(
+                symbol=symbol,
+                duration=duration,
+                bar_size=bar_size,
+                exchange=exchange,
+            ),
+        ),
+        timeout=timeout,
+    )
+
+
 @router.post("/api/historical_data")
 async def get_historical_data(
     request: HistoricalDataRequest,
@@ -253,8 +295,6 @@ async def get_historical_data(
                 "source": "database_cache",
             }
 
-        loop = asyncio.get_event_loop()
-
         # Unified data layer attempt ----------------------------------
         interval_key = _map_bar_size_to_interval(request.bar_size)
         duration_minutes = _parse_duration_to_minutes(request.duration)
@@ -296,16 +336,12 @@ async def get_historical_data(
             raise HTTPException(status_code=404, detail="No data found")
 
         try:
-            df = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: ib_client.get_historical_data(
-                        symbol=request.symbol,
-                        duration=request.duration,
-                        bar_size=request.bar_size,
-                        exchange=request.exchange,
-                    ),
-                ),
+            df = await _fetch_ib_historical(
+                ib_client,
+                symbol=request.symbol,
+                duration=request.duration,
+                bar_size=request.bar_size,
+                exchange=request.exchange,
                 timeout=30.0,
             )
         except asyncio.TimeoutError:
@@ -316,7 +352,7 @@ async def get_historical_data(
                 status_code=408, detail="Historical data request timed out"
             )
 
-        if df.empty:
+        if df is None or getattr(df, "empty", False):
             if cache_df is not None and not cache_df.empty:
                 return {
                     "success": True,
@@ -521,12 +557,20 @@ async def get_chart_data(
         if ib_client is None:
             raise HTTPException(status_code=400, detail="IBKR client unavailable")
 
-        df = await ib_client.get_historical_data(
-            symbol=request.symbol,
-            duration=request.duration,
-            bar_size=request.bar_size,
-            exchange=request.exchange,
-        )
+        try:
+            df = await _fetch_ib_historical(
+                ib_client,
+                symbol=request.symbol,
+                duration=request.duration,
+                bar_size=request.bar_size,
+                exchange=request.exchange,
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Chart data historical fetch timed out for {request.symbol}"
+            )
+            df = None
 
         # 4) 成功获取数据
         if df is not None and not df.empty:
@@ -774,7 +818,6 @@ async def get_current_price(
                     "source": "cache",
                 }
 
-        loop = asyncio.get_event_loop()
         try:
             data = await ib_client.get_real_time_data(
                         request.symbol, request.exchange
@@ -794,35 +837,32 @@ async def get_current_price(
                 f"Current price request for {request.symbol} timed out"
             )
 
+        symbol_upper = (request.symbol or '').upper()
+        timeout_duration = 3.0 if any(symbol_upper.startswith(root) for root in INDEX_FUTURE_ROOTS) else 2.0
         try:
-            symbol_upper = (request.symbol or '').upper()
-            timeout_duration = 3.0 if any(symbol_upper.startswith(root) for root in INDEX_FUTURE_ROOTS) else 2.0
-            df = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: ib_client.get_historical_data(
-                        symbol=request.symbol,
-                        duration="1 D",
-                        bar_size="1 min",
-                        exchange=request.exchange,
-                    ),
-                ),
+            df = await _fetch_ib_historical(
+                ib_client,
+                symbol=request.symbol,
+                duration="1 D",
+                bar_size="1 min",
+                exchange=request.exchange,
                 timeout=timeout_duration,
             )
-
-            if df is not None and not df.empty:
-                latest_price = float(df.iloc[-1]["close"])
-                return {
-                    "success": True,
-                    "symbol": request.symbol,
-                    "price": latest_price,
-                    "timestamp": now_local().isoformat(),
-                    "source": "historical",
-                }
         except asyncio.TimeoutError:
             logger.warning(
                 f"Historical data fallback for {request.symbol} timed out"
             )
+            df = None
+
+        if df is not None and not df.empty:
+            latest_price = float(df.iloc[-1]["close"])
+            return {
+                "success": True,
+                "symbol": request.symbol,
+                "price": latest_price,
+                "timestamp": now_local().isoformat(),
+                "source": "historical",
+            }
 
         return {
             "success": False,

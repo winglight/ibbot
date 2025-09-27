@@ -4,7 +4,15 @@ from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
 import core
-from core import connection_manager, risk_manager, strategy_manager, queue_manager, websocket_manager, order_manager
+from core import (
+    connection_manager,
+    risk_manager,
+    strategy_manager,
+    queue_manager,
+    websocket_manager,
+    order_manager,
+    notification_manager,
+)
 from src.connection_manager import ConnectionConfig
 from .auth import get_current_user
 
@@ -33,8 +41,14 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
                 loop.run_in_executor(None, lambda: connection_manager.disconnect()),
                 timeout=15.0,
             )
-            # 更新连接配置在断开之后，确保新参数生效
-            connection_manager.update_config(config)
+        except asyncio.TimeoutError:
+            logger.error("Disconnection operation timed out before reconnect")
+            raise HTTPException(status_code=408, detail="Disconnect request timed out")
+
+        # 更新连接配置在断开之后，确保新参数生效
+        connection_manager.update_config(config)
+
+        try:
             success = await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: connection_manager.connect()),
                 timeout=30.0,
@@ -42,6 +56,16 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
         except asyncio.TimeoutError:
             logger.error("Connection operation timed out")
             raise HTTPException(status_code=408, detail="Connection operation timed out")
+        except Exception as exc:
+            logger.warning("Connection attempt failed", error=str(exc))
+            detail = None
+            try:
+                detail = connection_manager.get_last_connect_error()
+            except Exception:
+                detail = None
+            if not detail:
+                detail = str(exc) or "Failed to connect to IBKR"
+            raise HTTPException(status_code=400, detail=detail)
 
         if success:
             if core.ibkr_client is None:
