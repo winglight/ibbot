@@ -8686,10 +8686,22 @@ class TradingApp {
                     this.updateStrategyChartStatus('缺少标的');
                     return;
                 }
+
+                const detailsState = this.strategyDetailsState || {};
+                const tabLoaded = detailsState.tabLoaded?.['strategy-chart'];
+
+                if (!tabLoaded) {
+                    if (chartState.loading) {
+                        this.updateStrategyChartStatus('加载中...');
+                    }
+                    return;
+                }
+
                 if (chartState.loading) {
                     this.updateStrategyChartStatus('加载中...');
                     return;
                 }
+
                 const hasBars = Array.isArray(chartState.fullBars) && chartState.fullBars.length > 0;
                 if (!hasBars) {
                     this.loadStrategyChart(chartState.currentStrategy, {
