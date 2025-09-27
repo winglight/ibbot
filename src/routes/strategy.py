@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
 
 from src.utils import now_local, parse_local_datetime
+from src.utils.account_pnl_cache import rebuild_account_daily_cache_from_db
 from src.utils.strategy_cache import (
     get_daily_pnl as cache_get_daily_pnl,
     get_strategy_stats as cache_get_strategy_stats,
@@ -721,6 +722,7 @@ async def clear_strategy_executions(name: str, user: Optional[str] = Depends(get
         db = get_db_manager()
         deleted = db.delete_strategy_orders(name)
         await invalidate_strategy_cache(name)
+        await rebuild_account_daily_cache_from_db(db)
         return {"success": True, "deleted": int(deleted)}
     except Exception as e:
         logger.error(f"Clear strategy executions error: {e}")
