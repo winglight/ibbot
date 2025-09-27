@@ -65,6 +65,7 @@ services:
       - ib-gateway
     networks:
       - ibbot-network
+      - stack
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://ibbot:8000/"]
@@ -91,6 +92,7 @@ services:
       - ibbot
     networks:
       - ibbot-network
+      - stack
     restart: unless-stopped
 
   # IB Gateway (gnzsnz)
@@ -143,7 +145,6 @@ services:
 
     networks:
       - ibbot-network
-
   # Cloudflare Tunnel (cloudflared) - token mode only
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -163,6 +164,8 @@ services:
 networks:
   ibbot-network:
     driver: bridge
+  stack:
+    external: true
 
 volumes:
   ibbot-logs:
