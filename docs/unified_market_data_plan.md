@@ -110,6 +110,24 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
   - Measurement: `tick_quotes`, tags=`symbol`,`exchange`,`source`; fields=`last`,`bid`,`ask`,`volume`。
   - Measurement: `candles_{interval}`（或统一 measurement + interval tag）。
 
+### 实际部署配置
+
+统一数据层在运行时会根据环境变量自动切换后端：
+
+- `DATA_LAYER_REDIS_URL`：Redis 连接串（例如 `redis://:REDIS_PASSWORD@redis:6379/0`）。未设置时回退为进程内缓存。
+- `DATA_LAYER_REDIS_PREFIX`（可选）：键名前缀，默认 `market-data`。
+- `DATA_LAYER_REDIS_SNAPSHOT_TTL`（可选）：快照 TTL 秒数，未设置则常驻。
+- `DATA_LAYER_INFLUX_URL`：InfluxDB 访问地址（例如 `http://influxdb:8086`）。
+- `DATA_LAYER_INFLUX_BUCKET`：写入 bucket 名称。
+- `DATA_LAYER_INFLUX_ORG`：组织名称。
+- `DATA_LAYER_INFLUX_TOKEN`（可选）：访问 token，如未配置则使用匿名方式。
+- `DATA_LAYER_INFLUX_MEASUREMENT`（可选）：事件 measurement，默认 `market_events`。
+
+配置步骤：
+1. 在 `.env` 或部署环境中设置上述变量，Redis/Influx 任意一项缺失即保持内存/Noop 模式。
+2. 确保容器或主机已部署对应服务，`docker-compose.yml` 可参考 `redis` 与 `influxdb` 服务暴露的端口。
+3. 重启应用后，日志会输出 `Using Redis cache backend...` 或 `Using InfluxDB persistence backend...`，确认接入成功。
+
 ## Compatibility Layer
 - `IBKRClient.get_real_time_data/get_historical_data` 调整为根据 mode 调用：
   - Legacy 模式：沿用现有逻辑（请求 IBKR API）。
@@ -174,3 +192,4 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 
 ## Update Log
 - 2024-07-30: 初始方案与分阶段计划。
+- 2024-07-31: 新增 Redis/Influx 可选后端及配置说明。
