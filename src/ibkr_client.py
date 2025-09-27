@@ -1865,6 +1865,17 @@ class IBKRClient:
                     connection_logger.debug(
                         f"Synchronized in-memory order {oid} commission: {prev_comm} -> {order.commission}, pnl: {prev_pnl} -> {order.pnl}"
                     )
+                    try:
+                        if getattr(order, "status", "").lower() == "filled":
+                            from .utils.strategy_cache import (
+                                record_filled_order as cache_record_filled_order,
+                            )
+
+                            await cache_record_filled_order(order)
+                    except Exception as cache_err:
+                        connection_logger.debug(
+                            f"Strategy cache update skipped for order {oid}: {cache_err}"
+                        )
                 else:
                     connection_logger.debug(f"In-memory order {oid} not found for commission/pnl sync")
             except Exception as sync_err:

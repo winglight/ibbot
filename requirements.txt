@@ -16,3 +16,4 @@ loguru
 PyJWT
 python-jose[cryptography]
 pandas-market-calendars
+redis>=4.5.0

@@ -642,26 +642,49 @@ class DatabaseManager:
             return affected
     
     # 策略执行表已移除；保留占位符以保持向后兼容接口
-    def load_strategy_orders(self, strategy_name: str, order_source: str = 'strategy', limit: int = 100) -> List[Order]:
+    def load_strategy_orders(
+        self,
+        strategy_name: str,
+        order_source: str = 'strategy',
+        limit: Optional[int] = 100,
+    ) -> List[Order]:
         """加载指定策略的订单记录"""
         with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT order_id, symbol, quantity, action, order_type, price,
-                       created_at as timestamp, exchange, sec_type,
-                       COALESCE(status, 'Submitted') as status,
-                       executed_at,
-                       rule_id,
-                       COALESCE(order_source, 'auto') as order_source,
-                       commission,
-                       pnl
-                FROM orders
-                WHERE strategy_name = ? AND order_source = ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (strategy_name, order_source, limit),
-            )
+            if limit is None:
+                cursor.execute(
+                    """
+                    SELECT order_id, symbol, quantity, action, order_type, price,
+                           created_at as timestamp, exchange, sec_type,
+                           COALESCE(status, 'Submitted') as status,
+                           executed_at,
+                           rule_id,
+                           COALESCE(order_source, 'auto') as order_source,
+                           commission,
+                           pnl
+                    FROM orders
+                    WHERE strategy_name = ? AND order_source = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (strategy_name, order_source),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT order_id, symbol, quantity, action, order_type, price,
+                           created_at as timestamp, exchange, sec_type,
+                           COALESCE(status, 'Submitted') as status,
+                           executed_at,
+                           rule_id,
+                           COALESCE(order_source, 'auto') as order_source,
+                           commission,
+                           pnl
+                    FROM orders
+                    WHERE strategy_name = ? AND order_source = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (strategy_name, order_source, limit),
+                )
             rows = cursor.fetchall()
         orders: List[Order] = []
         for row in rows:

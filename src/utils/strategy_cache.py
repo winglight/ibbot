@@ -1,0 +1,621 @@
+"""Helpers for maintaining strategy snapshots in Redis."""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from loguru import logger
+
+from src.cache import ensure_redis
+from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
+
+MAX_RECENT_ORDERS = int(os.getenv("STRATEGY_CACHE_MAX_RECENT", "200"))
+
+__all__ = [
+    "order_to_snapshot",
+    "record_filled_order",
+    "rebuild_strategy_cache",
+    "clear_strategy_cache",
+    "get_strategy_stats",
+    "get_strategy_orders",
+    "get_recent_fills",
+    "get_daily_pnl",
+    "compute_performance_metrics",
+    "mark_strategy_cache_stale",
+]
+
+
+def _base_key(strategy: str) -> str:
+    return f"strategy:{strategy}"
+
+
+def _orders_key(strategy: str) -> str:
+    return f"{_base_key(strategy)}:orders"
+
+
+def _recent_key(strategy: str) -> str:
+    return f"{_base_key(strategy)}:recent"
+
+
+def _stats_key(strategy: str) -> str:
+    return f"{_base_key(strategy)}:stats"
+
+
+def _daily_hash_key(strategy: str) -> str:
+    return f"{_base_key(strategy)}:daily"
+
+
+def _daily_zset_key(strategy: str) -> str:
+    return f"{_base_key(strategy)}:daily:zset"
+
+
+def _normalise_float(value: Any) -> float:
+    try:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        return float(str(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalise_int(value: Any) -> int:
+    try:
+        if value is None:
+            return 0
+        if isinstance(value, bool):
+            return int(value)
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def order_to_snapshot(order: Any, *, strategy_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Convert an order object into a serialisable snapshot for Redis."""
+
+    if order is None:
+        return None
+
+    strategy = strategy_name or getattr(order, "strategy_name", None)
+    if not strategy:
+        return None
+
+    status = getattr(order, "status", None) or getattr(order, "order_status", None)
+    if not status or str(status).lower() != "filled":
+        return None
+
+    order_id = getattr(order, "order_id", None) or getattr(order, "id", None)
+    if not order_id:
+        return None
+
+    created_raw = getattr(order, "created_at", None)
+    if created_raw is None:
+        created_raw = getattr(order, "timestamp", None)
+    if isinstance(created_raw, str):
+        created_at = parse_local_datetime(created_raw)
+    else:
+        created_at = ensure_local_timezone(created_raw)
+
+    executed_raw = getattr(order, "executed_at", None)
+    if isinstance(executed_raw, str):
+        executed_at = parse_local_datetime(executed_raw)
+    else:
+        executed_at = ensure_local_timezone(executed_raw)
+
+    if executed_at is None:
+        executed_at = created_at
+
+    quantity = _normalise_int(getattr(order, "quantity", None) or getattr(order, "qty", None))
+    pnl = _normalise_float(getattr(order, "pnl", None))
+    commission = _normalise_float(getattr(order, "commission", None))
+    price = _normalise_float(getattr(order, "price", None))
+    fill_price = _normalise_float(getattr(order, "fill_price", None)) or price
+
+    duration = None
+    if created_at and executed_at:
+        try:
+            delta = executed_at - created_at
+            duration = max(delta.total_seconds(), 0.0)
+        except Exception:
+            duration = None
+
+    snapshot: Dict[str, Any] = {
+        "order_id": str(order_id),
+        "strategy": strategy,
+        "symbol": getattr(order, "symbol", None),
+        "action": getattr(order, "action", None),
+        "quantity": quantity,
+        "order_type": getattr(order, "order_type", None),
+        "order_source": getattr(order, "order_source", None),
+        "price": price,
+        "fill_price": fill_price,
+        "pnl": pnl,
+        "commission": commission,
+        "created_at": to_local_iso(created_at) if created_at else None,
+        "executed_at": to_local_iso(executed_at) if executed_at else None,
+        "duration": duration,
+    }
+
+    return snapshot
+
+
+def _parse_snapshot_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    return parse_local_datetime(value)
+
+
+def _prepare_order_map(raw_map: Mapping[str, str]) -> Dict[str, Dict[str, Any]]:
+    orders: Dict[str, Dict[str, Any]] = {}
+    for key, payload in raw_map.items():
+        if not payload:
+            continue
+        try:
+            decoded = json.loads(payload)
+        except Exception:
+            continue
+        if not isinstance(decoded, dict):
+            continue
+        decoded.setdefault("order_id", key)
+        orders[key] = decoded
+    return orders
+
+
+def _serialise_order_map(order_map: Mapping[str, Dict[str, Any]]) -> Dict[str, str]:
+    return {order_id: json.dumps(snapshot, default=str) for order_id, snapshot in order_map.items()}
+
+
+def _serialise_recent(sorted_orders: Sequence[Dict[str, Any]]) -> List[str]:
+    entries: List[str] = []
+    limited = list(
+        sorted(
+            sorted_orders,
+            key=lambda item: (
+                _parse_snapshot_datetime(item.get("executed_at"))
+                or _parse_snapshot_datetime(item.get("created_at"))
+                or datetime.min.replace(tzinfo=now_local().tzinfo)
+            ),
+            reverse=True,
+        )
+    )[:MAX_RECENT_ORDERS]
+    for item in limited:
+        try:
+            entries.append(json.dumps(item, default=str))
+        except Exception:
+            continue
+    return entries
+
+
+def _compute_stats(order_map: Mapping[str, Dict[str, Any]]) -> Tuple[Dict[str, str], Dict[str, float], List[str]]:
+    orders = list(order_map.values())
+    if not orders:
+        now_iso = to_local_iso(now_local()) or now_local().isoformat()
+        return (
+            {
+                "filled_count": "0",
+                "pnl_sum": "0.0",
+                "pnl_sumsq": "0.0",
+                "commission_sum": "0.0",
+                "win_count": "0",
+                "loss_count": "0",
+                "duration_sum": "0.0",
+                "duration_count": "0",
+                "avg_duration": "0.0",
+                "cumulative_pnl": "0.0",
+                "peak_pnl": "0.0",
+                "max_drawdown": "0.0",
+                "last_trigger_ts": "",
+                "updated_at": now_iso,
+                "stale": "0",
+            },
+            {},
+            [],
+        )
+
+    sorted_orders = sorted(
+        orders,
+        key=lambda item: (
+            _parse_snapshot_datetime(item.get("executed_at"))
+            or _parse_snapshot_datetime(item.get("created_at"))
+            or datetime.min.replace(tzinfo=now_local().tzinfo)
+        ),
+    )
+
+    pnl_sum = 0.0
+    pnl_sumsq = 0.0
+    commission_sum = 0.0
+    win_count = 0
+    loss_count = 0
+    duration_sum = 0.0
+    duration_count = 0
+    cumulative = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    last_trigger = None
+    daily: Dict[str, float] = {}
+
+    for snapshot in sorted_orders:
+        pnl = _normalise_float(snapshot.get("pnl"))
+        pnl_sum += pnl
+        pnl_sumsq += pnl * pnl
+        if pnl > 0:
+            win_count += 1
+        elif pnl < 0:
+            loss_count += 1
+        commission_sum += _normalise_float(snapshot.get("commission"))
+
+        executed_at = _parse_snapshot_datetime(snapshot.get("executed_at"))
+        created_at = _parse_snapshot_datetime(snapshot.get("created_at"))
+        anchor_time = executed_at or created_at
+        if anchor_time:
+            day = anchor_time.strftime("%Y-%m-%d")
+            daily[day] = daily.get(day, 0.0) + pnl
+            if last_trigger is None or anchor_time > last_trigger:
+                last_trigger = anchor_time
+
+        duration = snapshot.get("duration")
+        if duration is None and executed_at and created_at:
+            try:
+                duration = max((executed_at - created_at).total_seconds(), 0.0)
+            except Exception:
+                duration = None
+        if duration is not None:
+            try:
+                duration_value = float(duration)
+            except (TypeError, ValueError):
+                duration_value = None
+            if duration_value is not None and duration_value >= 0:
+                duration_sum += duration_value
+                duration_count += 1
+
+        cumulative += pnl
+        if cumulative > peak:
+            peak = cumulative
+        drawdown = peak - cumulative
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+
+    avg_duration = duration_sum / duration_count if duration_count else 0.0
+    last_trigger_iso = to_local_iso(last_trigger) if last_trigger else ""
+    now_iso = to_local_iso(now_local()) or now_local().isoformat()
+
+    stats = {
+        "filled_count": str(len(sorted_orders)),
+        "pnl_sum": f"{pnl_sum:.6f}",
+        "pnl_sumsq": f"{pnl_sumsq:.6f}",
+        "commission_sum": f"{commission_sum:.6f}",
+        "win_count": str(win_count),
+        "loss_count": str(loss_count),
+        "duration_sum": f"{duration_sum:.6f}",
+        "duration_count": str(duration_count),
+        "avg_duration": f"{avg_duration:.6f}",
+        "cumulative_pnl": f"{cumulative:.6f}",
+        "peak_pnl": f"{peak:.6f}",
+        "max_drawdown": f"{max_drawdown:.6f}",
+        "last_trigger_ts": last_trigger_iso or "",
+        "updated_at": now_iso,
+        "stale": "0",
+    }
+
+    return stats, daily, _serialise_recent(sorted_orders)
+
+
+async def _write_strategy_cache(strategy: str, order_map: Mapping[str, Dict[str, Any]]) -> None:
+    client = await ensure_redis()
+    if client is None:
+        return
+
+    stats, daily_map, recent_entries = _compute_stats(order_map)
+    orders_serialised = _serialise_order_map(order_map)
+
+    pipe = client.pipeline(transaction=True)
+    pipe.delete(
+        _orders_key(strategy),
+        _stats_key(strategy),
+        _recent_key(strategy),
+        _daily_hash_key(strategy),
+        _daily_zset_key(strategy),
+    )
+
+    if orders_serialised:
+        pipe.hset(_orders_key(strategy), mapping=orders_serialised)
+
+    if stats:
+        pipe.hset(_stats_key(strategy), mapping=stats)
+
+    if recent_entries:
+        pipe.rpush(_recent_key(strategy), *recent_entries)
+
+    if daily_map:
+        pipe.hset(
+            _daily_hash_key(strategy),
+            mapping={day: f"{value:.6f}" for day, value in daily_map.items()},
+        )
+        zset_mapping = {}
+        for day, _ in daily_map.items():
+            dt = parse_local_datetime(f"{day}T00:00:00")
+            if dt is None:
+                try:
+                    dt = datetime.fromisoformat(f"{day}T00:00:00")
+                except ValueError:
+                    continue
+            dt = ensure_local_timezone(dt)
+            zset_mapping[day] = float(dt.timestamp())
+        if zset_mapping:
+            pipe.zadd(_daily_zset_key(strategy), zset_mapping)
+
+    await pipe.execute()
+
+
+async def record_filled_order(order: Any, *, strategy_name: Optional[str] = None) -> None:
+    """Record or update a filled order snapshot in Redis."""
+
+    snapshot = order_to_snapshot(order, strategy_name=strategy_name)
+    if not snapshot:
+        return
+
+    strategy = snapshot.get("strategy")
+    if not strategy:
+        return
+
+    client = await ensure_redis()
+    if client is None:
+        return
+
+    orders_hash = _orders_key(strategy)
+    existing = await client.hgetall(orders_hash)
+    order_map = _prepare_order_map(existing)
+    order_map[snapshot["order_id"]] = snapshot
+
+    try:
+        await _write_strategy_cache(strategy, order_map)
+    except Exception as exc:
+        logger.warning(
+            "Failed to update strategy cache", strategy=strategy, error=str(exc)
+        )
+
+
+async def rebuild_strategy_cache(strategy: str, orders: Iterable[Any]) -> None:
+    """Rebuild a strategy's cache from iterable orders."""
+
+    order_map: Dict[str, Dict[str, Any]] = {}
+    for order in orders:
+        snapshot = order_to_snapshot(order, strategy_name=strategy)
+        if snapshot is None:
+            continue
+        order_map[snapshot["order_id"]] = snapshot
+
+    try:
+        await _write_strategy_cache(strategy, order_map)
+    except Exception as exc:
+        logger.warning("Failed to rebuild strategy cache", strategy=strategy, error=str(exc))
+
+
+async def clear_strategy_cache(strategy: str) -> None:
+    client = await ensure_redis()
+    if client is None:
+        return
+    await client.delete(
+        _orders_key(strategy),
+        _stats_key(strategy),
+        _recent_key(strategy),
+        _daily_hash_key(strategy),
+        _daily_zset_key(strategy),
+    )
+
+
+async def mark_strategy_cache_stale(strategy: str) -> None:
+    client = await ensure_redis()
+    if client is None:
+        return
+    try:
+        await client.hset(_stats_key(strategy), mapping={"stale": "1"})
+    except Exception:
+        pass
+
+
+async def get_strategy_stats(strategy: str) -> Dict[str, Any]:
+    client = await ensure_redis()
+    if client is None:
+        return {}
+    raw = await client.hgetall(_stats_key(strategy))
+    if not raw:
+        return {}
+    result: Dict[str, Any] = {}
+    for key, value in raw.items():
+        if key in {"filled_count", "win_count", "loss_count", "duration_count"}:
+            result[key] = _normalise_int(value)
+        elif key in {
+            "pnl_sum",
+            "pnl_sumsq",
+            "commission_sum",
+            "duration_sum",
+            "avg_duration",
+            "cumulative_pnl",
+            "peak_pnl",
+            "max_drawdown",
+        }:
+            result[key] = _normalise_float(value)
+        elif key == "stale":
+            result[key] = value == "1"
+        else:
+            result[key] = value
+    return result
+
+
+async def get_strategy_orders(strategy: str) -> List[Dict[str, Any]]:
+    client = await ensure_redis()
+    if client is None:
+        return []
+    raw = await client.hgetall(_orders_key(strategy))
+    if not raw:
+        return []
+    order_map = _prepare_order_map(raw)
+    orders = list(order_map.values())
+    orders.sort(
+        key=lambda item: (
+            _parse_snapshot_datetime(item.get("executed_at"))
+            or _parse_snapshot_datetime(item.get("created_at"))
+            or datetime.min.replace(tzinfo=now_local().tzinfo)
+        ),
+        reverse=True,
+    )
+    return orders
+
+
+async def get_recent_fills(strategy: str, limit: int = 20) -> List[Dict[str, Any]]:
+    client = await ensure_redis()
+    if client is None:
+        return []
+    entries = await client.lrange(_recent_key(strategy), 0, max(limit - 1, 0))
+    result: List[Dict[str, Any]] = []
+    for entry in entries:
+        try:
+            payload = json.loads(entry)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            result.append(payload)
+    return result
+
+
+async def get_daily_pnl(strategy: str) -> List[Dict[str, Any]]:
+    client = await ensure_redis()
+    if client is None:
+        return []
+    raw = await client.hgetall(_daily_hash_key(strategy))
+    if not raw:
+        return []
+    items = []
+    for day, pnl_value in raw.items():
+        items.append((day, _normalise_float(pnl_value)))
+    items.sort(key=lambda item: item[0])
+    return [{"date": day, "pnl": pnl} for day, pnl in items]
+
+
+def _empty_performance() -> Dict[str, Any]:
+    return {
+        "total_executions": 0,
+        "total_pnl": 0.0,
+        "avg_pnl": 0.0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "win_rate": 0.0,
+        "max_drawdown": 0.0,
+        "sharpe_ratio": 0.0,
+        "avg_trade_duration": 0.0,
+        "total_commission": 0.0,
+    }
+
+
+async def compute_performance_metrics(
+    strategy: str,
+    *,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    orders = await get_strategy_orders(strategy)
+    if not orders:
+        return _empty_performance()
+
+    start_bound = ensure_local_timezone(start_date) if start_date else None
+    end_bound = ensure_local_timezone(end_date) if end_date else None
+
+    filtered: List[Dict[str, Any]] = []
+    for order in orders:
+        executed_at = _parse_snapshot_datetime(order.get("executed_at"))
+        created_at = _parse_snapshot_datetime(order.get("created_at"))
+        anchor = executed_at or created_at
+        if anchor is None:
+            continue
+        if start_bound and anchor < start_bound:
+            continue
+        if end_bound and anchor > end_bound:
+            continue
+        filtered.append(order)
+
+    if not filtered:
+        return _empty_performance()
+
+    pnl_values = [
+        _normalise_float(order.get("pnl"))
+        for order in filtered
+        if order.get("pnl") is not None
+    ]
+    commission_values = [
+        _normalise_float(order.get("commission"))
+        for order in filtered
+        if order.get("commission") is not None
+    ]
+
+    total_executions = len(filtered)
+    total_pnl = sum(pnl_values)
+    avg_pnl = total_pnl / len(pnl_values) if pnl_values else 0.0
+    winning_trades = len([p for p in pnl_values if p > 0])
+    losing_trades = len([p for p in pnl_values if p < 0])
+    win_rate = (winning_trades / len(pnl_values) * 100) if pnl_values else 0.0
+
+    cumulative = []
+    run_total = 0.0
+    for value in pnl_values:
+        run_total += value
+        cumulative.append(run_total)
+
+    max_drawdown = 0.0
+    peak = None
+    for value in cumulative:
+        if peak is None or value > peak:
+            peak = value
+        drawdown = (peak or 0.0) - value
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+
+    sharpe_ratio = 0.0
+    if len(pnl_values) > 1:
+        try:
+            import statistics
+
+            std_dev = statistics.stdev(pnl_values)
+            if std_dev:
+                sharpe_ratio = (avg_pnl / std_dev) * (len(pnl_values) ** 0.5)
+        except Exception:
+            sharpe_ratio = 0.0
+
+    durations: List[float] = []
+    for order in filtered:
+        duration = order.get("duration")
+        if duration is None:
+            executed = _parse_snapshot_datetime(order.get("executed_at"))
+            created = _parse_snapshot_datetime(order.get("created_at"))
+            if executed and created:
+                try:
+                    duration = max((executed - created).total_seconds(), 0.0)
+                except Exception:
+                    duration = None
+        if duration is None:
+            continue
+        try:
+            duration_value = float(duration)
+        except (TypeError, ValueError):
+            continue
+        if duration_value >= 0:
+            durations.append(duration_value)
+
+    avg_duration = sum(durations) / len(durations) if durations else 0.0
+
+    return {
+        "total_executions": total_executions,
+        "total_pnl": total_pnl,
+        "avg_pnl": avg_pnl,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "win_rate": win_rate,
+        "max_drawdown": max_drawdown,
+        "sharpe_ratio": sharpe_ratio,
+        "avg_trade_duration": avg_duration,
+        "total_commission": sum(commission_values),
+    }

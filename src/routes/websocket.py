@@ -20,6 +20,10 @@ from src.database import get_db_manager
 from src.dom_optimizer import get_dom_optimization_orchestrator
 from src.dom_service import get_dom_service
 from src.utils import now_local, parse_local_datetime, to_local_iso
+from src.utils.strategy_cache import (
+    compute_performance_metrics as cache_compute_performance,
+    get_strategy_stats as cache_get_strategy_stats,
+)
 
 router = APIRouter()
 
@@ -1021,6 +1025,32 @@ async def websocket_endpoint(websocket: WebSocket):
                             "error": "Rate limited",
                         }))
                     continue
+
+                cache_stats = None
+                try:
+                    cache_stats = await cache_get_strategy_stats(name)
+                except Exception:
+                    cache_stats = {}
+                if cache_stats and not cache_stats.get("stale"):
+                    try:
+                        metrics = await cache_compute_performance(
+                            name, start_date=start_date, end_date=end_date
+                        )
+                        payload = {
+                            "type": "strategy_performance",
+                            "success": True,
+                            "name": name,
+                            "range": range_value,
+                            "metrics": metrics,
+                            "from_cache": True,
+                        }
+                        last_responses[key] = payload
+                        await websocket.send_text(json.dumps(payload))
+                        continue
+                    except Exception as exc:
+                        logger.debug(
+                            f"Cache performance fetch failed for {name}: {exc}"
+                        )
 
                 loop = asyncio.get_event_loop()
                 try:
