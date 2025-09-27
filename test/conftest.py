@@ -1,6 +1,8 @@
 import importlib
 import os
 import shutil
+import asyncio
+import inspect
 from pathlib import Path
 from typing import Dict
 
@@ -16,6 +18,24 @@ os.environ.setdefault("JWT_SECRET", "unit-test-secret")
 os.environ.setdefault("AUTO_CONNECT", "false")
 
 DATABASE_BASENAME = "trading_bot.db"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line("markers", "asyncio: execute test within an event loop")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool:
+    test_function = pyfuncitem.obj
+    if inspect.iscoroutinefunction(test_function):
+        kwargs = {name: pyfuncitem.funcargs[name] for name in pyfuncitem._fixtureinfo.argnames}
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(test_function(**kwargs))
+        finally:
+            loop.close()
+        return True
+    return False
 
 
 @pytest.fixture(scope="session", autouse=True)
