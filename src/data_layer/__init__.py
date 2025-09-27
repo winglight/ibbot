@@ -37,4 +37,18 @@ __all__ = [
     "BusSubscriptionToken",
     "PersistenceBackend",
     "NoopPersistenceBackend",
+    "get_data_source_manager",
+    "get_quote_feed",
 ]
+
+
+def get_data_source_manager():
+    from .bootstrap import get_data_source_manager as _get_data_source_manager
+
+    return _get_data_source_manager()
+
+
+def get_quote_feed():
+    from .bootstrap import get_quote_feed as _get_quote_feed
+
+    return _get_quote_feed()

@@ -2,7 +2,7 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Depends
