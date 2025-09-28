@@ -677,7 +677,7 @@ class IBKRClient:
 
         display_price = price if price is not None else "MKT"
         ibkr_logger.warning(
-            "Trading disabled; simulated %s order: %s %s %s @%s (order_id=%s)",
+            "Trading disabled; simulated {} order: {} {} {} @{} (order_id={})",
             order_type,
             action,
             quantity,
@@ -1349,7 +1349,7 @@ class IBKRClient:
         order_id_str = str(order_id)
         if is_trading_disabled():
             ibkr_logger.warning(
-                "Trading disabled; simulated cancellation acknowledged for order %s",
+                "Trading disabled; simulated cancellation acknowledged for order {}",
                 order_id_str,
             )
             return True, "Cancelled (simulated)"

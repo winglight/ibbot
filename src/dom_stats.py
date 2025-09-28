@@ -403,7 +403,7 @@ class DomStatsAggregator:
             try:
                 self._rebuild_symbol(safe_symbol)
             except Exception:
-                logger.exception("Failed to rebuild DOM stats for %s", safe_symbol)
+                logger.exception("Failed to rebuild DOM stats for {}", safe_symbol)
 
         with self._lock:
             payload = self._payloads.get(safe_symbol)
@@ -431,8 +431,8 @@ class DomStatsAggregator:
             for safe_symbol in symbols:
                 try:
                     self._rebuild_symbol(safe_symbol)
-                except Exception:
-                    logger.exception("Failed to rebuild DOM stats for %s", safe_symbol)
+            except Exception:
+                logger.exception("Failed to rebuild DOM stats for {}", safe_symbol)
 
     # ------------------------------------------------------------------
     def _rebuild_symbol(self, safe_symbol: str) -> None:
@@ -605,7 +605,7 @@ class DomStatsAggregator:
             tmp_path = tmp_file.name
             os.replace(tmp_path, path)
         except Exception:
-            logger.exception("Failed to persist DOM stats payload for %s", safe_symbol)
+            logger.exception("Failed to persist DOM stats payload for {}", safe_symbol)
             try:
                 if tmp_path is None and tmp_file is not None:
                     tmp_path = tmp_file.name
@@ -628,7 +628,7 @@ class DomStatsAggregator:
             if isinstance(payload, DomStatsPayload):
                 return payload
         except Exception:
-            logger.exception("Failed to load DOM stats payload for %s", safe_symbol)
+            logger.exception("Failed to load DOM stats payload for {}", safe_symbol)
         return None
 
     # ------------------------------------------------------------------

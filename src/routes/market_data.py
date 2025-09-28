@@ -66,7 +66,7 @@ def _get_data_layer_manager():
         _data_layer_manager = get_data_source_manager()
         return _data_layer_manager
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to initialise data source manager: %s", exc)
+        logger.warning("Failed to initialise data source manager: {}", exc)
         return None
 
 
@@ -309,10 +309,18 @@ async def get_historical_data(
                     )
                 )
             except DataSourceError as exc:
-                logger.debug("Unified history unavailable for %s: %s", request.symbol, exc)
+                logger.debug(
+                    "Unified history unavailable for {}: {}",
+                    request.symbol,
+                    exc,
+                )
                 candles = []
             except Exception as exc:
-                logger.exception("Unified history error for %s: %s", request.symbol, exc)
+                logger.exception(
+                    "Unified history error for {}: {}",
+                    request.symbol,
+                    exc,
+                )
                 candles = []
 
             if candles:
@@ -511,10 +519,18 @@ async def get_chart_data(
                     )
                 )
             except DataSourceError as exc:
-                logger.debug("Unified chart history unavailable for %s: %s", request.symbol, exc)
+                logger.debug(
+                    "Unified chart history unavailable for {}: {}",
+                    request.symbol,
+                    exc,
+                )
                 candles = []
             except Exception as exc:
-                logger.exception("Unified chart history error for %s: %s", request.symbol, exc)
+                logger.exception(
+                    "Unified chart history error for {}: {}",
+                    request.symbol,
+                    exc,
+                )
                 candles = []
 
             if candles:
@@ -787,10 +803,18 @@ async def get_current_price(
                 )
             )
         except DataSourceError as exc:
-            logger.debug("Unified snapshot unavailable for %s: %s", request.symbol, exc)
+            logger.debug(
+                "Unified snapshot unavailable for {}: {}",
+                request.symbol,
+                exc,
+            )
             snapshot = {}
         except Exception as exc:
-            logger.exception("Unified snapshot error for %s: %s", request.symbol, exc)
+            logger.exception(
+                "Unified snapshot error for {}: {}",
+                request.symbol,
+                exc,
+            )
             snapshot = {}
         if snapshot and snapshot.get("last"):
             return {

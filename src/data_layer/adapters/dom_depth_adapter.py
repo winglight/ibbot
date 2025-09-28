@@ -203,4 +203,4 @@ class DomDepthAdapter(DataSourceAdapter):
         try:
             asyncio.run(self.event_bus.publish(envelope))
         except RuntimeError as exc:
-            logger.debug("DOM depth publish fallback failed: %s", exc)
+            logger.debug("DOM depth publish fallback failed: {}", exc)
