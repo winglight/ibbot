@@ -338,6 +338,31 @@ class TradingApp {
         this.init();
     }
 
+    /**
+     * 向后兼容：保持原有的日志加载接口
+     * 迁移到 LogsManager 后仍然暴露同名方法，避免未更新的调用出现异常
+     */
+    loadLogs(...args) {
+        if (this.logsManager && typeof this.logsManager.loadLogs === 'function') {
+            return this.logsManager.loadLogs(...args);
+        }
+        return Promise.resolve();
+    }
+
+    loadLogModules(...args) {
+        if (this.logsManager && typeof this.logsManager.loadLogModules === 'function') {
+            return this.logsManager.loadLogModules(...args);
+        }
+        return Promise.resolve();
+    }
+
+    showLogStats(...args) {
+        if (this.logsManager && typeof this.logsManager.showLogStats === 'function') {
+            return this.logsManager.showLogStats(...args);
+        }
+        return Promise.resolve();
+    }
+
     async ensureDefaultConnectionConfig(options = {}) {
         if (this.ibkrManager && typeof this.ibkrManager.ensureDefaultConnectionConfig === 'function') {
             return this.ibkrManager.ensureDefaultConnectionConfig(options);
