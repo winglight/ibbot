@@ -10,6 +10,8 @@ from loguru import logger
 from .engine import OptimizationEngine
 from .reporting import (
     build_conclusion,
+    compute_metric_distribution,
+    compute_metric_histogram,
     compute_return_distribution,
     compute_return_histogram,
     compute_runtime_summary,
@@ -138,6 +140,10 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
         runtime_summary["status"] = TaskState.COMPLETED.value
         return_distribution = compute_return_distribution(sorted_results)
         return_histogram = compute_return_histogram(sorted_results)
+        drawdown_distribution = compute_metric_distribution(sorted_results, "max_drawdown")
+        drawdown_histogram = compute_metric_histogram(sorted_results, "max_drawdown")
+        sharpe_distribution = compute_metric_distribution(sorted_results, "sharpe")
+        sharpe_histogram = compute_metric_histogram(sorted_results, "sharpe")
         report = OptimizationReportData(
             task_id=task_id,
             results=sorted_results,
@@ -152,6 +158,10 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
                 "runtime": runtime_summary,
                 "annual_return_distribution": return_distribution,
                 "annual_return_histogram": return_histogram,
+                "max_drawdown_distribution": drawdown_distribution,
+                "max_drawdown_histogram": drawdown_histogram,
+                "sharpe_distribution": sharpe_distribution,
+                "sharpe_histogram": sharpe_histogram,
                 "conclusion": build_conclusion(
                     actual_total,
                     len(results),

@@ -45,67 +45,70 @@ def compute_runtime_summary(
 def compute_return_distribution(results: List[OptimizationResultItem]) -> Dict[str, float]:
     """Calculate percentile-based annual return distribution for a report."""
 
-    returns = [
-        item.metrics.get("annual_return")
-        for item in results
-        if item.metrics and item.metrics.get("annual_return") is not None
-    ]
-    if not returns:
-        return {}
-    returns.sort()
-    count = len(returns)
-    average = sum(returns) / count
-    return {
-        "min": round(returns[0], 4),
-        "max": round(returns[-1], 4),
-        "mean": round(average, 4),
-        "p25": round(_percentile(returns, 0.25), 4),
-        "p50": round(_percentile(returns, 0.5), 4),
-        "p75": round(_percentile(returns, 0.75), 4),
-    }
+    return compute_metric_distribution(results, "annual_return")
 
 
 def compute_return_histogram(
     results: List[OptimizationResultItem], bins: int = 12
 ) -> List[Dict[str, float | int]]:
-    """Build a histogram of annual returns for visual summaries.
+    """Build a histogram of annual returns for visual summaries."""
 
-    The histogram groups annual returns into equally sized bins so that the
-    frontend can render a compact bar chart instead of enumerating every
-    optimisation result individually.
-    """
+    return compute_metric_histogram(results, "annual_return", bins=bins)
+
+
+def compute_metric_distribution(
+    results: List[OptimizationResultItem], metric_key: str
+) -> Dict[str, float]:
+    """Calculate percentile-based distribution for a numeric metric."""
+
+    values = _collect_metric_values(results, metric_key)
+    if not values:
+        return {}
+    values.sort()
+    count = len(values)
+    average = sum(values) / count
+    return {
+        "min": round(values[0], 4),
+        "max": round(values[-1], 4),
+        "mean": round(average, 4),
+        "p25": round(_percentile(values, 0.25), 4),
+        "p50": round(_percentile(values, 0.5), 4),
+        "p75": round(_percentile(values, 0.75), 4),
+    }
+
+
+def compute_metric_histogram(
+    results: List[OptimizationResultItem], metric_key: str, bins: int = 12
+) -> List[Dict[str, float | int]]:
+    """Build a histogram for any optimizer metric used in summaries."""
 
     if bins <= 0:
         bins = 1
 
-    returns = [
-        item.metrics.get("annual_return")
-        for item in results
-        if item.metrics and item.metrics.get("annual_return") is not None
-    ]
-    if not returns:
+    values = _collect_metric_values(results, metric_key)
+    if not values:
         return []
 
-    returns.sort()
-    minimum = returns[0]
-    maximum = returns[-1]
+    values.sort()
+    minimum = values[0]
+    maximum = values[-1]
     if math.isclose(minimum, maximum):
         return [
             {
                 "start": round(minimum, 4),
                 "end": round(maximum, 4),
-                "count": len(returns),
+                "count": len(values),
             }
         ]
 
-    bin_count = min(bins, max(1, len(returns)))
+    bin_count = min(bins, max(1, len(values)))
     span = maximum - minimum
     step = span / bin_count if bin_count else span
     if math.isclose(step, 0.0):
         step = span or 1.0
 
     counts = [0 for _ in range(bin_count)]
-    for value in returns:
+    for value in values:
         index = int((value - minimum) / step)
         if index >= bin_count:
             index = bin_count - 1
@@ -228,6 +231,26 @@ def _build_decision_sentence(
         return f"整体表现稳定，但仍有 {failed} 组组合未通过，建议复核失败组合的触发条件。"
 
     return "组合表现稳健，可重点评估夏普与回撤表现优异的候选组合。"
+
+
+def _collect_metric_values(
+    results: List[OptimizationResultItem], metric_key: str
+) -> List[float]:
+    values: List[float] = []
+    for item in results:
+        if not item.metrics:
+            continue
+        raw_value = item.metrics.get(metric_key)
+        if raw_value is None:
+            continue
+        try:
+            numeric = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(numeric):
+            continue
+        values.append(numeric)
+    return values
 
 
 def _percentile(sorted_values: List[float], quantile: float) -> float:
