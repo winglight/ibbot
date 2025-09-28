@@ -199,6 +199,52 @@
     margin-right: 0.35rem;
 }
 
+.return-histogram {
+    margin-top: 0.75rem;
+}
+
+.return-histogram-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.35rem;
+    min-height: 120px;
+    padding: 0.75rem 0.5rem 0;
+    border-radius: 0.75rem;
+    background: linear-gradient(180deg, rgba(59, 130, 246, 0.25), rgba(30, 41, 59, 0.6));
+}
+
+.return-histogram-bar {
+    position: relative;
+    flex: 1;
+    min-width: 12px;
+    border-radius: 0.45rem 0.45rem 0 0;
+    background: linear-gradient(135deg, #38bdf8, #3b82f6);
+    transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.return-histogram-bar:hover {
+    transform: translateY(-4px);
+    opacity: 0.85;
+}
+
+.return-histogram-bar__count {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translate(-50%, -0.35rem);
+    font-size: 0.7rem;
+    color: #94a3b8;
+}
+
+.return-histogram-scale {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: #94a3b8;
+    padding: 0 0.15rem;
+}
+
 .status-pill {
     display: inline-flex;
     align-items: center;
