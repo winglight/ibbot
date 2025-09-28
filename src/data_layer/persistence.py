@@ -84,4 +84,4 @@ class InfluxPersistenceBackend(PersistenceBackend):
         try:
             self._write_api.write(bucket=self._bucket, org=self._org, record=point)
         except Exception as exc:  # pragma: no cover - network errors
-            logger.warning("Failed to write market event to InfluxDB: %s", exc)
+            logger.warning("Failed to write market event to InfluxDB: {}", exc)

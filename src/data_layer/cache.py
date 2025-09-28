@@ -146,7 +146,7 @@ class RedisCacheBackend(CacheBackend):
                 pipe.expire(key, self._snapshot_ttl)
             pipe.execute()
         except Exception as exc:  # pragma: no cover - network errors
-            logger.warning("Redis set_snapshot failed: %s", exc)
+            logger.warning("Redis set_snapshot failed: {}", exc)
 
     def get_snapshot(self, channel: str, symbol: str) -> Dict[str, Any]:
         key = self._snapshot_key(channel, symbol)
@@ -158,7 +158,7 @@ class RedisCacheBackend(CacheBackend):
                 value = value.decode("utf-8")
             return json.loads(value)
         except Exception as exc:  # pragma: no cover - network errors
-            logger.warning("Redis get_snapshot failed: %s", exc)
+            logger.warning("Redis get_snapshot failed: {}", exc)
             return {}
 
     def append_series(
@@ -178,7 +178,7 @@ class RedisCacheBackend(CacheBackend):
                 pipe.ltrim(key, -limit, -1)
             pipe.execute()
         except Exception as exc:  # pragma: no cover - network errors
-            logger.warning("Redis append_series failed: %s", exc)
+            logger.warning("Redis append_series failed: {}", exc)
 
     def get_series(
         self,
@@ -194,7 +194,7 @@ class RedisCacheBackend(CacheBackend):
             else:
                 values = self._client.lrange(key, 0, -1)
         except Exception as exc:  # pragma: no cover - network errors
-            logger.warning("Redis get_series failed: %s", exc)
+            logger.warning("Redis get_series failed: {}", exc)
             return []
 
         series: List[Dict[str, Any]] = []

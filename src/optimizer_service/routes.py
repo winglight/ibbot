@@ -85,14 +85,14 @@ async def _notify_strategy_manager_of_new_strategy(strategy: DatabaseStrategy) -
             response = await client.post(url, json=payload)
         if response.status_code >= 400:
             logger.error(
-                "Failed to notify main service about strategy %s: %s %s",
+                "Failed to notify main service about strategy {}: {} {}",
                 strategy.name,
                 response.status_code,
                 response.text,
             )
     except httpx.HTTPError as exc:
         logger.error(
-            "Error notifying main service about strategy %s: %s",
+            "Error notifying main service about strategy {}: {}",
             strategy.name,
             exc,
         )
