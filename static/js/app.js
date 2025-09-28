@@ -8051,11 +8051,11 @@ class TradingApp {
         this.strategiesManager.displayStrategies(strategies);
     }
 
-    async toggleStrategy(name, enabled) {
+    async toggleStrategy(name, enabled, options = {}) {
         if (!this.strategiesManager || typeof this.strategiesManager.toggleStrategy !== 'function') {
             return;
         }
-        return this.strategiesManager.toggleStrategy(name, enabled);
+        return this.strategiesManager.toggleStrategy(name, enabled, options);
     }
 
     async toggleStrategyDataReception(strategy, args = {}) {

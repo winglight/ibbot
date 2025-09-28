@@ -12,6 +12,7 @@
             this.strategyPerformanceCache = new Map();
             this.strategyReceptionSwitchSeq = 0;
             this.strategyDataPushBusy = new Set();
+            this.strategyToggleBusy = new Set();
             this.strategyParameterInputs = {};
 
             if (app && typeof app === 'object' && !Object.getOwnPropertyDescriptor(app, 'strategyRefreshIntervalMs')) {
@@ -35,6 +36,7 @@
                 'strategyPerformanceCache',
                 'strategyReceptionSwitchSeq',
                 'strategyDataPushBusy',
+                'strategyToggleBusy',
                 'strategyParameterInputs'
             ];
         }
@@ -267,10 +269,18 @@
                 const statusCell = document.createElement('td');
                 const toggleSwitch = document.createElement('div');
                 toggleSwitch.className = 'form-check form-switch';
-                toggleSwitch.innerHTML = `
-                    <input class="form-check-input" type="checkbox" ${strategy.enabled ? 'checked' : ''}
-                           onchange="app.strategiesManager.toggleStrategy('${strategy.name}', this.checked)">
-                `;
+                const statusInput = document.createElement('input');
+                statusInput.className = 'form-check-input';
+                statusInput.type = 'checkbox';
+                statusInput.checked = !!strategy.enabled;
+                statusInput.setAttribute('aria-label', `${strategy.name} 状态开关`);
+                statusInput.addEventListener('change', () => {
+                    this.toggleStrategy(strategy.name, statusInput.checked, {
+                        controlEl: statusInput,
+                        previousState: !statusInput.checked,
+                    });
+                });
+                toggleSwitch.appendChild(statusInput);
                 statusCell.appendChild(toggleSwitch);
 
                 const receptionCell = document.createElement('td');
@@ -354,7 +364,29 @@
             }
         }
 
-        async toggleStrategy(name, enabled) {
+        async toggleStrategy(name, enabled, options = {}) {
+            if (!name) {
+                return;
+            }
+
+            const controlEl = options.controlEl || null;
+            const previousState = typeof options.previousState === 'boolean' ? options.previousState : !enabled;
+
+            if (!this.strategyToggleBusy) {
+                this.strategyToggleBusy = new Set();
+            }
+            if (this.strategyToggleBusy.has(name)) {
+                if (controlEl) {
+                    controlEl.checked = previousState;
+                }
+                return;
+            }
+
+            this.strategyToggleBusy.add(name);
+            if (controlEl) {
+                controlEl.disabled = true;
+            }
+
             try {
                 await this.app.apiCall(`/strategies/${encodeURIComponent(name)}/toggle?enabled=${enabled}`, { method: 'POST' });
                 this.app.showAlert('success', `Strategy ${name} ${enabled ? 'enabled' : 'disabled'}`);
@@ -362,7 +394,15 @@
             } catch (error) {
                 console.error('Failed to toggle strategy:', error);
                 this.app.showAlert('danger', 'Failed to toggle strategy');
+                if (controlEl) {
+                    controlEl.checked = previousState;
+                }
                 this.loadStrategies();
+            } finally {
+                if (controlEl) {
+                    controlEl.disabled = false;
+                }
+                this.strategyToggleBusy.delete(name);
             }
         }
 
