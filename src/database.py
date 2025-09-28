@@ -647,44 +647,36 @@ class DatabaseManager:
         strategy_name: str,
         order_source: str = 'strategy',
         limit: Optional[int] = 100,
+        symbol: Optional[str] = None,
     ) -> List[Order]:
         """加载指定策略的订单记录"""
         with self._cursor() as cursor:
+            filters = ["strategy_name = ?", "order_source = ?"]
+            params: List[Any] = [strategy_name, order_source]
+            if isinstance(symbol, str) and symbol.strip():
+                filters.append("UPPER(symbol) = ?")
+                params.append(symbol.strip().upper())
+
+            where_clause = " AND ".join(filters)
+
+            base_query = (
+                "SELECT order_id, symbol, quantity, action, order_type, price, "
+                "created_at as timestamp, exchange, sec_type, "
+                "COALESCE(status, 'Submitted') as status, "
+                "executed_at, "
+                "rule_id, "
+                "COALESCE(order_source, 'auto') as order_source, "
+                "commission, "
+                "pnl "
+                "FROM orders "
+                f"WHERE {where_clause} "
+                "ORDER BY created_at DESC"
+            )
+
             if limit is None:
-                cursor.execute(
-                    """
-                    SELECT order_id, symbol, quantity, action, order_type, price,
-                           created_at as timestamp, exchange, sec_type,
-                           COALESCE(status, 'Submitted') as status,
-                           executed_at,
-                           rule_id,
-                           COALESCE(order_source, 'auto') as order_source,
-                           commission,
-                           pnl
-                    FROM orders
-                    WHERE strategy_name = ? AND order_source = ?
-                    ORDER BY created_at DESC
-                    """,
-                    (strategy_name, order_source),
-                )
+                cursor.execute(base_query, params)
             else:
-                cursor.execute(
-                    """
-                    SELECT order_id, symbol, quantity, action, order_type, price,
-                           created_at as timestamp, exchange, sec_type,
-                           COALESCE(status, 'Submitted') as status,
-                           executed_at,
-                           rule_id,
-                           COALESCE(order_source, 'auto') as order_source,
-                           commission,
-                           pnl
-                    FROM orders
-                    WHERE strategy_name = ? AND order_source = ?
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                    """,
-                    (strategy_name, order_source, limit),
-                )
+                cursor.execute(f"{base_query} LIMIT ?", [*params, limit])
             rows = cursor.fetchall()
         orders: List[Order] = []
         for row in rows:

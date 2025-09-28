@@ -3496,10 +3496,41 @@ if __name__ == "__main__":
             
             
             
+    def _resolve_strategy_primary_symbol(self, strategy_name: str) -> Optional[str]:
+        """Resolve the active primary symbol for a strategy, upper-cased when found."""
+        raw_symbol = self._get_strategy_setting(strategy_name, "primary_symbol")
+        if isinstance(raw_symbol, str):
+            stripped = raw_symbol.strip().upper()
+            if stripped:
+                return stripped
+
+        record = self.strategies.get(strategy_name)
+        if record and isinstance(record.primary_symbol, str):
+            stripped = record.primary_symbol.strip().upper()
+            if stripped:
+                return stripped
+
+        runtime = self.internal_strategies_runtime.get(strategy_name)
+        if runtime:
+            for attr in ("primary_symbol", "symbol"):
+                value = getattr(runtime, attr, None)
+                if isinstance(value, str):
+                    stripped = value.strip().upper()
+                    if stripped:
+                        return stripped
+
+        return None
+
     def get_executions(self, strategy_name: str, limit: int = 100):
-        """Get strategy orders from database"""
+        """Get strategy orders from database filtered to the strategy's active symbol."""
         try:
-            return self.db_manager.load_strategy_orders(strategy_name, 'strategy', limit)
+            symbol = self._resolve_strategy_primary_symbol(strategy_name)
+            return self.db_manager.load_strategy_orders(
+                strategy_name,
+                'strategy',
+                limit,
+                symbol,
+            )
         except Exception as e:
             strategy_logger.error(f"Failed to get executions for {strategy_name}: {e}")
             return []
