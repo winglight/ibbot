@@ -2685,17 +2685,32 @@ class TradingApp {
             return wrapped;
         };
 
+        const visited = new WeakSet();
         const traverseDescriptors = (node, depth = 0) => {
-            if (!node || typeof node !== 'object' || depth > 6) {
+            if (!node || typeof node !== 'object' || depth > 8) {
                 return;
             }
+            if (visited.has(node)) {
+                return;
+            }
+            visited.add(node);
+
             if (Object.prototype.hasOwnProperty.call(node, '_scriptable')) {
                 node._scriptable = guardFn(node._scriptable);
             }
             if (Object.prototype.hasOwnProperty.call(node, '_indexable')) {
                 node._indexable = guardFn(node._indexable);
             }
-            for (const key of Object.keys(node)) {
+
+            if (Array.isArray(node)) {
+                node.forEach((item) => traverseDescriptors(item, depth + 1));
+                return;
+            }
+
+            for (const key of Reflect.ownKeys(node)) {
+                if (key === '_scriptable' || key === '_indexable') {
+                    continue;
+                }
                 const value = node[key];
                 if (!value || typeof value !== 'object') {
                     continue;
@@ -2704,7 +2719,7 @@ class TradingApp {
             }
         };
 
-        traverseDescriptors(defaults.plugins || {});
+        traverseDescriptors(defaults);
         this.chartScriptableGuardApplied = true;
     }
 
@@ -9758,8 +9773,13 @@ class TradingApp {
             this.strategyChartInstance.config.type = desiredType;
             const xScale = this.strategyChartInstance.options?.scales?.x;
             if (xScale) {
-                xScale.time = xScale.time || {};
-                xScale.time.unit = this.getStrategyChartTimeUnit(state.interval);
+                const nextUnit = this.getStrategyChartTimeUnit(state.interval);
+                const currentTimeConfig = xScale.time;
+                const normalizedTimeConfig = (currentTimeConfig && typeof currentTimeConfig === 'object' && !Array.isArray(currentTimeConfig))
+                    ? { ...currentTimeConfig }
+                    : {};
+                normalizedTimeConfig.unit = nextUnit;
+                xScale.time = normalizedTimeConfig;
             }
             const volumeScale = this.strategyChartInstance.options?.scales?.volume;
             if (volumeScale) {
