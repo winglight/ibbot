@@ -403,6 +403,9 @@ class TradingApp {
         this.monitorDomHistoryMeta = null;
         this.candlestickSupported = false;
         this.candlestickLoader = null;
+        this.chartDateAdapterUrl = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon';
+        this.dateAdapterReady = false;
+        this.dateAdapterLoader = null;
         this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
         this.chartScriptableGuardApplied = false;
         this.strategyChartInstance = null;
@@ -2879,6 +2882,201 @@ class TradingApp {
         }
     }
 
+    createCandlestickChartConfig(options = {}) {
+        const {
+            symbol = '',
+            ohlcData = [],
+            labels = [],
+            priceAxisId = 'y',
+            volumeAxisId = 'volume',
+            includeLabels = true,
+            datasetLabel = null,
+            volumeLabel = 'Volume',
+            priceDatasetOptions = {},
+            volumeDatasetOptions = {}
+        } = options || {};
+
+        const safeBars = Array.isArray(ohlcData)
+            ? ohlcData.filter((bar) => bar && Number.isFinite(bar.x))
+            : [];
+
+        const volumeData = safeBars.map((bar) => {
+            const rawVolume = Number.isFinite(bar.volume)
+                ? bar.volume
+                : Number.isFinite(bar.v)
+                    ? bar.v
+                    : 0;
+            return {
+                x: bar.x,
+                y: Number.isFinite(rawVolume) ? rawVolume : 0
+            };
+        });
+
+        const maxVolume = volumeData.reduce((acc, point) => {
+            const value = Number.isFinite(point?.y) ? point.y : 0;
+            return value > acc ? value : acc;
+        }, 0);
+
+        const resolvedLabel = datasetLabel
+            ? String(datasetLabel)
+            : `${symbol ? `${symbol} ` : ''}OHLC`.trim();
+
+        const candlestickDataset = {
+            type: 'candlestick',
+            label: resolvedLabel,
+            data: safeBars,
+            yAxisID: priceAxisId,
+            parsing: false,
+            ...priceDatasetOptions
+        };
+
+        const volumeDataset = {
+            type: 'bar',
+            label: String(volumeLabel || 'Volume'),
+            data: volumeData,
+            yAxisID: volumeAxisId,
+            backgroundColor: 'rgba(75, 192, 192, 0.6)',
+            borderWidth: 0,
+            parsing: false,
+            ...volumeDatasetOptions
+        };
+
+        const shouldIncludeLabels = includeLabels !== false;
+        const data = {
+            datasets: [candlestickDataset, volumeDataset]
+        };
+        if (shouldIncludeLabels && Array.isArray(labels) && labels.length) {
+            data.labels = labels;
+        }
+
+        return {
+            type: 'candlestick',
+            data,
+            datasets: {
+                price: candlestickDataset,
+                volume: volumeDataset
+            },
+            meta: {
+                volumeData,
+                maxVolume
+            }
+        };
+    }
+
+    isDateAdapterReady() {
+        const chart = window.Chart;
+        const adapterClass = chart?._adapters?._date;
+        if (!adapterClass) {
+            return false;
+        }
+        const proto = typeof adapterClass === 'function'
+            ? adapterClass.prototype
+            : adapterClass;
+        if (!proto || typeof proto.formats !== 'function') {
+            return false;
+        }
+        const source = Function.prototype.toString.call(proto.formats);
+        if (source.includes('This method is not implemented')) {
+            return false;
+        }
+        return true;
+    }
+
+    async ensureDateAdapter(options = {}) {
+        if (this.dateAdapterReady && this.isDateAdapterReady()) {
+            return true;
+        }
+
+        const attemptMarkReady = () => {
+            const ready = this.isDateAdapterReady();
+            this.dateAdapterReady = ready;
+            return ready;
+        };
+
+        if (attemptMarkReady()) {
+            return true;
+        }
+
+        if (this.dateAdapterLoader) {
+            try {
+                const result = await this.dateAdapterLoader;
+                return result;
+            } catch (error) {
+                console.warn('Date adapter loading promise rejected:', error);
+                return false;
+            }
+        }
+
+        const targetUrl = (options && options.url) || this.chartDateAdapterUrl;
+        if (!targetUrl) {
+            return attemptMarkReady();
+        }
+
+        const normalizedUrl = targetUrl.trim();
+        const dynamicScriptSelector = 'script[data-dynamic="chartjs-adapter-luxon"]';
+        const existingDynamic = document.querySelector(dynamicScriptSelector);
+
+        const buildLoaderPromise = (scriptElement, newlyCreated = false) => new Promise((resolve, reject) => {
+            const cleanup = () => {
+                scriptElement.removeEventListener('load', handleLoad);
+                scriptElement.removeEventListener('error', handleError);
+            };
+            const finalize = () => {
+                setTimeout(() => {
+                    const ready = attemptMarkReady();
+                    resolve(ready);
+                }, 0);
+            };
+            const handleLoad = () => {
+                if (newlyCreated) {
+                    scriptElement.dataset.loaded = 'true';
+                }
+                cleanup();
+                finalize();
+            };
+            const handleError = (err) => {
+                cleanup();
+                reject(err || new Error(`Failed to load date adapter script ${normalizedUrl}`));
+            };
+
+            scriptElement.addEventListener('load', handleLoad, { once: true });
+            scriptElement.addEventListener('error', handleError, { once: true });
+
+            if (scriptElement.dataset && scriptElement.dataset.loaded === 'true') {
+                finalize();
+            }
+        });
+
+        if (existingDynamic) {
+            if (existingDynamic.dataset.loading !== 'true' && existingDynamic.dataset.loaded === 'true') {
+                return attemptMarkReady();
+            }
+            this.dateAdapterLoader = buildLoaderPromise(existingDynamic);
+        } else {
+            const script = document.createElement('script');
+            script.src = normalizedUrl;
+            script.crossOrigin = 'anonymous';
+            script.defer = false;
+            script.async = true;
+            script.dataset.loading = 'true';
+            script.dataset.dynamic = 'chartjs-adapter-luxon';
+            this.dateAdapterLoader = buildLoaderPromise(script, true);
+            script.addEventListener('load', () => { delete script.dataset.loading; }, { once: true });
+            script.addEventListener('error', () => { delete script.dataset.loading; }, { once: true });
+            document.head.appendChild(script);
+        }
+
+        try {
+            const ready = await this.dateAdapterLoader;
+            return ready;
+        } catch (error) {
+            console.warn('Failed to load Chart.js date adapter:', error);
+            return false;
+        } finally {
+            this.dateAdapterLoader = null;
+        }
+    }
+
     updateReadOnlyMode(isReadOnly, role = 'admin', options = {}) {
         const persist = options.persist !== false;
         this.isReadOnly = !!isReadOnly;
@@ -5224,33 +5422,35 @@ class TradingApp {
                     console.log('OHLC data sample:', ohlcData.slice(0, 3));
                     console.log('Total OHLC points:', ohlcData.length);
 
-                    const volumeData = ohlcData.map(item => ({ x: item.x, y: item.volume }));
-                    maxVolume = Math.max(...volumeData.map(v => v.y), 0);
-                    chartConfig = {
-                        type: 'candlestick',
-                        data: {
-                            labels: labels,
-                            datasets: [
-                                {
-                                    type: 'candlestick',
-                                    label: `${symbol} OHLC`,
-                                    data: ohlcData,
-                                    yAxisID: 'y',
-                                    // 添加hover配置以确保事件能正确触发
-                                    hoverBackgroundColor: 'rgba(255, 99, 132, 0.8)',
-                                    hoverBorderColor: 'rgba(255, 99, 132, 1)',
-                                    hoverBorderWidth: 2
-                                },
-                                {
-                                    type: 'bar',
-                                    label: 'Volume',
-                                    data: volumeData,
-                                    yAxisID: 'y1',
-                                    backgroundColor: 'rgba(75, 192, 192, 0.6)'
-                                }
-                            ]
+                    const adapterReady = await this.ensureDateAdapter();
+                    if (!adapterReady) {
+                        console.warn('[loadMonitorChart] Date adapter unavailable, skipping candlestick render.');
+                        chartContainer.innerHTML = '<div class="alert alert-warning mb-0">蜡烛图依赖的时间适配器加载失败，请刷新后重试。</div>';
+                        return;
+                    }
+
+                    const candlestickConfig = this.createCandlestickChartConfig({
+                        symbol,
+                        ohlcData,
+                        labels,
+                        priceAxisId: 'y',
+                        volumeAxisId: 'y1',
+                        includeLabels: true,
+                        priceDatasetOptions: {
+                            // 添加hover配置以确保事件能正确触发
+                            hoverBackgroundColor: 'rgba(255, 99, 132, 0.8)',
+                            hoverBorderColor: 'rgba(255, 99, 132, 1)',
+                            hoverBorderWidth: 2
+                        },
+                        volumeDatasetOptions: {
+                            backgroundColor: 'rgba(75, 192, 192, 0.6)'
                         }
+                    });
+                    chartConfig = {
+                        type: candlestickConfig.type,
+                        data: candlestickConfig.data
                     };
+                    maxVolume = candlestickConfig.meta.maxVolume;
                 } else {
                     // 折线图配置
                     const volumeData = validData.map(item => parseFloat(item.volume || 0));
@@ -9174,7 +9374,7 @@ class TradingApp {
         const total = state.fullBars.length;
         const visibleCount = Math.max(1, Math.min(state.visibleCount || total, total));
         const ohlc = state.fullBars.slice(0, visibleCount);
-        const volumeData = ohlc.map((bar) => ({ x: bar.x, y: bar.volume }));
+        let volumeData = ohlc.map((bar) => ({ x: bar.x, y: bar.volume }));
         const cutoff = ohlc.length ? ohlc[ohlc.length - 1].x : null;
         const visibleOrders = cutoff == null
             ? []
@@ -9193,8 +9393,19 @@ class TradingApp {
         const tpLine = Number.isFinite(tpPrice)
             ? ohlc.map((bar) => ({ x: bar.x, y: tpPrice }))
             : [];
-        const maxVolume = volumeData.reduce((acc, point) => Math.max(acc, point.y || 0), 0);
-        const volumeScaleMax = maxVolume ? maxVolume * 3 : undefined;
+        let maxVolume = volumeData.reduce((acc, point) => Math.max(acc, point.y || 0), 0);
+        let volumeScaleMax = maxVolume ? maxVolume * 3 : undefined;
+        let volumeDatasetForCreation = {
+            type: 'bar',
+            label: 'Volume',
+            data: volumeData,
+            yAxisID: 'volume',
+            backgroundColor: 'rgba(99, 102, 241, 0.35)',
+            borderColor: 'rgba(79, 70, 229, 0.7)',
+            borderWidth: 1,
+            parsing: false,
+        };
+        let volumeDatasetConfigForUpdate = { ...volumeDatasetForCreation };
         const extraParts = [];
         if (visibleOrders.length) {
             extraParts.push(`成交 ${visibleOrders.length} 笔`);
@@ -9213,15 +9424,34 @@ class TradingApp {
             this.destroyStrategyChart();
         }
 
-        const baseDatasetConfigForUpdate = useCandles
-            ? {
-                type: 'candlestick',
-                label: `${state.symbol || ''} OHLC`,
-                data: ohlc,
-                yAxisID: 'y',
-                parsing: false,
-            }
-            : {
+        let baseDatasetConfigForUpdate;
+        let baseDatasetForCreation;
+
+        if (useCandles) {
+            const candlestickConfig = this.createCandlestickChartConfig({
+                symbol: state.symbol || '',
+                ohlcData: ohlc,
+                labels: [],
+                includeLabels: false,
+                priceAxisId: 'y',
+                volumeAxisId: 'volume',
+                volumeDatasetOptions: {
+                    backgroundColor: 'rgba(99, 102, 241, 0.35)',
+                    borderColor: 'rgba(79, 70, 229, 0.7)',
+                    borderWidth: 1,
+                },
+            });
+            const priceDataset = candlestickConfig.datasets.price;
+            const volumeDataset = candlestickConfig.datasets.volume;
+            baseDatasetForCreation = { ...priceDataset, data: ohlc };
+            baseDatasetConfigForUpdate = { ...priceDataset, data: ohlc };
+            volumeData = candlestickConfig.meta.volumeData;
+            maxVolume = candlestickConfig.meta.maxVolume;
+            volumeScaleMax = maxVolume ? maxVolume * 3 : undefined;
+            volumeDatasetForCreation = { ...volumeDataset, data: volumeData };
+            volumeDatasetConfigForUpdate = { ...volumeDataset, data: volumeData };
+        } else {
+            baseDatasetConfigForUpdate = {
                 type: 'line',
                 label: `${state.symbol || ''} Close`,
                 data: lineSeries,
@@ -9236,8 +9466,9 @@ class TradingApp {
                 tension: 0.2,
                 fill: false,
             };
-
-        const baseDatasetForCreation = { ...baseDatasetConfigForUpdate };
+            baseDatasetForCreation = { ...baseDatasetConfigForUpdate };
+            volumeDatasetConfigForUpdate = { ...volumeDatasetForCreation };
+        }
 
         if (!this.strategyChartInstance) {
             this.strategyChartInstance = new Chart(ctx, {
@@ -9245,16 +9476,7 @@ class TradingApp {
                 data: {
                     datasets: [
                         baseDatasetForCreation,
-                        {
-                            type: 'bar',
-                            label: 'Volume',
-                            data: volumeData,
-                            yAxisID: 'volume',
-                            backgroundColor: 'rgba(99, 102, 241, 0.35)',
-                            borderColor: 'rgba(79, 70, 229, 0.7)',
-                            borderWidth: 1,
-                            parsing: false,
-                        },
+                        volumeDatasetForCreation,
                         {
                             type: 'scatter',
                             label: 'Buy Orders',
@@ -9421,7 +9643,9 @@ class TradingApp {
             if (datasets[0]) {
                 Object.assign(datasets[0], baseDatasetConfigForUpdate);
             }
-            if (datasets[1]) datasets[1].data = volumeData;
+            if (datasets[1]) {
+                Object.assign(datasets[1], volumeDatasetConfigForUpdate);
+            }
             if (datasets[2]) datasets[2].data = buyOrders;
             if (datasets[3]) datasets[3].data = sellOrders;
             if (datasets[4]) {
