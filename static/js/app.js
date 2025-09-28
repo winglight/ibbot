@@ -3228,189 +3228,23 @@ class TradingApp {
     }
 
     async handleSummaryDataFeedChange() {
-        const name = this.currentStrategyDetails;
-        if (!name) return;
-        const select = document.getElementById('summaryDataFeedSelect');
-        if (!select) return;
-        const value = select.value || null;
-        if (value === this.summaryDataFeedCurrent) return;
-        try {
-            await this.apiCall(`/strategies/${encodeURIComponent(name)}`, {
-                method: 'PUT',
-                body: JSON.stringify({ data_subscription: value || null }),
-            });
-            this.summaryDataFeedCurrent = value;
-            if (this.data_push_state?.enabled) {
-                await this.setStrategyDataPush({ enabled: true });
-            }
-        } catch (error) {
-            console.error('Failed to update data subscription', error);
-            this.showAlert('danger', 'Failed to update data subscription');
-            if (this.summaryDataFeedCurrent !== null) {
-                select.value = this.summaryDataFeedCurrent || '';
-            }
-        }
+        if (!this.strategiesManager?.handleSummaryDataFeedChange) return;
+        return this.strategiesManager.handleSummaryDataFeedChange();
     }
 
     async handleSummaryPushToggle() {
-        if (this.summaryPushUpdating) return;
-        const switchEl = document.getElementById('summaryDataPushSwitch');
-        if (!switchEl) return;
-        const enabled = !!switchEl.checked;
-        const result = await this.setStrategyDataPush({ enabled });
-        if (!result || result.error) {
-            this.summaryPushUpdating = true;
-            switchEl.checked = false;
-            this.summaryPushUpdating = false;
-        }
+        if (!this.strategiesManager?.handleSummaryPushToggle) return;
+        return this.strategiesManager.handleSummaryPushToggle();
     }
 
     async setStrategyDataPush({ enabled, subscription, symbol } = {}) {
-        const name = this.currentStrategyDetails;
-        if (!name) return null;
-        if (typeof enabled !== 'boolean') enabled = true;
-        const select = document.getElementById('summaryDataFeedSelect');
-        const symbolInput = document.getElementById('summaryPrimarySymbolInput');
-        const switchEl = document.getElementById('summaryDataPushSwitch');
-        const statusEl = document.getElementById('summaryDataPushStatus');
-        const targetSub = subscription || select?.value || null;
-        const targetSymbol = (symbol || symbolInput?.value || '').trim().toUpperCase();
-        if (enabled) {
-            if (!targetSub) {
-                this.showAlert('warning', 'Select a data subscription before enabling push');
-                if (switchEl) switchEl.checked = false;
-                statusEl && (statusEl.textContent = '未推送');
-                this.summaryPushAwaitingData = false;
-                return { error: 'missing_subscription' };
-            }
-            if (!targetSymbol) {
-                this.showAlert('warning', 'Primary symbol is required to push data');
-                if (switchEl) switchEl.checked = false;
-                statusEl && (statusEl.textContent = '未推送');
-                this.summaryPushAwaitingData = false;
-                return { error: 'missing_symbol' };
-            }
-        }
-        try {
-            this.summaryPushUpdating = true;
-            if (statusEl) statusEl.textContent = enabled ? '推送中…' : '未推送';
-            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/data-push`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    enabled,
-                    subscription: targetSub || null,
-                    symbol: targetSymbol || null,
-                }),
-            });
-            const state = res?.state || {};
-            const awaitingData = !!state.awaiting_data && !!state.active;
-            const stateReason = state.status_reason || '';
-            this.summaryPushAwaitingData = awaitingData;
-            if (switchEl) switchEl.checked = !!state.active;
-            if (statusEl) {
-                if (state.active) {
-                    if (!awaitingData && stateReason) {
-                        statusEl.textContent = stateReason;
-                    } else {
-                        statusEl.textContent = awaitingData ? '等待DOM数据…' : '已推送';
-                    }
-                } else {
-                    statusEl.textContent = stateReason || '未推送';
-                }
-            }
-            this.data_push_state = {
-                enabled: !!state.active,
-                active: !!state.active,
-                subscription: state.subscription,
-                symbol: state.symbol,
-                awaiting_data: awaitingData,
-                last_data_timestamp: state.last_data_timestamp || null,
-                status_reason: stateReason || null,
-            };
-            if (!res?.success) {
-                const message = res?.error || 'Failed to update data push state';
-                this.showAlert('danger', message);
-            }
-            if (!awaitingData && this.summaryPushAwaitingTimer) {
-                clearTimeout(this.summaryPushAwaitingTimer);
-                this.summaryPushAwaitingTimer = null;
-            }
-            await this.loadStrategyStatus(name, { force: true });
-            return state;
-        } catch (error) {
-            console.error('Failed to update data push state', error);
-            this.showAlert('danger', 'Failed to update data push state');
-            if (switchEl) switchEl.checked = false;
-            if (statusEl) statusEl.textContent = '未推送';
-            this.summaryPushAwaitingData = false;
-            if (this.summaryPushAwaitingTimer) {
-                clearTimeout(this.summaryPushAwaitingTimer);
-                this.summaryPushAwaitingTimer = null;
-            }
-            return { error: 'request_failed' };
-        } finally {
-            this.summaryPushUpdating = false;
-        }
+        if (!this.strategiesManager?.setStrategyDataPush) return null;
+        return this.strategiesManager.setStrategyDataPush({ enabled, subscription, symbol });
     }
 
     async loadStrategyStatus(name, { force = false } = {}) {
-        if (this.summaryStatusLoading && !force) return;
-        const receivingEl = document.getElementById('summaryStatusReceiving');
-        if (!receivingEl) return;
-        this.summaryStatusLoading = true;
-        this.summaryStatusTarget = name;
-        const runtimeEl = document.getElementById('summaryStatusRuntime');
-        const processedEl = document.getElementById('summaryStatusProcessed');
-        const thresholdEl = document.getElementById('summaryStatusThresholdHits');
-        const buyEl = document.getElementById('summaryStatusBuySignals');
-        const sellEl = document.getElementById('summaryStatusSellSignals');
-        const slPriceEl = document.getElementById('summaryStatusStopLoss');
-        const tpPriceEl = document.getElementById('summaryStatusTakeProfit');
-
-        receivingEl.textContent = '…';
-        runtimeEl && (runtimeEl.textContent = '…');
-        processedEl && (processedEl.textContent = '…');
-        thresholdEl && (thresholdEl.textContent = '…');
-        buyEl && (buyEl.textContent = '…');
-        sellEl && (sellEl.textContent = '…');
-        slPriceEl && (slPriceEl.textContent = '…');
-        tpPriceEl && (tpPriceEl.textContent = '…');
-
-        if (this.ibkrManager && typeof this.ibkrManager.requestStrategyStatus === 'function') {
-            const result = this.ibkrManager.requestStrategyStatus({
-                name,
-                force: Boolean(force),
-                minInterval: 15000,
-            });
-            if (result !== 'failed') {
-                return result;
-            }
-        }
-
-        try {
-            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/status`);
-            const payload = {
-                type: 'strategy_status',
-                name,
-                success: !!res?.success,
-                status: res?.status || {},
-                source: 'http',
-            };
-            if (!payload.success) {
-                payload.error = res?.error || 'Failed to fetch status';
-            }
-            this.applyStrategyStatusPayload(payload);
-            return payload;
-        } catch (error) {
-            console.error('Failed to load strategy status', error);
-            this.applyStrategyStatusPayload({
-                type: 'strategy_status',
-                name,
-                success: false,
-                error: error?.message || 'request_failed',
-            });
-            return { error: error?.message || 'request_failed' };
-        }
+        if (!this.strategiesManager?.loadStrategyStatus) return null;
+        return this.strategiesManager.loadStrategyStatus(name, { force });
     }
 
     // cancelAllOrders和syncLimitOrder方法已迁移到OrderManager
