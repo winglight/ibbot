@@ -403,7 +403,8 @@ class TradingApp {
         this.monitorDomHistoryMeta = null;
         this.candlestickSupported = false;
         this.candlestickLoader = null;
-        this.financialScriptUrl = '/static/js/vendor/chartjs-chart-financial.js';
+        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
+        this.chartScriptableGuardApplied = false;
         this.strategyChartInstance = null;
         this.strategyChartFallbackNotified = false;
         this.strategyChartState = this.createDefaultStrategyChartState();
@@ -466,6 +467,7 @@ class TradingApp {
         this.notificationsManager = new NotificationsManager(this);
         this.domManager = new DOMManager(this);
 
+        this.guardChartScriptableDescriptors();
         this.init();
     }
 
@@ -2637,9 +2639,86 @@ class TradingApp {
         }
     }
 
+    guardChartScriptableDescriptors() {
+        if (this.chartScriptableGuardApplied) {
+            return;
+        }
+        const chart = window.Chart;
+        const defaults = chart?.defaults;
+        if (!defaults || typeof defaults !== 'object') {
+            return;
+        }
+
+        const guardFn = (fn) => {
+            if (typeof fn !== 'function') {
+                return fn;
+            }
+            if (fn.__ibbotGuarded) {
+                return fn;
+            }
+            const wrapped = (key, ...args) => {
+                if (typeof key !== 'string') {
+                    if (key != null) {
+                        console.warn('[Chart] Non-string descriptor key encountered', { key });
+                    }
+                    return false;
+                }
+                try {
+                    return fn(key, ...args);
+                } catch (err) {
+                    console.warn('[Chart] Descriptor check failed, suppressing error', err);
+                    return false;
+                }
+            };
+            wrapped.__ibbotGuarded = true;
+            return wrapped;
+        };
+
+        const traverseDescriptors = (node, depth = 0) => {
+            if (!node || typeof node !== 'object' || depth > 6) {
+                return;
+            }
+            if (Object.prototype.hasOwnProperty.call(node, '_scriptable')) {
+                node._scriptable = guardFn(node._scriptable);
+            }
+            if (Object.prototype.hasOwnProperty.call(node, '_indexable')) {
+                node._indexable = guardFn(node._indexable);
+            }
+            for (const key of Object.keys(node)) {
+                const value = node[key];
+                if (!value || typeof value !== 'object') {
+                    continue;
+                }
+                traverseDescriptors(value, depth + 1);
+            }
+        };
+
+        traverseDescriptors(defaults.plugins || {});
+        this.chartScriptableGuardApplied = true;
+    }
+
     registerCandlestickControllers() {
         try {
-            if (!window.Chart || !window.Chart.register) {
+            this.guardChartScriptableDescriptors();
+            const chartLib = window.Chart;
+            if (!chartLib) {
+                return false;
+            }
+
+            const registry = chartLib.registry;
+            const controllers = registry?.controllers;
+            const elements = registry?.elements;
+            const hasEntry = (collection, key) => typeof collection?.has === 'function' && collection.has(key);
+            const keys = ['candlestick', 'financial', 'ohlc'];
+            const controllerReady = keys.some((key) => hasEntry(controllers, key));
+            const elementReady = !elements || keys.some((key) => hasEntry(elements, key));
+
+            if (controllerReady && elementReady) {
+                this.candlestickSupported = true;
+                return true;
+            }
+
+            if (typeof chartLib.register !== 'function') {
                 return false;
             }
             const financialCandidates = [
@@ -2660,9 +2739,15 @@ class TradingApp {
                     fin?.FinancialElement
                 ].filter(Boolean);
                 if (components.length) {
-                    window.Chart.register(...components);
-                    this.candlestickSupported = true;
-                    return true;
+                    chartLib.register(...components);
+                    if (!registry) {
+                        this.candlestickSupported = true;
+                        return true;
+                    }
+                    if (keys.some((key) => hasEntry(controllers, key)) && (!elements || keys.some((key) => hasEntry(elements, key)))) {
+                        this.candlestickSupported = true;
+                        return true;
+                    }
                 }
             }
         } catch (error) {
