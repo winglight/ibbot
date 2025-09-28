@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import uuid
 
 from typing import Any, Dict, List, Optional, Set
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status, Query
 from fastapi.responses import JSONResponse
 
@@ -48,6 +51,47 @@ from .tasks import run_optimization_task
 from .reporting import compute_return_histogram
 
 router = APIRouter(prefix="/api/optimize", tags=["optimizer"])
+logger = logging.getLogger(__name__)
+
+
+async def _notify_strategy_manager_of_new_strategy(strategy: DatabaseStrategy) -> None:
+    """Post the newly generated strategy to the main service.
+
+    Any failure is logged but swallowed so the optimizer response
+    remains successful even if the notification fails.
+    """
+
+    base_url = os.getenv("IBBOT_API_URL")
+    if not base_url:
+        logger.info("IBBOT_API_URL not set; skipping strategy manager notification")
+        return
+
+    url = f"{base_url.rstrip('/')}/api/strategies"
+    payload = {
+        "name": strategy.name,
+        "strategy_type": strategy.strategy_type,
+        "enabled": strategy.enabled,
+        "api_endpoint": strategy.api_endpoint,
+        "file_path": strategy.file_path,
+        "description": strategy.description,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(url, json=payload)
+        if response.status_code >= 400:
+            logger.error(
+                "Failed to notify main service about strategy %s: %s %s",
+                strategy.name,
+                response.status_code,
+                response.text,
+            )
+    except httpx.HTTPError as exc:
+        logger.error(
+            "Error notifying main service about strategy %s: %s",
+            strategy.name,
+            exc,
+        )
 
 
 def _normalize_fail_reason(reason: str) -> str:
@@ -413,5 +457,7 @@ async def generate_strategy(payload: StrategyGenerationRequest) -> StrategyGener
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"failed to persist strategy: {exc}",
         )
+
+    await _notify_strategy_manager_of_new_strategy(db_record)
 
     return StrategyGenerationResponse(file_path=normalized_path, class_name=class_name)
