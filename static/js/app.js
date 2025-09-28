@@ -6,6 +6,9 @@ const MonitoringUtils = monitoringModules.utils || {};
 const MonitoringManagerModule = monitoringModules.manager || {};
 const MonitoringManagerClass = MonitoringManagerModule.MonitoringManager;
 const SharedUtils = appModules.utils || {};
+const uiModules = appModules.ui || {};
+const UIControllerModule = uiModules.controller || {};
+const UIControllerClass = UIControllerModule.UIController || globalScope.UIController;
 const ordersModules = appModules.orders || {};
 const OrdersManagerModule = ordersModules.manager || {};
 const OrdersManagerClass = OrdersManagerModule.OrderManager || globalScope.OrderManager;
@@ -313,6 +316,9 @@ class TradingApp {
         this.notificationsManager = typeof NotificationsManagerClass === 'function'
             ? new NotificationsManagerClass(this)
             : new NotificationsManager(this);
+        this.uiController = typeof UIControllerClass === 'function'
+            ? new UIControllerClass(this)
+            : null;
         this.domManager = new DOMManager(this);
 
         this.guardChartScriptableDescriptors();
@@ -7441,182 +7447,28 @@ class TradingApp {
     }
 
     showAlert(type, message) {
-        const alertContainer = document.getElementById('alertContainer');
-        const alertId = 'alert-' + Date.now();
-        
-        // 提升容器层级，确保不被模态遮挡
-        if (alertContainer) {
-            alertContainer.style.position = 'fixed';
-            alertContainer.style.top = document.querySelector('.modal.show') ? '10px' : '20px';
-            alertContainer.style.right = '20px';
-            alertContainer.style.zIndex = '20000';
-            alertContainer.style.maxWidth = '420px';
+        if (this.uiController?.showAlert) {
+            return this.uiController.showAlert(type, message);
         }
-        
-        const iconClass = type === 'success' ? 'fa-check-circle text-success'
-            : (type === 'danger' || type === 'error') ? 'fa-times-circle text-danger'
-            : type === 'warning' ? 'fa-exclamation-triangle text-warning'
-            : 'fa-info-circle text-info';
-        
-        const alertHtml = `
-            <div id="${alertId}" class="alert alert-${type} alert-dismissible fade show" role="alert" style="background:#ffffff; color:#212529; border:1px solid rgba(0,0,0,.125); box-shadow:0 0.5rem 1rem rgba(0,0,0,.15); opacity:1;">
-                <div style="display:flex; align-items:center; gap:.5rem;">
-                    <i class="fas ${iconClass}"></i>
-                    <span>${message}</span>
-                </div>
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>
-        `;
-        
-        alertContainer.insertAdjacentHTML('beforeend', alertHtml);
-        
-        // 同时添加到通知面板
-        this.notificationsManager.addNotification(type, message);
-        
-        // Auto-dismiss after 5 seconds
-        setTimeout(() => {
-            const alert = document.getElementById(alertId);
-            if (alert) {
-                const bsAlert = new bootstrap.Alert(alert);
-                bsAlert.close();
-            }
-        }, 5000);
+        const logMethod = type === 'danger' || type === 'error' ? 'error' : 'log';
+        console[logMethod]?.(message);
     }
 
     // Symbol combobox functionality
-    // Duplicate initSymbolCombobox method removed
+    initSymbolCombobox() {
+        return this.uiController?.initSymbolCombobox?.();
+    }
 
     setupSymbolInput(inputId, dropdownId) {
-        const input = document.getElementById(inputId);
-        const dropdown = document.getElementById(dropdownId);
-        if (!input || !dropdown) return;
-        dropdown.dataset.inputId = inputId;
-        let searchTimeout;
-
-        // Load historical symbols on focus
-        input.addEventListener('focus', () => {
-            this.showHistoricalSymbols(dropdownId);
-            dropdown.classList.add('show');
-        });
-
-        // Hide dropdown when clicking outside
-        document.addEventListener('click', (e) => {
-            if (!input.contains(e.target) && !dropdown.contains(e.target)) {
-                dropdown.classList.remove('show');
-            }
-        });
-
-        // Search symbols on input
-        input.addEventListener('input', (e) => {
-            const query = e.target.value.trim();
-            
-            clearTimeout(searchTimeout);
-            
-            if (query.length === 0) {
-                this.showHistoricalSymbols(dropdownId);
-                // 隐藏价格显示
-                if (inputId === 'orderSymbol') {
-                    const priceDisplay = document.getElementById('currentPriceDisplay');
-                    if (priceDisplay) {
-                        priceDisplay.style.display = 'none';
-                    }
-                }
-                return;
-            }
-
-            if (query.length >= 1) {
-                searchTimeout = setTimeout(() => {
-                    this.searchSymbols(query, dropdownId);
-                }, 300);
-            }
-            
-            // 如果是下单弹窗且输入长度>=2，尝试获取价格
-            if (inputId === 'orderSymbol' && query.length >= 2) {
-                clearTimeout(this.priceTimeout);
-                this.priceTimeout = setTimeout(() => {
-                    this.fetchCurrentPrice(query);
-                }, 1000); // 1秒后获取价格
-            }
-        });
-
-        // Handle keyboard navigation
-        input.addEventListener('keydown', (e) => {
-            const items = dropdown.querySelectorAll('.dropdown-item');
-            const activeItem = dropdown.querySelector('.dropdown-item.active');
-            let activeIndex = Array.from(items).indexOf(activeItem);
-
-            if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                activeIndex = activeIndex < items.length - 1 ? activeIndex + 1 : 0;
-                this.setActiveDropdownItem(items, activeIndex);
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                activeIndex = activeIndex > 0 ? activeIndex - 1 : items.length - 1;
-                this.setActiveDropdownItem(items, activeIndex);
-            } else if (e.key === 'Enter') {
-                e.preventDefault();
-                if (activeItem) {
-                    activeItem.click();
-                }
-            } else if (e.key === 'Escape') {
-                dropdown.classList.remove('show');
-                input.blur();
-            }
-        });
+        return this.uiController?.setupSymbolInput?.(inputId, dropdownId);
     }
 
     setActiveDropdownItem(items, activeIndex) {
-        items.forEach((item, index) => {
-            item.classList.toggle('active', index === activeIndex);
-        });
+        return this.uiController?.setActiveDropdownItem?.(items, activeIndex);
     }
 
     showHistoricalSymbols(dropdownId) {
-        const dropdown = document.getElementById(dropdownId);
-        if (!dropdown) return;
-        const historicalSymbols = this.getHistoricalSymbols();
-
-        let html = '';
-
-        if (historicalSymbols.length > 0) {
-            html += '<h6 class="dropdown-header">Recent Symbols</h6>';
-            historicalSymbols.forEach(symbol => {
-                html += `<a class="dropdown-item" href="#" data-symbol="${symbol}">${symbol}</a>`;
-            });
-            html += '<div class="dropdown-divider"></div>';
-        }
-        
-        html += '<h6 class="dropdown-header">Popular Symbols</h6>';
-        const popularSymbols = ['MNQ', 'NQ', 'ES', 'YM', 'AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN'];
-        popularSymbols.forEach(symbol => {
-            if (!historicalSymbols.includes(symbol)) {
-                html += `<a class="dropdown-item" href="#" data-symbol="${symbol}">${symbol}</a>`;
-            }
-        });
-        
-        dropdown.innerHTML = html;
-        
-        // Add click handlers
-        dropdown.querySelectorAll('.dropdown-item').forEach(item => {
-            item.addEventListener('click', (e) => {
-                e.preventDefault();
-                const symbol = e.target.getAttribute('data-symbol');
-                const targetId = dropdown.dataset.inputId || (dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol');
-                const targetInput = document.getElementById(targetId);
-                if (targetInput) {
-                    targetInput.value = symbol;
-                    const changeEvent = new Event('change', { bubbles: true });
-                    targetInput.dispatchEvent(changeEvent);
-                }
-                dropdown.classList.remove('show');
-                this.addToHistoricalSymbols(symbol);
-
-                // 如果是下单弹窗的symbol选择，获取当前价格
-                if (targetId === 'orderSymbol') {
-                    this.fetchCurrentPrice(symbol);
-                }
-            });
-        });
+        return this.uiController?.showHistoricalSymbols?.(dropdownId);
     }
 
     // 编辑订单
@@ -10195,59 +10047,26 @@ class TradingApp {
 
     // Chart helpers
     ensureChartDestroyed(id) {
-        if (this.charts[id]) {
-            try { this.charts[id].destroy(); } catch {}
-            delete this.charts[id];
-        }
+        return this.uiController?.ensureChartDestroyed?.(id);
     }
 
     renderLineChart(canvasId, label, labels, data, color) {
-        const ctx = document.getElementById(canvasId);
-        if (!ctx) return;
-        this.ensureChartDestroyed(canvasId);
-        this.charts[canvasId] = new Chart(ctx, {
-            type: 'line',
-            data: { labels, datasets: [{ label, data, borderColor: color, backgroundColor: color, fill: false, tension: 0.2, pointRadius: 0 }] },
-            options: { responsive: true, maintainAspectRatio: false, scales: { x: { display: true }, y: { display: true } } }
-        });
+        return this.uiController?.renderLineChart?.(canvasId, label, labels, data, color);
     }
 
     renderBarChart(canvasId, label, labels, data, color) {
-        const ctx = document.getElementById(canvasId);
-        if (!ctx) return;
-        this.ensureChartDestroyed(canvasId);
-        this.charts[canvasId] = new Chart(ctx, {
-            type: 'bar',
-            data: { labels, datasets: [{ label, data, backgroundColor: color }] },
-            options: { responsive: true, maintainAspectRatio: false }
-        });
+        return this.uiController?.renderBarChart?.(canvasId, label, labels, data, color);
     }
 
     renderPieChart(canvasId, labels, data, colors) {
-        const ctx = document.getElementById(canvasId);
-        if (!ctx) return;
-        this.ensureChartDestroyed(canvasId);
-        this.charts[canvasId] = new Chart(ctx, {
-            type: 'pie',
-            data: { labels, datasets: [{ data, backgroundColor: colors }] },
-            options: { responsive: true, maintainAspectRatio: false }
-        });
+        return this.uiController?.renderPieChart?.(canvasId, labels, data, colors);
     }
 
     makeHistogram(values, bins) {
-        const min = Math.min(...values);
-        const max = Math.max(...values);
-        const step = (max - min) / bins;
-        const labels = [];
-        const counts = new Array(bins).fill(0);
-        for (let i = 0; i < bins; i++) {
-            labels.push(`${(min + i * step).toFixed(2)}`);
+        if (this.uiController?.makeHistogram) {
+            return this.uiController.makeHistogram(values, bins);
         }
-        values.forEach(v => {
-            const idx = Math.min(bins - 1, Math.floor((v - min) / step));
-            counts[idx]++;
-        });
-        return { labels, counts };
+        return { labels: [], counts: [] };
     }
 
     async deleteStrategy(name) {
@@ -10260,212 +10079,47 @@ class TradingApp {
     // Logs functionality removed - panel no longer exists
 
     clearData() {
-        this.resetPanelLoading('orders');
-        this.resetPanelLoading('portfolio');
-        this.resetPanelLoading('risk-rules');
-        this.resetPanelLoading('strategies');
-        const accountInfo = document.getElementById('accountInfo');
-        if (accountInfo) {
-            accountInfo.innerHTML = '<p class="text-muted">Connect to view account information</p>';
-        }
-        
-        const ordersTableBody = document.querySelector('#ordersTable tbody');
-        if (ordersTableBody) {
-            ordersTableBody.innerHTML = '';
-        }
-        
-        const positionsTableBody = document.querySelector('#positionsTable tbody');
-        if (positionsTableBody) {
-            positionsTableBody.innerHTML = '';
-        }
-        
-        const autoOrdersTableBody = document.querySelector('#autoOrdersTable tbody');
-        if (autoOrdersTableBody) {
-            autoOrdersTableBody.innerHTML = '';
-        }
-        
-        const riskRulesTableBody = document.querySelector('#riskRulesTable2 tbody');
-        if (riskRulesTableBody) {
-            riskRulesTableBody.innerHTML = '';
-        }
+        return this.uiController?.clearData?.();
     }
 
     getStatusColor(status) {
-        switch ((status || '').toLowerCase()) {
-            // Order statuses
-            case 'filled': return 'success';
-            case 'cancelled':
-            case 'canceled': return 'danger';
-            case 'submitted':
-            case 'presubmitted': return 'primary';
-            case 'pendingsubmit': return 'warning';
-            case 'pendingcancel': return 'info';
-            case 'inactive': return 'secondary';
-            case 'apiwaiting':
-            case 'apipending': return 'warning';
-            // Executions/general statuses
-            case 'executed':
-            case 'success': return 'success';
-            case 'failed':
-            case 'error':
-            case 'rejected': return 'danger';
-            case 'pending': return 'warning';
-            default: return 'secondary';
+        if (this.uiController?.getStatusColor) {
+            return this.uiController.getStatusColor(status);
         }
+        return 'secondary';
     }
 
     // 判断传入日期是否为“今天”（按本地时区）
     isSameDay(dateInput) {
+        if (this.uiController?.isSameDay) {
+            return this.uiController.isSameDay(dateInput);
+        }
         if (!dateInput) return false;
         const d = new Date(dateInput);
-        if (isNaN(d.getTime())) return false;
+        if (Number.isNaN(d.getTime())) return false;
         const now = new Date();
-        return d.getFullYear() === now.getFullYear() &&
-               d.getMonth() === now.getMonth() &&
-               d.getDate() === now.getDate();
-    }
-
-    // Symbol combobox functionality
-    initSymbolCombobox() {
-        this.setupSymbolInput('orderSymbol', 'orderSymbolDropdown');
-    }
-
-    // Duplicate setupSymbolInput method removed
-
-    setActiveDropdownItem(items, activeIndex) {
-        items.forEach((item, index) => {
-            item.classList.toggle('active', index === activeIndex);
-        });
-    }
-
-    showHistoricalSymbols(dropdownId) {
-        const dropdown = document.getElementById(dropdownId);
-        const historicalSymbols = this.getHistoricalSymbols();
-        
-        let html = '';
-        
-        if (historicalSymbols.length > 0) {
-            html += '<h6 class="dropdown-header">Recent Symbols</h6>';
-            historicalSymbols.forEach(symbol => {
-                html += `<a class="dropdown-item" href="#" data-symbol="${symbol}">${symbol}</a>`;
-            });
-            html += '<div class="dropdown-divider"></div>';
-        }
-        
-        html += '<h6 class="dropdown-header">Popular Symbols</h6>';
-        const popularSymbols = ['MNQ', 'NQ', 'ES', 'YM', 'AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN'];
-        popularSymbols.forEach(symbol => {
-            if (!historicalSymbols.includes(symbol)) {
-                html += `<a class="dropdown-item" href="#" data-symbol="${symbol}">${symbol}</a>`;
-            }
-        });
-        
-        dropdown.innerHTML = html;
-        
-        // Add click handlers
-        dropdown.querySelectorAll('.dropdown-item').forEach(item => {
-            item.addEventListener('click', (e) => {
-                e.preventDefault();
-                const symbol = e.target.getAttribute('data-symbol');
-                const inputId = dropdown.dataset.inputId || (dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol');
-                const inputEl = document.getElementById(inputId);
-                if (inputEl) {
-                    inputEl.value = symbol;
-                    const changeEvent = new Event('change', { bubbles: true });
-                    inputEl.dispatchEvent(changeEvent);
-                }
-                dropdown.classList.remove('show');
-                this.addToHistoricalSymbols(symbol);
-
-                // 如果是下单弹窗的symbol选择，获取当前价格
-                if (inputId === 'orderSymbol') {
-                    this.fetchCurrentPrice(symbol);
-                }
-            });
-        });
+        return d.getFullYear() === now.getFullYear()
+            && d.getMonth() === now.getMonth()
+            && d.getDate() === now.getDate();
     }
 
     async searchSymbols(query, dropdownId) {
-        const dropdown = document.getElementById(dropdownId);
-        if (!dropdown) return;
-
-        try {
-            // Show loading
-            dropdown.innerHTML = '<div class="dropdown-item-text">Searching...</div>';
-            dropdown.classList.add('show');
-            
-            // For now, we'll use a simple client-side filter of common symbols
-            // In a real implementation, this would call an API
-            const allSymbols = [
-                'MNQ', 'NQ', 'ES', 'YM', 'RTY', 'CL', 'GC', 'SI',
-                'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'TSLA', 'NVDA', 'AMZN', 'META',
-                'NFLX', 'AMD', 'INTC', 'CRM', 'ORCL', 'ADBE', 'PYPL', 'UBER',
-                'SPOT', 'ZM', 'DOCU', 'SNOW', 'PLTR', 'COIN', 'RBLX', 'HOOD'
-            ];
-            
-            const filteredSymbols = allSymbols.filter(symbol => 
-                symbol.toLowerCase().includes(query.toLowerCase())
-            );
-            
-            let html = '';
-            
-            if (filteredSymbols.length > 0) {
-                html += '<h6 class="dropdown-header">Search Results</h6>';
-                filteredSymbols.slice(0, 10).forEach(symbol => {
-                    html += `<a class="dropdown-item" href="#" data-symbol="${symbol}">${symbol}</a>`;
-                });
-            } else {
-                html += '<div class="dropdown-item-text text-muted">No symbols found</div>';
-            }
-            
-            dropdown.innerHTML = html;
-            
-            // Add click handlers
-            dropdown.querySelectorAll('.dropdown-item').forEach(item => {
-                item.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    const symbol = e.target.getAttribute('data-symbol');
-                    const inputId = dropdown.dataset.inputId || (dropdownId === 'symbolDropdown' ? 'dataSymbol' : 'orderSymbol');
-                    const inputEl = document.getElementById(inputId);
-                    if (inputEl) {
-                        inputEl.value = symbol;
-                        const changeEvent = new Event('change', { bubbles: true });
-                        inputEl.dispatchEvent(changeEvent);
-                    }
-                    dropdown.classList.remove('show');
-                    this.addToHistoricalSymbols(symbol);
-
-                    // 如果是下单弹窗的symbol选择，获取当前价格
-                    if (inputId === 'orderSymbol') {
-                        this.fetchCurrentPrice(symbol);
-                    }
-                });
-            });
-            
-        } catch (error) {
-            console.error('Error searching symbols:', error);
-            dropdown.innerHTML = '<div class="dropdown-item-text text-danger">Search failed</div>';
+        if (this.uiController?.searchSymbols) {
+            return this.uiController.searchSymbols(query, dropdownId);
         }
     }
 
     getHistoricalSymbols() {
-        const stored = localStorage.getItem('historicalSymbols');
-        return stored ? JSON.parse(stored) : [];
+        if (this.uiController?.getHistoricalSymbols) {
+            return this.uiController.getHistoricalSymbols();
+        }
+        return [];
     }
 
     addToHistoricalSymbols(symbol) {
-        let historical = this.getHistoricalSymbols();
-        
-        // Remove if already exists
-        historical = historical.filter(s => s !== symbol);
-        
-        // Add to beginning
-        historical.unshift(symbol);
-        
-        // Keep only last 10
-        historical = historical.slice(0, 10);
-        
-        localStorage.setItem('historicalSymbols', JSON.stringify(historical));
+        if (this.uiController?.addToHistoricalSymbols) {
+            this.uiController.addToHistoricalSymbols(symbol);
+        }
     }
 
     async fetchCurrentPrice(symbol) {
