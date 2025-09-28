@@ -72,7 +72,7 @@ class AccountSnapshotService:
         self._stop_event = asyncio.Event()
         self._task = loop.create_task(self._run_loop())
         snapshot_service_logger.info(
-            "Account snapshot service started (refresh_interval=%ss, poll=%ss)",
+            "Account snapshot service started (refresh_interval={}s, poll={}s)",
             self.refresh_interval_seconds,
             self._poll_interval_seconds,
         )

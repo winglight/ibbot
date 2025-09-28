@@ -28,7 +28,7 @@ def get_quote_feed() -> QuoteFeed:
     global _quote_feed
     if _quote_feed is None:
         _quote_feed = resolve_default_quote_feed()
-        logger.info("Initialised default quote feed: %s", _quote_feed.__class__.__name__)
+        logger.info("Initialised default quote feed: {}", _quote_feed.__class__.__name__)
     return _quote_feed
 
 
@@ -75,10 +75,10 @@ def _get_cache_backend():
                     ttl = ttl_value
         try:
             _cache_backend = RedisCacheBackend(redis_url, prefix=prefix, snapshot_ttl=ttl)
-            logger.info("Using Redis cache backend at %s", redis_url)
+            logger.info("Using Redis cache backend at {}", redis_url)
             return _cache_backend
         except Exception as exc:
-            logger.warning("Failed to initialise Redis cache backend: %s", exc)
+            logger.warning("Failed to initialise Redis cache backend: {}", exc)
 
     _cache_backend = InMemoryCacheBackend()
     logger.info("Using in-memory cache backend")
@@ -104,10 +104,10 @@ def _get_persistence_backend():
                 token=token,
                 measurement=measurement,
             )
-            logger.info("Using InfluxDB persistence backend at %s", influx_url)
+            logger.info("Using InfluxDB persistence backend at {}", influx_url)
             return _persistence_backend
         except Exception as exc:
-            logger.warning("Failed to initialise InfluxDB backend: %s", exc)
+            logger.warning("Failed to initialise InfluxDB backend: {}", exc)
 
     _persistence_backend = NoopPersistenceBackend()
     logger.info("Using noop persistence backend")

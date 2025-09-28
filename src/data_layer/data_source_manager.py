@@ -132,7 +132,7 @@ class _SubscriptionRegistry:
                 self._token_to_key[token_value] = key
                 entry.refcount += 1
                 logger.debug(
-                    "SubscriptionRegistry reuse key=%s refcount=%s", key, entry.refcount
+                    "SubscriptionRegistry reuse key={} refcount={}", key, entry.refcount
                 )
                 return DataSubscriptionToken(token=token_value, channel=request.channel), False
 
@@ -154,14 +154,16 @@ class _SubscriptionRegistry:
                 token_value = f"sub-{next(self._token_counter)}"
                 self._token_to_key[token_value] = key
                 logger.debug(
-                    "SubscriptionRegistry reuse-after-race key=%s refcount=%s", key, entry.refcount
+                    "SubscriptionRegistry reuse-after-race key={} refcount={}",
+                    key,
+                    entry.refcount,
                 )
                 return DataSubscriptionToken(token=token_value, channel=request.channel), False
 
             token_value = f"sub-{next(self._token_counter)}"
             self._entries[key] = _RegistryEntry(cancel_callback=cancel_callback, refcount=1)
             self._token_to_key[token_value] = key
-            logger.debug("SubscriptionRegistry new key=%s", key)
+            logger.debug("SubscriptionRegistry new key={}", key)
             return DataSubscriptionToken(token=token_value, channel=request.channel), True
 
     async def release(self, token: DataSubscriptionToken) -> None:
@@ -176,7 +178,7 @@ class _SubscriptionRegistry:
 
             entry.refcount -= 1
             logger.debug(
-                "SubscriptionRegistry release key=%s refcount=%s", key, entry.refcount
+                "SubscriptionRegistry release key={} refcount={}", key, entry.refcount
             )
             if entry.refcount > 0:
                 return
@@ -210,7 +212,7 @@ class DataSourceManager:
         if channel in self._adapters:
             raise ValueError(f"Adapter already registered for channel '{channel}'")
         self._adapters[channel] = adapter
-        logger.info("Registered data source adapter for channel=%s", channel)
+        logger.info("Registered data source adapter for channel={}", channel)
 
     async def subscribe(self, request: DataSubscriptionRequest) -> DataSubscriptionToken:
         adapter = self._adapters.get(request.channel)
@@ -219,10 +221,16 @@ class DataSourceManager:
 
         token, is_new = await self._registry.acquire(request, lambda: adapter.subscribe(request))
         if is_new:
-            logger.info("Started new subscription for channel=%s symbol=%s", request.channel, request.symbol)
+            logger.info(
+                "Started new subscription for channel={} symbol={}",
+                request.channel,
+                request.symbol,
+            )
         else:
             logger.info(
-                "Reused subscription for channel=%s symbol=%s", request.channel, request.symbol
+                "Reused subscription for channel={} symbol={}",
+                request.channel,
+                request.symbol,
             )
         return token
 

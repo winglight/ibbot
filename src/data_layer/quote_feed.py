@@ -188,7 +188,7 @@ class IBQuoteFeed(QuoteFeed):
         try:
             ticker.updateEvent += _on_update
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.error("Failed to attach update handler for %s: %s", symbol, exc)
+            logger.error("Failed to attach update handler for {}: {}", symbol, exc)
             connection_manager.run_in_connection_thread(
                 lambda: connection_manager.get_ib_instance().cancelMktData(contract)
             )
@@ -208,7 +208,7 @@ class IBQuoteFeed(QuoteFeed):
                 try:
                     ib.cancelMktData(contract)
                 except Exception as exc:
-                    logger.warning("Failed to cancel market data for %s", contract)
+                    logger.warning("Failed to cancel market data for {}", contract)
             try:
                 ticker.updateEvent -= subscription.handler
             except Exception:
@@ -246,7 +246,7 @@ class IBQuoteFeed(QuoteFeed):
             try:
                 cb(payload)
             except Exception as exc:
-                logger.debug("Quote callback failed for %s: %s", symbol, exc)
+                logger.debug("Quote callback failed for {}: {}", symbol, exc)
 
     def _extract_payload(self, symbol: str, ticker: any) -> Optional[Dict[str, float]]:
         try:
@@ -273,7 +273,7 @@ class IBQuoteFeed(QuoteFeed):
                 "ts_ns": ts_ns,
             }
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.debug("Failed to extract ticker payload for %s: %s", symbol, exc)
+            logger.debug("Failed to extract ticker payload for {}: {}", symbol, exc)
             return None
 
     def _build_contract(self, symbol: str, options: Dict[str, any]):
@@ -333,5 +333,5 @@ def resolve_default_quote_feed() -> QuoteFeed:
     try:
         return IBQuoteFeed()
     except Exception as exc:  # pragma: no cover - defensive fallback
-        logger.warning("Falling back to in-memory quote feed: %s", exc)
+        logger.warning("Falling back to in-memory quote feed: {}", exc)
         return InMemoryQuoteFeed()
