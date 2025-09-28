@@ -403,7 +403,7 @@ class TradingApp {
         this.monitorDomHistoryMeta = null;
         this.candlestickSupported = false;
         this.candlestickLoader = null;
-        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
+        this.financialScriptUrl = '/static/js/vendor/chartjs-chart-financial.js';
         this.strategyChartInstance = null;
         this.strategyChartFallbackNotified = false;
         this.strategyChartState = this.createDefaultStrategyChartState();
