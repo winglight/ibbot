@@ -248,7 +248,6 @@ class TradingApp {
             allExecutions: []
         };
         this.cancellingOrders = new Set();
-        this.strategiesLoaded = false;
         this.currentStrategyDetails = null;
         this.internalStrategyOrders = [];
         this.strategyExecutionsCache = new Map();
@@ -280,23 +279,16 @@ class TradingApp {
         this.summaryControlsInitialized = false;
         this.summaryPrimarySaving = false;
         this.summaryPrimaryCurrent = null;
-        this.summaryPushUpdating = false;
-        this.summaryPushAwaitingData = false;
-        this.summaryPushAwaitingTimer = null;
-        this.summaryStatusLoading = false;
-        this.summaryStatusTarget = null;
         this.summaryDataFeedCurrent = null;
         this.wsHandlers = new Map();
         this.riskRulesManager = new RiskRulesManager(this);
         this.strategiesManager = new StrategiesManager(this);
         this.bindStrategiesStateProxies();
-        this.sizingHistoryCache = { table: [], latest: null, meta: null, context: null, receivedAt: 0 };
         this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
         this.registerWebSocketHandler('strategies_snapshot', (payload) => this.handleStrategiesSnapshot(payload));
         this.registerWebSocketHandler('strategy_status', (payload) => this.handleStrategyStatusMessage(payload));
         this.registerWebSocketHandler('sizing_history', (payload) => this.handleSizingHistorySnapshot(payload));
 
-        this.data_push_state = {};
         this.sidePanelManagerInitialized = false;
         this.panelLoadingStates = new Map();
 
@@ -533,103 +525,18 @@ class TradingApp {
     }
 
     handleStrategiesSnapshot(payload) {
-        if (!payload || payload.type !== 'strategies_snapshot') return false;
-        this.setPanelLoading('strategies', false);
-        if (!payload.success) {
-            console.warn('Strategies snapshot failed:', payload.error || 'unknown');
-            return true;
-        }
-        const strategies = Array.isArray(payload.strategies) ? payload.strategies : [];
-        this.strategies = strategies;
-        this.strategiesLoaded = true;
-        if (this.strategiesManager && typeof this.strategiesManager.displayStrategies === 'function') {
-            this.strategiesManager.displayStrategies(strategies);
-        }
-        return true;
+        if (!this.strategiesManager?.handleStrategiesSnapshot) return false;
+        return this.strategiesManager.handleStrategiesSnapshot(payload);
     }
 
     handleSizingHistorySnapshot(payload) {
-        if (!payload || payload.type !== 'sizing_history') return false;
-        if (!payload.success) {
-            console.warn('Sizing history snapshot failed:', payload.error || 'unknown');
-            if (payload.context === 'gs_rules') {
-                this.applySizingRuleStatusesFromHistory(null);
-            }
-            return true;
-        }
-
-        const history = Array.isArray(payload.data) ? payload.data : [];
-        const meta = payload.meta && typeof payload.meta === 'object' ? payload.meta : {};
-        const context = payload.context;
-
-        const limitValue = Number(meta?.limit ?? 0);
-        const isTablePayload = !context || context === 'table' || (Number.isFinite(limitValue) && limitValue > 1);
-
-        this.sizingHistoryCache.meta = meta;
-        this.sizingHistoryCache.context = context;
-        this.sizingHistoryCache.receivedAt = Date.now();
-        if (isTablePayload) {
-            this.sizingHistoryCache.table = history;
-        }
-        if (history.length > 0) {
-            this.sizingHistoryCache.latest = history[0];
-        } else if (isTablePayload) {
-            this.sizingHistoryCache.latest = null;
-        }
-
-        if (isTablePayload) {
-            this.renderSizingHistory(history);
-        }
-
-        const latestRecord = history[0] || this.sizingHistoryCache.latest || null;
-        this.applySizingRuleStatusesFromHistory(latestRecord);
-
-        return true;
+        if (!this.strategiesManager?.handleSizingHistorySnapshot) return false;
+        return this.strategiesManager.handleSizingHistorySnapshot(payload);
     }
 
     renderSizingHistory(history = []) {
-        const tbody = document.querySelector('#sizingHistoryTable tbody');
-        if (!tbody) return;
-
-        const records = Array.isArray(history) ? history : [];
-        if (records.length === 0) {
-            tbody.innerHTML = `
-                <tr>
-                    <td colspan="6" class="text-center text-muted">
-                        No sizing history available
-                    </td>
-                </tr>
-            `;
-            return;
-        }
-
-        const rows = records.map((item) => {
-            const timeValue = item?.sent_at || item?.created_at || item?.timestamp;
-            let timestamp = '-';
-            if (timeValue) {
-                try {
-                    timestamp = new Date(timeValue).toLocaleString();
-                } catch (_) {
-                    timestamp = String(timeValue);
-                }
-            }
-            const currentPrice = item?.current_price;
-            const priceDisplay = (currentPrice !== null && currentPrice !== undefined)
-                ? `$${this.formatNumber(currentPrice)}`
-                : 'N/A';
-            return `
-                <tr>
-                    <td>${timestamp}</td>
-                    <td>${item?.symbol ?? '-'}</td>
-                    <td><span class="badge bg-${item?.action === 'BUY' ? 'success' : 'danger'}">${item?.action ?? '-'}</span></td>
-                    <td>${item?.suggested_quantity ?? '-'}</td>
-                    <td>${item?.sizing_method ?? '-'}</td>
-                    <td>${priceDisplay}</td>
-                </tr>
-            `;
-        }).join('');
-
-        tbody.innerHTML = rows;
+        if (!this.strategiesManager?.renderSizingHistory) return;
+        this.strategiesManager.renderSizingHistory(history);
     }
 
     normalizeRuleStatus(status) {
@@ -658,215 +565,18 @@ class TradingApp {
     }
 
     applySizingRuleStatusesFromHistory(latestRecord) {
-        const record = latestRecord && typeof latestRecord === 'object' ? latestRecord : null;
-        const gStatus = record?.g_rules_status && typeof record.g_rules_status === 'object'
-            ? record.g_rules_status
-            : {};
-        const sStatus = record?.s_rules_status && typeof record.s_rules_status === 'object'
-            ? record.s_rules_status
-            : {};
-        const lastCheck = record?.timestamp || record?.sent_at || record?.created_at || null;
-
-        for (let i = 0; i <= 5; i += 1) {
-            const key = `g${i}`;
-            this.updateRuleStatus(key, this.normalizeRuleStatus(gStatus[key]), lastCheck);
-        }
-        ['s0', 's1', 's2', 's3', 's4'].forEach((key) => {
-            this.updateRuleStatus(key, this.normalizeRuleStatus(sStatus[key]), lastCheck);
-        });
+        if (!this.strategiesManager?.applySizingRuleStatusesFromHistory) return;
+        this.strategiesManager.applySizingRuleStatusesFromHistory(latestRecord);
     }
 
     handleStrategyStatusMessage(payload) {
-        return this.applyStrategyStatusPayload(payload);
+        if (!this.strategiesManager?.handleStrategyStatusMessage) return false;
+        return this.strategiesManager.handleStrategyStatusMessage(payload);
     }
 
     applyStrategyStatusPayload(payload) {
-        if (!payload || payload.type !== 'strategy_status') {
-            return false;
-        }
-
-        const targetName = payload.name || this.summaryStatusTarget || this.currentStrategyDetails;
-        if (!targetName) {
-            return false;
-        }
-        if (this.summaryStatusTarget && payload.name && payload.name !== this.summaryStatusTarget) {
-            return false;
-        }
-
-        const receivingEl = document.getElementById('summaryStatusReceiving');
-        if (!receivingEl) {
-            return false;
-        }
-
-        const runtimeEl = document.getElementById('summaryStatusRuntime');
-        const processedEl = document.getElementById('summaryStatusProcessed');
-        const thresholdEl = document.getElementById('summaryStatusThresholdHits');
-        const buyEl = document.getElementById('summaryStatusBuySignals');
-        const sellEl = document.getElementById('summaryStatusSellSignals');
-        const statusPush = document.getElementById('summaryDataPushStatus');
-        const pushSwitch = document.getElementById('summaryDataPushSwitch');
-        const logList = document.getElementById('summaryDataLogList');
-        const slPriceEl = document.getElementById('summaryStatusStopLoss');
-        const tpPriceEl = document.getElementById('summaryStatusTakeProfit');
-
-        this.summaryStatusLoading = false;
-        this.summaryStatusTarget = targetName;
-
-        if (!payload.success) {
-            receivingEl.textContent = '-';
-            runtimeEl && (runtimeEl.textContent = '-');
-            processedEl && (processedEl.textContent = '-');
-            thresholdEl && (thresholdEl.textContent = '-');
-            buyEl && (buyEl.textContent = '-');
-            sellEl && (sellEl.textContent = '-');
-            slPriceEl && (slPriceEl.textContent = '-');
-            tpPriceEl && (tpPriceEl.textContent = '-');
-            if (statusPush) statusPush.textContent = '未推送';
-            if (logList) logList.innerHTML = '<li class="text-muted">暂无记录</li>';
-            this.summaryPushAwaitingData = false;
-            this.data_push_state = {};
-            if (this.summaryPushAwaitingTimer) {
-                clearTimeout(this.summaryPushAwaitingTimer);
-                this.summaryPushAwaitingTimer = null;
-            }
-            this.setStrategyChartRiskLevels({ slEnabled: false, tpEnabled: false, slPrice: null, tpPrice: null });
-            return true;
-        }
-
-        const status = payload.status || {};
-        const pushState = status.data_push || {};
-        const reasonText = status.data_push_reason || pushState.status_reason || '';
-        const slEnabled = Boolean(status.sl_enabled);
-        const tpEnabled = Boolean(status.tp_enabled);
-        const rawSlPrice = status.sl_price;
-        const rawTpPrice = status.tp_price;
-        const slPriceNumber = (slEnabled && rawSlPrice !== null && rawSlPrice !== undefined)
-            ? Number(rawSlPrice)
-            : null;
-        const tpPriceNumber = (tpEnabled && rawTpPrice !== null && rawTpPrice !== undefined)
-            ? Number(rawTpPrice)
-            : null;
-        if (slPriceEl) {
-            if (slEnabled) {
-                if (Number.isFinite(slPriceNumber)) {
-                    slPriceEl.textContent = `$${this.formatNumber(slPriceNumber)}`;
-                } else {
-                    slPriceEl.textContent = '—';
-                }
-            } else {
-                slPriceEl.textContent = '未启用';
-            }
-        }
-        if (tpPriceEl) {
-            if (tpEnabled) {
-                if (Number.isFinite(tpPriceNumber)) {
-                    tpPriceEl.textContent = `$${this.formatNumber(tpPriceNumber)}`;
-                } else {
-                    tpPriceEl.textContent = '—';
-                }
-            } else {
-                tpPriceEl.textContent = '未启用';
-            }
-        }
-        this.setStrategyChartRiskLevels({
-            slEnabled,
-            tpEnabled,
-            slPrice: Number.isFinite(slPriceNumber) ? slPriceNumber : null,
-            tpPrice: Number.isFinite(tpPriceNumber) ? tpPriceNumber : null,
-        });
-        if (status.is_receiving_data) {
-            receivingEl.textContent = 'Yes';
-        } else if (reasonText) {
-            receivingEl.textContent = `No — ${reasonText}`;
-        } else {
-            receivingEl.textContent = 'No';
-        }
-        runtimeEl && (runtimeEl.textContent =
-            typeof status.runtime_seconds === 'number'
-                ? this.formatRuntimeDuration(status.runtime_seconds)
-                : '-');
-        processedEl && (processedEl.textContent = status.processed_count ?? '-');
-        thresholdEl && (thresholdEl.textContent = status.threshold_hits ?? '-');
-        buyEl && (buyEl.textContent = status.buy_signals ?? '-');
-        sellEl && (sellEl.textContent = status.sell_signals ?? '-');
-
-        let awaitingData = !!pushState.awaiting_data;
-        if (status.is_receiving_data) {
-            awaitingData = false;
-        }
-        if (!pushState.active) {
-            awaitingData = false;
-        }
-
-        this.summaryPushAwaitingData = awaitingData;
-        if (awaitingData) {
-            if (!this.summaryPushAwaitingTimer) {
-                this.summaryPushAwaitingTimer = setTimeout(() => {
-                    this.summaryPushAwaitingTimer = null;
-                    if (this.currentStrategyDetails === targetName) {
-                        this.loadStrategyStatus(targetName, { force: true });
-                    }
-                }, 1500);
-            }
-        } else if (this.summaryPushAwaitingTimer) {
-            clearTimeout(this.summaryPushAwaitingTimer);
-            this.summaryPushAwaitingTimer = null;
-        }
-
-        if (pushSwitch && !this.summaryPushUpdating) {
-            pushSwitch.checked = !!pushState.active;
-        }
-        if (statusPush) {
-            if (pushState.active) {
-                if (!awaitingData && reasonText) {
-                    statusPush.textContent = reasonText;
-                } else {
-                    statusPush.textContent = awaitingData ? '等待DOM数据…' : '已推送';
-                }
-            } else {
-                statusPush.textContent = reasonText || '未推送';
-            }
-        }
-
-        const logs = Array.isArray(status.data_push_logs) ? status.data_push_logs : [];
-        if (logList) {
-            if (!logs.length) {
-                logList.innerHTML = '<li class="text-muted">暂无记录</li>';
-            } else {
-                const items = logs.map((entry, idx) => {
-                    if (!entry || typeof entry !== 'object') return '';
-                    const level = String(entry.level || 'info').toLowerCase();
-                    let badgeClass = 'bg-secondary';
-                    if (level === 'error') badgeClass = 'bg-danger';
-                    else if (level === 'warning') badgeClass = 'bg-warning text-dark';
-                    const timestamp = entry.timestamp ? `<span class="text-muted me-2">${this.escapeHtml(String(entry.timestamp))}</span>` : '';
-                    const message = this.escapeHtml(String(entry.message || ''));
-                    let detailHtml = '';
-                    if (entry.details && typeof entry.details === 'object') {
-                        const detailParts = Object.entries(entry.details).map(([key, value]) => `${this.escapeHtml(String(key))}=${this.escapeHtml(String(value ?? ''))}`);
-                        if (detailParts.length) {
-                            detailHtml = `<div class="text-muted ms-4">${detailParts.join(', ')}</div>`;
-                        }
-                    }
-                    const borderClass = idx === 0 ? '' : ' border-top';
-                    return `<li class="py-2${borderClass}"><span class="badge ${badgeClass} me-2">${level.toUpperCase()}</span>${timestamp}${message}${detailHtml}</li>`;
-                }).filter(Boolean);
-                logList.innerHTML = items.join('') || '<li class="text-muted">暂无记录</li>';
-            }
-        }
-
-        this.data_push_state = {
-            enabled: !!pushState.active,
-            active: !!pushState.active,
-            subscription: pushState.subscription,
-            symbol: pushState.symbol,
-            awaiting_data: awaitingData,
-            last_data_timestamp: pushState.last_data_timestamp || null,
-            status_reason: reasonText || null,
-            logs,
-        };
-
-        return true;
+        if (!this.strategiesManager?.applyStrategyStatusPayload) return false;
+        return this.strategiesManager.applyStrategyStatusPayload(payload);
     }
 
     addDomSignal(signal) {
@@ -10384,49 +10094,13 @@ class TradingApp {
 
 
     async loadGSRulesStatus() {
-        const latest = this.sizingHistoryCache?.latest || null;
-        this.applySizingRuleStatusesFromHistory(latest);
-
-        if (this.ibkrManager && typeof this.ibkrManager.requestSizingHistory === 'function') {
-            const result = this.ibkrManager.requestSizingHistory({
-                limit: 1,
-                context: 'gs_rules',
-                minInterval: 5000,
-            });
-            if (result === 'failed') {
-                console.warn('Failed to request G/S rules status via websocket');
-            }
-            return result;
-        }
-
-        console.warn('WebSocket sizing history request unavailable for G/S rules');
-        return 'failed';
+        if (!this.strategiesManager?.loadGSRulesStatus) return 'failed';
+        return this.strategiesManager.loadGSRulesStatus();
     }
 
     updateRuleStatus(ruleId, status, lastCheck) {
-        const statusElement = document.getElementById(`${ruleId}_status`);
-        const messageElement = document.getElementById(`${ruleId}_message`);
-        const lastElement = document.getElementById(`${ruleId}_last`);
-        
-        if (statusElement) {
-            statusElement.className = `badge ${status.passed ? 'bg-success' : 'bg-danger'}`;
-            statusElement.textContent = status.passed ? '通过' : '违规';
-        }
-        
-        if (messageElement) {
-            messageElement.textContent = status.message || (status.passed ? '正常' : '违规');
-        }
-        
-        if (lastElement) {
-            const ts = lastCheck || status?.timestamp || status?.lastCheck;
-            if (ts) {
-                try {
-                    lastElement.textContent = new Date(ts).toLocaleString();
-                } catch (_) {
-                    lastElement.textContent = ts;
-                }
-            }
-        }
+        if (!this.strategiesManager?.updateRuleStatus) return;
+        this.strategiesManager.updateRuleStatus(ruleId, status, lastCheck);
     }
 
     async showConfigModal(activeTab = 'g-rules') {
