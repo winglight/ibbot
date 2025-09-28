@@ -403,10 +403,12 @@ class TradingApp {
         this.monitorDomHistoryMeta = null;
         this.candlestickSupported = false;
         this.candlestickLoader = null;
-        this.chartDateAdapterUrl = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon';
+        this.luxonScriptUrl = 'https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js';
+        this.luxonLoader = null;
+        this.chartDateAdapterUrl = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js';
         this.dateAdapterReady = false;
         this.dateAdapterLoader = null;
-        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
+        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.umd.min.js';
         this.chartScriptableGuardApplied = false;
         this.strategyChartInstance = null;
         this.strategyChartFallbackNotified = false;
@@ -1781,6 +1783,12 @@ class TradingApp {
     async init() {
         try {
             if (window.Chart && window.Chart.register) {
+                if (!window.ChartAnnotation && window['chartjs-plugin-annotation']) {
+                    window.ChartAnnotation = window['chartjs-plugin-annotation'];
+                }
+                if (!window.zoomPlugin && window['chartjs-plugin-zoom']) {
+                    window.zoomPlugin = window['chartjs-plugin-zoom'];
+                }
                 if (window.ChartAnnotation) {
                     window.Chart.register(window.ChartAnnotation);
                 }
@@ -2963,6 +2971,92 @@ class TradingApp {
         };
     }
 
+    isLuxonReady() {
+        return typeof luxon !== 'undefined' && luxon && typeof luxon.DateTime === 'function';
+    }
+
+    async ensureLuxon(options = {}) {
+        if (this.isLuxonReady()) {
+            return true;
+        }
+
+        if (this.luxonLoader) {
+            try {
+                return await this.luxonLoader;
+            } catch (error) {
+                console.warn('Luxon loading promise rejected:', error);
+                return this.isLuxonReady();
+            }
+        }
+
+        const targetUrl = (options && options.url) || this.luxonScriptUrl;
+        if (!targetUrl) {
+            return this.isLuxonReady();
+        }
+
+        const normalizedUrl = targetUrl.trim();
+        const dynamicScriptSelector = 'script[data-dynamic="luxon"]';
+        const existingDynamic = document.querySelector(dynamicScriptSelector);
+
+        const buildLoaderPromise = (scriptElement, newlyCreated = false) => new Promise((resolve, reject) => {
+            const cleanup = () => {
+                scriptElement.removeEventListener('load', handleLoad);
+                scriptElement.removeEventListener('error', handleError);
+            };
+            const finalize = () => {
+                setTimeout(() => {
+                    resolve(this.isLuxonReady());
+                }, 0);
+            };
+            const handleLoad = () => {
+                if (newlyCreated) {
+                    scriptElement.dataset.loaded = 'true';
+                }
+                cleanup();
+                finalize();
+            };
+            const handleError = (err) => {
+                cleanup();
+                reject(err || new Error(`Failed to load Luxon script ${normalizedUrl}`));
+            };
+
+            scriptElement.addEventListener('load', handleLoad, { once: true });
+            scriptElement.addEventListener('error', handleError, { once: true });
+
+            if (scriptElement.dataset && scriptElement.dataset.loaded === 'true') {
+                finalize();
+            }
+        });
+
+        if (existingDynamic) {
+            if (existingDynamic.dataset.loading !== 'true' && existingDynamic.dataset.loaded === 'true') {
+                return this.isLuxonReady();
+            }
+            this.luxonLoader = buildLoaderPromise(existingDynamic);
+        } else {
+            const script = document.createElement('script');
+            script.src = normalizedUrl;
+            script.crossOrigin = 'anonymous';
+            script.async = true;
+            script.dataset.loading = 'true';
+            script.dataset.dynamic = 'luxon';
+            this.luxonLoader = buildLoaderPromise(script, true);
+            script.addEventListener('load', () => { delete script.dataset.loading; }, { once: true });
+            script.addEventListener('error', () => { delete script.dataset.loading; }, { once: true });
+            document.head.appendChild(script);
+        }
+
+        try {
+            const ready = await this.luxonLoader;
+            return ready;
+        } catch (error) {
+            console.warn('Failed to load Luxon:', error);
+            return this.isLuxonReady();
+        } finally {
+            this.luxonLoader = null;
+        }
+    }
+
     isDateAdapterReady() {
         const chart = window.Chart;
         const adapterClass = chart?._adapters?._date;
@@ -3005,6 +3099,11 @@ class TradingApp {
                 console.warn('Date adapter loading promise rejected:', error);
                 return false;
             }
+        }
+
+        const luxonReady = await this.ensureLuxon();
+        if (!luxonReady) {
+            console.warn('Luxon library unavailable - date adapter may not initialize correctly.');
         }
 
         const targetUrl = (options && options.url) || this.chartDateAdapterUrl;
