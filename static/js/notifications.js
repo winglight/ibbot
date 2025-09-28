@@ -1,5 +1,10 @@
-(function() {
+(function(global) {
     "use strict";
+
+    const root = global || {};
+    const appModules = root.appModules = root.appModules || {};
+    const notificationsNamespace = appModules.notifications = appModules.notifications || {};
+    const managerNamespace = notificationsNamespace.manager = notificationsNamespace.manager || {};
     
     class NotificationsManager {
         constructor(app) {
@@ -7,6 +12,8 @@
             this.notificationHistory = [];
             this.settingsListenersAttached = false;
             this.clearingNotifications = false;
+            this.startReminderTimeout = null;
+            this.endReminderTimeout = null;
             if (this.app) {
                 this.app.filterNotificationHistory = this.filterNotificationHistory.bind(this);
             }
@@ -61,7 +68,105 @@
             const filters = this.getHistoryFilters();
             return this.loadNotificationHistory(filters);
         }
-        
+
+        scheduleTradingReminders() {
+            if (typeof window === 'undefined' || !('Notification' in window)) {
+                console.log('浏览器不支持通知功能');
+                return;
+            }
+
+            const startTime = localStorage.getItem('startTradingTime') || '20:30';
+            const endTime = localStorage.getItem('endTradingTime') || '22:30';
+            const now = new Date();
+            const schedule = (timeStr, type) => {
+                const target = this.getNextReminderDate(timeStr, now);
+                const delay = target.getTime() - now.getTime();
+                if (delay <= 0) {
+                    console.warn(`${type === 'start' ? '开市' : '收市'}提醒时间已过，跳过`);
+                    return null;
+                }
+                return setTimeout(() => {
+                    this.fireTradingReminder(type);
+                    this.scheduleTradingReminders();
+                }, delay);
+            };
+
+            if (Notification.permission === 'default') {
+                try {
+                    Notification.requestPermission().then(permission => {
+                        console.log(`通知权限状态: ${permission}`);
+                    });
+                } catch (e) {
+                    console.error('请求通知权限失败:', e);
+                }
+            }
+
+            if (this.startReminderTimeout) {
+                clearTimeout(this.startReminderTimeout);
+            }
+            if (this.endReminderTimeout) {
+                clearTimeout(this.endReminderTimeout);
+            }
+
+            this.startReminderTimeout = schedule(startTime, 'start');
+            this.endReminderTimeout = schedule(endTime, 'end');
+        }
+
+        fireTradingReminder(type) {
+            const message = type === 'start' ? '🔔 开始交易提醒' : '🔔 结束交易提醒';
+            try {
+                if ('Notification' in window && Notification.permission === 'granted') {
+                    const notification = new Notification(message, {
+                        icon: '/favicon.ico',
+                        badge: '/favicon.ico',
+                        tag: 'trading-reminder',
+                        requireInteraction: true
+                    });
+                    setTimeout(() => notification.close(), 10000);
+                }
+            } catch (e) {
+                console.error('发送浏览器通知失败:', e);
+            }
+
+            if (this.app && typeof this.app.apiCall === 'function') {
+                this.app.apiCall('/notify', {
+                    method: 'POST',
+                    body: JSON.stringify({ message, event_type: 'trading_reminder' })
+                }).catch(error => {
+                    console.error('Telegram通知发送失败:', error);
+                });
+            }
+        }
+
+        getNextReminderDate(timeStr, reference) {
+            const [hour, minute] = timeStr.split(':').map(n => parseInt(n, 10));
+            let date = new Date(reference);
+            date.setHours(hour, minute, 0, 0);
+            while (date <= reference || !this.isWorkingDay(date) || this.isNasdaqHoliday(date)) {
+                date.setDate(date.getDate() + 1);
+                date.setHours(hour, minute, 0, 0);
+            }
+            return date;
+        }
+
+        isWorkingDay(date) {
+            const day = date.getDay();
+            return day >= 1 && day <= 5;
+        }
+
+        isNasdaqHoliday(date) {
+            const holidays = [
+                '2024-01-01', '2024-01-15', '2024-02-19', '2024-03-29',
+                '2024-05-27', '2024-06-19', '2024-07-04', '2024-09-02',
+                '2024-11-28', '2024-12-25',
+                '2025-01-01', '2025-01-20', '2025-02-17', '2025-04-18',
+                '2025-05-26', '2025-06-19', '2025-07-04', '2025-09-01',
+                '2025-11-27', '2025-12-25'
+            ];
+            const d = date.toISOString().split('T')[0];
+            return holidays.includes(d);
+        }
+
         // 添加通知到面板
         addNotification(type, message, timestamp = null) {
             const notificationPanel = document.getElementById('notificationPanel');
@@ -440,7 +545,7 @@
                     
                     // Update trading reminder schedules if enabled
                     if (settings.trading_reminder && settings.trading_reminder.enabled) {
-                        this.app.scheduleTradingReminders();
+                        this.scheduleTradingReminders();
                     }
                     
                     const modal = bootstrap.Modal.getInstance(document.getElementById('notificationSettingsModal'));
@@ -705,6 +810,5 @@
         }
     }
     
-    // 导出到全局
-    window.NotificationsManager = NotificationsManager;
-})();
+    managerNamespace.NotificationsManager = NotificationsManager;
+})(typeof window !== 'undefined' ? window : globalThis);

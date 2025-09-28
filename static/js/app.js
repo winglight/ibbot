@@ -6,6 +6,12 @@ const MonitoringUtils = monitoringModules.utils || {};
 const MonitoringManagerModule = monitoringModules.manager || {};
 const MonitoringManagerClass = MonitoringManagerModule.MonitoringManager;
 const SharedUtils = appModules.utils || {};
+const ordersModules = appModules.orders || {};
+const OrdersManagerModule = ordersModules.manager || {};
+const OrdersManagerClass = OrdersManagerModule.OrderManager || globalScope.OrderManager;
+const notificationsModules = appModules.notifications || {};
+const NotificationsManagerModule = notificationsModules.manager || {};
+const NotificationsManagerClass = NotificationsManagerModule.NotificationsManager || globalScope.NotificationsManager;
 
 const {
     INTERVAL_MINUTES_MAP = {},
@@ -240,8 +246,6 @@ class TradingApp {
         };
         this.cancellingOrders = new Set();
         this.strategiesLoaded = false;
-        this.startReminderTimeout = null;
-        this.endReminderTimeout = null;
         this.currentStrategyDetails = null;
         this.internalStrategyOrders = [];
         this.strategyExecutionsCache = new Map();
@@ -297,14 +301,18 @@ class TradingApp {
         this.loginManager = new LoginManager(this);
         this.ibkrManager = new IBKRConnectionManager(this);
         this.dataManager = new IBKRDataManager(this);
-        this.orderManager = new OrderManager(this);
+        this.orderManager = typeof OrdersManagerClass === 'function'
+            ? new OrdersManagerClass(this)
+            : new OrderManager(this);
         this.portfolioManager = new PortfolioManager(this);
         this.logsManager = new LogsManager(
             this.apiCall.bind(this),
             this.showAlert.bind(this),
             this.formatNumber.bind(this)
         );
-        this.notificationsManager = new NotificationsManager(this);
+        this.notificationsManager = typeof NotificationsManagerClass === 'function'
+            ? new NotificationsManagerClass(this)
+            : new NotificationsManager(this);
         this.domManager = new DOMManager(this);
 
         this.guardChartScriptableDescriptors();
@@ -2226,99 +2234,11 @@ class TradingApp {
     // WebSocket functionality moved to IBKRConnectionManager
 
     scheduleTradingReminders() {
-        if (typeof window === 'undefined' || !('Notification' in window)) {
-            console.log('浏览器不支持通知功能');
-            return;
-        }
-
-        const startTime = localStorage.getItem('startTradingTime') || '20:30';
-        const endTime = localStorage.getItem('endTradingTime') || '22:30';
-
-        const now = new Date();
-        console.log(`当前时间: ${now.toLocaleString()}, 开市提醒: ${startTime}, 收市提醒: ${endTime}`);
-
-        const schedule = (timeStr, type) => {
-            const target = this.getNextReminderDate(timeStr, now);
-            const delay = target.getTime() - now.getTime();
-            console.log(`${type === 'start' ? '开市' : '收市'}提醒计划时间: ${target.toLocaleString()}, 延迟: ${Math.round(delay/1000/60)}分钟`);
-            
-            if (delay <= 0) {
-                console.warn(`${type === 'start' ? '开市' : '收市'}提醒时间已过，跳过`);
-                return null;
-            }
-            
-            return setTimeout(() => {
-                console.log(`触发${type === 'start' ? '开市' : '收市'}提醒`);
-                this.fireTradingReminder(type);
-                this.scheduleTradingReminders();
-            }, delay);
-        };
-
-        // 请求通知权限
-        if (Notification.permission === 'default') {
-            try { 
-                Notification.requestPermission().then(permission => {
-                    console.log(`通知权限状态: ${permission}`);
-                });
-            } catch (e) {
-                console.error('请求通知权限失败:', e);
-            }
-        } else {
-            console.log(`当前通知权限状态: ${Notification.permission}`);
-        }
-
-        // 清除之前的定时器
-        if (this.startReminderTimeout) {
-            clearTimeout(this.startReminderTimeout);
-            console.log('清除之前的开市提醒定时器');
-        }
-        if (this.endReminderTimeout) {
-            clearTimeout(this.endReminderTimeout);
-            console.log('清除之前的收市提醒定时器');
-        }
-
-        // 设置新的定时器
-        this.startReminderTimeout = schedule(startTime, 'start');
-        this.endReminderTimeout = schedule(endTime, 'end');
-        
-        console.log('定时提醒已重新设置');
+        return this.notificationsManager.scheduleTradingReminders();
     }
 
     fireTradingReminder(type) {
-        const message = type === 'start' ? '🔔 开始交易提醒' : '🔔 结束交易提醒';
-        console.log(`发送提醒: ${message}`);
-        
-        // 浏览器通知
-        try {
-            if ('Notification' in window && Notification.permission === 'granted') {
-                const notification = new Notification(message, {
-                    icon: '/favicon.ico',
-                    badge: '/favicon.ico',
-                    tag: 'trading-reminder',
-                    requireInteraction: true
-                });
-                console.log('浏览器通知已发送');
-                
-                // 自动关闭通知
-                setTimeout(() => {
-                    notification.close();
-                }, 10000);
-            } else {
-                console.warn(`无法发送浏览器通知，权限状态: ${Notification.permission}`);
-            }
-        } catch (e) {
-            console.error('发送浏览器通知失败:', e);
-        }
-        
-        // Telegram通知
-        this.apiCall('/notify', {
-            method: 'POST',
-            body: JSON.stringify({ message, event_type: 'trading_reminder' })
-        }).then(response => {
-            console.log('Telegram通知发送成功:', response);
-        }).catch(error => {
-            console.error('Telegram通知发送失败:', error);
-        });
+        return this.notificationsManager.fireTradingReminder(type);
     }
     
 
@@ -2326,34 +2246,10 @@ class TradingApp {
 
 
     getNextReminderDate(timeStr, reference) {
-        const [hour, minute] = timeStr.split(':').map(n => parseInt(n, 10));
-        let date = new Date(reference);
-        date.setHours(hour, minute, 0, 0);
-        while (date <= reference || !this.isWorkingDay(date) || this.isNasdaqHoliday(date)) {
-            date.setDate(date.getDate() + 1);
-            date.setHours(hour, minute, 0, 0);
+        if (typeof this.notificationsManager.getNextReminderDate === 'function') {
+            return this.notificationsManager.getNextReminderDate(timeStr, reference);
         }
-        return date;
-    }
-
-    isWorkingDay(date) {
-        const day = date.getDay();
-        return day >= 1 && day <= 5;
-    }
-
-    isNasdaqHoliday(date) {
-        const holidays = [
-            // 2024年假期
-            '2024-01-01', '2024-01-15', '2024-02-19', '2024-03-29',
-            '2024-05-27', '2024-06-19', '2024-07-04', '2024-09-02',
-            '2024-11-28', '2024-12-25',
-            // 2025年假期
-            '2025-01-01', '2025-01-20', '2025-02-17', '2025-04-18',
-            '2025-05-26', '2025-06-19', '2025-07-04', '2025-09-01',
-            '2025-11-27', '2025-12-25'
-        ];
-        const d = date.toISOString().split('T')[0];
-        return holidays.includes(d);
+        return new Date(reference);
     }
 
     // API请求缓存
@@ -3413,70 +3309,7 @@ class TradingApp {
     }
 
     async closePosition(symbol, options = {}) {
-        const { positionQty: rawQty = null, skipConfirm = false } = options || {};
-        const normalizedSymbol = typeof symbol === 'string' ? symbol.trim() : '';
-        if (!normalizedSymbol) {
-            return false;
-        }
-
-        const lookupSymbol = normalizedSymbol.toUpperCase();
-        let qty = rawQty;
-        if (qty === null || typeof qty === 'undefined') {
-            const positionInfo = this.dataManager?.getPosition?.(lookupSymbol) || this.dataManager?.getPosition?.(normalizedSymbol);
-            if (positionInfo) {
-                qty = positionInfo.position;
-            }
-        }
-        qty = Number(qty);
-        if (!Number.isFinite(qty) || Math.abs(qty) < 1e-9) {
-            this.showAlert('warning', '当前无持仓，无法平仓');
-            return false;
-        }
-
-        if (!skipConfirm) {
-            const confirmed = confirm(`确认平仓 ${lookupSymbol}？\n持仓量: ${qty}\n将以市价单全部平仓`);
-            if (!confirmed) {
-                return false;
-            }
-        }
-
-        try {
-            const response = await this.apiCall('/close_position', {
-                method: 'POST',
-                body: JSON.stringify({ symbol: normalizedSymbol })
-            });
-
-            if (response?.success) {
-                const actionText = response.action || 'CLOSE';
-                const quantityText = Number.isFinite(response.quantity) ? response.quantity : qty;
-                const orderIdText = response.order_id ? ` (订单ID: ${response.order_id})` : '';
-                this.showAlert('success', `平仓订单已提交: ${actionText} ${quantityText} ${lookupSymbol}${orderIdText}`);
-                await this.loadPortfolio();
-                this.loadOrders();
-
-                const monitorSymbol = (this.currentMonitor?.symbol || '').trim();
-                if (monitorSymbol && monitorSymbol.toUpperCase() === lookupSymbol && typeof this.syncMonitorModalData === 'function') {
-                    try {
-                        await this.syncMonitorModalData(lookupSymbol);
-                    } catch (syncErr) {
-                        console.warn('Failed to sync monitor modal after close position:', syncErr);
-                    }
-                }
-                return true;
-            }
-
-            const failureReason = (response && response.message) ? response.message : '未知错误';
-            this.showAlert('danger', `平仓失败: ${failureReason}`);
-        } catch (err) {
-            if (err?.isReadOnly) {
-                return false;
-            }
-            console.error('平仓失败:', err);
-            const message = err?.message || err;
-            this.showAlert('danger', `平仓失败: ${message}`);
-        }
-
-        return false;
+        return this.orderManager.closePosition(symbol, options);
     }
 
     async openMonitorModal(symbol, positionQty = 0, currentPrice = 0, avgCost = 0, pnl = 0, pnlPercent = 0) {
@@ -4176,138 +4009,16 @@ class TradingApp {
         }
     }
 
-    // 订单数据缓存
-    ordersCache = {};
-    
-    // 创建防抖版本的loadMonitorOrdersList方法
-    debouncedLoadMonitorOrdersList = null;
-    
-    // 初始化防抖函数
-    initDebounce() {
-        if (!this.debouncedLoadMonitorOrdersList) {
-            this.debouncedLoadMonitorOrdersList = this.debounce(this._loadMonitorOrdersList.bind(this), 300);
-        }
+    initOrdersDebounce() {
+        return this.orderManager.initOrdersDebounce?.();
     }
-    
-    // 防抖包装方法
+
+    initMonitorOrdersDebounce() {
+        return this.orderManager.initMonitorOrdersDebounce?.();
+    }
+
     async loadMonitorOrdersList(symbol, status = 'working') {
-        // 确保防抖函数已初始化
-        this.initDebounce();
-        
-        const ordersList = document.getElementById('monitorOrdersList');
-        if (!ordersList) return;
-        
-        // 显示加载状态
-        ordersList.innerHTML = '<div class="text-center text-muted py-2"><div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div><small>加载订单数据中...</small></div>';
-        
-        // 调用防抖版本的方法
-        this.debouncedLoadMonitorOrdersList(symbol, status);
-    }
-    
-    // 实际加载订单的方法
-    async _loadMonitorOrdersList(symbol, status = 'working') {
-        try {
-            const ordersList = document.getElementById('monitorOrdersList');
-            if (!ordersList) return;
-            
-            // 检查缓存
-            const cacheKey = `orders_${symbol}_${status}`;
-            const now = Date.now();
-            const cachedData = this.ordersCache[cacheKey];
-            
-            let result;
-            if (cachedData && (now - cachedData.timestamp) < 10 * 1000) { // 10秒缓存
-                console.log(`Using cached orders data for ${symbol} (${status})`);
-                result = cachedData.data;
-            } else {
-                console.log(`Fetching fresh orders data for ${symbol} (${status})`);
-                // 获取订单数据，使用缓存机制
-                result = await this.apiCall('/orders', {
-                    useCache: true,
-                    cacheTime: 10000, // 10秒缓存
-                    timeout: 20000 // 20秒超时
-                });
-                
-                // 更新缓存
-                this.ordersCache[cacheKey] = {
-                    data: result,
-                    timestamp: now
-                };
-            }
-            
-            let orders = result.orders || [];
-            // 仅保留当天创建的订单
-            orders = orders.filter(order => this.isSameDay(order.submit_time || order.created_at));
-            
-            // 过滤当前资产的订单
-            const filteredOrders = orders.filter(order => {
-                const matchSymbol = order.symbol === symbol;
-                
-                // 市价单应该总是显示在filled中，因为它们会立即成交
-                if (order.order_type === 'MKT') {
-                    return matchSymbol && status === 'filled';
-                }
-                
-                // 限价单根据状态分类
-                const matchStatus = status === 'working' ? 
-                    ['PendingSubmit', 'Submitted', 'PreSubmitted', 'ApiPending'].includes(order.status) :
-                    ['Filled'].includes(order.status);
-                return matchSymbol && matchStatus;
-            });
-            
-            if (filteredOrders.length === 0) {
-                ordersList.innerHTML = '<div class="text-center text-muted py-2"><small>暂无订单</small></div>';
-                return;
-            }
-            
-            // 构建订单列表HTML
-            let html = '';
-            filteredOrders.forEach(order => {
-                const side = order.action === 'BUY' ? '买入' : '卖出';
-                const sideClass = order.action === 'BUY' ? 'text-success' : 'text-danger';
-                const quantity = Math.abs(parseFloat(order.quantity || 0));
-                // 检查订单类型和价格
-                const orderType = order.order_type || 'MKT';
-                const limitPrice = parseFloat(order.limit_price || 0);
-                const avgFillPrice = parseFloat(order.avg_fill_price || 0);
-                
-                let priceText;
-                if (orderType === 'LMT' && limitPrice > 0) {
-                    priceText = `$${limitPrice.toFixed(2)} (限价)`;
-                } else if (avgFillPrice > 0) {
-                    priceText = `$${avgFillPrice.toFixed(2)} (成交)`;
-                } else {
-                    priceText = '市价';
-                }
-                
-                // 判断是否需要显示同步按钮（限价单且状态为Submitted）
-                const needSyncButton = orderType === 'LMT' && order.status === 'Submitted';
-                
-                html += `
-                    <div class="border-bottom py-1">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <div>
-                                <span class="badge ${sideClass === 'text-success' ? 'bg-success' : 'bg-danger'} me-1">${side}</span>
-                                <small class="text-muted">${quantity}</small>
-                            </div>
-                            <div class="text-end d-flex align-items-center">
-                                <small class="${sideClass} me-2">${priceText}</small>
-                                ${needSyncButton ? `<button class="btn btn-outline-primary btn-sm" onclick="app.syncLimitOrder('${order.order_id}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : ''}
-                            </div>
-                        </div>
-                    </div>
-                `;
-            });
-            
-            ordersList.innerHTML = html;
-            
-        } catch (error) {
-            console.error('加载订单列表失败:', error);
-            const ordersList = document.getElementById('monitorOrdersList');
-            if (ordersList) {
-                ordersList.innerHTML = '<div class="text-center text-muted py-2"><small>加载失败</small></div>';
-            }
-        }
+        return this.orderManager.loadMonitorOrdersList(symbol, status);
     }
 
     async openOrderDetails(orderId) {
@@ -7090,14 +6801,9 @@ class TradingApp {
         return this.riskRulesManager.addRiskRule();
     }
 
-    // 创建防抖版本的loadOrders方法
-    debouncedLoadOrders = null;
-    
     // 初始化loadOrders防抖函数
     initOrdersDebounce() {
-        if (!this.debouncedLoadOrders) {
-            this.debouncedLoadOrders = this.debounce(this._loadOrders.bind(this), 300);
-        }
+        return this.orderManager.initOrdersDebounce?.();
     }
     
     // 委托给OrderManager
@@ -7127,57 +6833,7 @@ class TradingApp {
     // 订单表格相关方法已迁移到OrderManager
 
     renderInternalOrders(name, orders = null) {
-        const tbody = document.querySelector('#internalOrdersTable tbody');
-        if (!tbody) return;
-
-        const strategyName = name || this.currentStrategyDetails;
-        const sourceOrders = Array.isArray(orders) ? orders : this.internalStrategyOrders;
-        const data = Array.isArray(sourceOrders) ? sourceOrders : [];
-        if (!strategyName || data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No strategy orders</td></tr>';
-            return;
-        }
-
-        const frag = document.createDocumentFragment();
-        data.forEach(order => {
-            if (!order) return;
-            const createdTimestamp = order.created_at
-                || order.submit_time
-                || order.timestamp
-                || null;
-            const normalized = {
-                order_id: order.order_id,
-                symbol: order.symbol,
-                action: order.action,
-                quantity: order.quantity,
-                order_type: order.order_type || 'MKT',
-                limit_price: order.price ?? order.limit_price ?? null,
-                price: order.price ?? null,
-                avg_fill_price: order.fill_price ?? order.price ?? 0,
-                status: order.status || 'Submitted',
-                pnl: Number(order.pnl ?? 0),
-                commission: Number(order.commission ?? 0),
-                order_source: order.order_source || 'strategy',
-                notes: order.notes || '',
-                created_at: createdTimestamp,
-                submit_time: order.submit_time
-                    || order.created_at
-                    || order.timestamp
-                    || createdTimestamp,
-            };
-            const row = this.orderManager.generateOrderRowHtml(normalized);
-            if (row) {
-                frag.appendChild(row);
-            }
-        });
-
-        if (!frag.childNodes.length) {
-            tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No strategy orders</td></tr>';
-            return;
-        }
-
-        tbody.innerHTML = '';
-        tbody.appendChild(frag);
+        return this.orderManager.renderInternalOrders(name, orders);
     }
 
     async loadInternalStrategyOrders(name, { executions = null, limit = this.strategyExecutionsDefaultLimit, force = false } = {}) {
@@ -7965,52 +7621,7 @@ class TradingApp {
 
     // 编辑订单
     editOrder(orderId, symbol, action, quantity, orderType, limitPrice) {
-        // 填充下单表单
-        document.getElementById('orderSymbol').value = symbol;
-        document.getElementById('orderAction').value = action;
-        document.getElementById('orderQuantity').value = quantity;
-        // 正确转换订单类型到HTML选项值
-        let normalizedType;
-        if (orderType === 'LMT') {
-            normalizedType = 'LIMIT';
-        } else if (orderType === 'MKT') {
-            normalizedType = 'MARKET';
-        } else {
-            normalizedType = orderType; // 保持原值
-        }
-        document.getElementById('orderType').value = normalizedType;
-        
-        // 获取当前价格（这会更新价格显示）
-        this.fetchCurrentPrice(symbol);
-        
-        // 在fetchCurrentPrice之后设置价格输入框状态，确保限价单的设置不被覆盖
-        setTimeout(() => {
-            const priceInput = document.getElementById('orderPrice');
-            if ((normalizedType === 'LIMIT') && limitPrice) {
-                priceInput.value = limitPrice;
-                priceInput.disabled = false;
-            } else if (normalizedType === 'LIMIT') {
-                // 限价单但没有预设价格，启用输入框让用户输入
-                priceInput.disabled = false;
-                if (!priceInput.value) {
-                    priceInput.value = '';
-                }
-            }
-            // 触发价格变化事件以更新SL/TP计算
-            if (priceInput.value) {
-                priceInput.dispatchEvent(new Event('input'));
-            }
-        }, 100);
-        
-        // 显示下单模态框
-        this.setupOrderFormListeners();
-        const modal = new bootstrap.Modal(document.getElementById('orderModal'));
-        modal.show();
-        
-        // 存储原订单ID，用于后续处理
-        this.editingOrderId = orderId;
-        
-        this.showAlert('info', `正在编辑订单 ${orderId}，请修改后重新提交`);
+        return this.orderManager.editOrder(orderId, symbol, action, quantity, orderType, limitPrice);
     }
     async loadStrategies(options = {}) {
         if (!this.strategiesManager || typeof this.strategiesManager.loadStrategies !== 'function') {
@@ -10571,111 +10182,15 @@ class TradingApp {
     }
 
     renderExecutionsTable() {
-        const tbody = document.querySelector('#executionsTable tbody');
-        if (!tbody) return;
-        // 同步表头为 9 列
-        const theadRow = document.querySelector('#executionsTable thead tr');
-        if (theadRow) {
-            theadRow.innerHTML = `
-              <th>ID</th>
-              <th>Symbol</th>
-              <th>Created At</th>
-              <th>Action</th>
-              <th>Qty</th>
-              <th>Price</th>
-              <th>Status</th>
-              <th>PnL</th>
-              <th>Commission</th>
-            `;
-        }
-        tbody.innerHTML = '';
-        const { currentPage, pageSize, allExecutions } = this.executionsPagination;
-        const start = (currentPage - 1) * pageSize;
-        const end = start + pageSize;
-        const pageItems = allExecutions.slice(start, end);
-        pageItems.forEach(exe => {
-            const tr = document.createElement('tr');
-            const created = exe.created_at ? new Date(exe.created_at).toLocaleString() : (exe.execution_time ? new Date(exe.execution_time).toLocaleString() : '-');
-            const commission = exe.commission != null ? Number(exe.commission).toFixed(2) : '-';
-            const pnl = exe.pnl != null ? Number(exe.pnl).toFixed(2) : '-';
-            const pnlClass = exe.pnl != null ? (Number(exe.pnl) > 0 ? 'text-success' : Number(exe.pnl) < 0 ? 'text-danger' : '') : '';
-            tr.innerHTML = `
-              <td>${exe.id ?? exe.order_id ?? '-'}</td>
-              <td>${exe.symbol ?? '-'}</td>
-              <td>${created}</td>
-              <td>${exe.action ?? '-'}</td>
-              <td>${exe.quantity ?? '-'}</td>
-              <td>${exe.price != null ? exe.price : '-'}</td>
-              <td><span class="badge bg-${this.getStatusColor(exe.status || '')}">${exe.status}</span></td>
-              <td class="${pnlClass}">${pnl}</td>
-              <td>${commission}</td>
-            `;
-            tbody.appendChild(tr);
-        });
+        return this.orderManager.renderExecutionsTable();
     }
 
     renderExecutionsPagination() {
-        const ul = document.getElementById('executionsPagination');
-        if (!ul) return;
-        const { currentPage, pageSize, totalItems } = this.executionsPagination;
-        const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
-        const makeLi = (label, page, disabled = false, active = false) => {
-            const li = document.createElement('li');
-            li.className = `page-item ${disabled ? 'disabled' : ''} ${active ? 'active' : ''}`;
-            const a = document.createElement('a');
-            a.className = 'page-link';
-            a.href = '#';
-            a.textContent = label;
-            a.onclick = (e) => {
-                e.preventDefault();
-                if (disabled || page === currentPage) return;
-                this.executionsPagination.currentPage = page;
-                this.renderExecutionsTable();
-                this.renderExecutionsPagination();
-            };
-            li.appendChild(a);
-            return li;
-        };
-
-        ul.innerHTML = '';
-        ul.appendChild(makeLi('«', Math.max(1, currentPage - 1), currentPage === 1));
-
-        const windowSize = 5;
-        const start = Math.max(1, currentPage - Math.floor(windowSize / 2));
-        const end = Math.min(totalPages, start + windowSize - 1);
-        for (let p = start; p <= end; p++) {
-            ul.appendChild(makeLi(String(p), p, false, p === currentPage));
-        }
-
-        ul.appendChild(makeLi('»', Math.min(totalPages, currentPage + 1), currentPage === totalPages));
+        return this.orderManager.renderExecutionsPagination();
     }
 
     exportExecutionsCsv(name) {
-        const rows = [
-            ['ID','Symbol','Created At','Action','Qty','Price','Status','PnL','Commission']
-        ];
-        const all = this.executionsPagination.allExecutions || [];
-        all.forEach(exe => {
-            rows.push([
-                exe.id ?? '',
-                exe.symbol ?? '',
-                exe.created_at ? new Date(exe.created_at).toISOString() : (exe.execution_time ? new Date(exe.execution_time).toISOString() : ''),
-                exe.action ?? '',
-                exe.quantity ?? '',
-                exe.price ?? '',
-                exe.status ?? '',
-                exe.pnl ?? '',
-                exe.commission ?? ''
-            ]);
-        });
-        const csv = rows.map(r => r.map(v => typeof v === 'string' && v.includes(',') ? `"${v.replace(/"/g,'""')}"` : v).join(',')).join('\n');
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${(document.getElementById('detailsStrategyName')?.textContent || name)}_executions.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
+        return this.orderManager.exportExecutionsCsv(name);
     }
 
     // Chart helpers
@@ -11058,132 +10573,15 @@ class TradingApp {
     
     // Suggested Position Size functions
     async refreshPositionSuggestion() {
-        const symbolRaw = document.getElementById('orderSymbol')?.value || '';
-        const symbol = symbolRaw.trim().toUpperCase();
-        const action = document.getElementById('orderAction')?.value;
-        const priceInput = document.getElementById('orderPrice')?.value?.trim();
-        const price = parseFloat(priceInput) || 0;
-        const stopLoss = parseFloat(document.getElementById('stopLossPrice')?.value) || 0;
-
-        // Note: Position sizing calculation doesn't require IB connection
-        // Only actual order placement requires connection
-
-        if (!symbol || !action) {
-            this.clearPositionSuggestion();
-            return;
-        }
-
-        // If no price is provided, try to get current market price
-        let effectivePrice = price;
-        if (!effectivePrice || effectivePrice <= 0) {
-            try {
-                const position = this.dataManager.getPosition(symbol);
-                if (position && position.current_price > 0) {
-                    effectivePrice = position.current_price;
-                }
-            } catch (error) {
-            }
-
-            // If still no price, show error and return
-            if (!effectivePrice || effectivePrice <= 0) {
-                this.showAlert('warning', '请输入价格或确保该股票有当前市场价格');
-                this.clearPositionSuggestion();
-                return;
-            }
-        }
-
-        // Calculate stop_distance based on action and stop loss
-        let stopDistance = 0;
-
-        if (stopLoss > 0) {
-            if (action === 'BUY') {
-                stopDistance = Math.abs(effectivePrice - stopLoss);
-            } else if (action === 'SELL') {
-                stopDistance = Math.abs(stopLoss - effectivePrice);
-            }
-        } else {
-            // Default stop distance based on symbol type
-            if (symbol.includes('ES') || symbol.includes('NQ') || symbol.includes('YM') || symbol.includes('RTY')) {
-                // For futures, use a smaller default stop distance (e.g., 10 points)
-                stopDistance = 10;
-            } else {
-                // For stocks, use 2% of price as default
-                stopDistance = effectivePrice * 0.02;
-            }
-        }
-        
-        if (stopDistance <= 0) {
-            this.clearPositionSuggestion();
-            return;
-        }
-        
-        try {
-            const data = await this.apiCall('/position-sizing', {
-                method: 'POST',
-                body: JSON.stringify({
-                    symbol: symbol,
-                    stop_distance: stopDistance
-                })
-            });
-            
-            this.updatePositionSuggestionUI(data);
-            
-            // Refresh sizing history table after successful calculation
-            this.loadSizingHistory();
-        } catch (error) {
-            console.error('Failed to get position suggestion:', error);
-            this.clearPositionSuggestion();
-        }
+        return this.orderManager.refreshPositionSuggestion();
     }
-    
+
     updatePositionSuggestionUI(data) {
-        const suggestedQuantity = document.getElementById('suggestedQuantity');
-        const sizingMethod = document.getElementById('sizingMethod');
-        const estimatedInvestment = document.getElementById('estimatedInvestment');
-        const maxRisk = document.getElementById('maxRisk');
-        const stopDistance = document.getElementById('stopDistance');
-        const pointValue = document.getElementById('pointValue');
-        const scaleTotal = document.getElementById('scaleTotal');
-        const scaleVol = document.getElementById('scaleVol');
-        const scaleDd = document.getElementById('scaleDd');
-        const scaleSig = document.getElementById('scaleSig');
-        const scaleExec = document.getElementById('scaleExec');
-        const sizingExplanation = document.getElementById('sizingExplanation');
-        
-        console.log('Updating position suggestion UI with data:', data);
-        
-        // Extract data from the response - data structure: {N: number, explain: {...}}
-        const contracts = data.N || 0;
-        const explain = data.explain || {};
-        
-        if (suggestedQuantity) suggestedQuantity.textContent = contracts || '--';
-        if (sizingMethod) sizingMethod.textContent = 'Position Sizing';
-        if (estimatedInvestment) estimatedInvestment.textContent = data.estimatedInvestment ? `$${data.estimatedInvestment.toFixed(2)}` : '--';
-        if (maxRisk) maxRisk.textContent = data.maxRisk ? `$${data.maxRisk.toFixed(2)}` : '--';
-        if (stopDistance) stopDistance.textContent = data.stopDistance ? data.stopDistance.toFixed(4) : '--';
-        if (pointValue) pointValue.textContent = data.pointValue ? data.pointValue.toFixed(2) : '--';
-        if (scaleTotal) scaleTotal.textContent = data.scaleTotal ? data.scaleTotal.toFixed(4) : '--';
-        if (scaleVol) scaleVol.textContent = data.scaleVol ? data.scaleVol.toFixed(4) : '--';
-        if (scaleDd) scaleDd.textContent = data.scaleDd ? data.scaleDd.toFixed(4) : '--';
-        if (scaleSig) scaleSig.textContent = data.scaleSig ? data.scaleSig.toFixed(4) : '--';
-        if (scaleExec) scaleExec.textContent = data.scaleExec ? data.scaleExec.toFixed(4) : '--';
-        if (sizingExplanation) sizingExplanation.textContent = explain || '--';
-        
-        // Store suggested quantity for apply button
-        this.lastSuggestedQuantity = contracts;
+        return this.orderManager.updatePositionSuggestionUI(data);
     }
-    
+
     clearPositionSuggestion() {
-        const elements = [
-            'suggestedQuantity', 'sizingMethod', 'estimatedInvestment', 'maxRisk',
-            'stopDistance', 'pointValue', 'scaleTotal', 'scaleVol', 'scaleDd',
-            'scaleSig', 'scaleExec', 'sizingExplanation'
-        ];
-        elements.forEach(id => {
-            const element = document.getElementById(id);
-            if (element) element.textContent = '--';
-        });
-        this.lastSuggestedQuantity = null;
+        return this.orderManager.clearPositionSuggestion();
     }
 
     initSidePanels() {
@@ -11498,42 +10896,7 @@ class TradingApp {
     }
 
     updatePositionValueField() {
-        const positionMethod = document.getElementById('s0PositionSizing')?.value;
-        const positionValueLabel = document.querySelector('label[for="s1PositionValue"]');
-        const positionValueInput = document.getElementById('s1PositionValue');
-        const positionValueHelp = document.getElementById('s1PositionValue')?.parentNode?.querySelector('.form-text');
-        
-        if (!positionValueLabel || !positionValueInput) return;
-        
-        switch (positionMethod) {
-            case 'percentage':
-                positionValueLabel.textContent = 'Position Percentage (%)';
-                positionValueInput.placeholder = '例如: 2.5 (表示2.5%)';
-                if (positionValueHelp) {
-                    positionValueHelp.textContent = '每个仓位占总资金的百分比';
-                }
-                break;
-            case 'fixed':
-                positionValueLabel.textContent = 'Fixed Amount ($)';
-                positionValueInput.placeholder = '例如: 1000 (表示$1000)';
-                if (positionValueHelp) {
-                    positionValueHelp.textContent = '每个仓位的固定金额';
-                }
-                break;
-            case 'shares':
-                positionValueLabel.textContent = 'Number of Shares';
-                positionValueInput.placeholder = '例如: 100 (表示100股)';
-                if (positionValueHelp) {
-                    positionValueHelp.textContent = '每个仓位的固定股数';
-                }
-                break;
-            default:
-                positionValueLabel.textContent = 'Position Value';
-                positionValueInput.placeholder = '';
-                if (positionValueHelp) {
-                    positionValueHelp.textContent = '';
-                }
-        }
+        return this.orderManager.updatePositionValueField();
     }
 
     async loadConfigData() {
@@ -11616,26 +10979,12 @@ class TradingApp {
 
     // 启动订单状态自动刷新
     startOrdersAutoRefresh() {
-        // 每15秒自动刷新订单状态
-        this.ordersRefreshInterval = setInterval(() => {
-            // 只有在Orders标签页激活时才刷新
-            const ordersTab = document.querySelector('#orders-tab');
-            if (ordersTab && ordersTab.classList.contains('active')) {
-                console.log('Auto-refreshing orders status...');
-                this.loadOrders();
-            }
-        }, 15000); // 15秒间隔
-
-        console.log('Orders auto-refresh started (15s interval)');
+        return this.orderManager.startOrdersAutoRefresh();
     }
 
     // 停止订单状态自动刷新
     stopOrdersAutoRefresh() {
-        if (this.ordersRefreshInterval) {
-            clearInterval(this.ordersRefreshInterval);
-            this.ordersRefreshInterval = null;
-            console.log('Orders auto-refresh stopped');
-        }
+        return this.orderManager.stopOrdersAutoRefresh();
     }
 }
 
