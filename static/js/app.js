@@ -11383,10 +11383,21 @@ class TradingApp {
             if (!res.success) return;
             const m = res.metrics || {};
             const el = (id) => document.getElementById(id);
-            el('kpiPnL').textContent = `$${(m.total_pnl ?? 0).toFixed(2)}`;
-            el('kpiWinRate').textContent = `${(m.win_rate ?? 0).toFixed(2)}%`;
-            el('kpiMaxDD').textContent = `$${(m.max_drawdown ?? 0).toFixed(2)}`;
-            el('kpiSharpe').textContent = `${(m.sharpe_ratio ?? 0).toFixed(2)}`;
+            const toFiniteNumber = (value, fallback = 0) => {
+                if (typeof value === 'number' && Number.isFinite(value)) {
+                    return value;
+                }
+                const parsed = Number(value);
+                return Number.isFinite(parsed) ? parsed : fallback;
+            };
+            const totalPnl = toFiniteNumber(m.total_pnl);
+            const winRate = toFiniteNumber(m.win_rate);
+            const maxDrawdown = toFiniteNumber(m.max_drawdown);
+            const sharpe = toFiniteNumber(m.sharpe_ratio);
+            el('kpiPnL').textContent = `$${totalPnl.toFixed(2)}`;
+            el('kpiWinRate').textContent = `${winRate.toFixed(2)}%`;
+            el('kpiMaxDD').textContent = `$${maxDrawdown.toFixed(2)}`;
+            el('kpiSharpe').textContent = `${sharpe.toFixed(2)}`;
             const totalExecutions = Number(m.total_executions ?? 0);
             const totalCommission = Number(m.total_commission ?? 0);
             const tradesDisplay = Number.isFinite(totalExecutions) ? totalExecutions : 0;
