@@ -65,6 +65,66 @@ def compute_return_distribution(results: List[OptimizationResultItem]) -> Dict[s
     }
 
 
+def compute_return_histogram(
+    results: List[OptimizationResultItem], bins: int = 12
+) -> List[Dict[str, float | int]]:
+    """Build a histogram of annual returns for visual summaries.
+
+    The histogram groups annual returns into equally sized bins so that the
+    frontend can render a compact bar chart instead of enumerating every
+    optimisation result individually.
+    """
+
+    if bins <= 0:
+        bins = 1
+
+    returns = [
+        item.metrics.get("annual_return")
+        for item in results
+        if item.metrics and item.metrics.get("annual_return") is not None
+    ]
+    if not returns:
+        return []
+
+    returns.sort()
+    minimum = returns[0]
+    maximum = returns[-1]
+    if math.isclose(minimum, maximum):
+        return [
+            {
+                "start": round(minimum, 4),
+                "end": round(maximum, 4),
+                "count": len(returns),
+            }
+        ]
+
+    bin_count = min(bins, max(1, len(returns)))
+    span = maximum - minimum
+    step = span / bin_count if bin_count else span
+    if math.isclose(step, 0.0):
+        step = span or 1.0
+
+    counts = [0 for _ in range(bin_count)]
+    for value in returns:
+        index = int((value - minimum) / step)
+        if index >= bin_count:
+            index = bin_count - 1
+        counts[index] += 1
+
+    histogram: List[Dict[str, float | int]] = []
+    for idx, count in enumerate(counts):
+        start = minimum + step * idx
+        end = start + step
+        histogram.append(
+            {
+                "start": round(start, 4),
+                "end": round(end, 4),
+                "count": count,
+            }
+        )
+    return histogram
+
+
 def build_conclusion(
     total: int,
     success: int,
