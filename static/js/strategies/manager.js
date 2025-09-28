@@ -23,6 +23,12 @@
             this.summaryPushAwaitingData = false;
             this.summaryPushAwaitingTimer = null;
             this.data_push_state = {};
+            this.strategyExecutionsCache = new Map();
+            const defaultExecLimit = Number.isFinite(app?.strategyExecutionsDefaultLimit)
+                ? Number(app.strategyExecutionsDefaultLimit)
+                : 20;
+            this.strategyExecutionsDefaultLimit = defaultExecLimit > 0 ? defaultExecLimit : 20;
+            this.internalStrategyOrders = [];
 
             if (app && typeof app === 'object' && !Object.getOwnPropertyDescriptor(app, 'strategyRefreshIntervalMs')) {
                 Object.defineProperty(app, 'strategyRefreshIntervalMs', {
@@ -55,8 +61,90 @@
                 'summaryPushUpdating',
                 'summaryPushAwaitingData',
                 'summaryPushAwaitingTimer',
-                'data_push_state'
+                'data_push_state',
+                'strategyExecutionsCache',
+                'strategyExecutionsDefaultLimit',
+                'internalStrategyOrders'
             ];
+        }
+
+        getStrategyExecutionsCacheKey(name, limit) {
+            return `${name}::${limit}`;
+        }
+
+        clearStrategyExecutionsCache(name) {
+            if (!this.strategyExecutionsCache) return;
+            if (!name) {
+                this.strategyExecutionsCache.clear();
+                return;
+            }
+            const prefix = `${name}::`;
+            for (const key of Array.from(this.strategyExecutionsCache.keys())) {
+                if (key.startsWith(prefix)) {
+                    this.strategyExecutionsCache.delete(key);
+                }
+            }
+        }
+
+        async fetchStrategyExecutions(name, { limit = this.strategyExecutionsDefaultLimit, force = false } = {}) {
+            if (!name) return [];
+            const fallbackLimit = Number(this.strategyExecutionsDefaultLimit) || 20;
+            const effectiveLimit = Math.max(1, Number(limit) || fallbackLimit);
+            const cacheKey = this.getStrategyExecutionsCacheKey(name, effectiveLimit);
+            const cached = !force && this.strategyExecutionsCache.get(cacheKey);
+            if (cached) {
+                if (cached.data) return cached.data;
+                if (cached.promise) return await cached.promise;
+            }
+
+            const fetchPromise = (async () => {
+                const res = await this.app?.apiCall?.(`/strategies/${encodeURIComponent(name)}/executions?limit=${effectiveLimit}`);
+                if (!res || !res.success) {
+                    throw new Error('Failed to load strategy executions');
+                }
+                return Array.isArray(res.executions) ? res.executions.slice() : [];
+            })();
+
+            this.strategyExecutionsCache.set(cacheKey, { promise: fetchPromise });
+
+            try {
+                const data = await fetchPromise;
+                this.strategyExecutionsCache.set(cacheKey, { data, timestamp: Date.now() });
+                return data;
+            } catch (error) {
+                this.strategyExecutionsCache.delete(cacheKey);
+                throw error;
+            }
+        }
+
+        async loadInternalStrategyOrders(name, { executions = null, limit = this.strategyExecutionsDefaultLimit, force = false } = {}) {
+            try {
+                const rawExecutions = Array.isArray(executions)
+                    ? executions
+                    : await this.fetchStrategyExecutions(name, { limit, force });
+                if (!Array.isArray(rawExecutions)) {
+                    this.internalStrategyOrders = [];
+                    this.app?.renderInternalOrders?.(name, []);
+                    return [];
+                }
+                const orders = rawExecutions.slice();
+                orders.sort((a, b) => {
+                    const at = a?.timestamp ? new Date(a.timestamp).getTime() : 0;
+                    const bt = b?.timestamp ? new Date(b.timestamp).getTime() : 0;
+                    if (bt !== at) return bt - at;
+                    const aid = Number(a?.order_id) || 0;
+                    const bid = Number(b?.order_id) || 0;
+                    return bid - aid;
+                });
+                this.internalStrategyOrders = orders;
+                this.app?.renderInternalOrders?.(name, orders);
+                return orders;
+            } catch (error) {
+                console.error('Failed to load internal strategy orders:', error);
+                this.internalStrategyOrders = [];
+                this.app?.renderInternalOrders?.(name, []);
+                return [];
+            }
         }
 
         async loadStrategies(options = {}) {
