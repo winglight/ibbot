@@ -431,8 +431,8 @@ class DomStatsAggregator:
             for safe_symbol in symbols:
                 try:
                     self._rebuild_symbol(safe_symbol)
-            except Exception:
-                logger.exception("Failed to rebuild DOM stats for {}", safe_symbol)
+                except Exception:
+                    logger.exception("Failed to rebuild DOM stats for {}", safe_symbol)
 
     # ------------------------------------------------------------------
     def _rebuild_symbol(self, safe_symbol: str) -> None:
