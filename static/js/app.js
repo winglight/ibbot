@@ -2774,6 +2774,26 @@ class TradingApp {
         return this.candlestickLoader;
     }
 
+    async waitForCandlestickPlugin(options = {}) {
+        const { promise = null, timeoutMs = 2500 } = options || {};
+        const loaderPromise = Promise.resolve(promise ?? this.ensureCandlestickPlugin());
+        const timeoutToken = Symbol('candlestick-timeout');
+        try {
+            const result = await Promise.race([
+                loaderPromise,
+                new Promise((resolve) => setTimeout(() => resolve(timeoutToken), Math.max(0, timeoutMs)))
+            ]);
+            if (result === timeoutToken) {
+                console.warn(`[Chart] Candlestick plugin load timed out after ${timeoutMs}ms; proceeding without it.`);
+                return { ready: false, timedOut: true, promise: loaderPromise };
+            }
+            return { ready: !!result, timedOut: false, promise: loaderPromise };
+        } catch (error) {
+            console.warn('[Chart] Candlestick plugin load failed:', error);
+            return { ready: false, timedOut: false, promise: loaderPromise };
+        }
+    }
+
     updateReadOnlyMode(isReadOnly, role = 'admin', options = {}) {
         const persist = options.persist !== false;
         this.isReadOnly = !!isReadOnly;
@@ -4440,6 +4460,7 @@ class TradingApp {
     
     async loadMonitorChart(symbol, options = {}) {
         try {
+            this.pendingMonitorCandlestickUpgradeToken = null;
             const { useCache = true, forceRefresh = false } = options || {};
             const chartContainer = document.getElementById('monitorChartContainer');
             if (!chartContainer) return;
@@ -4723,9 +4744,26 @@ class TradingApp {
                 const isCandlestick = chartType === 'candlestick';
 
                 if (isCandlestick) {
-                    const ready = await this.ensureCandlestickPlugin();
-                    if (!ready) {
-                        chartContainer.innerHTML = '<div class="alert alert-warning mb-0">蜡烛图插件加载中，请稍后重试。</div>';
+                    const pluginStatus = await this.waitForCandlestickPlugin();
+                    if (!pluginStatus.ready) {
+                        if (pluginStatus.timedOut && pluginStatus.promise) {
+                            const upgradeToken = Symbol('monitor-candlestick-upgrade');
+                            this.pendingMonitorCandlestickUpgradeToken = upgradeToken;
+                            pluginStatus.promise
+                                .then((result) => {
+                                    if (!result || this.pendingMonitorCandlestickUpgradeToken !== upgradeToken) {
+                                        return;
+                                    }
+                                    this.pendingMonitorCandlestickUpgradeToken = null;
+                                    this.loadMonitorChart(symbol, {
+                                        ...options,
+                                        useCache: true,
+                                        forceRefresh: false,
+                                    });
+                                })
+                                .catch(() => {});
+                        }
+                        chartContainer.innerHTML = '<div class="alert alert-warning mb-0">蜡烛图插件加载中，将在可用时自动刷新。</div>';
                         return;
                     }
                 }
@@ -9393,6 +9431,7 @@ class TradingApp {
         const state = this.getStrategyChartState();
         if (!name) return;
         state.currentStrategy = name;
+        state.pendingCandlestickUpgradeToken = null;
         if (options.symbol) {
             const normalizedSymbol = String(options.symbol).trim().toUpperCase();
             if (normalizedSymbol) {
@@ -9503,11 +9542,36 @@ class TradingApp {
                 return;
             }
 
-            const pluginReady = await pluginPromise;
-            console.log('[StrategyChart] 蜡烛图插件状态', { pluginReady });
+            const pluginStatus = await this.waitForCandlestickPlugin({ promise: pluginPromise });
+            const pluginReady = pluginStatus.ready;
+            console.log('[StrategyChart] 蜡烛图插件状态', { pluginReady, timedOut: pluginStatus.timedOut });
             state.useCandlestick = Boolean(pluginReady);
             if (!pluginReady) {
-                console.warn('[StrategyChart] Candlestick plugin unavailable, falling back to line chart.');
+                if (!this.strategyChartFallbackNotified) {
+                    console.warn('[StrategyChart] Candlestick plugin unavailable, falling back to line chart.');
+                    this.strategyChartFallbackNotified = true;
+                }
+                if (pluginStatus.timedOut && pluginStatus.promise) {
+                    const upgradeToken = Symbol('strategy-candlestick-upgrade');
+                    state.pendingCandlestickUpgradeToken = upgradeToken;
+                    pluginStatus.promise
+                        .then((result) => {
+                            if (!result || state.pendingCandlestickUpgradeToken !== upgradeToken) {
+                                return;
+                            }
+                            state.pendingCandlestickUpgradeToken = null;
+                            state.useCandlestick = true;
+                            this.strategyChartFallbackNotified = false;
+                            if (state.fullBars && state.fullBars.length) {
+                                console.log('[StrategyChart] Candlestick plugin became available after timeout, upgrading chart.');
+                                this.renderStrategyChart({ redraw: true });
+                            }
+                        })
+                        .catch(() => {});
+                }
+            } else {
+                state.pendingCandlestickUpgradeToken = null;
+                this.strategyChartFallbackNotified = false;
             }
 
             const bars = this.normalizeStrategyChartBars(response.data);
