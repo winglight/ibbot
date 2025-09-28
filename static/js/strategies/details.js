@@ -827,7 +827,7 @@
                 console.error('Failed to load internal strategy info:', err);
             }
 
-            await this.app?.loadStrategyStatus?.(name, { force: true });
+            await this.manager?.loadStrategyStatus?.(name, { force: true });
         }
 
         async loadStrategyRiskTab() {

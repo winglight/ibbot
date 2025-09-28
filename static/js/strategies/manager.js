@@ -22,6 +22,7 @@
             this.summaryPushUpdating = false;
             this.summaryPushAwaitingData = false;
             this.summaryPushAwaitingTimer = null;
+            this.summaryDataFeedCurrent = null;
             this.data_push_state = {};
             this.strategyExecutionsCache = new Map();
             const defaultExecLimit = Number.isFinite(app?.strategyExecutionsDefaultLimit)
@@ -61,6 +62,7 @@
                 'summaryPushUpdating',
                 'summaryPushAwaitingData',
                 'summaryPushAwaitingTimer',
+                'summaryDataFeedCurrent',
                 'data_push_state',
                 'strategyExecutionsCache',
                 'strategyExecutionsDefaultLimit',
@@ -450,7 +452,7 @@
                     this.summaryPushAwaitingTimer = setTimeout(() => {
                         this.summaryPushAwaitingTimer = null;
                         if (this.app?.currentStrategyDetails === targetName) {
-                            this.app?.loadStrategyStatus?.(targetName, { force: true });
+                            this.loadStrategyStatus(targetName, { force: true });
                         }
                     }, 1500);
                 }
@@ -520,6 +522,237 @@
             };
 
             return true;
+        }
+
+        async handleSummaryDataFeedChange() {
+            const currentName = this.app?.currentStrategyDetails;
+            if (!currentName) return;
+            const apiCall = this.app?.apiCall;
+            if (typeof apiCall !== 'function') {
+                console.warn('Strategy data feed update unavailable: apiCall missing');
+                return;
+            }
+
+            const select = document.getElementById('summaryDataFeedSelect');
+            if (!select) return;
+
+            const value = select.value || null;
+            if (value === this.summaryDataFeedCurrent) return;
+
+            try {
+                await apiCall(`/strategies/${encodeURIComponent(currentName)}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ data_subscription: value || null }),
+                });
+                this.summaryDataFeedCurrent = value;
+                if (this.data_push_state?.enabled) {
+                    await this.setStrategyDataPush({ enabled: true });
+                }
+            } catch (error) {
+                console.error('Failed to update data subscription', error);
+                this.app?.showAlert?.('danger', 'Failed to update data subscription');
+                if (this.summaryDataFeedCurrent !== null) {
+                    select.value = this.summaryDataFeedCurrent || '';
+                }
+            }
+        }
+
+        async handleSummaryPushToggle() {
+            if (this.summaryPushUpdating) return;
+            const switchEl = document.getElementById('summaryDataPushSwitch');
+            if (!switchEl) return;
+
+            const enabled = !!switchEl.checked;
+            const result = await this.setStrategyDataPush({ enabled });
+            if (!result || result.error) {
+                this.summaryPushUpdating = true;
+                switchEl.checked = false;
+                this.summaryPushUpdating = false;
+            }
+        }
+
+        async setStrategyDataPush({ enabled, subscription, symbol } = {}) {
+            const currentName = this.app?.currentStrategyDetails;
+            if (!currentName) return null;
+
+            const apiCall = this.app?.apiCall;
+            if (typeof apiCall !== 'function') {
+                console.warn('Strategy data push update unavailable: apiCall missing');
+                return { error: 'api_unavailable' };
+            }
+
+            if (typeof enabled !== 'boolean') enabled = true;
+
+            const select = document.getElementById('summaryDataFeedSelect');
+            const symbolInput = document.getElementById('summaryPrimarySymbolInput');
+            const switchEl = document.getElementById('summaryDataPushSwitch');
+            const statusEl = document.getElementById('summaryDataPushStatus');
+
+            const targetSub = subscription || select?.value || null;
+            const targetSymbol = (symbol || symbolInput?.value || '').trim().toUpperCase();
+
+            if (enabled) {
+                if (!targetSub) {
+                    this.app?.showAlert?.('warning', 'Select a data subscription before enabling push');
+                    if (switchEl) switchEl.checked = false;
+                    if (statusEl) statusEl.textContent = '未推送';
+                    this.summaryPushAwaitingData = false;
+                    return { error: 'missing_subscription' };
+                }
+                if (!targetSymbol) {
+                    this.app?.showAlert?.('warning', 'Primary symbol is required to push data');
+                    if (switchEl) switchEl.checked = false;
+                    if (statusEl) statusEl.textContent = '未推送';
+                    this.summaryPushAwaitingData = false;
+                    return { error: 'missing_symbol' };
+                }
+            }
+
+            try {
+                this.summaryPushUpdating = true;
+                if (statusEl) statusEl.textContent = enabled ? '推送中…' : '未推送';
+
+                const res = await apiCall(`/strategies/${encodeURIComponent(currentName)}/data-push`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        enabled,
+                        subscription: targetSub || null,
+                        symbol: targetSymbol || null,
+                    }),
+                });
+
+                const state = res?.state || {};
+                const awaitingData = !!state.awaiting_data && !!state.active;
+                const stateReason = state.status_reason || '';
+
+                this.summaryPushAwaitingData = awaitingData;
+                if (switchEl) switchEl.checked = !!state.active;
+
+                if (statusEl) {
+                    if (state.active) {
+                        if (!awaitingData && stateReason) {
+                            statusEl.textContent = stateReason;
+                        } else {
+                            statusEl.textContent = awaitingData ? '等待DOM数据…' : '已推送';
+                        }
+                    } else {
+                        statusEl.textContent = stateReason || '未推送';
+                    }
+                }
+
+                this.data_push_state = {
+                    enabled: !!state.active,
+                    active: !!state.active,
+                    subscription: state.subscription,
+                    symbol: state.symbol,
+                    awaiting_data: awaitingData,
+                    last_data_timestamp: state.last_data_timestamp || null,
+                    status_reason: stateReason || null,
+                };
+
+                if (!res?.success) {
+                    const message = res?.error || 'Failed to update data push state';
+                    this.app?.showAlert?.('danger', message);
+                }
+
+                if (!awaitingData && this.summaryPushAwaitingTimer) {
+                    clearTimeout(this.summaryPushAwaitingTimer);
+                    this.summaryPushAwaitingTimer = null;
+                }
+
+                await this.loadStrategyStatus(currentName, { force: true });
+                return state;
+            } catch (error) {
+                console.error('Failed to update data push state', error);
+                this.app?.showAlert?.('danger', 'Failed to update data push state');
+                if (switchEl) switchEl.checked = false;
+                if (statusEl) statusEl.textContent = '未推送';
+                this.summaryPushAwaitingData = false;
+                if (this.summaryPushAwaitingTimer) {
+                    clearTimeout(this.summaryPushAwaitingTimer);
+                    this.summaryPushAwaitingTimer = null;
+                }
+                return { error: 'request_failed' };
+            } finally {
+                this.summaryPushUpdating = false;
+            }
+        }
+
+        async loadStrategyStatus(name, { force = false } = {}) {
+            if (!name) return;
+            if (this.summaryStatusLoading && !force) return;
+
+            const receivingEl = document.getElementById('summaryStatusReceiving');
+            if (!receivingEl) return;
+
+            this.summaryStatusLoading = true;
+            this.summaryStatusTarget = name;
+
+            const runtimeEl = document.getElementById('summaryStatusRuntime');
+            const processedEl = document.getElementById('summaryStatusProcessed');
+            const thresholdEl = document.getElementById('summaryStatusThresholdHits');
+            const buyEl = document.getElementById('summaryStatusBuySignals');
+            const sellEl = document.getElementById('summaryStatusSellSignals');
+            const slPriceEl = document.getElementById('summaryStatusStopLoss');
+            const tpPriceEl = document.getElementById('summaryStatusTakeProfit');
+
+            receivingEl.textContent = '…';
+            runtimeEl && (runtimeEl.textContent = '…');
+            processedEl && (processedEl.textContent = '…');
+            thresholdEl && (thresholdEl.textContent = '…');
+            buyEl && (buyEl.textContent = '…');
+            sellEl && (sellEl.textContent = '…');
+            slPriceEl && (slPriceEl.textContent = '…');
+            tpPriceEl && (tpPriceEl.textContent = '…');
+
+            const wsManager = this.app?.ibkrManager;
+            if (wsManager && typeof wsManager.requestStrategyStatus === 'function') {
+                const result = wsManager.requestStrategyStatus({
+                    name,
+                    force: Boolean(force),
+                    minInterval: 15000,
+                });
+                if (result !== 'failed') {
+                    return result;
+                }
+            }
+
+            const apiCall = this.app?.apiCall;
+            if (typeof apiCall !== 'function') {
+                console.warn('Strategy status request unavailable: apiCall missing');
+                this.applyStrategyStatusPayload({
+                    type: 'strategy_status',
+                    name,
+                    success: false,
+                    error: 'api_unavailable',
+                });
+                return { error: 'api_unavailable' };
+            }
+
+            try {
+                const res = await apiCall(`/strategies/${encodeURIComponent(name)}/status`);
+                const payload = {
+                    type: 'strategy_status',
+                    name,
+                    success: !!res?.success,
+                    status: res?.status || {},
+                    source: 'http',
+                };
+                if (!payload.success) {
+                    payload.error = res?.error || 'Failed to fetch status';
+                }
+                this.applyStrategyStatusPayload(payload);
+                return payload;
+            } catch (error) {
+                console.error('Failed to load strategy status', error);
+                this.applyStrategyStatusPayload({
+                    type: 'strategy_status',
+                    name,
+                    success: false,
+                    error: error?.message || 'request_failed',
+                });
+                return { error: error?.message || 'request_failed' };
+            }
         }
 
         async loadGSRulesStatus() {
