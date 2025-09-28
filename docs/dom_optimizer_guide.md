@@ -29,6 +29,7 @@
    - `DOM_SIGNAL_OUTCOME_THRESHOLD`：多/空信号成功所需的相对价格变动阈值。
    - `DOM_CACHE_RETENTION_DAYS`：历史缓存保留时间。
    - `DOM_AUTOMATION_DEFAULT_*`：编排器默认计划（间隔分钟数、回溯长度、最小信号、是否自动写回等）。
+   - `IBBOT_API_URL`：主服务（FastAPI）基础地址，优化器会向其 `POST /api/strategies` 通知新策略，请确保该地址对优化器进程可达。
 
 3. **后端进程**：确保主应用（FastAPI + 背景任务）可访问本地存储与数据库。若只在本地重放数据，可使用历史快照喂给 `DOMService._on_depth_update`。
 
