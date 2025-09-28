@@ -3,6 +3,8 @@ const appModules = globalScope.appModules = globalScope.appModules || {};
 const monitoringModules = appModules.monitoring || {};
 const MonitoringConstants = monitoringModules.constants || {};
 const MonitoringUtils = monitoringModules.utils || {};
+const MonitoringManagerModule = monitoringModules.manager || {};
+const MonitoringManagerClass = MonitoringManagerModule.MonitoringManager;
 const SharedUtils = appModules.utils || {};
 
 const {
@@ -244,48 +246,22 @@ class TradingApp {
         this.internalStrategyOrders = [];
         this.strategyExecutionsCache = new Map();
         this.strategyExecutionsDefaultLimit = 20;
-        // 当前订阅实时行情的合约符号，null 表示未订阅
-        this.monitorRealtimeSymbol = null;
-        // 记录用户是否希望在重新打开时自动恢复实时行情
-        this.monitorRealtimeShouldResume = false;
-        this.monitorRealtimeResumeSymbol = null;
         // 缓存当日订单列表，供监控时查找最新建仓/加仓时间
         this.orders = [];
         // 通知列表
         this.notifications = [];
-        this.monitorChartTimezone = null;
-        // 价格缓存机制
-        this.priceCache = new Map();
-        this.priceCacheTimeout = 30000; // 30秒缓存
-        this.domSignals = [];
-        this.monitorTrendChart = null;
-        this.monitorTrendData = [];
-        this.monitorTrendDatasetMap = { trend: 0, events: 1, price: 2 };
-        this.monitorDomHistoryList = null;
-        this.monitorDomHistoryMeta = null;
-        this.candlestickSupported = false;
-        this.candlestickLoader = null;
-        this.luxonScriptUrl = 'https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js';
-        this.luxonLoader = null;
-        this.chartDateAdapterUrl = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js';
-        this.dateAdapterReady = false;
-        this.dateAdapterLoader = null;
-        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.umd.min.js';
-        this.chartScriptableGuardApplied = false;
-        this.strategyChartInstance = null;
-        this.strategyChartFallbackNotified = false;
-        this.strategyChartState = this.createDefaultStrategyChartState();
+
+        this.monitoringManager = typeof MonitoringManagerClass === 'function'
+            ? new MonitoringManagerClass(this)
+            : null;
+        this.monitoring = this.monitoringManager;
+        if (this.monitoringManager) {
+            this.bindMonitoringStateProxies();
+        } else {
+            this.initializeMonitoringStateFallback();
+        }
         this.strategyDetailsState = this.createEmptyStrategyDetailsState();
         this.strategyDetailsTabListenerBound = false;
-        // 渲染监控图表时使用的定时器句柄，防止重复渲染导致死循环
-        this.monitorChartRenderTimeout = null;
-        // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制
-        this.pendingMonitorChartRender = null;
-        // 图表联动时的递归保护开关
-        this._syncingCharts = false;
-        // 监控弹窗全屏状态
-        this.monitorModalFullscreen = false;
-        this._monitorFullscreenChangeHandler = null;
         this.authRole = localStorage.getItem('user_role') || 'admin';
         this.isReadOnly = localStorage.getItem('is_read_only') === '1';
         this.lastReadOnlyWarningAt = 0;
@@ -336,6 +312,66 @@ class TradingApp {
 
         this.guardChartScriptableDescriptors();
         this.init();
+    }
+
+    bindMonitoringStateProxies() {
+        const manager = this.monitoringManager;
+        if (!manager || typeof manager.getManagedProperties !== 'function') {
+            return;
+        }
+        const properties = manager.getManagedProperties();
+        properties.forEach((prop) => {
+            if (Object.prototype.hasOwnProperty.call(this, prop)) {
+                delete this[prop];
+            }
+            Object.defineProperty(this, prop, {
+                configurable: true,
+                enumerable: true,
+                get: () => manager[prop],
+                set: (value) => {
+                    manager[prop] = value;
+                }
+            });
+        });
+    }
+
+    initializeMonitoringStateFallback() {
+        // 当前订阅实时行情的合约符号，null 表示未订阅
+        this.monitorRealtimeSymbol = null;
+        // 记录用户是否希望在重新打开时自动恢复实时行情
+        this.monitorRealtimeShouldResume = false;
+        this.monitorRealtimeResumeSymbol = null;
+        this.monitorChartTimezone = null;
+        // 价格缓存机制
+        this.priceCache = new Map();
+        this.priceCacheTimeout = 30000; // 30秒缓存
+        this.domSignals = [];
+        this.monitorTrendChart = null;
+        this.monitorTrendData = [];
+        this.monitorTrendDatasetMap = { trend: 0, events: 1, price: 2 };
+        this.monitorDomHistoryList = null;
+        this.monitorDomHistoryMeta = null;
+        this.candlestickSupported = false;
+        this.candlestickLoader = null;
+        this.luxonScriptUrl = 'https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js';
+        this.luxonLoader = null;
+        this.chartDateAdapterUrl = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js';
+        this.dateAdapterReady = false;
+        this.dateAdapterLoader = null;
+        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.umd.min.js';
+        this.chartScriptableGuardApplied = false;
+        this.strategyChartInstance = null;
+        this.strategyChartFallbackNotified = false;
+        this.strategyChartState = this.createDefaultStrategyChartState();
+        // 渲染监控图表时使用的定时器句柄，防止重复渲染导致死循环
+        this.monitorChartRenderTimeout = null;
+        // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制
+        this.pendingMonitorChartRender = null;
+        // 图表联动时的递归保护开关
+        this._syncingCharts = false;
+        // 监控弹窗全屏状态
+        this.monitorModalFullscreen = false;
+        this._monitorFullscreenChangeHandler = null;
     }
 
     /**
@@ -8883,6 +8919,9 @@ class TradingApp {
     }
 
     createDefaultStrategyChartState() {
+        if (this.monitoringManager?.createDefaultStrategyChartState) {
+            return this.monitoringManager.createDefaultStrategyChartState();
+        }
         return {
             initialized: false,
             currentStrategy: null,
@@ -8891,19 +8930,19 @@ class TradingApp {
             duration: '1 D',
             fullBars: [],
             orders: [],
-        visibleCount: 0,
-        isRealtime: false,
-        realtimeTimer: null,
-        isReplaying: false,
-        replayTimer: null,
-        loadToken: null,
-        loading: false,
-        slEnabled: false,
-        tpEnabled: false,
-        currentSlPrice: null,
-        currentTpPrice: null,
-        useCandlestick: true,
-    };
+            visibleCount: 0,
+            isRealtime: false,
+            realtimeTimer: null,
+            isReplaying: false,
+            replayTimer: null,
+            loadToken: null,
+            loading: false,
+            slEnabled: false,
+            tpEnabled: false,
+            currentSlPrice: null,
+            currentTpPrice: null,
+            useCandlestick: true,
+        };
     }
 
     createEmptyStrategyDetailsState() {
@@ -8929,6 +8968,9 @@ class TradingApp {
     }
 
     getStrategyChartState() {
+        if (this.monitoringManager?.getStrategyChartState) {
+            return this.monitoringManager.getStrategyChartState();
+        }
         if (!this.strategyChartState) {
             this.strategyChartState = this.createDefaultStrategyChartState();
         }
@@ -8936,12 +8978,18 @@ class TradingApp {
     }
 
     getStrategyChartRefreshIntervalMs(intervalValue) {
+        if (this.monitoringManager?.getStrategyChartRefreshIntervalMs) {
+            return this.monitoringManager.getStrategyChartRefreshIntervalMs(intervalValue);
+        }
         const key = normalizeIntervalKey(intervalValue || '');
         const minutes = INTERVAL_MINUTES_MAP[key] || 5;
         return Math.max(15000, minutes * 60000);
     }
 
     getStrategyChartTimeUnit(intervalValue) {
+        if (this.monitoringManager?.getStrategyChartTimeUnit) {
+            return this.monitoringManager.getStrategyChartTimeUnit(intervalValue);
+        }
         const value = (intervalValue || '').toLowerCase();
         if (value.includes('day')) return 'day';
         if (value.includes('hour')) return 'hour';
@@ -9149,6 +9197,9 @@ class TradingApp {
     }
 
     refreshStrategyChartDuration(intervalValue, options = {}) {
+        if (this.monitoringManager?.refreshStrategyChartDuration) {
+            return this.monitoringManager.refreshStrategyChartDuration(intervalValue, options);
+        }
         const selectEl = options.selectEl || document.getElementById('strategyChartDuration');
         if (!selectEl) return;
         const available = getMonitorDurationOptions(intervalValue);
