@@ -9194,6 +9194,7 @@ class TradingApp {
             ? ohlc.map((bar) => ({ x: bar.x, y: tpPrice }))
             : [];
         const maxVolume = volumeData.reduce((acc, point) => Math.max(acc, point.y || 0), 0);
+        const volumeScaleMax = maxVolume ? maxVolume * 3 : undefined;
         const extraParts = [];
         if (visibleOrders.length) {
             extraParts.push(`成交 ${visibleOrders.length} 笔`);
@@ -9401,7 +9402,7 @@ class TradingApp {
                             grid: { display: false },
                             ticks: { display: false },
                             title: { display: true, text: 'Volume' },
-                            max: maxVolume ? maxVolume * 1.1 : undefined,
+                            max: volumeScaleMax,
                         },
                     },
                 },
@@ -9439,7 +9440,11 @@ class TradingApp {
             }
             const volumeScale = this.strategyChartInstance.options?.scales?.volume;
             if (volumeScale) {
-                volumeScale.max = maxVolume ? maxVolume * 1.1 : undefined;
+                if (typeof volumeScaleMax === 'number') {
+                    volumeScale.max = volumeScaleMax;
+                } else {
+                    delete volumeScale.max;
+                }
             }
             const updateMode = options.redraw === true ? 'default' : 'none';
             this.strategyChartInstance.update(updateMode);
