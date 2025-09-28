@@ -18,6 +18,7 @@ from src.account_snapshot_service import AccountSnapshotService
 from src.dom_processor import DOMProcessor
 from src.dom_service import get_dom_service
 from src.strategies.dom_strategy import DOMStrategy
+from src.strategies.buy_the_dip_strategy import BuyTheDipStrategy
 from src.dom_dependencies import DOMConfig, get_dom_processor
 import src.dom_dependencies as dom_dependencies
 from src.strategy_risk import StrategyRiskManager
@@ -123,6 +124,21 @@ try:
     strategy_manager.register_internal_strategy(dom_strategy)
 except Exception as exc:  # pragma: no cover - defensive guard
     logger.warning(f"Failed to initialize DOM strategy: {exc}")
+
+buy_the_dip_strategy = None
+try:
+    buy_the_dip_strategy = BuyTheDipStrategy()
+    buy_the_dip_strategy.set_dependencies(
+        strategy_manager=strategy_manager,
+        order_manager=order_manager,
+        queue_manager=queue_manager,
+        risk_manager=risk_manager,
+        strategy_risk_manager=strategy_risk_manager,
+        notification_manager=notification_manager,
+    )
+    strategy_manager.register_internal_strategy(buy_the_dip_strategy)
+except Exception as exc:  # pragma: no cover - defensive guard
+    logger.warning(f"Failed to initialize Buy-the-Dip strategy: {exc}")
 
 # IBKR client is created on demand
 ibkr_client = None

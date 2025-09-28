@@ -5,15 +5,15 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from threading import RLock
-from typing import Deque, Dict, Iterable, List, Optional
+from typing import Deque, Dict, List, Optional
 
 from loguru import logger
 
 from src.data_layer import (
+    BusSubscriptionToken,
     DataSubscriptionRequest,
     DataSubscriptionToken,
     EventEnvelope,
-    BusSubscriptionToken,
     get_data_layer_mode,
     get_data_source_manager,
     is_unified_mode,
@@ -23,7 +23,7 @@ from .base import BaseStrategy
 
 
 class CandleSubscriptionStrategy(BaseStrategy):
-    """Base strategy that manages candle subscriptions from the unified data layer."""
+    """Base class that manages unified candle subscriptions for strategies."""
 
     candle_interval: str = "1m"
     candle_history: int = 200
@@ -157,8 +157,8 @@ class CandleSubscriptionStrategy(BaseStrategy):
             self.logger.exception("Candle handler failed: {}", exc)
 
     # ------------------------------------------------------------------
-    def on_candle(self, candle: Dict[str, float]) -> None:  # pragma: no cover - interface hook
-        """Hook invoked when a closed candle is received."""
+    def on_candle(self, candle: Dict[str, float]) -> None:  # pragma: no cover - hook
+        """Hook invoked when a closed candle arrives."""
 
     # ------------------------------------------------------------------
     def _run_coro(self, coro):
@@ -172,3 +172,4 @@ class CandleSubscriptionStrategy(BaseStrategy):
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             return future.result()
         return asyncio.run(coro)
+

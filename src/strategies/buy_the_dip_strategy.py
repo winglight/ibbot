@@ -1,4 +1,4 @@
-"""Momentum-support buy-the-dip strategy using unified candle subscriptions."""
+"""Momentum-support buy-the-dip strategy using unified candle data."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ DEFAULT_FUTURE_TICKS = {
 
 
 class BuyTheDipStrategy(CandleSubscriptionStrategy):
-    """Buy the dip when momentum resumes after a pullback."""
+    """Buy when price pulls back to support but momentum/flow turn positive."""
 
     def __init__(
         self,
@@ -36,8 +36,7 @@ class BuyTheDipStrategy(CandleSubscriptionStrategy):
         history_bars: int = 240,
         name: str = "Buy The Dip",
         description: str = (
-            "当价格短期回调且动量指标恢复向上时入场，结合成交量差确认买盘优势，"
-            "并通过冷却期及风险控制避免过度交易。"
+            "当价格回踩短期均线且动量指标恢复向上时自动买入，结合成交量差确认买盘"
         ),
         default_quantity: int = 1,
         cooldown_seconds: float = 120.0,
@@ -73,9 +72,9 @@ class BuyTheDipStrategy(CandleSubscriptionStrategy):
         self._last_order_payload: Optional[Dict[str, Any]] = None
         self.file_path = "src/strategies/buy_the_dip_strategy.py"
         self.summary_points = [
-            "订阅统一K线数据，实时计算RSI、均线乖离与成交量差指标",
-            "价格跌破短期均线且RSI超卖，同时CVD恢复为正时触发买入",
-            "通过冷却期和风险参数控制连续信号，适配RiskManager与队列执行"
+            "订阅统一K线数据并计算RSI、均线乖离与CVD z-score",
+            "价格跌破快线、RSI超卖且CVD转正时触发买入",
+            "通过冷却期与风控参数控制重复信号，队列统一执行"
         ]
         self.set_parameter_definitions(
             {
@@ -83,7 +82,7 @@ class BuyTheDipStrategy(CandleSubscriptionStrategy):
                     "type": "str",
                     "default": symbol.upper(),
                     "label": "Symbol",
-                    "description": "订阅及交易的标的代码。",
+                    "description": "订阅与交易的标的代码。",
                 },
                 "default_quantity": {
                     "type": "int",
@@ -91,7 +90,6 @@ class BuyTheDipStrategy(CandleSubscriptionStrategy):
                     "min": 1,
                     "max": 200,
                     "label": "Order Quantity",
-                    "description": "默认下单数量，风险管理无法计算仓位时使用。",
                 },
                 "cooldown_seconds": {
                     "type": "float",
@@ -135,7 +133,7 @@ class BuyTheDipStrategy(CandleSubscriptionStrategy):
                     "min": 0.0005,
                     "max": 0.05,
                     "label": "MA Pullback Threshold",
-                    "description": "价格低于快线的最小回调比例 (eg. 0.004 = 0.4%)。",
+                    "description": "价格低于快线的最小回调比例 (0.004=0.4%)。",
                     "step": 0.0005,
                 },
                 "cvd_window": {
@@ -328,3 +326,4 @@ class BuyTheDipStrategy(CandleSubscriptionStrategy):
         rsi = 100 - (100 / (1 + rs))
         rsi = rsi.fillna(50.0)
         return rsi.clip(0.0, 100.0)
+
