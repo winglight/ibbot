@@ -50,4 +50,8 @@ def test_build_report_payload_compacts_results_and_failures() -> None:
     assert payload.summary["other_combination_count"] == 2
     assert payload.summary["detailed_result_limit"] == 3
     assert len(payload.summary["annual_return_histogram"]) >= 1
+    assert len(payload.summary["max_drawdown_histogram"]) >= 1
+    assert len(payload.summary["sharpe_histogram"]) >= 1
+    assert payload.summary["max_drawdown_distribution"]["mean"] is not None
+    assert payload.summary["sharpe_distribution"]["mean"] is not None
     assert payload.fail_reasons == ["信号数不足", "数据缺失"]

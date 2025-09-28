@@ -536,29 +536,7 @@ class OptimizerApp {
                 </div>
             `
             : '';
-        const histogramHtml = this.renderReturnHistogram(summary);
-        const distribution = summary?.annual_return_distribution;
-        const hasDistribution = distribution && Object.keys(distribution).length;
-        const distributionHtml = hasDistribution || histogramHtml
-            ? `
-                <div style="margin-top:1rem;">
-                    <h4 style="margin-bottom:0.5rem;">收益率分布</h4>
-                    ${hasDistribution
-                        ? `
-                            <div class="tag-list">
-                                <span class="tag">最小 ${this.formatPercent(distribution.min)}</span>
-                                <span class="tag">25分位 ${this.formatPercent(distribution.p25)}</span>
-                                <span class="tag">中位数 ${this.formatPercent(distribution.p50)}</span>
-                                <span class="tag">75分位 ${this.formatPercent(distribution.p75)}</span>
-                                <span class="tag">最大 ${this.formatPercent(distribution.max)}</span>
-                            </div>
-                            <p class="section-subtitle" style="margin-top:0.5rem;">平均收益 ${this.formatPercent(distribution.mean)}</p>
-                        `
-                        : ''}
-                    ${histogramHtml}
-                </div>
-            `
-            : '';
+        const distributionHtml = this.renderMetricDistributions(summary);
         const conclusionHtml = summary?.conclusion
             ? `
                 <div style="margin-top:1rem;">
@@ -665,8 +643,124 @@ class OptimizerApp {
         `;
     }
 
-    renderReturnHistogram(summary) {
-        const bins = summary?.annual_return_histogram;
+    renderMetricDistributions(summary) {
+        if (!summary || typeof summary !== 'object') {
+            return '';
+        }
+        const sections = [
+            this.renderMetricDistributionSection(summary, {
+                title: '收益率分布',
+                histogramKey: 'annual_return_histogram',
+                distributionKey: 'annual_return_distribution',
+                valueFormatter: (value) => this.formatPercent(value, 1),
+                bucketFormatter: (value) => this.formatPercent(value, 1),
+                meanLabel: '平均收益',
+                labels: {
+                    min: '最小',
+                    p25: '25分位',
+                    p50: '中位数',
+                    p75: '75分位',
+                    max: '最大',
+                },
+            }),
+            this.renderMetricDistributionSection(summary, {
+                title: '回撤率分布',
+                histogramKey: 'max_drawdown_histogram',
+                distributionKey: 'max_drawdown_distribution',
+                valueFormatter: (value) => this.formatPercent(value, 1),
+                bucketFormatter: (value) => this.formatPercent(value, 1),
+                meanLabel: '平均回撤',
+                labels: {
+                    min: '最小',
+                    p25: '25分位',
+                    p50: '中位数',
+                    p75: '75分位',
+                    max: '最大',
+                },
+            }),
+            this.renderMetricDistributionSection(summary, {
+                title: '夏普分布',
+                histogramKey: 'sharpe_histogram',
+                distributionKey: 'sharpe_distribution',
+                valueFormatter: (value) => this.formatNumber(value, 2),
+                bucketFormatter: (value) => this.formatNumber(value, 2),
+                meanLabel: '平均夏普',
+                labels: {
+                    min: '最小',
+                    p25: '25分位',
+                    p50: '中位数',
+                    p75: '75分位',
+                    max: '最大',
+                },
+            }),
+        ].filter(Boolean);
+        if (!sections.length) {
+            return '';
+        }
+        return `
+            <div class="metric-distribution-grid">
+                ${sections.join('')}
+            </div>
+        `;
+    }
+
+    renderMetricDistributionSection(summary, config) {
+        const histogramHtml = this.renderHistogram(summary?.[config.histogramKey], config);
+        const stats = this.renderDistributionDetails(summary?.[config.distributionKey], config);
+        if (!histogramHtml && !stats) {
+            return '';
+        }
+        const tagsHtml = stats?.tags || '';
+        const meanHtml = stats?.mean || '';
+        return `
+            <section class="metric-section">
+                <div class="metric-section__header">
+                    <h4>${config.title}</h4>
+                    ${tagsHtml}
+                </div>
+                ${meanHtml}
+                ${histogramHtml}
+            </section>
+        `;
+    }
+
+    renderDistributionDetails(distribution, config) {
+        if (!distribution || typeof distribution !== 'object') {
+            return null;
+        }
+        const formatter = config.valueFormatter || ((value) => this.formatNumber(value, 2));
+        const labels = config.labels || {};
+        const tags = [];
+        const appendTag = (key, label) => {
+            const value = distribution[key];
+            if (value === undefined || value === null) {
+                return;
+            }
+            const formatted = formatter(value);
+            if (formatted === '-' || formatted === '') {
+                return;
+            }
+            tags.push(`<span class="tag">${label} ${formatted}</span>`);
+        };
+        appendTag('min', labels.min || '最小');
+        appendTag('p25', labels.p25 || '25分位');
+        appendTag('p50', labels.p50 || '中位数');
+        appendTag('p75', labels.p75 || '75分位');
+        appendTag('max', labels.max || '最大');
+        const meanValue = distribution.mean;
+        const meanHtml = meanValue === undefined || meanValue === null
+            ? ''
+            : `<p class="section-subtitle metric-section__mean">${config.meanLabel || '平均值'} ${formatter(meanValue)}</p>`;
+        if (!tags.length && !meanHtml) {
+            return null;
+        }
+        return {
+            tags: tags.length ? `<div class="tag-list">${tags.join('')}</div>` : '',
+            mean: meanHtml,
+        };
+    }
+
+    renderHistogram(bins, config) {
         if (!Array.isArray(bins) || !bins.length) {
             return '';
         }
@@ -685,6 +779,7 @@ class OptimizerApp {
             const numeric = Number(value);
             return Number.isFinite(numeric) ? numeric : null;
         };
+        const formatRange = config.bucketFormatter || ((value) => this.formatNumber(value, 2));
         const bars = bins
             .map((bin, idx) => {
                 const count = counts[idx];
@@ -692,29 +787,59 @@ class OptimizerApp {
                 const height = count > 0 ? Math.max(normalized, 6) : 0;
                 const start = toNumber(bin?.start);
                 const end = toNumber(bin?.end);
-                const startLabel = start !== null ? this.formatPercent(start, 1) : '-';
-                const endLabel = end !== null ? this.formatPercent(end, 1) : '-';
-                const title = `收益区间 ${startLabel} ~ ${endLabel} · ${count} 组`;
+                const startLabel = start !== null ? formatRange(start) : '-';
+                const endLabel = end !== null ? formatRange(end) : '-';
+                const title = `${config.title}区间 ${startLabel} ~ ${endLabel} · ${count} 组`;
+                const countLabel = count > 0 ? `<span class="metric-histogram__bar-count">${count}</span>` : '';
                 return `
-                    <div class="return-histogram-bar" style="height:${height.toFixed(2)}%;" title="${title}">
-                        <span class="return-histogram-bar__count">${count}</span>
+                    <div class="metric-histogram__bar" style="height:${height.toFixed(2)}%;" title="${title}">
+                        ${countLabel}
                     </div>
                 `;
             })
             .join('');
         const firstStart = toNumber(bins[0]?.start);
         const lastEnd = toNumber(bins[bins.length - 1]?.end);
-        const firstLabel = firstStart !== null ? this.formatPercent(firstStart, 1) : '';
-        const lastLabel = lastEnd !== null ? this.formatPercent(lastEnd, 1) : '';
+        const firstLabel = firstStart !== null ? formatRange(firstStart) : '';
+        const lastLabel = lastEnd !== null ? formatRange(lastEnd) : '';
+        const axisTicks = this.buildHistogramAxisTicks(maxCount);
+        const axisHtml = axisTicks
+            .map((tick) => `<span class="metric-histogram__tick">${this.formatNumber(tick, 0)}</span>`)
+            .join('');
         return `
-            <div class="return-histogram" role="img" aria-label="收益率柱状分布图">
-                <div class="return-histogram-bars">${bars}</div>
-                <div class="return-histogram-scale">
+            <div class="metric-histogram" role="img" aria-label="${config.title}柱状分布图">
+                <div class="metric-histogram__chart">
+                    <div class="metric-histogram__y-axis">
+                        ${axisHtml}
+                        <span class="metric-histogram__axis-label">组合数</span>
+                    </div>
+                    <div class="metric-histogram__bars">${bars}</div>
+                </div>
+                <div class="metric-histogram__scale">
                     <span>${firstLabel}</span>
                     <span>${lastLabel}</span>
                 </div>
             </div>
         `;
+    }
+
+    buildHistogramAxisTicks(maxCount) {
+        if (!Number.isFinite(maxCount) || maxCount <= 0) {
+            return [0];
+        }
+        const steps = 4;
+        const ticks = [];
+        for (let i = steps; i >= 0; i -= 1) {
+            const ratio = i / steps;
+            const value = Math.round(maxCount * ratio);
+            if (!ticks.length || ticks[ticks.length - 1] !== value) {
+                ticks.push(value);
+            }
+        }
+        if (ticks[ticks.length - 1] !== 0) {
+            ticks.push(0);
+        }
+        return ticks;
     }
 
     renderCombinationItem(result, index, report, planId) {

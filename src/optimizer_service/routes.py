@@ -48,7 +48,11 @@ from .storage import store, TaskRecord
 from .analytics import summarize_parameter_groups
 from .strategy_generator import StrategyGenerationError, generate_strategy_file
 from .tasks import run_optimization_task
-from .reporting import compute_return_histogram
+from .reporting import (
+    compute_metric_distribution,
+    compute_metric_histogram,
+    compute_return_histogram,
+)
 
 router = APIRouter(prefix="/api/optimize", tags=["optimizer"])
 logger = logging.getLogger(__name__)
@@ -149,6 +153,26 @@ def _build_report_payload(record: TaskRecord) -> Optional[OptimizationReportData
 
     if "annual_return_histogram" not in summary:
         summary["annual_return_histogram"] = compute_return_histogram(report.results)
+    if "annual_return_distribution" not in summary:
+        summary["annual_return_distribution"] = compute_metric_distribution(
+            report.results, "annual_return"
+        )
+    if "max_drawdown_histogram" not in summary:
+        summary["max_drawdown_histogram"] = compute_metric_histogram(
+            report.results, "max_drawdown"
+        )
+    if "max_drawdown_distribution" not in summary:
+        summary["max_drawdown_distribution"] = compute_metric_distribution(
+            report.results, "max_drawdown"
+        )
+    if "sharpe_histogram" not in summary:
+        summary["sharpe_histogram"] = compute_metric_histogram(
+            report.results, "sharpe"
+        )
+    if "sharpe_distribution" not in summary:
+        summary["sharpe_distribution"] = compute_metric_distribution(
+            report.results, "sharpe"
+        )
 
     fail_reasons = _unique_fail_reasons(record, report)
 
