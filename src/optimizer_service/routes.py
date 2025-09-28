@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import uuid
 
+from typing import Any, Dict, List, Optional, Set
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status, Query
 from fastapi.responses import JSONResponse
 
@@ -11,6 +13,7 @@ from src.database import Strategy as DatabaseStrategy, get_db_manager
 
 from .schemas import (
     ErrorResponse,
+    OptimizationReportData,
     OptimizationReportResponse,
     OptimizationRequest,
     OptimizationStartResponse,
@@ -38,12 +41,80 @@ from .metadata import (
     get_available_feature_metrics,
     get_symbol_data_range,
 )
-from .storage import store
+from .storage import store, TaskRecord
 from .analytics import summarize_parameter_groups
 from .strategy_generator import StrategyGenerationError, generate_strategy_file
 from .tasks import run_optimization_task
+from .reporting import compute_return_histogram
 
 router = APIRouter(prefix="/api/optimize", tags=["optimizer"])
+
+
+def _normalize_fail_reason(reason: str) -> str:
+    text = (reason or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        prefix, suffix = text.split(":", 1)
+        candidate = suffix.strip()
+        text = candidate or prefix.strip()
+    return text
+
+
+def _coerce_int(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _unique_fail_reasons(record: TaskRecord, report: OptimizationReportData) -> List[str]:
+    seen: Set[str] = set()
+    aggregated: List[str] = []
+    for source in (record.fail_reasons or []):
+        normalized = _normalize_fail_reason(source)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            aggregated.append(normalized)
+    if aggregated:
+        return aggregated
+    for source in report.fail_reasons or []:
+        normalized = _normalize_fail_reason(source)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            aggregated.append(normalized)
+    return aggregated
+
+
+def _build_report_payload(record: TaskRecord) -> Optional[OptimizationReportData]:
+    report = record.report
+    if not report:
+        return None
+
+    summary: Dict[str, Any] = dict(report.summary or {})
+    successful = _coerce_int(summary.get("successful_combinations"), len(report.results))
+    summary["successful_combinations"] = successful
+    failed = _coerce_int(summary.get("failed_combinations"), len(record.fail_reasons or []))
+    summary["failed_combinations"] = failed
+    if "tested_combinations" not in summary:
+        summary["tested_combinations"] = successful + failed
+
+    detailed_results = report.results[:3]
+    summary["detailed_result_limit"] = 3
+    summary["other_combination_count"] = max(successful - len(detailed_results), 0)
+
+    if "annual_return_histogram" not in summary:
+        summary["annual_return_histogram"] = compute_return_histogram(report.results)
+
+    fail_reasons = _unique_fail_reasons(record, report)
+
+    return OptimizationReportData(
+        task_id=report.task_id,
+        results=detailed_results,
+        summary=summary,
+        equity_curve=report.equity_curve,
+        fail_reasons=fail_reasons,
+    )
 
 
 @router.on_event("startup")
@@ -272,18 +343,20 @@ async def list_plan_reports(plan_id: str) -> OptimizationPlanReportList:
     except KeyError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="plan not found")
     records = plan_manager.list_plan_reports(plan_id)
-    reports_payload = [
-        OptimizationPlanReportEntry(
-            task_id=task_id,
-            state=record.state,
-            created_at=record.created_at,
-            completed_at=record.completed_at,
-            message=record.message,
-            report=record.report,
-            runtime=record.runtime,
+    reports_payload = []
+    for task_id, record in records:
+        condensed_report = _build_report_payload(record)
+        reports_payload.append(
+            OptimizationPlanReportEntry(
+                task_id=task_id,
+                state=record.state,
+                created_at=record.created_at,
+                completed_at=record.completed_at,
+                message=record.message,
+                report=condensed_report,
+                runtime=record.runtime,
+            )
         )
-        for task_id, record in records
-    ]
     return OptimizationPlanReportList(plan_id=plan_id, reports=reports_payload)
 
 

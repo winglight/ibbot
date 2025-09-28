@@ -8,7 +8,12 @@ from typing import Any, Dict, List, Tuple
 from loguru import logger
 
 from .engine import OptimizationEngine
-from .reporting import build_conclusion, compute_return_distribution, compute_runtime_summary
+from .reporting import (
+    build_conclusion,
+    compute_return_distribution,
+    compute_return_histogram,
+    compute_runtime_summary,
+)
 from .schemas import (
     OptimizationReportData,
     OptimizationRequest,
@@ -132,6 +137,7 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
         )
         runtime_summary["status"] = TaskState.COMPLETED.value
         return_distribution = compute_return_distribution(sorted_results)
+        return_histogram = compute_return_histogram(sorted_results)
         report = OptimizationReportData(
             task_id=task_id,
             results=sorted_results,
@@ -145,6 +151,7 @@ def run_optimization_task(task_id: str, request: OptimizationRequest, store: Opt
                 "generated_at": datetime.utcnow().isoformat() + "Z",
                 "runtime": runtime_summary,
                 "annual_return_distribution": return_distribution,
+                "annual_return_histogram": return_histogram,
                 "conclusion": build_conclusion(
                     actual_total,
                     len(results),
