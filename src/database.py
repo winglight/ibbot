@@ -972,22 +972,48 @@ class DatabaseManager:
         return need_start < have_start or need_end > have_end
     
     def load_historical_data(self, symbol: str, bar_size: str = "1 day") -> pd.DataFrame:
-        """加载历史数据"""
+        """加载历史数据（兼容新schema，使用date/time/interval列）。"""
+
+        interval = self._normalize_interval(bar_size)
         with self._connection() as conn:
-            query = """
-                SELECT timestamp, open, high, low, close, volume
-                FROM historical_data
-                WHERE symbol = ? AND bar_size = ? 
-                ORDER BY timestamp
-            """
-            df = pd.read_sql_query(query, conn, params=(symbol, bar_size))
-            
-            if not df.empty:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df.set_index('timestamp', inplace=True)
-            
-            database_logger.debug(f"Loaded historical data for {symbol}: {len(df)} records")
-            return df
+            if interval.endswith("d"):
+                query = (
+                    "SELECT date, open, high, low, close, volume, adj_close "
+                    "FROM historical_data "
+                    "WHERE symbol = ? AND interval = ? "
+                    "ORDER BY date"
+                )
+            else:
+                query = (
+                    "SELECT date, time, open, high, low, close, volume, adj_close "
+                    "FROM historical_data "
+                    "WHERE symbol = ? AND interval = ? "
+                    "ORDER BY date, time"
+                )
+
+            df = pd.read_sql_query(query, conn, params=(symbol, interval))
+
+        if not df.empty:
+            if interval.endswith("d"):
+                df["timestamp"] = pd.to_datetime(df["date"], errors="coerce")
+            else:
+                times = df.get("time")
+                if times is None:
+                    times = "00:00:00"
+                else:
+                    times = times.fillna("00:00:00")
+                df["timestamp"] = pd.to_datetime(
+                    df["date"].astype(str) + " " + times.astype(str), errors="coerce"
+                )
+
+            df = df[df["timestamp"].notna()].copy()
+            df.set_index("timestamp", inplace=True)
+            df.drop(columns=[col for col in ("date", "time") if col in df.columns], inplace=True)
+
+        database_logger.debug(
+            f"Loaded historical data for {symbol}: {len(df)} records (interval={interval})"
+        )
+        return df
     
     # 策略设置相关方法
     # 旧的策略设置方法已删除，请使用 save_strategy_config 和 load_strategy_config
