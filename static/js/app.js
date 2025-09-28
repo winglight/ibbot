@@ -1,34 +1,23 @@
-// 全局常量定义
-const INTERVAL_MINUTES_MAP = {
-    '1min': 1,
-    '5min': 5,
-    '5mins': 5,
-    '15min': 15,
-    '15mins': 15,
-    '30mins': 30,
-    '1hour': 60,
-    '1day': 1440
-};
+const globalScope = typeof window !== 'undefined' ? window : globalThis;
+const appModules = globalScope.appModules = globalScope.appModules || {};
+const monitoringModules = appModules.monitoring || {};
+const MonitoringConstants = monitoringModules.constants || {};
+const MonitoringUtils = monitoringModules.utils || {};
+const SharedUtils = appModules.utils || {};
 
-const MONITOR_SOURCE_TZ = 'America/New_York';
-const MONITOR_FALLBACK_TZ = 'Asia/Shanghai';
-const MONITOR_CHART_MAX_MINUTES = 30;
-const MONITOR_CHART_MAX_POINTS = 3000;
+const {
+    INTERVAL_MINUTES_MAP = {},
+    MONITOR_SOURCE_TZ = 'America/New_York',
+    MONITOR_FALLBACK_TZ = 'Asia/Shanghai',
+    MONITOR_CHART_MAX_MINUTES = 30,
+    MONITOR_CHART_MAX_POINTS = 3000,
+    MONITOR_DURATION_MINUTES_MAP = {},
+    MONITOR_DURATION_OPTIONS = {},
+    TREND_LEVEL_STYLES = {},
+    MONITOR_EVENT_SIDE_COLORS = {}
+} = MonitoringConstants;
 
-const MONITOR_DURATION_MINUTES_MAP = {
-    '30M': 30,
-    '1H': 60,
-    '4H': 240,
-    '1D': 1440,
-    '2D': 2880,
-    '5D': 7200,
-    '1W': 10080,
-    '1M': 43200,
-    '3M': 129600,
-    '1Y': 525600
-};
-
-function normalizeIntervalKey(value) {
+const fallbackNormalizeIntervalKey = (value) => {
     if (typeof value === 'string') {
         return value.replace(/\s+/g, '').toLowerCase();
     }
@@ -36,9 +25,9 @@ function normalizeIntervalKey(value) {
         return String(value);
     }
     return '';
-}
+};
 
-function normalizeDurationKey(value) {
+const fallbackNormalizeDurationKey = (value) => {
     if (typeof value === 'string') {
         return value.replace(/\s+/g, '').toUpperCase();
     }
@@ -46,10 +35,10 @@ function normalizeDurationKey(value) {
         return String(value);
     }
     return '';
-}
+};
 
-function getMonitorDurationMinutes(durationValue) {
-    const normalized = normalizeDurationKey(durationValue);
+const fallbackGetMonitorDurationMinutes = (durationValue) => {
+    const normalized = fallbackNormalizeDurationKey(durationValue);
     if (!normalized) return null;
 
     if (Object.prototype.hasOwnProperty.call(MONITOR_DURATION_MINUTES_MAP, normalized)) {
@@ -92,10 +81,7 @@ function getMonitorDurationMinutes(durationValue) {
         case 'WEEK':
         case 'WEEKS':
             return value * 10080;
-        case 'MO':
-        case 'MOS':
         case 'MON':
-        case 'MONS':
         case 'MONTH':
         case 'MONTHS':
             return value * 43200;
@@ -108,67 +94,24 @@ function getMonitorDurationMinutes(durationValue) {
         default:
             return null;
     }
-}
-
-const MONITOR_DURATION_OPTIONS = {
-    '1 min': [
-        { value: '30 M', label: '30 分钟' },
-        { value: '1 H', label: '1 小时' },
-        { value: '4 H', label: '4 小时' },
-        { value: '1 D', label: '1 天' }
-    ],
-    '5 mins': [
-        { value: '30 M', label: '30 分钟' },
-        { value: '1 H', label: '1 小时' },
-        { value: '4 H', label: '4 小时' },
-        { value: '1 D', label: '1 天' },
-        { value: '1 W', label: '1 周' }
-    ],
-    '15 mins': [
-        { value: '1 H', label: '1 小时' },
-        { value: '4 H', label: '4 小时' },
-        { value: '1 D', label: '1 天' },
-        { value: '1 W', label: '1 周' },
-        { value: '1 M', label: '1 个月' }
-    ],
-    '30 mins': [
-        { value: '4 H', label: '4 小时' },
-        { value: '1 D', label: '1 天' },
-        { value: '1 W', label: '1 周' },
-        { value: '1 M', label: '1 个月' },
-        { value: '3 M', label: '3 个月' }
-    ],
-    '1 hour': [
-        { value: '1 D', label: '1 天' },
-        { value: '1 W', label: '1 周' },
-        { value: '1 M', label: '1 个月' },
-        { value: '3 M', label: '3 个月' },
-        { value: '1 Y', label: '1 年' }
-    ],
-    '1 day': [
-        { value: '1 W', label: '1 周' },
-        { value: '1 M', label: '1 个月' },
-        { value: '3 M', label: '3 个月' },
-        { value: '1 Y', label: '1 年' }
-    ]
 };
 
-function getMonitorDurationOptions(intervalValue) {
+const fallbackGetMonitorDurationOptions = (intervalValue) => {
     const intervalKey = typeof intervalValue === 'string'
         ? intervalValue.trim().toLowerCase()
         : '';
     return MONITOR_DURATION_OPTIONS[intervalKey] || MONITOR_DURATION_OPTIONS['1 min'] || [];
-}
+};
 
-function refreshMonitorDurationSelect(intervalValue, options = {}) {
-    const durationSelect = document.getElementById('monitorDuration');
-    if (!durationSelect) return;
+const fallbackRefreshMonitorDurationSelect = (intervalValue, options = {}) => {
+    const selectEl = options.selectEl || document.getElementById('monitorDuration');
+    if (!selectEl) return [];
 
-    const availableOptions = getMonitorDurationOptions(intervalValue);
-    const previousValue = durationSelect.value;
+    const availableOptions = fallbackGetMonitorDurationOptions(intervalValue);
+    const previousValue = selectEl.value;
     const preferredValue = options.preferredValue;
 
-    durationSelect.innerHTML = '';
+    selectEl.innerHTML = '';
     availableOptions.forEach((item, index) => {
         const optionEl = document.createElement('option');
         optionEl.value = item.value;
@@ -176,140 +119,46 @@ function refreshMonitorDurationSelect(intervalValue, options = {}) {
         if (index === 0 && !preferredValue && !previousValue) {
             optionEl.selected = true;
         }
-        durationSelect.appendChild(optionEl);
+        selectEl.appendChild(optionEl);
     });
 
-    const hasPreferred = preferredValue && availableOptions.some(opt => opt.value === preferredValue);
-    const hasPrevious = availableOptions.some(opt => opt.value === previousValue);
+    const hasPreferred = preferredValue && availableOptions.some((option) => option.value === preferredValue);
+    const hasPrevious = availableOptions.some((option) => option.value === previousValue);
     const fallbackValue = availableOptions[0]?.value || '';
 
     if (hasPreferred) {
-        durationSelect.value = preferredValue;
+        selectEl.value = preferredValue;
     } else if (hasPrevious) {
-        durationSelect.value = previousValue;
+        selectEl.value = previousValue;
     } else if (fallbackValue) {
-        durationSelect.value = fallbackValue;
+        selectEl.value = fallbackValue;
     }
 
-    const changed = durationSelect.value !== previousValue;
+    const changed = selectEl.value !== previousValue;
     if (options.triggerChange && changed) {
-        durationSelect.dispatchEvent(new Event('change'));
+        selectEl.dispatchEvent(new Event('change'));
     }
-}
 
-const TREND_LEVEL_STYLES = {
-    0: {
-        buyColor: '#60a5fa',
-        sellColor: '#f87171',
-        neutralColor: '#94a3b8',
-        barBuyColor: 'rgba(96,165,250,0.3)',
-        barSellColor: 'rgba(248,113,113,0.3)',
-        barNeutralColor: 'rgba(148,163,184,0.25)',
-        pointRadius: 2.5,
-        hoverRadius: 4,
-        borderWidth: 1,
-        borderColor: '#ffffff',
-        labelFont: '600 11px sans-serif',
-        labelOffset: 16,
-        labelBuyColor: '#60a5fa',
-        labelSellColor: '#f87171'
-    },
-    1: {
-        buyColor: 'rgba(134,239,172,0.85)',
-        sellColor: 'rgba(252,165,165,0.85)',
-        neutralColor: '#94a3b8',
-        barBuyColor: 'rgba(134,239,172,0.35)',
-        barSellColor: 'rgba(252,165,165,0.35)',
-        barNeutralColor: 'rgba(148,163,184,0.25)',
-        pointRadius: 3.5,
-        hoverRadius: 5,
-        borderWidth: 1,
-        borderColor: '#ffffff',
-        labelFont: '600 12px sans-serif',
-        labelOffset: 18,
-        labelBuyColor: '#4ade80',
-        labelSellColor: '#f87171'
-    },
-    2: {
-        buyColor: 'rgba(74,222,128,0.9)',
-        sellColor: 'rgba(248,113,113,0.9)',
-        neutralColor: '#94a3b8',
-        barBuyColor: 'rgba(74,222,128,0.4)',
-        barSellColor: 'rgba(248,113,113,0.4)',
-        barNeutralColor: 'rgba(148,163,184,0.25)',
-        pointRadius: 4.5,
-        hoverRadius: 6,
-        borderWidth: 1.5,
-        borderColor: '#f0fdf4',
-        labelFont: '600 13px sans-serif',
-        labelOffset: 20,
-        labelBuyColor: '#22c55e',
-        labelSellColor: '#ef4444'
-    },
-    3: {
-        buyColor: 'rgba(34,197,94,0.95)',
-        sellColor: 'rgba(239,68,68,0.95)',
-        neutralColor: '#94a3b8',
-        barBuyColor: 'rgba(34,197,94,0.45)',
-        barSellColor: 'rgba(239,68,68,0.45)',
-        barNeutralColor: 'rgba(148,163,184,0.25)',
-        pointRadius: 5.5,
-        hoverRadius: 7,
-        borderWidth: 2,
-        borderColor: '#dcfce7',
-        labelFont: '700 14px sans-serif',
-        labelOffset: 22,
-        labelBuyColor: '#16a34a',
-        labelSellColor: '#dc2626'
-    },
-    4: {
-        buyColor: '#16a34a',
-        sellColor: '#b91c1c',
-        neutralColor: '#94a3b8',
-        barBuyColor: 'rgba(22,163,74,0.55)',
-        barSellColor: 'rgba(185,28,28,0.55)',
-        barNeutralColor: 'rgba(148,163,184,0.25)',
-        pointRadius: 6.5,
-        hoverRadius: 8,
-        borderWidth: 2.5,
-        borderColor: '#fef9c3',
-        labelFont: '700 15px sans-serif',
-        labelOffset: 24,
-        labelBuyColor: '#15803d',
-        labelSellColor: '#b91c1c',
-        shadowBlur: 10,
-        shadowColor: 'rgba(250,204,21,0.55)',
-        outlineColor: '#fef08a',
-        outlineWidth: 1.5
-    }
+    return availableOptions;
 };
 
-const MONITOR_EVENT_SIDE_COLORS = {
-    buy: '#22c55e',
-    sell: '#ef4444',
-    neutral: '#64748b',
-};
-
-function getTrendLevelStyle(level) {
+const fallbackGetTrendLevelStyle = (level) => {
     const key = Number.isFinite(level) ? Number(level) : 0;
-    return TREND_LEVEL_STYLES[key] || TREND_LEVEL_STYLES[0];
-}
+    return TREND_LEVEL_STYLES[key] || TREND_LEVEL_STYLES[0] || {};
+};
 
-function getTrendSuggestionLabel(suggestion, level) {
+const fallbackGetTrendSuggestionLabel = (suggestion, level) => {
     if (!suggestion) return '';
     const numericLevel = Number(level);
-    const resolvedLevel = Number.isFinite(numericLevel) ? Math.min(4, Math.max(1, Math.round(numericLevel))) : 1;
+    const resolvedLevel = Number.isFinite(numericLevel)
+        ? Math.min(4, Math.max(1, Math.round(numericLevel)))
+        : 1;
     if (suggestion === 'buy') return `B${resolvedLevel}`;
     if (suggestion === 'sell') return `S${resolvedLevel}`;
     return '';
-}
+};
 
-if (typeof window !== 'undefined') {
-    window.getTrendLevelStyle = getTrendLevelStyle;
-    window.getTrendSuggestionLabel = getTrendSuggestionLabel;
-}
-
-const TrendSignalLabelPlugin = {
+const fallbackTrendSignalLabelPlugin = {
     id: 'trendSignalLabel',
     afterDatasetsDraw(chart, args, opts) {
         const dataset = chart.data?.datasets?.[0];
@@ -327,8 +176,8 @@ const TrendSignalLabelPlugin = {
             if (!raw || !raw.suggestion) return;
             const { x, y } = element.tooltipPosition();
             const level = raw.level ?? 0;
-            const style = getTrendLevelStyle(level);
-            const text = getTrendSuggestionLabel(raw.suggestion, raw.level)
+            const style = fallbackGetTrendLevelStyle(level);
+            const text = fallbackGetTrendSuggestionLabel(raw.suggestion, raw.level)
                 || (raw.suggestion === 'buy' ? 'Buy' : 'Sell');
             const resolvedOffset = style.labelOffset ?? offset;
             const yOffset = raw.suggestion === 'buy' ? -resolvedOffset : resolvedOffset;
@@ -355,13 +204,26 @@ const TrendSignalLabelPlugin = {
     }
 };
 
-function slugifyStrategyName(name) {
-    return (name || '')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '_')
-        .replace(/_+/g, '_')
-        .replace(/^_+|_+$/g, '');
-}
+const fallbackSlugifyStrategyName = (name) => (name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+const {
+    normalizeIntervalKey = fallbackNormalizeIntervalKey,
+    normalizeDurationKey = fallbackNormalizeDurationKey,
+    getMonitorDurationMinutes = fallbackGetMonitorDurationMinutes,
+    getMonitorDurationOptions = fallbackGetMonitorDurationOptions,
+    refreshMonitorDurationSelect = fallbackRefreshMonitorDurationSelect,
+    getTrendLevelStyle = fallbackGetTrendLevelStyle,
+    getTrendSuggestionLabel = fallbackGetTrendSuggestionLabel
+} = MonitoringUtils;
+
+const {
+    TrendSignalLabelPlugin = fallbackTrendSignalLabelPlugin,
+    slugifyStrategyName = fallbackSlugifyStrategyName
+} = SharedUtils;
 
 class TradingApp {
     constructor() {
