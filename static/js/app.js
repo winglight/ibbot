@@ -9773,8 +9773,13 @@ class TradingApp {
             this.strategyChartInstance.config.type = desiredType;
             const xScale = this.strategyChartInstance.options?.scales?.x;
             if (xScale) {
-                xScale.time = xScale.time || {};
-                xScale.time.unit = this.getStrategyChartTimeUnit(state.interval);
+                const nextUnit = this.getStrategyChartTimeUnit(state.interval);
+                const currentTimeConfig = xScale.time;
+                const normalizedTimeConfig = (currentTimeConfig && typeof currentTimeConfig === 'object' && !Array.isArray(currentTimeConfig))
+                    ? { ...currentTimeConfig }
+                    : {};
+                normalizedTimeConfig.unit = nextUnit;
+                xScale.time = normalizedTimeConfig;
             }
             const volumeScale = this.strategyChartInstance.options?.scales?.volume;
             if (volumeScale) {
