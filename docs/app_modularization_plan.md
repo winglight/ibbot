@@ -348,49 +348,48 @@
 - `addToHistoricalSymbols` (L11857)
 - `applySuggestedQuantity` (L12317)
 
-## 5. 迁移计划与验证步骤
+## 5. 重排迁移计划（基于 2024 年现状）
 
-为确保迁移过程可控，建议按以下阶段推进，每完成一阶段立即执行对应测试/验证：
+结合现有 `monitoring/manager.js`、`strategies/manager.js`、`orders/manager.js` 等文件的内容，以下步骤按照“先迁走仍保留在 `app.js` 中的实现，再收缩入口类”的思路重新排序。每一步都列出了需要迁移的方法与目标模块，迁移完成后请删除 `app.js` 中的回退实现，仅保留必要的委托调用。
 
-### 阶段 0：准备工作
-- **目标**：建立模块化目录结构（如 `static/js/monitoring/`, `static/js/strategies/`, `static/js/utils/`），配置构建/加载方式（ES 模块或打包器）。
-- **验证**：
-  - 确认浏览器能正确加载拆分后的入口脚本（可通过本地启动应用并观察控制台无 404/语法错误）。
-  - 运行现有后端/接口测试（如 `pytest`）确保环境变更未影响后台。 
+### 步骤 1：监控状态与时间选择逻辑
+- **目标模块**：`static/js/monitoring/manager.js`
+- **待迁移方法**：`initializeMonitoringStateFallback`、`createDefaultStrategyChartState`、`getStrategyChartState`、`getStrategyChartRefreshIntervalMs`、`getStrategyChartTimeUnit`、`refreshStrategyChartDuration`、以及 `bindMonitoringStateProxies` 中对状态字段的定义（改为在 `MonitoringManager` 内维护状态并只在构造函数中注册代理）。
+- **验证要点**：监控弹窗与策略图表的区间/时长下拉框仍能正确渲染和联动，刷新页面后状态不会丢失。
 
-### 阶段 1：抽离全局常量与基础工具
-- **范围**：移动“全局常量与工具函数”表中的内容到新的 `monitoring/constants.js` 与 `monitoring/utils.js`；将 `TrendSignalLabelPlugin` 与 `slugifyStrategyName` 放入共享 `utils` 包；更新 `app.js` 中引用。
-- **验证**：
-  - 手动测试监控时长选择器能随区间变化刷新选项。
-  - 手动刷新趋势图，确认标签样式/文字仍正确显示。
-  - 前端构建或浏览器控制台无未定义引用错误。
+### 步骤 2：监控趋势数据处理与渲染
+- **目标模块**：`static/js/monitoring/manager.js`（必要时可拆出 `monitoring/trend.js`）
+- **待迁移方法**：`setMonitorTrendHistory`、`resetMonitorTrendData`、`formatTrendPointForChart`、`getFormattedTrendChartData`、`updateMonitorSignalOverlayDatasets`、`renderMonitorSignalHistory`、`getTrendValues`、`setupTrendLegendAndAnnotations`、`refreshTrend`、`syncTrendReferenceLines`、`deriveTrendLevel`、`addMonitorTrendPoint`。
+- **验证要点**：历史趋势图加载、信号标记、趋势等级提示等功能保持一致；`TrendSignalLabelPlugin` 在新模块中仍能工作。
 
-### 阶段 2：拆分监控与图表模块
-- **范围**：将“监控与趋势图表”方法连同相关状态（`monitor*` 字段、`strategyChartState` 等）迁移到新模块；保留与主类通信的接口（如事件钩子、公共方法）。
-- **验证**：
-  - 启动监控弹窗，验证实时/历史图表加载、缩放、实时订阅开关等功能。
-  - 在策略详情页检查图表切换、播放、风险线展示是否正常。
-  - 若有单元/集成测试，可补充针对图表数据处理的测试。
+### 步骤 3：监控实时订阅与模态交互
+- **目标模块**：`static/js/monitoring/manager.js`
+- **待迁移方法**：`syncCharts`、`normalizeMonitorTime`、`getMonitorDisplayTimes`、`getMonitorDisplayLabels`、`extractRangeFromMonitorChart`、`shouldResumeMonitorRealtime`、`subscribeMonitorRealtime`、`unsubscribeMonitorRealtime`、`updateMonitorRealtime`、`loadMonitorChart`、`displayChart`、`updateMonitorStopLossLine`、`updateMonitorTakeProfitLine`、`openMonitorModal`、`syncMonitorModalData`、`loadMonitorOrdersList`、`_loadMonitorOrdersList`、`exitMonitorFullscreen`。
+- **验证要点**：实时订阅切换、全屏模式、订单列表刷新、止盈止损线拖拽/输入仍可正常使用；重新打开弹窗可恢复实时流。
 
-### 阶段 3：拆分策略管理与风险控制
-- **范围**：根据“策略管理与绩效”与“风险控制与规则”列表，新建 `strategies/` 与 `risk/` 模块；将 `StrategiesManager` 等外部依赖整合，使 `TradingApp` 仅协调模块间交互。
-- **验证**：
-  - 在策略列表中执行增删改、详情查看、数据推送开关等操作。
-  - 编辑风险规则并保存，确认后端响应与 UI 状态同步正常。
-  - 通过现有接口测试（`pytest` 或 API 回归）确认无回归。
+### 步骤 4：策略详情面板与内部订单
+- **目标模块**：新建 `static/js/strategies/details.js`（负责详情 UI）并扩展 `strategies/manager.js`（负责数据请求）
+- **待迁移方法**：`openStrategyDetails`、`initializeStrategyDetailsState`、`prepareStrategyDetailsModal`、`ensureStrategyDetailsTabListener`、`initializeStrategyDetailsContent`、`activateStrategyDetailsDefaultTab`、`requestActiveStrategyDetailsTabLoad`、`triggerStrategyDetailsTabLoad`、`loadStrategySummaryTab`、`loadStrategyExecutionsTab`、`loadStrategyChartsTab`、`loadStrategyStrategyChartTab`、`loadStrategyInternalOrdersTab`、`loadStrategyPnLCalendarTab`、`loadStrategyApiExamplesTab`、`updateStrategyDetailsHeader`、`updateStrategySummaryHeader`、`renderStrategyExecutions`、`fetchStrategyExecutions`、`clearStrategyExecutionsCache`、`loadInternalStrategyOrders`。
+- **验证要点**：策略详情弹窗可打开并在各标签间切换；执行记录、内部订单、PnL 日历和 API 示例加载逻辑保持一致；导出/重置等按钮仍可调用。
 
-### 阶段 4：拆分订单执行与通知
-- **范围**：将“下单与执行流程”方法移动到 `orders/` 模块，将“通知与提醒”迁出到 `notifications/`（若尚未独立，可与已有 `NotificationsManager` 对齐）。
-- **验证**：
-  - 在模拟环境下尝试下单、撤单、导出执行记录等操作。
-  - 测试交易提醒触发（可通过修改系统时间或使用测试按钮）。
-  - 检查订单自动刷新功能是否仍按 15 秒触发。
+### 步骤 5：策略列表状态与绩效补强
+- **目标模块**：`static/js/strategies/manager.js`
+- **待迁移方法**：`handleStrategiesSnapshot`、`handleSizingHistorySnapshot`、`renderSizingHistory`、`applySizingRuleStatusesFromHistory`、`handleStrategyStatusMessage`、`applyStrategyStatusPayload`、`loadGSRulesStatus`、`updateRuleStatus`、以及与策略数据推送、重置、重命名相关的剩余 DOM 操作（如对列表开关、提示文本的直接操作）。
+- **验证要点**：策略列表刷新、G/S 规则状态展示、策略推送开关、重命名/重置等交互均由 `StrategiesManager` 驱动，`TradingApp` 仅保留事件注册。
 
-### 阶段 5：整理通用 UI 与工具
-- **范围**：将“界面状态与交互”与“通用工具/辅助”方法分为 UI 控制器与共享工具库；清理重复方法（如重复的 `setActiveDropdownItem`/`showHistoricalSymbols`）。
-- **验证**：
-  - 全量回归主要界面：设置面板、只读模式切换、配置保存与重置等。
-  - 运行静态检查/格式化工具（如 ESLint、Prettier）保证风格统一。
-  - 确认最终打包/部署资源体积与功能符合预期。
+### 步骤 6：风险配置与通用工具收尾
+- **目标模块**：`static/js/risk/manager.js` 与 `static/js/utils/format.js`（或现有 `utils/` 子模块）
+- **待迁移方法**：`normalizeRuleStatus`、`showConfigModal`、`loadConfigData`、`saveConfigRules`、`resetConfigRules`、`fetchRiskRuleOrders` 以及 `formatNumber`、`isSameDay` 等通用工具函数；确保风险弹窗、配置保存与历史订单查看均通过 `RiskRulesManager` 和共享工具完成。
+- **验证要点**：风险规则配置对话框、G/S 规则统计、风险订单查看、数字格式化等功能保持稳定；`app.js` 中不再保留通用工具的冗余实现。
 
-在每个阶段完成后，应及时提交代码并与团队同步测试结果，以便快速定位潜在回归。待您确认本分类与计划后，可按指定类别逐步迁移，并在每一步附上相应验证记录。
+每完成一个步骤，应手动回归对应模块的关键路径（监控图表、策略详情、风险配置等），并在浏览器控制台确认未出现新的未定义引用或事件绑定错误。
+
+## 现状评估（2024-xx）
+
+目前仓库已存在 `static/js/monitoring/`, `static/js/strategies/`, `static/js/ui/` 等目录，也在 `app.js` 中增加了 `appModules.*` 命名空间的探测与回退逻辑。但按照上文新的迁移步骤，仍停留在“步骤 1”初期：
+
+- `monitoring/constants.js` 与 `monitoring/utils.js` 已定义常量与工具，不过 `app.js` 继续保留完整的回退实现，导致即使加载了模块也会执行旧逻辑。【F:static/js/app.js†L1-L105】
+- `monitoring/manager.js` 目前仅实现了状态字段与少量选择器方法，大量监控与策略图表逻辑仍直接驻留在 `app.js`（如 `updateMonitorRealtime`、`renderStrategyChart` 等），需要按步骤 2 和步骤 3 迁移。【F:static/js/app.js†L5954-L5979】【F:static/js/app.js†L9468-L9555】
+- `TradingApp` 中虽然新增了 `bindMonitoringStateProxies`、`bindStrategiesStateProxies` 等代理，但 200 多个实例方法依旧定义在 `app.js`。部分方法改为探测子模块再回退执行旧实现，导致文件体量没有下降，也让真实的迁移进度难以衡量。【F:static/js/app.js†L239-L368】【F:static/js/app.js†L7449-L7498】
+
+只有按上述步骤逐组迁移并删除回退实现，`app.js` 的行数才会从当前的 10k+ 行逐步下降，真正实现模块化目标。
