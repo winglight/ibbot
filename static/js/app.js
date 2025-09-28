@@ -280,12 +280,11 @@ class TradingApp {
         this.summaryStatusTarget = null;
         this.summaryDataFeedCurrent = null;
         this.wsHandlers = new Map();
-        this.strategyPerformanceCells = new Map();
-        this.strategyPerformanceCache = new Map();
-        this.strategyRefreshIntervalMs = 15000;
+        this.riskRulesManager = new RiskRulesManager(this);
+        this.strategiesManager = new StrategiesManager(this);
+        this.bindStrategiesStateProxies();
         this.sizingHistoryCache = { table: [], latest: null, meta: null, context: null, receivedAt: 0 };
         this.registerWebSocketHandler('strategy_performance', (payload) => this.handleStrategyPerformanceMessage(payload));
-        this.registerWebSocketHandler('risk_rules', (payload) => this.handleRiskRulesMessage(payload));
         this.registerWebSocketHandler('strategies_snapshot', (payload) => this.handleStrategiesSnapshot(payload));
         this.registerWebSocketHandler('strategy_status', (payload) => this.handleStrategyStatusMessage(payload));
         this.registerWebSocketHandler('sizing_history', (payload) => this.handleSizingHistorySnapshot(payload));
@@ -300,8 +299,6 @@ class TradingApp {
         this.dataManager = new IBKRDataManager(this);
         this.orderManager = new OrderManager(this);
         this.portfolioManager = new PortfolioManager(this);
-        this.riskRulesManager = new RiskRulesManager(this);
-        this.strategiesManager = new StrategiesManager(this);
         this.logsManager = new LogsManager(
             this.apiCall.bind(this),
             this.showAlert.bind(this),
@@ -327,6 +324,27 @@ class TradingApp {
             Object.defineProperty(this, prop, {
                 configurable: true,
                 enumerable: true,
+                get: () => manager[prop],
+                set: (value) => {
+                    manager[prop] = value;
+                }
+            });
+        });
+    }
+
+    bindStrategiesStateProxies() {
+        const manager = this.strategiesManager;
+        if (!manager || typeof manager.getManagedProperties !== 'function') {
+            return;
+        }
+        const properties = manager.getManagedProperties();
+        properties.forEach((prop) => {
+            if (Object.prototype.hasOwnProperty.call(this, prop)) {
+                delete this[prop];
+            }
+            Object.defineProperty(this, prop, {
+                configurable: true,
+                enumerable: false,
                 get: () => manager[prop],
                 set: (value) => {
                     manager[prop] = value;
@@ -486,31 +504,10 @@ class TradingApp {
     }
 
     handleStrategyPerformanceMessage(message) {
-        if (!message || !message.name) return false;
-        const entry = this.strategyPerformanceCells.get(message.name);
-        if (!entry) return false;
-        const { pnlCell, tradesCell } = entry;
-        if (!pnlCell || !tradesCell) return true;
-        if (!message.success) {
-            const err = message?.error || '';
-            if (typeof err === 'string' && err.toLowerCase().includes('rate')) {
-                return true;
-            }
-            if (!this.strategyPerformanceCache.has(message.name)) {
-                pnlCell.textContent = '-';
-                tradesCell.textContent = '-';
-            }
-            return true;
+        if (!this.strategiesManager || typeof this.strategiesManager.handleStrategyPerformanceMessage !== 'function') {
+            return false;
         }
-        const metrics = message.metrics || {};
-        const totalPnL = Number(metrics.total_pnl ?? 0);
-        const totalExec = Number(metrics.total_executions ?? 0);
-        const formattedPnL = `$${(Number.isFinite(totalPnL) ? totalPnL : 0).toFixed(2)}`;
-        const formattedTrades = `${Math.max(0, Math.floor((Number.isFinite(totalExec) ? totalExec : 0) / 2))}`;
-        pnlCell.textContent = formattedPnL;
-        tradesCell.textContent = formattedTrades;
-        this.strategyPerformanceCache.set(message.name, { pnl: formattedPnL, trades: formattedTrades });
-        return true;
+        return this.strategiesManager.handleStrategyPerformanceMessage(message);
     }
 
     handleRiskRulesMessage(payload) {
@@ -3279,202 +3276,39 @@ class TradingApp {
     // Update expected PnL based on current inputs
     // 旧版本的updateExpectedPnL已删除，使用新版本的方法
 
-    openRiskRuleModal(symbol = '', stopLoss = '', takeProfit = '', maxTime = '', position = 0, currentPrice = 0, avgCost = 0, isEditMode = false) {
-        document.getElementById('riskSymbol').value = symbol;
-        document.getElementById('riskStopLossPrice').value = stopLoss;
-        document.getElementById('riskTakeProfitPrice').value = takeProfit;
-        document.getElementById('riskMaxTime').value = maxTime;
-        
-        // Store position data for PnL calculations
-        this.currentRiskRuleData = {
-            symbol: symbol,
-            position: position,
-            currentPrice: currentPrice,
-            avgCost: avgCost
-        };
-        
-        // Always show PnL preview section
-        const pnlSection = document.getElementById('pnlPreviewSection');
-        pnlSection.style.display = 'block';
-        this.updatePnLPreview();
-        
-        // Set button text based on mode
-        const submitBtn = document.getElementById('submitRiskRuleBtn');
-        if (isEditMode) {
-            submitBtn.innerHTML = '<i class="fas fa-save"></i> Save Changes';
-        } else {
-            submitBtn.innerHTML = '<i class="fas fa-plus"></i> Add Risk Rule';
+    openRiskRuleModal(...args) {
+        if (!this.riskRulesManager || typeof this.riskRulesManager.openRiskRuleModal !== 'function') {
+            return;
         }
-        
-        // Add event listeners for real-time updates
-        this.addPnLUpdateListeners();
-        
-        const modal = new bootstrap.Modal(document.getElementById('riskRuleModal'));
-        
-        // Clean up listeners when modal is closed
-        document.getElementById('riskRuleModal').addEventListener('hidden.bs.modal', () => {
-            this.removePnLUpdateListeners();
-        }, { once: true });
-        
-        modal.show();
+        return this.riskRulesManager.openRiskRuleModal(...args);
     }
 
     updatePnLPreview() {
-        if (!this.currentRiskRuleData) return;
-        
-        const { position, currentPrice, avgCost } = this.currentRiskRuleData;
-        const stopLossPrice = parseFloat(document.getElementById('riskStopLossPrice').value) || 0;
-        const takeProfitPrice = parseFloat(document.getElementById('riskTakeProfitPrice').value) || 0;
-        
-        // Check if we have valid position data
-        if (position === 0 || !avgCost) {
-            // Show placeholder when no position data
-            document.getElementById('stopLossPnL').textContent = 'N/A';
-            document.getElementById('takeProfitPnL').textContent = 'N/A';
-            
-            // Set neutral colors
-            document.getElementById('stopLossPnL').className = 'fw-bold text-muted';
-            document.getElementById('takeProfitPnL').className = 'fw-bold text-muted';
+        if (!this.riskRulesManager || typeof this.riskRulesManager.updatePnLPreview !== 'function') {
             return;
         }
-        
-        // Calculate PnL based on actual position size
-        const stopLossPnL = (stopLossPrice - avgCost) * position;
-        const takeProfitPnL = (takeProfitPrice - avgCost) * position;
-        
-        // Update display
-        document.getElementById('stopLossPnL').textContent = `$${stopLossPnL.toFixed(2)}`;
-        document.getElementById('takeProfitPnL').textContent = `$${takeProfitPnL.toFixed(2)}`;
-        
-        // Update colors based on positive/negative values
-        const stopLossElement = document.getElementById('stopLossPnL');
-        const takeProfitElement = document.getElementById('takeProfitPnL');
-        
-        stopLossElement.className = stopLossPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
-        takeProfitElement.className = takeProfitPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
+        return this.riskRulesManager.updatePnLPreview();
     }
 
     addPnLUpdateListeners() {
-        // Remove existing listeners to avoid duplicates
-        this.removePnLUpdateListeners();
-        
-        const symbol = document.getElementById('riskSymbol').value;
-        
-        // Add new listeners with price correction
-        this.stopLossListener = (e) => {
-            const correctedPrice = this.correctPriceStep(e.target.value, symbol);
-            if (correctedPrice !== parseFloat(e.target.value)) {
-                e.target.value = correctedPrice;
-            }
-            this.updatePnLPreview();
-        };
-        
-        this.takeProfitListener = (e) => {
-            const correctedPrice = this.correctPriceStep(e.target.value, symbol);
-            if (correctedPrice !== parseFloat(e.target.value)) {
-                e.target.value = correctedPrice;
-            }
-            this.updatePnLPreview();
-        };
-        
-        document.getElementById('riskStopLossPrice').addEventListener('input', this.stopLossListener);
-        document.getElementById('riskTakeProfitPrice').addEventListener('input', this.takeProfitListener);
+        if (!this.riskRulesManager || typeof this.riskRulesManager.addPnLUpdateListeners !== 'function') {
+            return;
+        }
+        return this.riskRulesManager.addPnLUpdateListeners();
     }
 
     removePnLUpdateListeners() {
-        if (this.stopLossListener) {
-            document.getElementById('riskStopLossPrice').removeEventListener('input', this.stopLossListener);
+        if (!this.riskRulesManager || typeof this.riskRulesManager.removePnLUpdateListeners !== 'function') {
+            return;
         }
-        if (this.takeProfitListener) {
-            document.getElementById('riskTakeProfitPrice').removeEventListener('input', this.takeProfitListener);
-        }
+        return this.riskRulesManager.removePnLUpdateListeners();
     }
 
-    async editPositionRiskRule(symbol, currentPrice, avgCost, position = 0, presetStopLoss = '', presetTakeProfit = '') {
-        try {
-            // Get risk configuration from API
-            const config = await this.apiCall('/risk-config');
-            
-            const stopLossRatio = config.stop_loss_ratio || 0.025;
-            const takeProfitRatio = config.take_profit_ratio || 0.025;
-            
-            // Determine if this is a short position (negative position)
-            const isShortPosition = position < 0;
-            
-            // Determine base price for SL/TP calculation
-            let basePrice = avgCost; // Default to average cost
-            
-            // Apply leverage adjustment for leveraged assets
-            let adjustedStopLossRatio = stopLossRatio;
-            let adjustedTakeProfitRatio = takeProfitRatio;
-            
-            const leverageMap = (config && config.leverage) ? config.leverage : {};
-            const lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || (symbol === 'MNQ' ? (leverageMap['MNQ'] || 20) : null);
-            if (lev && !isNaN(lev) && lev > 0) {
-                adjustedStopLossRatio = stopLossRatio / lev;
-                adjustedTakeProfitRatio = takeProfitRatio / lev;
-            }
-            
-            let stopLoss, takeProfit;
-            
-            // Use preset values if provided, otherwise calculate suggested values
-            if (presetStopLoss !== '' && presetTakeProfit !== '') {
-                stopLoss = presetStopLoss;
-                takeProfit = presetTakeProfit;
-            } else {
-                // Calculate suggested values based on position direction
-                if (isShortPosition) {
-                    // For short positions: stop loss is above avg cost, take profit is below avg cost
-                    stopLoss = (basePrice * (1 + adjustedStopLossRatio)).toFixed(2);
-                    takeProfit = (basePrice * (1 - adjustedTakeProfitRatio)).toFixed(2);
-                } else {
-                    // For long positions: stop loss is below avg cost, take profit is above avg cost
-                    stopLoss = (basePrice * (1 - adjustedStopLossRatio)).toFixed(2);
-                    takeProfit = (basePrice * (1 + adjustedTakeProfitRatio)).toFixed(2);
-                }
-            }
-            
-            this.openRiskRuleModal(symbol, stopLoss, takeProfit, '', position, currentPrice, avgCost, true);
-        } catch (error) {
-            console.error('Failed to get risk config:', error);
-            // Fallback to preset values or default calculated values with leverage consideration
-            let stopLoss, takeProfit;
-            const isShortPosition = position < 0;
-            
-            if (presetStopLoss !== '' && presetTakeProfit !== '') {
-                stopLoss = presetStopLoss;
-                takeProfit = presetTakeProfit;
-            } else {
-                // Use default ratios with leverage adjustment
-                let stopLossRatio = 0.025; // Default 2.5%
-                let takeProfitRatio = 0.025; // Default 2.5%
-                
-                // Try to get leverage info even if risk config failed
-                try {
-                    const config = await this.apiCall('/risk-config');
-                    const leverageMap = (config && config.leverage) ? config.leverage : {};
-                    const lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || (symbol === 'MNQ' ? (leverageMap['MNQ'] || 20) : null);
-                    if (lev && !isNaN(lev) && lev > 0) {
-                        stopLossRatio = stopLossRatio / lev;
-                        takeProfitRatio = takeProfitRatio / lev;
-                    }
-                } catch (leverageError) {
-                    console.warn('Failed to get leverage info, using default ratios:', leverageError);
-                }
-                
-                if (isShortPosition) {
-                    // For short positions: stop loss above avg cost, take profit below avg cost
-                    stopLoss = presetStopLoss || (avgCost * (1 + stopLossRatio)).toFixed(2);
-                    takeProfit = presetTakeProfit || (avgCost * (1 - takeProfitRatio)).toFixed(2);
-                } else {
-                    // For long positions: stop loss below avg cost, take profit above avg cost
-                    stopLoss = presetStopLoss || (avgCost * (1 - stopLossRatio)).toFixed(2);
-                    takeProfit = presetTakeProfit || (avgCost * (1 + takeProfitRatio)).toFixed(2);
-                }
-            }
-            
-            this.openRiskRuleModal(symbol, stopLoss, takeProfit, '', position, currentPrice, avgCost, true);
+    async editPositionRiskRule(...args) {
+        if (!this.riskRulesManager || typeof this.riskRulesManager.editPositionRiskRule !== 'function') {
+            return;
         }
+        return this.riskRulesManager.editPositionRiskRule(...args);
     }
 
     shouldResumeMonitorRealtime(symbol) {
@@ -7018,7 +6852,8 @@ class TradingApp {
         try {
             // 支持两种模式：监控模式和建议仓位模式
             const isMonitorMode = !!this.currentMonitor;
-            
+            const currentRiskRuleData = this.riskRulesManager?.getCurrentRuleData?.() || null;
+
             let stopLossInput, takeProfitInput, positionQty, avgCost;
             let symbolForMultiplier = '';
 
@@ -7040,7 +6875,7 @@ class TradingApp {
                 // 在建议仓位模式下，使用订单价格作为成本价，订单数量作为持仓
                 avgCost = orderPrice;
                 positionQty = action === 'SELL' ? -quantity : quantity;
-                symbolForMultiplier = (this.currentRiskRuleData?.symbol
+                symbolForMultiplier = (currentRiskRuleData?.symbol
                     || document.getElementById('orderSymbol')?.value
                     || document.getElementById('summaryPrimarySymbolInput')?.value
                     || '')
@@ -7182,43 +7017,17 @@ class TradingApp {
     }
 
     showActiveRiskRule(rule) {
-        try {
-            const activeRiskRuleDisplay = document.getElementById('activeRiskRuleDisplay');
-            const activeStopLossPrice = document.getElementById('activeStopLossPrice');
-            const activeTakeProfitPrice = document.getElementById('activeTakeProfitPrice');
-            
-            if (activeRiskRuleDisplay && activeStopLossPrice && activeTakeProfitPrice) {
-                // 显示止损价格
-                if (rule.stop_loss_price) {
-                    activeStopLossPrice.textContent = `$${this.formatNumber(rule.stop_loss_price)}`;
-                } else {
-                    activeStopLossPrice.textContent = '未设置';
-                }
-                
-                // 显示止盈价格
-                if (rule.take_profit_price) {
-                    activeTakeProfitPrice.textContent = `$${this.formatNumber(rule.take_profit_price)}`;
-                } else {
-                    activeTakeProfitPrice.textContent = '未设置';
-                }
-                
-                // 显示激活风险规则区域
-                activeRiskRuleDisplay.style.display = 'block';
-            }
-        } catch (err) {
-            console.error('showActiveRiskRule failed:', err);
+        if (!this.riskRulesManager || typeof this.riskRulesManager.showActiveRiskRule !== 'function') {
+            return;
         }
+        return this.riskRulesManager.showActiveRiskRule(rule);
     }
 
     hideActiveRiskRule() {
-        try {
-            const activeRiskRuleDisplay = document.getElementById('activeRiskRuleDisplay');
-            if (activeRiskRuleDisplay) {
-                activeRiskRuleDisplay.style.display = 'none';
-            }
-        } catch (err) {
-            console.error('hideActiveRiskRule failed:', err);
+        if (!this.riskRulesManager || typeof this.riskRulesManager.hideActiveRiskRule !== 'function') {
+            return;
         }
+        return this.riskRulesManager.hideActiveRiskRule();
     }
 
     displayChart(symbol, data) {
@@ -7275,51 +7084,10 @@ class TradingApp {
 
 
     async addRiskRule() {
-        const rule = {
-            symbol: document.getElementById('riskSymbol').value.toUpperCase(),
-            stop_loss_price: document.getElementById('riskStopLossPrice').value ? parseFloat(document.getElementById('riskStopLossPrice').value) : null,
-            take_profit_price: document.getElementById('riskTakeProfitPrice').value ? parseFloat(document.getElementById('riskTakeProfitPrice').value) : null,
-            max_time_span: document.getElementById('riskMaxTime').value || null
-        };
-        
-        if (!rule.symbol) {
-            this.showAlert('warning', 'Please enter a symbol');
+        if (!this.riskRulesManager || typeof this.riskRulesManager.addRiskRule !== 'function') {
             return;
         }
-        
-        if (!rule.stop_loss_price && !rule.take_profit_price) {
-            this.showAlert('warning', 'Please enter at least one price level');
-            return;
-        }
-        
-        try {
-            await this.apiCall('/risk_rules', {
-                method: 'POST',
-                body: JSON.stringify(rule)
-            });
-            
-            this.showAlert('success', 'Risk rule added successfully');
-            document.getElementById('riskRuleForm').reset();
-            this.riskRulesManager.loadRiskRules();
-            
-            // Close modal
-            const modal = bootstrap.Modal.getInstance(document.getElementById('riskRuleModal'));
-            if (modal) {
-                modal.hide();
-                // Force remove backdrop if it exists
-                setTimeout(() => {
-                    const backdrop = document.querySelector('.modal-backdrop');
-                    if (backdrop) {
-                        backdrop.remove();
-                    }
-                    document.body.classList.remove('modal-open');
-                    document.body.style.removeProperty('overflow');
-                    document.body.style.removeProperty('padding-right');
-                }, 300);
-            }
-        } catch (error) {
-            console.error('Failed to add risk rule:', error);
-        }
+        return this.riskRulesManager.addRiskRule();
     }
 
     // 创建防抖版本的loadOrders方法
@@ -7463,46 +7231,17 @@ class TradingApp {
 
 
     async loadStrategySettings() {
-        try {
-            const data = await this.apiCall('/strategy/settings');
-            const s = data.settings || {};
-            const el1 = document.getElementById('strategyApiEndpoint');
-            if (!el1) return;
-            document.getElementById('strategyApiEndpoint').value = s.api_endpoint || '/api/strategy';
-            document.getElementById('strategyApiMethod').value = s.api_method || 'POST';
-            document.getElementById('strategyApiPayload').value = JSON.stringify(s.api_payload_template || {
-                strategy: '{{strategy_name}}', symbol: '{{symbol}}', action: '{{action}}', qty: '{{quantity}}', type: '{{order_type}}', price: '{{price}}'
-            }, null, 2);
-            document.getElementById('strategyPath').value = s.strategy_path || 'src/strategies/';
-            document.getElementById('enableStrategyAuth').checked = !!s.enable_auth;
-            document.getElementById('strategyAuthToken').value = s.auth_token || '';
-        } catch (error) {
-            console.error('Failed to load strategy settings:', error);
+        if (!this.strategiesManager || typeof this.strategiesManager.loadStrategySettings !== 'function') {
+            return;
         }
+        return this.strategiesManager.loadStrategySettings();
     }
 
     async saveStrategySettings() {
-        try {
-            const api_endpoint = document.getElementById('strategyApiEndpoint').value.trim() || '/api/strategy';
-            const api_method = document.getElementById('strategyApiMethod').value || 'POST';
-            const payloadText = document.getElementById('strategyApiPayload').value || '{}';
-            let api_payload_template = {};
-            try { api_payload_template = JSON.parse(payloadText); } catch (e) { this.showAlert('danger', 'Invalid JSON for payload template'); return; }
-            const strategy_path = document.getElementById('strategyPath').value.trim() || 'src/strategies/';
-            const enable_auth = document.getElementById('enableStrategyAuth').checked;
-            const auth_token = document.getElementById('strategyAuthToken').value || null;
-            await this.apiCall('/strategy/settings', {
-                method: 'POST',
-                body: JSON.stringify({ api_endpoint, api_method, api_payload_template, strategy_path, enable_auth, auth_token })
-            });
-            this.showAlert('success', 'Strategy settings saved');
-            const modalEl = document.getElementById('strategySettingsModal');
-            const modal = bootstrap.Modal.getInstance(modalEl);
-            if (modal) modal.hide();
-        } catch (error) {
-            console.error('Failed to save strategy settings:', error);
-            this.showAlert('danger', 'Failed to save strategy settings');
+        if (!this.strategiesManager || typeof this.strategiesManager.saveStrategySettings !== 'function') {
+            return;
         }
+        return this.strategiesManager.saveStrategySettings();
     }
 
     ensureSummaryControls() {
@@ -8274,648 +8013,63 @@ class TradingApp {
         this.showAlert('info', `正在编辑订单 ${orderId}，请修改后重新提交`);
     }
     async loadStrategies(options = {}) {
-        if (this.ibkrManager && typeof this.ibkrManager.requestStrategies === 'function') {
-            const minInterval = options.minInterval ?? this.strategyRefreshIntervalMs ?? 15000;
-            const result = this.ibkrManager.requestStrategies({
-                force: Boolean(options.force),
-                minInterval,
-            });
-            if (result === 'failed') {
-                console.warn('Failed to send strategies request via websocket');
-            }
-            return result;
+        if (!this.strategiesManager || typeof this.strategiesManager.loadStrategies !== 'function') {
+            return 'failed';
         }
-
-        console.warn('WebSocket strategies request unavailable');
-        return 'failed';
+        return this.strategiesManager.loadStrategies(options);
     }
 
     resolveStrategySymbol(strategy) {
-        if (!strategy || typeof strategy !== 'object') {
+        if (!this.strategiesManager || typeof this.strategiesManager.resolveStrategySymbol !== 'function') {
             return '';
         }
-        const candidates = [
-            strategy.primary_symbol,
-            strategy.symbol,
-            strategy.ticker,
-            strategy?.settings?.primary_symbol,
-            strategy?.meta?.primary_symbol,
-            strategy?.meta?.symbol,
-        ];
-        for (const candidate of candidates) {
-            if (typeof candidate === 'string') {
-                const trimmed = candidate.trim();
-                if (trimmed) {
-                    return trimmed.toUpperCase();
-                }
-            }
-        }
-        if (Array.isArray(strategy.symbols)) {
-            const match = strategy.symbols.find((item) => typeof item === 'string' && item.trim());
-            if (match) {
-                return match.trim().toUpperCase();
-            }
-        }
-        return '';
+        return this.strategiesManager.resolveStrategySymbol(strategy);
     }
 
     formatStrategyDataReception(strategy) {
-        const fallback = {
-            text: '-',
-            tooltip: '',
-            active: false,
-            awaitingData: false,
-            reason: '',
-            isReceiving: false,
-            subscription: null,
-            symbol: '',
-            statusLabel: '-',
-            toggleDisabled: false,
-        };
-        if (!strategy || typeof strategy !== 'object') {
-            return fallback;
-        }
-
-        const info = (strategy.data_reception && typeof strategy.data_reception === 'object')
-            ? strategy.data_reception
-            : (strategy.data_push_state && typeof strategy.data_push_state === 'object')
-                ? strategy.data_push_state
-                : null;
-        const strategyEnabled = typeof strategy.enabled === 'boolean' ? strategy.enabled : true;
-
-        let isReceiving;
-        if (typeof strategy.is_receiving_data === 'boolean') {
-            isReceiving = strategy.is_receiving_data;
-        } else if (info && typeof info.is_receiving === 'boolean') {
-            isReceiving = Boolean(info.is_receiving);
-        } else {
-            isReceiving = false;
-        }
-
-        const awaitingData = info && typeof info.awaiting_data !== 'undefined'
-            ? Boolean(info.awaiting_data)
-            : false;
-        const reasonText = (info && info.status_reason)
-            || strategy.data_push_reason
-            || (strategy.strategy_type && strategy.strategy_type !== 'internal' ? '外部策略' : '');
-        const lastTimestamp = info && info.last_data_timestamp ? info.last_data_timestamp : null;
-        const isExternal = strategy.strategy_type && strategy.strategy_type !== 'internal';
-        const active = info && typeof info.active !== 'undefined'
-            ? Boolean(info.active)
-            : Boolean(isReceiving);
-
-        let detailText = '';
-        if (isReceiving) {
-            detailText = reasonText || '数据接收中';
-        } else if (awaitingData && !reasonText) {
-            detailText = '等待数据';
-        } else if (reasonText) {
-            detailText = reasonText;
-        } else if (isExternal) {
-            detailText = '外部策略';
-        }
-
-        const tooltipParts = [];
-        if (info && typeof info.active !== 'undefined') {
-            tooltipParts.push(info.active ? '推送已开启' : '推送未开启');
-        }
-        if (awaitingData && !isReceiving) {
-            tooltipParts.push('正在等待数据');
-        }
-        if (reasonText) {
-            tooltipParts.push(`状态说明：${reasonText}`);
-        }
-        if (info && info.subscription) {
-            tooltipParts.push(`订阅：${info.subscription}`);
-        }
-        if (info && info.symbol) {
-            tooltipParts.push(`标的：${info.symbol}`);
-        }
-        if (lastTimestamp) {
-            tooltipParts.push(`最后数据时间：${lastTimestamp}`);
-        }
-        const statusLabel = (() => {
-            if (!isExternal && active) {
-                if (awaitingData) return '等待DOM数据…';
-                if (reasonText) return reasonText;
-                return '已推送';
-            }
-            if (reasonText) return reasonText;
-            if (isExternal) return '未推送';
-            return active ? '已推送' : '未推送';
-        })();
-
-        const resolvedSubscription = info && info.subscription
-            ? info.subscription
-            : (strategy.data_subscription || null);
-        const resolvedSymbol = info && info.symbol
-            ? info.symbol
-            : this.resolveStrategySymbol(strategy);
-
-        const baseInfo = {
-            text: detailText || (isReceiving ? '数据接收中' : (active ? '推送已开启' : '未推送')),
-            tooltip: tooltipParts.join('；'),
-            active,
-            awaitingData,
-            reason: reasonText || '',
-            isReceiving: Boolean(isReceiving),
-            subscription: resolvedSubscription || null,
-            symbol: resolvedSymbol || '',
-            statusLabel,
-            toggleDisabled: Boolean(isExternal),
-        };
-
-        if (!strategyEnabled) {
+        if (!this.strategiesManager || typeof this.strategiesManager.formatStrategyDataReception !== 'function') {
             return {
-                ...baseInfo,
+                text: '-',
+                tooltip: '',
                 active: false,
                 awaitingData: false,
-                text: '策略已禁用',
-                statusLabel: '策略已禁用',
-                toggleDisabled: true,
-                reason: baseInfo.reason || '策略已禁用',
+                reason: '',
+                isReceiving: false,
+                subscription: null,
+                symbol: '',
+                statusLabel: '-',
+                toggleDisabled: false,
             };
         }
-
-        return baseInfo;
+        return this.strategiesManager.formatStrategyDataReception(strategy);
     }
 
     displayStrategies(strategies) {
-        const tbody = document.querySelector('#strategiesTable tbody');
-        if (!tbody) return;
-
-        tbody.innerHTML = '';
-        this.strategyPerformanceCells.clear();
-        const visibleStrategies = new Set();
-        strategies.forEach(strategy => {
-            visibleStrategies.add(strategy.name);
-            const row = document.createElement('tr');
-
-            // Name
-            const nameCell = document.createElement('td');
-            nameCell.textContent = strategy.name;
-            nameCell.style.cursor = 'pointer';
-            nameCell.style.color = '#0066cc';
-            nameCell.style.textDecoration = 'underline';
-            nameCell.addEventListener('click', () => {
-                this.openStrategyDetails(strategy.name);
-            });
-            
-            // Symbol
-            const symbolCell = document.createElement('td');
-            const resolvedSymbol = this.resolveStrategySymbol(strategy);
-            symbolCell.textContent = resolvedSymbol || '-';
-            if (resolvedSymbol) {
-                symbolCell.title = resolvedSymbol;
-            }
-            
-            // Status（开关）
-            const statusCell = document.createElement('td');
-            const toggleSwitch = document.createElement('div');
-            toggleSwitch.className = 'form-check form-switch';
-            toggleSwitch.innerHTML = `
-                <input class="form-check-input" type="checkbox" ${strategy.enabled ? 'checked' : ''}
-                       onchange="app.strategiesManager.toggleStrategy('${strategy.name}', this.checked)">
-            `;
-            statusCell.appendChild(toggleSwitch);
-
-            // 数据接收状态
-            const receptionCell = document.createElement('td');
-            const receptionInfo = this.formatStrategyDataReception(strategy);
-            receptionCell.classList.add('align-middle');
-            if (!this.strategyReceptionSwitchSeq) {
-                this.strategyReceptionSwitchSeq = 0;
-            }
-            const receptionSwitchId = `strategyReceptionSwitch-${++this.strategyReceptionSwitchSeq}`;
-            const receptionSwitchWrap = document.createElement('div');
-            receptionSwitchWrap.className = 'form-check form-switch mb-1';
-            const receptionSwitch = document.createElement('input');
-            receptionSwitch.className = 'form-check-input';
-            receptionSwitch.type = 'checkbox';
-            receptionSwitch.id = receptionSwitchId;
-            receptionSwitch.checked = !!receptionInfo.active;
-            if (receptionInfo.toggleDisabled) {
-                receptionSwitch.disabled = true;
-                receptionSwitch.title = receptionInfo.reason || '仅内部策略支持数据推送';
-            }
-            const receptionLabel = document.createElement('label');
-            receptionLabel.className = 'form-check-label visually-hidden';
-            receptionLabel.setAttribute('for', receptionSwitchId);
-            receptionLabel.textContent = '数据推送';
-            receptionSwitchWrap.appendChild(receptionSwitch);
-            receptionSwitchWrap.appendChild(receptionLabel);
-            receptionCell.appendChild(receptionSwitchWrap);
-
-            const receptionDetail = document.createElement('div');
-            receptionDetail.className = 'small text-muted';
-            receptionDetail.textContent = receptionInfo.text || '-';
-            if (receptionInfo.tooltip) {
-                receptionDetail.title = receptionInfo.tooltip;
-            }
-            receptionCell.appendChild(receptionDetail);
-
-            if (!receptionInfo.toggleDisabled) {
-                receptionSwitch.addEventListener('change', () => {
-                    this.toggleStrategyDataReception(strategy, {
-                        controlEl: receptionSwitch,
-                        statusEl: receptionDetail,
-                        enabled: receptionSwitch.checked,
-                    });
-                });
-            }
-
-            // P&L（最近1个月）与 Trades（executions/2 取整），先占位，后异步回填
-            const pnlCell = document.createElement('td');
-            const cachedMetrics = this.strategyPerformanceCache.get(strategy.name);
-            if (cachedMetrics && typeof cachedMetrics === 'object') {
-                pnlCell.textContent = cachedMetrics.pnl ?? '...';
-            } else {
-                pnlCell.textContent = '...';
-            }
-            const tradesCell = document.createElement('td');
-            if (cachedMetrics && typeof cachedMetrics === 'object') {
-                tradesCell.textContent = cachedMetrics.trades ?? '...';
-            } else {
-                tradesCell.textContent = '...';
-            }
-            
-            row.appendChild(nameCell);
-            row.appendChild(symbolCell);
-            row.appendChild(statusCell);
-            row.appendChild(receptionCell);
-            row.appendChild(pnlCell);
-            row.appendChild(tradesCell);
-
-            tbody.appendChild(row);
-
-            this.strategyPerformanceCells.set(strategy.name, { pnlCell, tradesCell });
-            if (this.ibkrManager && typeof this.ibkrManager.requestStrategyPerformance === 'function') {
-                this.ibkrManager.requestStrategyPerformance({ name: strategy.name, range: '1m' });
-            }
-        });
-
-        for (const name of Array.from(this.strategyPerformanceCache.keys())) {
-            if (!visibleStrategies.has(name)) {
-                this.strategyPerformanceCache.delete(name);
-            }
+        if (!this.strategiesManager || typeof this.strategiesManager.displayStrategies !== 'function') {
+            return;
         }
+        this.strategiesManager.displayStrategies(strategies);
     }
 
     async toggleStrategy(name, enabled) {
-        try {
-            await this.apiCall(`/strategies/${encodeURIComponent(name)}/toggle?enabled=${enabled}`, { method: 'POST' });
-            this.showAlert('success', `Strategy ${name} ${enabled ? 'enabled' : 'disabled'}`);
-            if (this.strategiesManager && typeof this.strategiesManager.loadStrategies === 'function') {
-                this.strategiesManager.loadStrategies({ force: true, minInterval: 0 });
-            }
-        } catch (error) {
-            console.error('Failed to toggle strategy:', error);
-            this.showAlert('danger', 'Failed to toggle strategy');
-            // Reload to revert the switch
-            this.strategiesManager.loadStrategies();
+        if (!this.strategiesManager || typeof this.strategiesManager.toggleStrategy !== 'function') {
+            return;
         }
+        return this.strategiesManager.toggleStrategy(name, enabled);
     }
 
-    async toggleStrategyDataReception(strategy, { enabled, controlEl, statusEl } = {}) {
-        if (!strategy || !strategy.name) return;
-        const name = strategy.name;
-        if (!this.strategyDataPushBusy) {
-            this.strategyDataPushBusy = new Set();
-        }
-        if (this.strategyDataPushBusy.has(name)) {
-            if (controlEl) {
-                controlEl.checked = !controlEl.checked;
-            }
+    async toggleStrategyDataReception(strategy, args = {}) {
+        if (!this.strategiesManager || typeof this.strategiesManager.toggleStrategyDataReception !== 'function') {
             return;
         }
-
-        const originalInfo = this.formatStrategyDataReception(strategy);
-        let finalInfo = originalInfo;
-        const revertToOriginal = () => {
-            if (controlEl) {
-                controlEl.checked = originalInfo.active;
-                controlEl.disabled = originalInfo.toggleDisabled;
-            }
-            if (statusEl) {
-                statusEl.textContent = originalInfo.text || '-';
-                statusEl.title = originalInfo.tooltip || '';
-            }
-        };
-
-        const targetEnabled = typeof enabled === 'boolean'
-            ? enabled
-            : controlEl
-                ? !!controlEl.checked
-                : !originalInfo.active;
-
-        if (targetEnabled && !strategy.enabled) {
-            this.showAlert('warning', '启用策略后才能开启数据推送');
-            revertToOriginal();
-            return;
-        }
-
-        const info = (strategy.data_reception && typeof strategy.data_reception === 'object')
-            ? strategy.data_reception
-            : (strategy.data_push_state && typeof strategy.data_push_state === 'object')
-                ? strategy.data_push_state
-                : {};
-
-        const subscription = info?.subscription
-            || strategy.data_subscription
-            || strategy.subscription
-            || null;
-        const symbolCandidate = info?.symbol
-            || this.resolveStrategySymbol(strategy)
-            || '';
-        const symbol = symbolCandidate ? String(symbolCandidate).trim().toUpperCase() : '';
-
-        if (targetEnabled && !subscription) {
-            this.showAlert('warning', '请选择数据订阅后再开启推送');
-            revertToOriginal();
-            return;
-        }
-        if (targetEnabled && !symbol) {
-            this.showAlert('warning', '请先配置主标的后再开启推送');
-            revertToOriginal();
-            return;
-        }
-
-        this.strategyDataPushBusy.add(name);
-        if (controlEl) {
-            controlEl.disabled = true;
-        }
-        if (statusEl) {
-            statusEl.textContent = targetEnabled ? '推送中…' : '未推送';
-            statusEl.title = '';
-        }
-
-        try {
-            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/data-push`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    enabled: targetEnabled,
-                    subscription: subscription || null,
-                    symbol: symbol || null,
-                }),
-            });
-
-            if (!res || typeof res !== 'object') {
-                throw new Error('Empty response');
-            }
-
-            const state = res.state || {};
-            if (!res.success) {
-                this.showAlert('danger', res.error || 'Failed to update data push state');
-                finalInfo = originalInfo;
-                return;
-            }
-
-            const awaitingData = !!state.awaiting_data && !!state.active;
-            strategy.data_reception = {
-                ...(strategy.data_reception || {}),
-                active: !!state.active,
-                awaiting_data: awaitingData,
-                status_reason: state.status_reason || null,
-                subscription: state.subscription || subscription || null,
-                symbol: state.symbol || symbol || null,
-                last_data_timestamp: state.last_data_timestamp
-                    || (strategy.data_reception?.last_data_timestamp ?? null),
-            };
-            if (state.active && !awaitingData && !state.status_reason) {
-                strategy.is_receiving_data = true;
-            } else if (!state.active) {
-                strategy.is_receiving_data = false;
-            }
-            if (state.status_reason) {
-                strategy.data_push_reason = state.status_reason;
-            } else if (!state.active) {
-                strategy.data_push_reason = '';
-            }
-
-            finalInfo = this.formatStrategyDataReception(strategy);
-            this.loadStrategies({ force: true });
-        } catch (error) {
-            console.error('Failed to update strategy data push state from list', error);
-            this.showAlert('danger', 'Failed to update data push state');
-            finalInfo = originalInfo;
-        } finally {
-            if (controlEl) {
-                controlEl.disabled = finalInfo.toggleDisabled;
-                controlEl.checked = finalInfo.active;
-            }
-            if (statusEl) {
-                statusEl.textContent = finalInfo.text || '-';
-                statusEl.title = finalInfo.tooltip || '';
-            }
-            this.strategyDataPushBusy.delete(name);
-        }
+        return this.strategiesManager.toggleStrategyDataReception(strategy, args);
     }
 
     async editStrategy(name) {
-        try {
-            const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}`);
-            if (!res.success) throw new Error('Failed to load strategy');
-            const s = res.strategy;
-            const nameEl = document.getElementById('editStrategyName');
-            if (nameEl) nameEl.textContent = s.name;
-            const desc = document.getElementById('editStrategyDescriptionInput');
-            const api = document.getElementById('editStrategyApiInput');
-            if (desc) desc.value = s.description || '';
-            if (api) api.value = s.api_endpoint || '';
-
-            // SL/TP: 仅对内部策略显示并填充
-            const sltpGroup = document.getElementById('editSlTpGroup');
-            const subscriptionGroup = document.getElementById('editSubscriptionGroup');
-            const positionTimingGroup = document.getElementById('editPositionTimingGroup');
-            if (sltpGroup) sltpGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
-            if (subscriptionGroup) subscriptionGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
-            if (positionTimingGroup) positionTimingGroup.style.display = s.strategy_type === 'internal' ? '' : 'none';
-            const parameterGroup = document.getElementById('editParameterGroup');
-            const parameterList = document.getElementById('editParameterList');
-            this.strategyParameterInputs = {};
-            if (parameterGroup && parameterList) {
-                parameterList.innerHTML = '';
-                const schemaSource = Array.isArray(s.parameters) && s.parameters.length
-                    ? s.parameters
-                    : (Array.isArray(s.configurable_parameters) ? s.configurable_parameters : []);
-                const schema = Array.isArray(schemaSource) ? schemaSource : [];
-                if (s.strategy_type === 'internal' && schema.length) {
-                    parameterGroup.style.display = '';
-                    schema.forEach((param) => {
-                        if (!param?.name) return;
-                        const wrapper = document.createElement('div');
-                        wrapper.className = 'border rounded p-2';
-                        const controlId = `editParam-${param.name}`;
-                        const label = document.createElement('label');
-                        label.className = 'form-label small mb-1';
-                        label.setAttribute('for', controlId);
-                        label.textContent = param.label || param.name;
-                        wrapper.appendChild(label);
-
-                        let inputEl;
-                        if (param.type === 'bool') {
-                            const switchWrap = document.createElement('div');
-                            switchWrap.className = 'form-check form-switch';
-                            const checkbox = document.createElement('input');
-                            checkbox.className = 'form-check-input';
-                            checkbox.type = 'checkbox';
-                            checkbox.id = controlId;
-                            checkbox.checked = param.value !== undefined ? Boolean(param.value) : Boolean(param.default);
-                            const textLabel = document.createElement('label');
-                            textLabel.className = 'form-check-label';
-                            textLabel.setAttribute('for', controlId);
-                            textLabel.textContent = 'Enabled';
-                            switchWrap.appendChild(checkbox);
-                            switchWrap.appendChild(textLabel);
-                            wrapper.appendChild(switchWrap);
-                            inputEl = checkbox;
-                        } else {
-                            const input = document.createElement('input');
-                            input.className = 'form-control form-control-sm';
-                            input.type = 'number';
-                            input.id = controlId;
-                            const stepValue = param.step !== undefined ? param.step : (param.type === 'int' ? 1 : 0.1);
-                            if (stepValue !== undefined && stepValue !== null) input.step = stepValue;
-                            if (param.min !== undefined && param.min !== null) input.min = param.min;
-                            if (param.max !== undefined && param.max !== null) input.max = param.max;
-                            const initial = param.value !== undefined && param.value !== null
-                                ? param.value
-                                : (param.allow_null ? '' : (param.default ?? ''));
-                            input.value = initial !== null && initial !== undefined ? initial : '';
-                            input.required = !param.allow_null;
-                            wrapper.appendChild(input);
-                            inputEl = input;
-                        }
-
-                        const help = document.createElement('div');
-                        help.className = 'form-text';
-                        const helpParts = [];
-                        if (param.default !== undefined && param.default !== null) helpParts.push(`默认 ${param.default}`);
-                        const rangeParts = [];
-                        if (param.min !== undefined && param.min !== null) rangeParts.push(`≥ ${param.min}`);
-                        if (param.max !== undefined && param.max !== null) rangeParts.push(`≤ ${param.max}`);
-                        if (rangeParts.length) helpParts.push(rangeParts.join('，'));
-                        if (param.allow_null) helpParts.push('可留空');
-                        if (param.description) helpParts.push(param.description);
-                        help.textContent = helpParts.join('； ') || '可调整参数';
-                        wrapper.appendChild(help);
-
-                        parameterList.appendChild(wrapper);
-                        this.strategyParameterInputs[param.name] = { input: inputEl, meta: param };
-                    });
-                } else {
-                    parameterGroup.style.display = 'none';
-                }
-            }
-            const slEnabled = document.getElementById('editSlEnabledSwitch');
-            const tpEnabled = document.getElementById('editTpEnabledSwitch');
-            const slPrice = document.getElementById('editSlPriceInput');
-            const tpPrice = document.getElementById('editTpPriceInput');
-            const slType = document.getElementById('editSlTypeSelect');
-            const tpType = document.getElementById('editTpTypeSelect');
-            if (slEnabled) slEnabled.checked = !!s.sl_enabled;
-            if (tpEnabled) tpEnabled.checked = !!s.tp_enabled;
-            if (slPrice) slPrice.value = s.sl_price ?? '';
-            if (tpPrice) tpPrice.value = s.tp_price ?? '';
-            if (slType) slType.value = s.sl_type || 'amount';
-            if (tpType) tpType.value = s.tp_type || 'amount';
-            const editDataSubscription = document.getElementById('editDataSubscriptionSelect');
-            if (editDataSubscription) editDataSubscription.value = s.data_subscription || '';
-            const editCooldownInput = document.getElementById('editPositionAddCooldownInput');
-            if (editCooldownInput) editCooldownInput.value = s.position_add_cooldown_minutes ?? '';
-            const editCloseInput = document.getElementById('editCloseBeforeCloseInput');
-            if (editCloseInput) editCloseInput.value = s.close_before_close_minutes ?? '';
-
-            const modal = new bootstrap.Modal(document.getElementById('editStrategyModal'));
-            modal.show();
-
-            const updateBtn = document.getElementById('updateStrategyBtn');
-            if (updateBtn) {
-                const newBtn = updateBtn.cloneNode(true);
-                updateBtn.parentNode.replaceChild(newBtn, updateBtn);
-                newBtn.addEventListener('click', async () => {
-                    const updates = {
-                        description: document.getElementById('editStrategyDescriptionInput')?.value || '',
-                        api_endpoint: document.getElementById('editStrategyApiInput')?.value || undefined,
-                    };
-                    if (s.strategy_type === 'internal') {
-                        updates.sl_enabled = !!document.getElementById('editSlEnabledSwitch')?.checked;
-                        updates.tp_enabled = !!document.getElementById('editTpEnabledSwitch')?.checked;
-                        const slv = document.getElementById('editSlPriceInput')?.value;
-                        const tpv = document.getElementById('editTpPriceInput')?.value;
-                        updates.sl_price = slv ? Number(slv) : null;
-                        updates.tp_price = tpv ? Number(tpv) : null;
-                        updates.sl_type = document.getElementById('editSlTypeSelect')?.value || 'amount';
-                        updates.tp_type = document.getElementById('editTpTypeSelect')?.value || 'amount';
-                        const dataSub = document.getElementById('editDataSubscriptionSelect')?.value || '';
-                        updates.data_subscription = dataSub || null;
-                        const coolRaw = document.getElementById('editPositionAddCooldownInput')?.value;
-                        const closeRaw = document.getElementById('editCloseBeforeCloseInput')?.value;
-                        const coolVal = coolRaw !== undefined && coolRaw !== '' ? parseInt(coolRaw, 10) : null;
-                        const closeVal = closeRaw !== undefined && closeRaw !== '' ? parseInt(closeRaw, 10) : null;
-                        updates.position_add_cooldown_minutes = Number.isFinite(coolVal) ? coolVal : null;
-                        updates.close_before_close_minutes = Number.isFinite(closeVal) ? closeVal : null;
-                        const parameterUpdates = {};
-                        let validationError = null;
-                        if (this.strategyParameterInputs) {
-                            Object.entries(this.strategyParameterInputs).forEach(([paramName, ctx]) => {
-                                if (validationError) return;
-                                const { input, meta } = ctx;
-                                let value;
-                                if (meta.type === 'bool') {
-                                    value = !!input.checked;
-                                } else {
-                                    const raw = input.value;
-                                    if (raw === '' || raw === null || raw === undefined) {
-                                        value = meta.allow_null ? null : (meta.default ?? null);
-                                    } else if (meta.type === 'int') {
-                                        value = parseInt(raw, 10);
-                                    } else if (meta.type === 'float') {
-                                        value = parseFloat(raw);
-                                    } else {
-                                        value = raw;
-                                    }
-                                    if ((meta.type === 'int' || meta.type === 'float')) {
-                                        if (value === null && meta.allow_null) {
-                                            // ok
-                                        } else if (!Number.isFinite(value)) {
-                                            validationError = `参数 ${meta.label || paramName} 无效`;
-                                            return;
-                                        }
-                                    }
-                                }
-                                if ((value === null || value === undefined) && !meta.allow_null && meta.type !== 'bool') {
-                                    validationError = `参数 ${meta.label || paramName} 必须填写`;
-                                    return;
-                                }
-                                parameterUpdates[paramName] = value;
-                            });
-                        }
-                        if (validationError) {
-                            this.showAlert('danger', validationError);
-                            return;
-                        }
-                        if (Object.keys(parameterUpdates).length) {
-                            updates.parameters = parameterUpdates;
-                        }
-                    }
-                    try {
-                        await this.apiCall(`/strategies/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(updates) });
-                        this.showAlert('success', `Strategy ${name} updated`);
-                        const modalEl = document.getElementById('editStrategyModal');
-                        const inst = bootstrap.Modal.getInstance(modalEl);
-                        if (inst) inst.hide();
-                        this.strategiesManager.loadStrategies();
-                    } catch (e) {
-                        console.error(e);
-                        this.showAlert('danger', 'Failed to update strategy');
-                    }
-                });
-            }
-        } catch (e) {
-            console.error('Edit strategy error:', e);
-            this.showAlert('danger', 'Failed to open edit modal');
+        if (!this.strategiesManager || typeof this.strategiesManager.editStrategy !== 'function') {
+            return;
         }
+        return this.strategiesManager.editStrategy(name);
     }
 
     createDefaultStrategyChartState() {
@@ -11582,18 +10736,10 @@ class TradingApp {
     }
 
     async deleteStrategy(name) {
-        if (!confirm(`Are you sure you want to delete strategy "${name}"?`)) {
+        if (!this.strategiesManager || typeof this.strategiesManager.deleteStrategy !== 'function') {
             return;
         }
-        
-        try {
-            await this.apiCall(`/strategies/${encodeURIComponent(name)}`, { method: 'DELETE' });
-            this.showAlert('success', `Strategy ${name} deleted`);
-            this.strategiesManager.loadStrategies();
-        } catch (error) {
-            console.error('Failed to delete strategy:', error);
-            this.showAlert('danger', 'Failed to delete strategy');
-        }
+        return this.strategiesManager.deleteStrategy(name);
     }
 
     // Logs functionality removed - panel no longer exists
@@ -11874,116 +11020,10 @@ class TradingApp {
     // 日志管理方法已迁移到 logs.js
 
     async showRiskRuleOrders(symbol) {
-        try {
-            // 获取全部订单数据
-            const ordersData = await this.apiCall('/orders');
-
-            // 构建持仓映射，用于计算PnL
-            const positions = (this.dataManager.getAllPositions && this.dataManager.getAllPositions()) || [];
-            const posMap = {};
-            (positions || []).forEach(p => { if (p && p.symbol) posMap[String(p.symbol).toUpperCase()] = p; });
-
-            const target = String(symbol || '').toUpperCase();
-            
-            // 过滤：来源为风险规则（sl/tp 或 trigger_type=risk_rule），且 symbol 或 rule_id 与目标匹配；不再限制“仅今日”
-            const riskRuleOrders = (ordersData.orders || []).filter(order => {
-                const os = String(order.order_source || '').toLowerCase();
-                const isRisk = os === 'sl' || os === 'tp' || String(order.trigger_type || '').toLowerCase() === 'risk_rule';
-                const symU = String(order.symbol || '').toUpperCase();
-                const ridU = String(order.rule_id || '').toUpperCase();
-                const isFilled = String(order.status || '').toLowerCase() === 'filled';
-                return isRisk && (symU === target || ridU === target) && isFilled;
-            }).sort((a,b) => new Date(b.submit_time || b.created_at || 0) - new Date(a.submit_time || a.created_at || 0));
-
-            // 计算统计数据
-            let totalOrders = riskRuleOrders.length;
-            let totalProfit = 0;
-            let totalLoss = 0;
-
-            riskRuleOrders.forEach(order => {
-                const pos = posMap[String(order.symbol || '').toUpperCase()];
-                const avgCost = pos ? pos.avg_cost : 0;
-                if (String(order.status || '').toLowerCase() === 'filled' && order.avg_fill_price && avgCost > 0) {
-                    let pnlPerShare = 0;
-                    if (order.action === 'SELL') pnlPerShare = order.avg_fill_price - avgCost; else if (order.action === 'BUY') pnlPerShare = avgCost - order.avg_fill_price;
-                    const totalPnl = pnlPerShare * (order.quantity || 0);
-                    if (totalPnl > 0) totalProfit += totalPnl; else totalLoss += Math.abs(totalPnl);
-                }
-            });
-
-            // 更新规则信息
-            document.getElementById('ruleInfoText').textContent = `${symbol} 风险规则触发的订单`;
-            
-            // 更新统计卡片
-            document.getElementById('totalOrdersCount').textContent = totalOrders;
-            document.getElementById('totalProfit').textContent = '$' + this.formatNumber(totalProfit);
-            document.getElementById('totalLoss').textContent = '$' + this.formatNumber(totalLoss);
-
-            // 渲染订单表格
-            const tbody = document.querySelector('#riskRuleOrdersTable tbody');
-            tbody.innerHTML = (riskRuleOrders || []).map(order => {
-                // 确定触发类型显示文本
-                let triggerTypeText = '风险规则';
-                let triggerTypeClass = 'bg-warning';
-                if (order.order_source === 'sl') { triggerTypeText = '止损'; triggerTypeClass = 'bg-danger'; }
-                else if (order.order_source === 'tp') { triggerTypeText = '止盈'; triggerTypeClass = 'bg-success'; }
-                else if (order.order_source === 'strategy') { triggerTypeText = '策略'; triggerTypeClass = 'bg-info'; }
-                else if (order.order_source === 'auto' || order.order_source === '机器人') { triggerTypeText = '自动'; triggerTypeClass = 'bg-secondary'; }
-                else if (String(order.trigger_type || '').toLowerCase() === 'risk_rule') { triggerTypeText = '风险规则'; triggerTypeClass = 'bg-warning'; }
-                else { triggerTypeText = order.order_source || '手动'; triggerTypeClass = 'bg-info'; }
-
-                // 价格显示
-                let priceDisplay = '';
-                if (order.order_type === 'MKT' || order.order_type === 'MARKET') {
-                    priceDisplay = order.avg_fill_price && order.avg_fill_price > 0 ? this.formatNumber(order.avg_fill_price) : 'Market';
-                } else {
-                    priceDisplay = order.limit_price ? this.formatNumber(order.limit_price) : 'N/A';
-                }
-
-                const pos = posMap[String(order.symbol || '').toUpperCase()];
-                const avgCost = pos ? pos.avg_cost : 0;
-                let orderPnl = 0;
-                if (String(order.status || '').toLowerCase() === 'filled' && order.avg_fill_price && avgCost > 0) {
-                    let pnlPerShare = 0;
-                    if (order.action === 'SELL') pnlPerShare = order.avg_fill_price - avgCost; else if (order.action === 'BUY') pnlPerShare = avgCost - order.avg_fill_price;
-                    orderPnl = pnlPerShare * (order.quantity || 0);
-                }
-                const pnlClass = orderPnl > 0 ? 'text-success' : orderPnl < 0 ? 'text-danger' : 'text-muted';
-                const pnlText = `$${this.formatNumber(orderPnl)}`;
-                const executionPrice = order.avg_fill_price || 0;
-
-                return `
-                <tr>
-                    <td>${order.order_id}</td>
-                    <td>${new Date(order.submit_time || order.created_at).toLocaleString()}</td>
-                    <td>${order.symbol}</td>
-                    <td><span class="badge bg-${order.action === 'BUY' ? 'success' : 'danger'}">${order.action}</span></td>
-                    <td>${order.quantity}</td>
-                    <td>$${priceDisplay}</td>
-                    <td><span class="badge bg-${this.getStatusColor(order.status)}">${order.status}</span></td>
-                    <td>$${this.formatNumber(executionPrice)}</td>
-                    <td class="${pnlClass}">${pnlText}</td>
-                    <td><span class="badge ${triggerTypeClass}">${triggerTypeText}</span></td>
-                </tr>
-                `;
-            }).join('');
-
-            if ((riskRuleOrders || []).length === 0) {
-                tbody.innerHTML = `
-                    <tr>
-                        <td colspan="10" class="text-center text-muted">暂无该风险规则关联的订单</td>
-                    </tr>
-                `;
-            }
-
-            const modalEl = document.getElementById('riskRuleOrdersModal');
-            const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
-            modal.show();
-
-        } catch (error) {
-            console.error('Failed to load risk rule orders:', error);
-            this.showAlert('danger', '加载风险规则订单详情时发生错误');
+        if (!this.riskRulesManager || typeof this.riskRulesManager.showRiskRuleOrders !== 'function') {
+            return;
         }
+        return this.riskRulesManager.showRiskRuleOrders(symbol);
     }
 
     // S Rules (Sizing Policy) related functions
