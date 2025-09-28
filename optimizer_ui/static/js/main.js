@@ -536,19 +536,26 @@ class OptimizerApp {
                 </div>
             `
             : '';
+        const histogramHtml = this.renderReturnHistogram(summary);
         const distribution = summary?.annual_return_distribution;
-        const distributionHtml = distribution && Object.keys(distribution).length
+        const hasDistribution = distribution && Object.keys(distribution).length;
+        const distributionHtml = hasDistribution || histogramHtml
             ? `
                 <div style="margin-top:1rem;">
                     <h4 style="margin-bottom:0.5rem;">收益率分布</h4>
-                    <div class="tag-list">
-                        <span class="tag">最小 ${this.formatPercent(distribution.min)}</span>
-                        <span class="tag">25分位 ${this.formatPercent(distribution.p25)}</span>
-                        <span class="tag">中位数 ${this.formatPercent(distribution.p50)}</span>
-                        <span class="tag">75分位 ${this.formatPercent(distribution.p75)}</span>
-                        <span class="tag">最大 ${this.formatPercent(distribution.max)}</span>
-                    </div>
-                    <p class="section-subtitle" style="margin-top:0.5rem;">平均收益 ${this.formatPercent(distribution.mean)}</p>
+                    ${hasDistribution
+                        ? `
+                            <div class="tag-list">
+                                <span class="tag">最小 ${this.formatPercent(distribution.min)}</span>
+                                <span class="tag">25分位 ${this.formatPercent(distribution.p25)}</span>
+                                <span class="tag">中位数 ${this.formatPercent(distribution.p50)}</span>
+                                <span class="tag">75分位 ${this.formatPercent(distribution.p75)}</span>
+                                <span class="tag">最大 ${this.formatPercent(distribution.max)}</span>
+                            </div>
+                            <p class="section-subtitle" style="margin-top:0.5rem;">平均收益 ${this.formatPercent(distribution.mean)}</p>
+                        `
+                        : ''}
+                    ${histogramHtml}
                 </div>
             `
             : '';
@@ -654,6 +661,58 @@ class OptimizerApp {
             <div class="combo-section">
                 <h4 class="combo-title">成功组合</h4>
                 <div class="combo-list">${items}</div>
+            </div>
+        `;
+    }
+
+    renderReturnHistogram(summary) {
+        const bins = summary?.annual_return_histogram;
+        if (!Array.isArray(bins) || !bins.length) {
+            return '';
+        }
+        const counts = bins.map((bin) => {
+            const value = typeof bin?.count === 'number' ? bin.count : Number(bin?.count);
+            return Number.isFinite(value) ? value : 0;
+        });
+        const maxCount = counts.reduce((max, value) => (value > max ? value : max), 0);
+        if (maxCount <= 0) {
+            return '';
+        }
+        const toNumber = (value) => {
+            if (typeof value === 'number') {
+                return value;
+            }
+            const numeric = Number(value);
+            return Number.isFinite(numeric) ? numeric : null;
+        };
+        const bars = bins
+            .map((bin, idx) => {
+                const count = counts[idx];
+                const normalized = maxCount ? (count / maxCount) * 100 : 0;
+                const height = count > 0 ? Math.max(normalized, 6) : 0;
+                const start = toNumber(bin?.start);
+                const end = toNumber(bin?.end);
+                const startLabel = start !== null ? this.formatPercent(start, 1) : '-';
+                const endLabel = end !== null ? this.formatPercent(end, 1) : '-';
+                const title = `收益区间 ${startLabel} ~ ${endLabel} · ${count} 组`;
+                return `
+                    <div class="return-histogram-bar" style="height:${height.toFixed(2)}%;" title="${title}">
+                        <span class="return-histogram-bar__count">${count}</span>
+                    </div>
+                `;
+            })
+            .join('');
+        const firstStart = toNumber(bins[0]?.start);
+        const lastEnd = toNumber(bins[bins.length - 1]?.end);
+        const firstLabel = firstStart !== null ? this.formatPercent(firstStart, 1) : '';
+        const lastLabel = lastEnd !== null ? this.formatPercent(lastEnd, 1) : '';
+        return `
+            <div class="return-histogram" role="img" aria-label="收益率柱状分布图">
+                <div class="return-histogram-bars">${bars}</div>
+                <div class="return-histogram-scale">
+                    <span>${firstLabel}</span>
+                    <span>${lastLabel}</span>
+                </div>
             </div>
         `;
     }
