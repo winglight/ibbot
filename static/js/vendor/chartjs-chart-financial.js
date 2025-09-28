@@ -103,7 +103,19 @@
         }
     }
 
-    CandlestickElement.id = 'candlestickElement';
+    // Chart.js expects the registered element id to match the key used in
+    // `Chart.defaults.elements`. The upstream plugin used to register the
+    // element under `candlestick`, but a previous refactor renamed the id to
+    // `candlestickElement`. In Chart.js 4 this causes runtime errors such as
+    // "CandlestickElement ... is not a registered element" because the
+    // registry lookup happens by id. Reverting the identifier back to
+    // `candlestick` keeps it aligned with the defaults and allows the
+    // candlestick controller to resolve the correct element class.
+    CandlestickElement.id = 'candlestick';
+    // Some environments (notably when components are re-registered through a
+    // global loader) read the identifier from the prototype instead of the
+    // constructor. Populate both to be defensive against those lookups.
+    CandlestickElement.prototype.id = CandlestickElement.id;
     CandlestickElement.defaults = {
         upColor: '#26a69a',
         downColor: '#ef5350',

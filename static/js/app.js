@@ -2642,6 +2642,35 @@ class TradingApp {
             if (!window.Chart || !window.Chart.register) {
                 return false;
             }
+            const ensureComponentId = (component, fallbackId) => {
+                if (!component) {
+                    return null;
+                }
+                if (!component.id && fallbackId) {
+                    component.id = fallbackId;
+                }
+                if (!component.id && component.prototype?.id) {
+                    component.id = component.prototype.id;
+                }
+                if (component.prototype && !component.prototype.id && component.id) {
+                    component.prototype.id = component.id;
+                }
+                return component;
+            };
+
+            const isElementRegistered = (id) => {
+                try {
+                    const registry = window.Chart.registry;
+                    if (registry?.getElement) {
+                        return !!registry.getElement(id);
+                    }
+                } catch (err) {
+                    // Swallow registry lookup errors and fall back to legacy checks below.
+                }
+                const elements = window.Chart.elements || window.Chart.defaults?.elements;
+                return !!(elements && elements[id]);
+            };
+
             const financialCandidates = [
                 window.ChartFinancial,
                 window['chartjs-chart-financial'],
@@ -2652,15 +2681,19 @@ class TradingApp {
 
             for (const fin of financialCandidates) {
                 const components = [
-                    fin?.CandlestickController,
-                    fin?.OhlcController,
-                    fin?.CandlestickElement,
-                    fin?.OhlcElement,
-                    fin?.FinancialController,
-                    fin?.FinancialElement
+                    ensureComponentId(fin?.CandlestickController, 'candlestick'),
+                    ensureComponentId(fin?.OhlcController, 'ohlc'),
+                    ensureComponentId(fin?.CandlestickElement, 'candlestick'),
+                    ensureComponentId(fin?.OhlcElement, 'ohlc'),
+                    ensureComponentId(fin?.FinancialController, 'financial'),
+                    ensureComponentId(fin?.FinancialElement, 'financial')
                 ].filter(Boolean);
                 if (components.length) {
                     window.Chart.register(...components);
+                    if (!isElementRegistered('candlestick')) {
+                        console.warn('Candlestick element still missing after registration attempt.');
+                        continue;
+                    }
                     this.candlestickSupported = true;
                     return true;
                 }
