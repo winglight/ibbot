@@ -11,7 +11,7 @@ echo "======================================"
 
 # 检查SSH连接
 echo "📡 检查VPS连接..."
-if ssh -o ConnectTimeout=5 vps-ibbot 'echo "VPS连接正常"' 2>/dev/null; then
+if ssh -o BatchMode=yes -o ConnectTimeout=5 vps-ibbot 'echo "VPS连接正常"'; then
     echo "✅ VPS连接正常"
 else
     echo "❌ VPS连接失败，请检查:"
