@@ -52,8 +52,11 @@ class RiskRule:
         if self.auto_trailing and rule_type != "trailing":
             rule_type = "trailing"
         self.rule_type = rule_type
-        if self.rule_type == "trailing" and not self.auto_trailing:
-            self.auto_trailing = True
+        if self.rule_type == "trailing":
+            if not self.auto_trailing:
+                self.auto_trailing = True
+        elif self.auto_trailing:
+            self.auto_trailing = False
 
 @dataclass
 class OrderRequest:
@@ -201,6 +204,42 @@ class RiskManager:
         self._load_from_database()
         self._load_position_limits_from_db()
 
+    @staticmethod
+    def _resolve_rule_type(
+        rule_type: Optional[str], auto_trailing: Optional[bool]
+    ) -> Tuple[str, bool]:
+        """Normalise rule type and derive the trailing flag."""
+
+        candidate = (rule_type or "").strip().lower()
+        if candidate in {"fixed", "trailing"}:
+            resolved_type = candidate
+        else:
+            resolved_type = "trailing" if auto_trailing else "fixed"
+
+        resolved_auto = resolved_type == "trailing"
+        return resolved_type, resolved_auto
+
+    def _sync_rule_trailing_state(self, rule: RiskRule) -> None:
+        """Ensure auto_trailing flag and ATR subscriptions reflect the rule type."""
+
+        resolved_type, resolved_auto = self._resolve_rule_type(rule.rule_type, rule.auto_trailing)
+        rule.rule_type = resolved_type
+        rule.auto_trailing = resolved_auto
+
+        service = getattr(self, "atr_service", None)
+        if not service:
+            return
+
+        try:
+            if rule.rule_type == "trailing" and rule.enabled:
+                service.ensure_subscription(rule.symbol, rule)
+            else:
+                service.disable_symbol(rule.symbol)
+        except Exception as atr_err:
+            risk_logger.warning(
+                f"Failed to synchronise ATR subscription for {rule.symbol}: {atr_err}"
+            )
+
     def _get_ibkr_client(self, ensure_ready: bool = False):
         """Safely resolve the shared IBKR client instance.
 
@@ -262,6 +301,7 @@ class RiskManager:
                         'trailing' if getattr(rule_db, 'auto_trailing', False) else 'fixed'
                     ),
                 )
+                self._sync_rule_trailing_state(rule)
                 self.risk_rules[rule.symbol] = rule
 
         except Exception as e:
@@ -682,10 +722,9 @@ class RiskManager:
             risk_logger.info(
                 f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}, max_time_span={max_time_span}, auto_trailing={auto_trailing}, rule_type={rule_type}"
             )
-            normalised_rule_type = (rule_type or "fixed").lower()
-            if normalised_rule_type not in {"fixed", "trailing"}:
-                normalised_rule_type = "fixed"
-            auto_trailing = bool(auto_trailing or normalised_rule_type == "trailing")
+            normalised_rule_type, auto_trailing_flag = self._resolve_rule_type(
+                rule_type, auto_trailing
+            )
             rule = RiskRule(
                 symbol=symbol,
                 stop_loss_price=stop_loss_price,
@@ -694,7 +733,7 @@ class RiskManager:
                 enabled=True,
                 max_time_span=max_time_span,
                 created_at=now_local(),
-                auto_trailing=auto_trailing,
+                auto_trailing=auto_trailing_flag,
                 atr_params=atr_params or {},
                 rule_type=normalised_rule_type,
             )
@@ -714,10 +753,11 @@ class RiskManager:
             )
             self.db_manager.save_risk_rule(db_rule)
             risk_logger.debug(f"Risk rule persisted: {db_rule}")
-            
+
             # 更新内存缓存
             self.risk_rules[symbol] = rule
-            
+            self._sync_rule_trailing_state(rule)
+
             risk_logger.info(f"Risk rule added for {symbol}")
             return True
         except Exception as e:
@@ -730,11 +770,21 @@ class RiskManager:
             risk_logger.info(f"remove_risk_rule called: symbol={symbol}")
             # 从数据库删除
             self.db_manager.delete_risk_rule(symbol)
-            
+
             # 从内存删除
             if symbol in self.risk_rules:
-                if getattr(self.risk_rules[symbol], 'auto_trailing', False) and getattr(self, 'atr_service', None):
-                    self.atr_service.disable_symbol(symbol)
+                rule = self.risk_rules[symbol]
+                resolved_type, _ = self._resolve_rule_type(rule.rule_type, rule.auto_trailing)
+                if (
+                    resolved_type == "trailing"
+                    and getattr(self, 'atr_service', None)
+                ):
+                    try:
+                        self.atr_service.disable_symbol(symbol)
+                    except Exception as atr_err:
+                        risk_logger.warning(
+                            f"Failed to disable ATR subscription for {symbol}: {atr_err}"
+                        )
                 del self.risk_rules[symbol]
                 risk_logger.info(f"Risk rule removed for {symbol}")
                 return True
@@ -770,21 +820,25 @@ class RiskManager:
                 if max_time_span is not None:
                     rule.max_time_span = max_time_span
                 if rule_type is not None:
-                    normalised_rule_type = (rule_type or "fixed").lower()
-                    if normalised_rule_type not in {"fixed", "trailing"}:
-                        normalised_rule_type = "fixed"
-                    rule.rule_type = normalised_rule_type
-                    if normalised_rule_type == "trailing" and auto_trailing is None:
-                        auto_trailing = True
-                if auto_trailing is not None:
-                    rule.auto_trailing = auto_trailing
+                    resolved_type, resolved_auto = self._resolve_rule_type(
+                        rule_type, auto_trailing
+                    )
+                    rule.rule_type = resolved_type
+                    rule.auto_trailing = resolved_auto
+                elif auto_trailing is not None:
+                    resolved_type, resolved_auto = self._resolve_rule_type(
+                        "trailing" if auto_trailing else "fixed", auto_trailing
+                    )
+                    rule.rule_type = resolved_type
+                    rule.auto_trailing = resolved_auto
+                else:
+                    resolved_type, resolved_auto = self._resolve_rule_type(
+                        rule.rule_type, rule.auto_trailing
+                    )
+                    rule.rule_type = resolved_type
+                    rule.auto_trailing = resolved_auto
                 if atr_params is not None:
                     rule.atr_params = dict(atr_params)
-                if rule.rule_type == "trailing" and not rule.auto_trailing:
-                    rule.auto_trailing = True
-                elif rule.rule_type != "trailing" and auto_trailing is None and rule.auto_trailing:
-                    # 当规则类型切换回固定但未显式传入 auto_trailing 时保持与类型一致
-                    rule.auto_trailing = False
 
                 # 转换为数据库层的 RiskRule 并保存到数据库
                 db_rule = DatabaseRiskRule(
@@ -801,7 +855,9 @@ class RiskManager:
                 )
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.debug(f"Risk rule persisted after update: {db_rule}")
-                
+
+                self._sync_rule_trailing_state(rule)
+
                 risk_logger.info(f"Risk rule updated for {symbol}")
                 return True
             else:
@@ -852,7 +908,12 @@ class RiskManager:
                 await self._check_stop_loss_take_profit(position, client)
 
                 rule = self.risk_rules.get(symbol)
-                if rule and getattr(rule, 'auto_trailing', False) and getattr(self, 'atr_service', None):
+                if (
+                    rule
+                    and rule.enabled
+                    and rule.rule_type == "trailing"
+                    and getattr(self, 'atr_service', None)
+                ):
                     try:
                         await self.atr_service.refresh_for_symbol(symbol, position, rule)
                     except Exception as atr_err:
@@ -878,8 +939,7 @@ class RiskManager:
                         rule_type=rule.rule_type,
                     )
                     self.db_manager.save_risk_rule(db_rule)
-                    if getattr(rule, 'auto_trailing', False) and getattr(self, 'atr_service', None):
-                        self.atr_service.disable_symbol(symbol)
+                    self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Risk rule for {symbol} has been deactivated due to zero position")
             
             risk_logger.info("=== Position monitoring cycle completed ===")
@@ -1000,6 +1060,7 @@ class RiskManager:
                 rule_type=rule.rule_type,
             )
             self.db_manager.save_risk_rule(db_rule)
+            self._sync_rule_trailing_state(rule)
             return
         
         risk_logger.info(f"Checking risk rule for {symbol}: SL=${rule.stop_loss_price}, TP=${rule.take_profit_price}")
@@ -1097,6 +1158,7 @@ class RiskManager:
                             rule_type=rule.rule_type,
                         )
                         self.db_manager.save_risk_rule(db_rule)
+                        self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Take profit rule disabled after market order for {symbol}")
                         return
                     else:
@@ -1116,6 +1178,7 @@ class RiskManager:
                             rule_type=rule.rule_type,
                         )
                         self.db_manager.save_risk_rule(db_rule)
+                        self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Take profit rule disabled due to order failure for {symbol}")
                 except Exception as e:
                     risk_logger.error(f"Failed to place take profit market order for {symbol}: {e}")
@@ -1134,6 +1197,7 @@ class RiskManager:
                         rule_type=rule.rule_type,
                     )
                     self.db_manager.save_risk_rule(db_rule)
+                    self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Take profit rule disabled due to exception for {symbol}")
             
             # If price has reached take profit, execute market order
@@ -1175,6 +1239,7 @@ class RiskManager:
                     rule_type=rule.rule_type,
                 )
                 self.db_manager.save_risk_rule(db_rule)
+                self._sync_rule_trailing_state(rule)
                 risk_logger.info(f"Take profit order queued for {symbol} at ${current_price:.2f}, rule disabled")
                 return  # 当触发止盈市价单时立即返回，不再检查止损
 
@@ -1289,6 +1354,7 @@ class RiskManager:
                             rule_type=rule.rule_type,
                         )
                         self.db_manager.save_risk_rule(db_rule)
+                        self._sync_rule_trailing_state(rule)
                         risk_logger.warning(f"🔒 Stop loss rule disabled for {symbol} after triggering at ${current_price:.2f}")
 
                         return
@@ -1309,6 +1375,7 @@ class RiskManager:
                             rule_type=rule.rule_type,
                         )
                         self.db_manager.save_risk_rule(db_rule)
+                        self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Stop loss rule disabled due to order failure for {symbol}")
                 except Exception as e:
                     risk_logger.error(f"Failed to place stop loss market order for {symbol}: {e}")
@@ -1327,6 +1394,7 @@ class RiskManager:
                         rule_type=rule.rule_type,
                     )
                     self.db_manager.save_risk_rule(db_rule)
+                    self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Stop loss rule disabled due to exception for {symbol}")
             
             # If price has reached stop loss, execute market order
@@ -1368,6 +1436,7 @@ class RiskManager:
                     rule_type=rule.rule_type,
                 )
                 self.db_manager.save_risk_rule(db_rule)
+                self._sync_rule_trailing_state(rule)
                 risk_logger.info(f"Stop loss order queued for {symbol} at ${current_price:.2f}, rule disabled")
                 return  # 触发市价单后立即返回，不再检查止盈
     
@@ -1722,6 +1791,8 @@ class RiskManager:
         self.order_manager = order_manager
         if atr_service is not None:
             self.atr_service = atr_service
+            for rule in self.risk_rules.values():
+                self._sync_rule_trailing_state(rule)
 
     def remove_order_record(self, order_id: str):
         """从记录中删除订单"""
@@ -1779,6 +1850,7 @@ class RiskManager:
                                 rule_type=rule.rule_type,
                             )
                             self.db_manager.save_risk_rule(db_rule)
+                            self._sync_rule_trailing_state(rule)
                             risk_logger.info(f"Risk rule for {symbol} disabled due to filled order {order_id}")
                         except Exception as db_rule_err:
                             risk_logger.warning(f"Failed to persist disabled rule for {symbol}: {db_rule_err}")
@@ -1805,9 +1877,18 @@ class RiskManager:
         risk_logger.warning("save_risk_rules_to_csv is deprecated, data is now stored in database")
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['symbol', 'stop_loss_price', 'take_profit_price', 'max_loss_percent', 'enabled', 'created_at']
+                fieldnames = [
+                    'symbol',
+                    'stop_loss_price',
+                    'take_profit_price',
+                    'max_loss_percent',
+                    'enabled',
+                    'created_at',
+                    'rule_type',
+                    'auto_trailing',
+                ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
+
                 writer.writeheader()
                 for symbol, rule in self.risk_rules.items():
                     writer.writerow({
@@ -1816,7 +1897,9 @@ class RiskManager:
                         'take_profit_price': rule.take_profit_price,
                         'max_loss_percent': rule.max_loss_percent,
                         'enabled': rule.enabled,
-                        'created_at': to_local_iso(rule.created_at)
+                        'created_at': to_local_iso(rule.created_at),
+                        'rule_type': rule.rule_type,
+                        'auto_trailing': rule.auto_trailing,
                     })
             risk_logger.info(f"Risk rules saved to {filename}")
         except Exception as e:
@@ -1832,7 +1915,7 @@ class RiskManager:
             
             with open(filename, 'r', newline='', encoding='utf-8') as csvfile:
                 reader = csv.DictReader(csvfile)
-                
+
                 for row in reader:
                     symbol = row['symbol']
                     stop_loss_price = float(row['stop_loss_price']) if row['stop_loss_price'] else None
@@ -1840,19 +1923,29 @@ class RiskManager:
                     max_loss_percent = float(row['max_loss_percent']) if row['max_loss_percent'] else None
                     enabled = row['enabled'].lower() == 'true' if row['enabled'] else True
                     created_at = parse_local_datetime(row['created_at']) if row['created_at'] else now_local()
-                    
-                    self.risk_rules[symbol] = RiskRule(
+                    csv_rule_type = row.get('rule_type') if 'rule_type' in row else None
+                    csv_auto_trailing = row.get('auto_trailing') if 'auto_trailing' in row else None
+                    auto_trailing_flag = None
+                    if csv_auto_trailing is not None:
+                        auto_trailing_flag = str(csv_auto_trailing).strip().lower() in {'true', '1', 'yes'}
+                    resolved_type, resolved_auto = self._resolve_rule_type(
+                        csv_rule_type, auto_trailing_flag
+                    )
+
+                    rule = RiskRule(
                         symbol=symbol,
                         stop_loss_price=stop_loss_price,
                         take_profit_price=take_profit_price,
                         max_loss_percent=max_loss_percent,
                         enabled=enabled,
                         created_at=created_at,
-                        auto_trailing=False,
+                        auto_trailing=resolved_auto,
                         atr_params={},
-                        rule_type="fixed",
+                        rule_type=resolved_type,
                     )
-            
+                    self._sync_rule_trailing_state(rule)
+                    self.risk_rules[symbol] = rule
+
             risk_logger.info(f"Risk rules loaded from {filename}, total: {len(self.risk_rules)}")
         except Exception as e:
             risk_logger.error(f"Error loading risk rules from CSV: {e}")

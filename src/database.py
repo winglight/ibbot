@@ -254,8 +254,28 @@ class DatabaseManager:
             cursor.execute(
                 """
                 UPDATE risk_rules
-                SET rule_type = CASE WHEN COALESCE(auto_trailing, 0) = 1 THEN 'trailing' ELSE 'fixed' END
-                WHERE rule_type IS NULL OR TRIM(rule_type) = ''
+                SET rule_type = CASE
+                    WHEN LOWER(TRIM(COALESCE(rule_type, ''))) IN ('fixed', 'trailing')
+                        THEN LOWER(TRIM(rule_type))
+                    WHEN COALESCE(auto_trailing, 0) = 1 THEN 'trailing'
+                    ELSE 'fixed'
+                END
+                WHERE rule_type IS NULL
+                   OR TRIM(rule_type) = ''
+                   OR LOWER(TRIM(rule_type)) NOT IN ('fixed', 'trailing')
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE risk_rules
+                SET auto_trailing = CASE
+                    WHEN LOWER(COALESCE(rule_type, '')) = 'trailing' THEN 1
+                    ELSE 0
+                END
+                WHERE auto_trailing IS NULL
+                   OR auto_trailing NOT IN (0, 1)
+                   OR (LOWER(COALESCE(rule_type, '')) = 'trailing' AND auto_trailing != 1)
+                   OR (LOWER(COALESCE(rule_type, '')) != 'trailing' AND auto_trailing != 0)
                 """
             )
 
