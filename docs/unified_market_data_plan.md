@@ -122,6 +122,7 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 - `DATA_LAYER_INFLUX_ORG`：组织名称。
 - `DATA_LAYER_INFLUX_TOKEN`（可选）：访问 token，如未配置则使用匿名方式。
 - `DATA_LAYER_INFLUX_MEASUREMENT`（可选）：事件 measurement，默认 `market_events`。
+- `DATA_LAYER_INFLUX_TIMEOUT_MS`（可选）：InfluxDB 客户端超时时间（毫秒），未设置则使用默认值。
 
 配置步骤：
 1. 在 `.env` 或部署环境中设置上述变量，Redis/Influx 任意一项缺失即保持内存/Noop 模式。

@@ -48,11 +48,34 @@ class InfluxPersistenceBackend(PersistenceBackend):
         org: str,
         token: Optional[str] = None,
         measurement: str = "market_events",
+        timeout: Optional[int] = None,
     ) -> None:
         if InfluxDBClient is None:
             raise RuntimeError("influxdb-client package is not installed")
 
-        self._client = InfluxDBClient(url=url, token=token, org=org)
+        client_kwargs = {
+            "url": url,
+            "token": token,
+            "org": org,
+        }
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
+
+        self._client = InfluxDBClient(**client_kwargs)
+
+        try:
+            health = self._client.health()
+        except Exception as exc:  # pragma: no cover - network errors
+            self._client.close()
+            raise RuntimeError(f"Unable to contact InfluxDB at {url}") from exc
+
+        status = getattr(health, "status", None)
+        if status not in {"pass", "ok"}:  # pragma: no cover - network errors
+            self._client.close()
+            raise RuntimeError(
+                f"InfluxDB health check for {url} returned unexpected status: {status!r}"
+            )
+
         self._write_api = self._client.write_api()
         buckets_api = self._client.buckets_api()
 
@@ -76,6 +99,7 @@ class InfluxPersistenceBackend(PersistenceBackend):
             try:
                 org_response = org_api.find_organizations()
             except Exception as exc:  # pragma: no cover - network errors
+                self._client.close()
                 raise RuntimeError("Failed to list InfluxDB organizations") from exc
 
             organizations = getattr(org_response, "orgs", org_response) or []
@@ -86,6 +110,7 @@ class InfluxPersistenceBackend(PersistenceBackend):
                     break
 
             if org_id is None:
+                self._client.close()
                 raise RuntimeError(f"Unable to find InfluxDB organization '{org}'")
 
             buckets_api.create_bucket(bucket_name=bucket, org_id=org_id)
