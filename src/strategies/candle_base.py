@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+import threading
 from threading import RLock
 from typing import Deque, Dict, List, Optional
 
@@ -11,6 +12,7 @@ from loguru import logger
 
 from src.data_layer import (
     BusSubscriptionToken,
+    DataSourceError,
     DataSubscriptionRequest,
     DataSubscriptionToken,
     EventEnvelope,
@@ -18,6 +20,7 @@ from src.data_layer import (
     get_data_source_manager,
     is_unified_mode,
 )
+from src.connection_manager import connection_manager
 
 from .base import BaseStrategy
 
@@ -48,6 +51,8 @@ class CandleSubscriptionStrategy(BaseStrategy):
         self._event_token: Optional[BusSubscriptionToken] = None
         self._last_event_ts: Optional[int] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._subscription_retry_stop = threading.Event()
+        self._subscription_retry_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     def start(self) -> bool:
@@ -61,6 +66,19 @@ class CandleSubscriptionStrategy(BaseStrategy):
             return False
         try:
             self._ensure_subscription()
+            self._cancel_retry_thread()
+        except DataSourceError as exc:
+            if self._is_connection_unavailable_error(exc):
+                self.logger.warning(
+                    "Failed to initialise candle subscription because IBKR is not connected; will retry automatically",
+                    symbol=self.primary_symbol,
+                    interval=self.candle_interval,
+                )
+                self._start_retry_thread()
+                return True
+            self.logger.error("Failed to initialise candle subscription: {}", exc)
+            super().stop()
+            return False
         except Exception as exc:
             self.logger.error("Failed to initialise candle subscription: {}", exc)
             super().stop()
@@ -71,6 +89,7 @@ class CandleSubscriptionStrategy(BaseStrategy):
     def stop(self) -> bool:
         stopped = super().stop()
         if stopped:
+            self._cancel_retry_thread()
             self._teardown_subscription()
         return stopped
 
@@ -136,6 +155,92 @@ class CandleSubscriptionStrategy(BaseStrategy):
                 self.logger.debug("Failed to cancel data subscription: {}", exc)
         self._subscription_token = None
         self._event_token = None
+
+    # ------------------------------------------------------------------
+    def _is_connection_unavailable_error(self, exc: Exception) -> bool:
+        message = str(exc).strip().lower()
+        return "ibkr connection is not active" in message or "ibkr connection not active" in message
+
+    # ------------------------------------------------------------------
+    def _start_retry_thread(self) -> None:
+        if self._subscription_retry_thread and self._subscription_retry_thread.is_alive():
+            return
+        self._subscription_retry_stop.clear()
+        thread = threading.Thread(
+            target=self._retry_subscription_loop,
+            name=f"{self.name}-candle-retry",
+            daemon=True,
+        )
+        self._subscription_retry_thread = thread
+        thread.start()
+
+    # ------------------------------------------------------------------
+    def _cancel_retry_thread(self) -> None:
+        thread = self._subscription_retry_thread
+        if not thread:
+            self._subscription_retry_stop.clear()
+            return
+        self._subscription_retry_stop.set()
+        try:
+            thread.join(timeout=2.0)
+        except Exception:
+            pass
+        self._subscription_retry_thread = None
+        self._subscription_retry_stop = threading.Event()
+
+    # ------------------------------------------------------------------
+    def _retry_subscription_loop(self) -> None:
+        delay = 2.0
+        try:
+            self.logger.info(
+                "Waiting for IBKR connection to restore candle subscription",
+                symbol=self.primary_symbol,
+                interval=self.candle_interval,
+            )
+        except Exception:
+            pass
+
+        while not self._subscription_retry_stop.is_set():
+            if not self.active or not self.enabled:
+                break
+
+            if connection_manager.is_connected():
+                try:
+                    self._ensure_subscription()
+                    try:
+                        self.logger.info(
+                            "Candle subscription restored after IBKR connection became available",
+                            symbol=self.primary_symbol,
+                            interval=self.candle_interval,
+                        )
+                    except Exception:
+                        pass
+                    return
+                except DataSourceError as exc:
+                    if not self._is_connection_unavailable_error(exc):
+                        try:
+                            self.logger.error(
+                                "Failed to restore candle subscription after reconnect: {}",
+                                exc,
+                            )
+                        except Exception:
+                            pass
+                        return
+                except Exception as exc:
+                    try:
+                        self.logger.error(
+                            "Unexpected error while restoring candle subscription: {}",
+                            exc,
+                        )
+                    except Exception:
+                        pass
+                    return
+
+            if self._subscription_retry_stop.wait(delay):
+                break
+            delay = min(delay * 1.5, 30.0)
+
+        self._subscription_retry_thread = None
 
     # ------------------------------------------------------------------
     def _handle_candle_event(self, envelope: EventEnvelope) -> None:
