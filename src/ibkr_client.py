@@ -2018,8 +2018,18 @@ class IBKRClient:
                 ibkr_logger.error(f"IBKR connection lost for get account info")
                 return self._return_cached_account_info()
 
-            # Use synchronous methods in async context
-            account_values = ib.accountValues()
+            # accountValues() 是同步方法，直接调用会阻塞FastAPI事件循环，
+            # 在连接成功后前端的所有请求都会等待该方法完成而无法刷新页面。
+            # 通过 run_in_connection_thread + asyncio.to_thread 将其移到连接线程
+            # 并在后台等待结果，避免阻塞主事件循环。
+            account_values = await asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
+                ib.accountValues,
+                timeout=10.0,
+            )
+            if account_values is None:
+                ibkr_logger.warning("IB accountValues() returned no data")
+                return self._return_cached_account_info()
 
             # Start from the last cached snapshot when available so that we don't
             # accidentally wipe fields to zero if IBKR returns a partial update.
