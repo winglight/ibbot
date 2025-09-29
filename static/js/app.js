@@ -225,6 +225,87 @@ const fallbackSlugifyStrategyName = (name) => (name || '')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
 
+const fallbackFormatNumber = (num) => {
+    if (num === null || num === undefined || num === '') return 'N/A';
+    const numeric = Number(num);
+    if (!Number.isFinite(numeric)) return 'N/A';
+    return numeric.toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
+};
+
+const fallbackEscapeHtml = (value) => {
+    if (value === null || value === undefined) {
+        return '';
+    }
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+};
+
+const fallbackFormatDuration = (seconds) => {
+    const numeric = Number(seconds);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+        return '0 秒';
+    }
+
+    const absolute = Math.max(0, numeric);
+    const unitConfig = [
+        { threshold: 60, unit: '秒', divisor: 1 },
+        { threshold: 3600, unit: '分钟', divisor: 60 },
+        { threshold: 86400, unit: '小时', divisor: 3600 },
+        { threshold: Infinity, unit: '天', divisor: 86400 },
+    ];
+
+    const selected = unitConfig.find(({ threshold }) => absolute < threshold) || unitConfig[0];
+    const rawValue = absolute / selected.divisor;
+    const rounded = Math.round(rawValue * 100) / 100;
+    const valueStr = Number.isInteger(rounded)
+        ? String(rounded)
+        : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+
+    return `${valueStr} ${selected.unit}`;
+};
+
+const fallbackIsSameDay = (dateInput, referenceDate = new Date()) => {
+    if (!dateInput) return false;
+    const d = new Date(dateInput);
+    if (Number.isNaN(d.getTime())) return false;
+    const compareTarget = referenceDate instanceof Date ? referenceDate : new Date(referenceDate);
+    return d.getFullYear() === compareTarget.getFullYear()
+        && d.getMonth() === compareTarget.getMonth()
+        && d.getDate() === compareTarget.getDate();
+};
+
+const fallbackNormalizeRuleStatus = (status) => {
+    if (!status || typeof status !== 'object') {
+        return { passed: true, message: '正常' };
+    }
+    const passed = status.passed !== undefined ? !!status.passed : true;
+    let message = status.message;
+    if (!message) {
+        const errors = Array.isArray(status.errors) ? status.errors : [];
+        if (errors.length > 0) {
+            message = errors.map((err) => {
+                if (typeof err === 'string') return err;
+                try {
+                    return JSON.stringify(err);
+                } catch (_) {
+                    return String(err);
+                }
+            }).join(' | ');
+        }
+    }
+    if (!message) {
+        message = passed ? '正常' : '违规';
+    }
+    return { passed, message };
+};
+
 const {
     normalizeIntervalKey = fallbackNormalizeIntervalKey,
     normalizeDurationKey = fallbackNormalizeDurationKey,
@@ -237,7 +318,11 @@ const {
 
 const {
     TrendSignalLabelPlugin = fallbackTrendSignalLabelPlugin,
-    slugifyStrategyName = fallbackSlugifyStrategyName
+    slugifyStrategyName = fallbackSlugifyStrategyName,
+    formatNumber: sharedFormatNumber = fallbackFormatNumber,
+    escapeHtml: sharedEscapeHtml = fallbackEscapeHtml,
+    formatDuration: sharedFormatDuration = fallbackFormatDuration,
+    isSameDay: sharedIsSameDay = fallbackIsSameDay,
 } = SharedUtils;
 
 class TradingApp {
@@ -695,28 +780,10 @@ class TradingApp {
     }
 
     normalizeRuleStatus(status) {
-        if (!status || typeof status !== 'object') {
-            return { passed: true, message: '正常' };
+        if (this.riskRulesManager?.normalizeRuleStatus) {
+            return this.riskRulesManager.normalizeRuleStatus(status);
         }
-        const passed = status.passed !== undefined ? !!status.passed : true;
-        let message = status.message;
-        if (!message) {
-            const errors = Array.isArray(status.errors) ? status.errors : [];
-            if (errors.length > 0) {
-                message = errors.map((err) => {
-                    if (typeof err === 'string') return err;
-                    try {
-                        return JSON.stringify(err);
-                    } catch (_) {
-                        return String(err);
-                    }
-                }).join(' | ');
-            }
-        }
-        if (!message) {
-            message = passed ? '正常' : '违规';
-        }
-        return { passed, message };
+        return fallbackNormalizeRuleStatus(status);
     }
 
     applySizingRuleStatusesFromHistory(latestRecord) {
@@ -3256,47 +3323,15 @@ class TradingApp {
 
 
     formatNumber(num) {
-        if (num === null || num === undefined) return 'N/A';
-        return parseFloat(num).toLocaleString('en-US', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2
-        });
+        return sharedFormatNumber(num);
     }
 
     escapeHtml(value) {
-        if (value === null || value === undefined) {
-            return '';
-        }
-        return String(value)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
+        return sharedEscapeHtml(value);
     }
 
     formatDuration(seconds) {
-        const numeric = Number(seconds);
-        if (!Number.isFinite(numeric) || numeric <= 0) {
-            return '0 秒';
-        }
-
-        const absolute = Math.max(0, numeric);
-        const unitConfig = [
-            { threshold: 60, unit: '秒', divisor: 1 },
-            { threshold: 3600, unit: '分钟', divisor: 60 },
-            { threshold: 86400, unit: '小时', divisor: 3600 },
-            { threshold: Infinity, unit: '天', divisor: 86400 },
-        ];
-
-        const selected = unitConfig.find(({ threshold }) => absolute < threshold) || unitConfig[0];
-        const rawValue = absolute / selected.divisor;
-        const rounded = Math.round(rawValue * 100) / 100;
-        const valueStr = Number.isInteger(rounded)
-            ? String(rounded)
-            : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
-
-        return `${valueStr} ${selected.unit}`;
+        return sharedFormatDuration(seconds);
     }
 
     // 根据标的类型修正价格到允许的最小单位
@@ -4806,17 +4841,11 @@ class TradingApp {
     }
 
     // 判断传入日期是否为“今天”（按本地时区）
-    isSameDay(dateInput) {
+    isSameDay(dateInput, referenceDate) {
         if (this.uiController?.isSameDay) {
-            return this.uiController.isSameDay(dateInput);
+            return this.uiController.isSameDay(dateInput, referenceDate);
         }
-        if (!dateInput) return false;
-        const d = new Date(dateInput);
-        if (Number.isNaN(d.getTime())) return false;
-        const now = new Date();
-        return d.getFullYear() === now.getFullYear()
-            && d.getMonth() === now.getMonth()
-            && d.getDate() === now.getDate();
+        return sharedIsSameDay(dateInput, referenceDate);
     }
 
     async searchSymbols(query, dropdownId) {
@@ -5110,123 +5139,27 @@ class TradingApp {
     }
 
     async showConfigModal(activeTab = 'g-rules') {
-        // 激活指定的标签页
-        const gRulesTab = document.getElementById('config-g-rules-tab');
-        const sRulesTab = document.getElementById('config-s-rules-tab');
-        const gRulesPane = document.getElementById('config-g-rules');
-        const sRulesPane = document.getElementById('config-s-rules');
-        
-        if (activeTab === 'g-rules') {
-            gRulesTab.classList.add('active');
-            gRulesTab.setAttribute('aria-selected', 'true');
-            sRulesTab.classList.remove('active');
-            sRulesTab.setAttribute('aria-selected', 'false');
-            gRulesPane.classList.add('show', 'active');
-            sRulesPane.classList.remove('show', 'active');
-        } else {
-            sRulesTab.classList.add('active');
-            sRulesTab.setAttribute('aria-selected', 'true');
-            gRulesTab.classList.remove('active');
-            gRulesTab.setAttribute('aria-selected', 'false');
-            sRulesPane.classList.add('show', 'active');
-            gRulesPane.classList.remove('show', 'active');
+        if (!this.riskRulesManager?.showConfigModal) {
+            console.warn('RiskRulesManager.showConfigModal unavailable');
+            return undefined;
         }
-        
-        // 加载现有配置数据
-        await this.loadConfigData();
-        
-        // 添加保存事件监听器
-        const saveBtn = document.getElementById('saveConfigRulesBtn');
-        const resetBtn = document.getElementById('resetConfigRulesBtn');
-        
-        // 移除旧的事件监听器
-        const newSaveBtn = saveBtn.cloneNode(true);
-        const newResetBtn = resetBtn.cloneNode(true);
-        saveBtn.parentNode.replaceChild(newSaveBtn, saveBtn);
-        resetBtn.parentNode.replaceChild(newResetBtn, resetBtn);
-        
-        newSaveBtn.addEventListener('click', () => {
-            this.saveConfigFromModal();
-        });
-        
-        newResetBtn.addEventListener('click', () => {
-            this.resetConfigFromModal();
-        });
-        
-        // 更新Position Value字段显示
-        this.updatePositionValueField();
-        
-        // 显示模态框
-        const modal = document.getElementById('configRulesModal');
-        const bootstrapModal = new bootstrap.Modal(modal);
-        bootstrapModal.show();
+        return this.riskRulesManager.showConfigModal(activeTab);
     }
 
     async saveConfigFromModal() {
-        try {
-            // 获取G Rules配置
-            const gRulesConfig = {
-                g0_max_drawdown: parseFloat(document.getElementById('g0MaxDrawdown').value) || 5.0,
-                g1_max_loss: parseFloat(document.getElementById('g1MaxLoss').value) || 2.0,
-                g2_max_position_per_symbol: parseFloat(document.getElementById('g2MaxPositionPerSymbol').value) || 10.0,
-                g3_correlation_check: document.getElementById('g3CorrelationCheck').value === 'enabled',
-                g4_liquidity_check: document.getElementById('g4LiquidityCheck').value === 'enabled',
-                g5_time_window: document.getElementById('g5TimeWindow').value === 'enabled'
-            };
-            
-            // 获取S Rules配置
-            const sRulesConfig = {
-                s0_position_sizing: document.getElementById('s0PositionSizing').value || 'fixed',
-                s1_risk_percentage: parseFloat(document.getElementById('s1PositionValue').value) || 1.0,
-                s2_max_positions: parseInt(document.getElementById('s2MaxPositions').value) || 10,
-                s3_volatility_adjustment: document.getElementById('s3Rebalancing').value === 'enabled',
-                s4_volatility_adjustment: document.getElementById('s4VolatilityAdjustment').value === 'enabled'
-            };
-            
-            // 保存到后端
-            await this.apiCall('/config/rules', {
-                method: 'PUT',
-                body: JSON.stringify({ 
-                    g_rules: gRulesConfig,
-                    s_rules: sRulesConfig
-                })
-            });
-            
-            this.showAlert('success', '配置已保存');
-            
-            // 关闭模态框
-            const modal = bootstrap.Modal.getInstance(document.getElementById('configRulesModal'));
-            if (modal) modal.hide();
-            
-            // 重新加载状态
-            this.loadGSRulesStatus();
-            
-        } catch (error) {
-            console.error('保存配置失败:', error);
-            this.showAlert('danger', '保存配置失败');
+        if (!this.riskRulesManager?.saveConfigRules) {
+            console.warn('RiskRulesManager.saveConfigRules unavailable');
+            return undefined;
         }
+        return this.riskRulesManager.saveConfigRules();
     }
-    
+
     resetConfigFromModal() {
-        // 重置G Rules为默认值
-        document.getElementById('g0MaxDrawdown').value = 5.0;
-        document.getElementById('g1MaxLoss').value = 2.0;
-        document.getElementById('g2MaxPositionPerSymbol').value = 10.0;
-        document.getElementById('g3CorrelationCheck').value = 'enabled';
-        document.getElementById('g4LiquidityCheck').value = 'enabled';
-        document.getElementById('g5TimeWindow').value = 'enabled';
-        
-        // 重置S Rules为默认值
-        document.getElementById('s0PositionSizing').value = 'fixed';
-        document.getElementById('s1PositionValue').value = 1.0;
-        document.getElementById('s2MaxPositions').value = 10;
-        document.getElementById('s3Rebalancing').value = 'enabled';
-        document.getElementById('s4VolatilityAdjustment').value = 'enabled';
-        
-        // 更新Position Value字段显示
-        this.updatePositionValueField();
-        
-        this.showAlert('info', '配置已重置为默认值');
+        if (!this.riskRulesManager?.resetConfigRules) {
+            console.warn('RiskRulesManager.resetConfigRules unavailable');
+            return undefined;
+        }
+        return this.riskRulesManager.resetConfigRules();
     }
 
     updatePositionValueField() {
@@ -5234,37 +5167,11 @@ class TradingApp {
     }
 
     async loadConfigData() {
-        try {
-            const response = await this.apiCall('/config/rules', {
-                method: 'GET'
-            });
-            
-            if (response && response.g_rules) {
-                // 填充G Rules配置
-                const gRules = response.g_rules;
-                document.getElementById('g0MaxDrawdown').value = gRules.g0_max_drawdown || 5.0;
-                document.getElementById('g1MaxLoss').value = gRules.g1_max_loss || 2.0;
-                document.getElementById('g2MaxPositionPerSymbol').value = gRules.g2_max_position_per_symbol || 10.0;
-                document.getElementById('g3CorrelationCheck').value = gRules.g3_correlation_check ? 'enabled' : 'disabled';
-                document.getElementById('g4LiquidityCheck').value = gRules.g4_liquidity_check ? 'enabled' : 'disabled';
-                document.getElementById('g5TimeWindow').value = gRules.g5_time_window ? 'enabled' : 'disabled';
-            }
-            
-            if (response && response.s_rules) {
-                // 填充S Rules配置
-                const sRules = response.s_rules;
-                document.getElementById('s0PositionSizing').value = sRules.s0_position_sizing || 'fixed';
-                document.getElementById('s1PositionValue').value = sRules.s1_risk_percentage || 1.0;
-                document.getElementById('s2MaxPositions').value = sRules.s2_max_positions || 10;
-                document.getElementById('s3Rebalancing').value = sRules.s3_volatility_adjustment ? 'enabled' : 'disabled';
-                document.getElementById('s4VolatilityAdjustment').value = sRules.s4_volatility_adjustment ? 'enabled' : 'disabled';
-            }
-            
-        } catch (error) {
-            console.error('加载配置数据失败:', error);
-            // 如果加载失败，使用默认值
-            this.resetConfigFromModal();
+        if (!this.riskRulesManager?.loadConfigData) {
+            console.warn('RiskRulesManager.loadConfigData unavailable');
+            return null;
         }
+        return this.riskRulesManager.loadConfigData();
     }
 
     // 显示订单notes的浮动提示

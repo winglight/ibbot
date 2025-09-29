@@ -67,10 +67,76 @@
         }
     };
 
+    function formatNumber(num) {
+        if (num === null || num === undefined || num === '') {
+            return 'N/A';
+        }
+        const numeric = Number(num);
+        if (!Number.isFinite(numeric)) {
+            return 'N/A';
+        }
+        return numeric.toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
+    }
+
+    function escapeHtml(value) {
+        if (value === null || value === undefined) {
+            return '';
+        }
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function formatDuration(seconds) {
+        const numeric = Number(seconds);
+        if (!Number.isFinite(numeric) || numeric <= 0) {
+            return '0 秒';
+        }
+
+        const absolute = Math.max(0, numeric);
+        const unitConfig = [
+            { threshold: 60, unit: '秒', divisor: 1 },
+            { threshold: 3600, unit: '分钟', divisor: 60 },
+            { threshold: 86400, unit: '小时', divisor: 3600 },
+            { threshold: Infinity, unit: '天', divisor: 86400 },
+        ];
+
+        const selected = unitConfig.find(({ threshold }) => absolute < threshold) || unitConfig[0];
+        const rawValue = absolute / selected.divisor;
+        const rounded = Math.round(rawValue * 100) / 100;
+        const valueStr = Number.isInteger(rounded)
+            ? String(rounded)
+            : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+
+        return `${valueStr} ${selected.unit}`;
+    }
+
+    function isSameDay(dateInput, referenceDate) {
+        if (!dateInput) return false;
+        const date = new Date(dateInput);
+        if (Number.isNaN(date.getTime())) return false;
+
+        const compareTarget = referenceDate instanceof Date ? referenceDate : new Date();
+        return date.getFullYear() === compareTarget.getFullYear()
+            && date.getMonth() === compareTarget.getMonth()
+            && date.getDate() === compareTarget.getDate();
+    }
+
     utils.slugifyStrategyName = slugifyStrategyName;
     utils.TrendSignalLabelPlugin = TrendSignalLabelPlugin;
+    utils.formatNumber = formatNumber;
+    utils.escapeHtml = escapeHtml;
+    utils.formatDuration = formatDuration;
+    utils.isSameDay = isSameDay;
 
     if (root && typeof root === 'object') {
-        root.slugifyStrategyName = slugifyStrategyName;
+        root.slugifyStrategyName = root.slugifyStrategyName || slugifyStrategyName;
+        root.formatNumber = root.formatNumber || formatNumber;
     }
 })(typeof window !== 'undefined' ? window : globalThis);

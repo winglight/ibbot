@@ -123,6 +123,31 @@
             }).join('');
         }
 
+        normalizeRuleStatus(status) {
+            if (!status || typeof status !== 'object') {
+                return { passed: true, message: '正常' };
+            }
+            const passed = status.passed !== undefined ? !!status.passed : true;
+            let message = status.message;
+            if (!message) {
+                const errors = Array.isArray(status.errors) ? status.errors : [];
+                if (errors.length > 0) {
+                    message = errors.map((err) => {
+                        if (typeof err === 'string') return err;
+                        try {
+                            return JSON.stringify(err);
+                        } catch (_) {
+                            return String(err);
+                        }
+                    }).join(' | ');
+                }
+            }
+            if (!message) {
+                message = passed ? '正常' : '违规';
+            }
+            return { passed, message };
+        }
+
         async removeRiskRule(symbol) {
             if (!confirm(`Are you sure you want to remove the risk rule for ${symbol}?`)) {
                 return;
@@ -181,6 +206,153 @@
                 this.app.showAlert('danger', msg);
                 throw error;
             }
+        }
+
+        async loadConfigData() {
+            try {
+                const response = await this.app.apiCall('/config/rules', { method: 'GET' });
+
+                if (response && response.g_rules) {
+                    const gRules = response.g_rules;
+                    document.getElementById('g0MaxDrawdown').value = gRules.g0_max_drawdown || 5.0;
+                    document.getElementById('g1MaxLoss').value = gRules.g1_max_loss || 2.0;
+                    document.getElementById('g2MaxPositionPerSymbol').value = gRules.g2_max_position_per_symbol || 10.0;
+                    document.getElementById('g3CorrelationCheck').value = gRules.g3_correlation_check ? 'enabled' : 'disabled';
+                    document.getElementById('g4LiquidityCheck').value = gRules.g4_liquidity_check ? 'enabled' : 'disabled';
+                    document.getElementById('g5TimeWindow').value = gRules.g5_time_window ? 'enabled' : 'disabled';
+                }
+
+                if (response && response.s_rules) {
+                    const sRules = response.s_rules;
+                    document.getElementById('s0PositionSizing').value = sRules.s0_position_sizing || 'fixed';
+                    document.getElementById('s1PositionValue').value = sRules.s1_risk_percentage || 1.0;
+                    document.getElementById('s2MaxPositions').value = sRules.s2_max_positions || 10;
+                    document.getElementById('s3Rebalancing').value = sRules.s3_volatility_adjustment ? 'enabled' : 'disabled';
+                    document.getElementById('s4VolatilityAdjustment').value = sRules.s4_volatility_adjustment ? 'enabled' : 'disabled';
+                }
+            } catch (error) {
+                console.error('加载配置数据失败:', error);
+                this.resetConfigRules();
+            }
+        }
+
+        resetConfigRules() {
+            const setValue = (id, value) => {
+                const el = document.getElementById(id);
+                if (el) el.value = value;
+            };
+
+            setValue('g0MaxDrawdown', 5.0);
+            setValue('g1MaxLoss', 2.0);
+            setValue('g2MaxPositionPerSymbol', 10.0);
+            setValue('g3CorrelationCheck', 'enabled');
+            setValue('g4LiquidityCheck', 'enabled');
+            setValue('g5TimeWindow', 'enabled');
+
+            setValue('s0PositionSizing', 'fixed');
+            setValue('s1PositionValue', 1.0);
+            setValue('s2MaxPositions', 10);
+            setValue('s3Rebalancing', 'enabled');
+            setValue('s4VolatilityAdjustment', 'enabled');
+
+            this.updatePositionValueField();
+            this.app.showAlert('info', '配置已重置为默认值');
+        }
+
+        async saveConfigRules() {
+            try {
+                const gRulesConfig = {
+                    g0_max_drawdown: parseFloat(document.getElementById('g0MaxDrawdown').value) || 5.0,
+                    g1_max_loss: parseFloat(document.getElementById('g1MaxLoss').value) || 2.0,
+                    g2_max_position_per_symbol: parseFloat(document.getElementById('g2MaxPositionPerSymbol').value) || 10.0,
+                    g3_correlation_check: document.getElementById('g3CorrelationCheck').value === 'enabled',
+                    g4_liquidity_check: document.getElementById('g4LiquidityCheck').value === 'enabled',
+                    g5_time_window: document.getElementById('g5TimeWindow').value === 'enabled'
+                };
+
+                const sRulesConfig = {
+                    s0_position_sizing: document.getElementById('s0PositionSizing').value || 'fixed',
+                    s1_risk_percentage: parseFloat(document.getElementById('s1PositionValue').value) || 1.0,
+                    s2_max_positions: parseInt(document.getElementById('s2MaxPositions').value, 10) || 10,
+                    s3_volatility_adjustment: document.getElementById('s3Rebalancing').value === 'enabled',
+                    s4_volatility_adjustment: document.getElementById('s4VolatilityAdjustment').value === 'enabled'
+                };
+
+                await this.app.apiCall('/config/rules', {
+                    method: 'PUT',
+                    body: JSON.stringify({
+                        g_rules: gRulesConfig,
+                        s_rules: sRulesConfig
+                    })
+                });
+
+                this.app.showAlert('success', '配置已保存');
+
+                const modal = bootstrap.Modal.getInstance(document.getElementById('configRulesModal'));
+                modal?.hide();
+
+                this.app.loadGSRulesStatus?.();
+            } catch (error) {
+                console.error('保存配置失败:', error);
+                this.app.showAlert('danger', '保存配置失败');
+                throw error;
+            }
+        }
+
+        async showConfigModal(activeTab = 'g-rules') {
+            const gRulesTab = document.getElementById('config-g-rules-tab');
+            const sRulesTab = document.getElementById('config-s-rules-tab');
+            const gRulesPane = document.getElementById('config-g-rules');
+            const sRulesPane = document.getElementById('config-s-rules');
+
+            if (gRulesTab && sRulesTab && gRulesPane && sRulesPane) {
+                if (activeTab === 'g-rules') {
+                    gRulesTab.classList.add('active');
+                    gRulesTab.setAttribute('aria-selected', 'true');
+                    sRulesTab.classList.remove('active');
+                    sRulesTab.setAttribute('aria-selected', 'false');
+                    gRulesPane.classList.add('show', 'active');
+                    sRulesPane.classList.remove('show', 'active');
+                } else {
+                    sRulesTab.classList.add('active');
+                    sRulesTab.setAttribute('aria-selected', 'true');
+                    gRulesTab.classList.remove('active');
+                    gRulesTab.setAttribute('aria-selected', 'false');
+                    sRulesPane.classList.add('show', 'active');
+                    gRulesPane.classList.remove('show', 'active');
+                }
+            }
+
+            await this.loadConfigData();
+
+            const saveBtn = document.getElementById('saveConfigRulesBtn');
+            const resetBtn = document.getElementById('resetConfigRulesBtn');
+            if (saveBtn && resetBtn) {
+                const newSaveBtn = saveBtn.cloneNode(true);
+                const newResetBtn = resetBtn.cloneNode(true);
+                saveBtn.parentNode.replaceChild(newSaveBtn, saveBtn);
+                resetBtn.parentNode.replaceChild(newResetBtn, resetBtn);
+
+                newSaveBtn.addEventListener('click', async () => {
+                    try {
+                        await this.saveConfigRules();
+                    } catch (err) {
+                        console.error('Failed to save config rules:', err);
+                    }
+                });
+                newResetBtn.addEventListener('click', () => this.resetConfigRules());
+            }
+
+            this.updatePositionValueField();
+
+            const modalEl = document.getElementById('configRulesModal');
+            if (!modalEl) return;
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            modal.show();
+        }
+
+        updatePositionValueField() {
+            return this.app.orderManager?.updatePositionValueField?.();
         }
 
         openRiskRuleModal(symbol = '', stopLoss = '', takeProfit = '', maxTime = '', position = 0, currentPrice = 0, avgCost = 0, isEditMode = false) {
@@ -437,48 +609,68 @@
             }
         }
 
+        async fetchRiskRuleOrders(symbol) {
+            const ordersData = await this.app.apiCall('/orders');
+            const positions = (this.app.dataManager.getAllPositions && this.app.dataManager.getAllPositions()) || [];
+            const posMap = {};
+            (positions || []).forEach((p) => {
+                if (p && p.symbol) {
+                    posMap[String(p.symbol).toUpperCase()] = p;
+                }
+            });
+
+            const target = String(symbol || '').toUpperCase();
+
+            const filtered = (ordersData.orders || []).filter((order) => {
+                const os = String(order.order_source || '').toLowerCase();
+                const isRisk = os === 'sl' || os === 'tp' || String(order.trigger_type || '').toLowerCase() === 'risk_rule';
+                const symU = String(order.symbol || '').toUpperCase();
+                const ridU = String(order.rule_id || '').toUpperCase();
+                const isFilled = String(order.status || '').toLowerCase() === 'filled';
+                return isRisk && (symU === target || ridU === target) && isFilled;
+            }).sort((a, b) => new Date(b.submit_time || b.created_at || 0) - new Date(a.submit_time || a.created_at || 0));
+
+            let totalProfit = 0;
+            let totalLoss = 0;
+
+            const orders = filtered.map((order) => {
+                const pos = posMap[String(order.symbol || '').toUpperCase()];
+                const avgCost = pos ? pos.avg_cost : 0;
+                let orderPnl = 0;
+                if (String(order.status || '').toLowerCase() === 'filled' && order.avg_fill_price && avgCost > 0) {
+                    let pnlPerShare = 0;
+                    if (order.action === 'SELL') {
+                        pnlPerShare = order.avg_fill_price - avgCost;
+                    } else if (order.action === 'BUY') {
+                        pnlPerShare = avgCost - order.avg_fill_price;
+                    }
+                    orderPnl = pnlPerShare * (order.quantity || 0);
+                    if (orderPnl > 0) totalProfit += orderPnl; else totalLoss += Math.abs(orderPnl);
+                }
+                return { order, avgCost, orderPnl };
+            });
+
+            return {
+                symbol: target,
+                totalOrders: orders.length,
+                totalProfit,
+                totalLoss,
+                orders,
+            };
+        }
+
         async showRiskRuleOrders(symbol) {
             try {
-                const ordersData = await this.app.apiCall('/orders');
-
-                const positions = (this.app.dataManager.getAllPositions && this.app.dataManager.getAllPositions()) || [];
-                const posMap = {};
-                (positions || []).forEach(p => { if (p && p.symbol) posMap[String(p.symbol).toUpperCase()] = p; });
-
-                const target = String(symbol || '').toUpperCase();
-
-                const riskRuleOrders = (ordersData.orders || []).filter(order => {
-                    const os = String(order.order_source || '').toLowerCase();
-                    const isRisk = os === 'sl' || os === 'tp' || String(order.trigger_type || '').toLowerCase() === 'risk_rule';
-                    const symU = String(order.symbol || '').toUpperCase();
-                    const ridU = String(order.rule_id || '').toUpperCase();
-                    const isFilled = String(order.status || '').toLowerCase() === 'filled';
-                    return isRisk && (symU === target || ridU === target) && isFilled;
-                }).sort((a,b) => new Date(b.submit_time || b.created_at || 0) - new Date(a.submit_time || a.created_at || 0));
-
-                let totalOrders = riskRuleOrders.length;
-                let totalProfit = 0;
-                let totalLoss = 0;
-
-                riskRuleOrders.forEach(order => {
-                    const pos = posMap[String(order.symbol || '').toUpperCase()];
-                    const avgCost = pos ? pos.avg_cost : 0;
-                    if (String(order.status || '').toLowerCase() === 'filled' && order.avg_fill_price && avgCost > 0) {
-                        let pnlPerShare = 0;
-                        if (order.action === 'SELL') pnlPerShare = order.avg_fill_price - avgCost; else if (order.action === 'BUY') pnlPerShare = avgCost - order.avg_fill_price;
-                        const totalPnl = pnlPerShare * (order.quantity || 0);
-                        if (totalPnl > 0) totalProfit += totalPnl; else totalLoss += Math.abs(totalPnl);
-                    }
-                });
+                const data = await this.fetchRiskRuleOrders(symbol);
 
                 document.getElementById('ruleInfoText').textContent = `${symbol} 风险规则触发的订单`;
 
-                document.getElementById('totalOrdersCount').textContent = totalOrders;
-                document.getElementById('totalProfit').textContent = '$' + this.app.formatNumber(totalProfit);
-                document.getElementById('totalLoss').textContent = '$' + this.app.formatNumber(totalLoss);
+                document.getElementById('totalOrdersCount').textContent = data.totalOrders;
+                document.getElementById('totalProfit').textContent = '$' + this.app.formatNumber(data.totalProfit);
+                document.getElementById('totalLoss').textContent = '$' + this.app.formatNumber(data.totalLoss);
 
                 const tbody = document.querySelector('#riskRuleOrdersTable tbody');
-                tbody.innerHTML = (riskRuleOrders || []).map(order => {
+                tbody.innerHTML = (data.orders || []).map(({ order, orderPnl }) => {
                     let triggerTypeText = '风险规则';
                     let triggerTypeClass = 'bg-warning';
                     if (order.order_source === 'sl') { triggerTypeText = '止损'; triggerTypeClass = 'bg-danger'; }
@@ -495,14 +687,6 @@
                         priceDisplay = order.limit_price ? this.app.formatNumber(order.limit_price) : 'N/A';
                     }
 
-                    const pos = posMap[String(order.symbol || '').toUpperCase()];
-                    const avgCost = pos ? pos.avg_cost : 0;
-                    let orderPnl = 0;
-                    if (String(order.status || '').toLowerCase() === 'filled' && order.avg_fill_price && avgCost > 0) {
-                        let pnlPerShare = 0;
-                        if (order.action === 'SELL') pnlPerShare = order.avg_fill_price - avgCost; else if (order.action === 'BUY') pnlPerShare = avgCost - order.avg_fill_price;
-                        orderPnl = pnlPerShare * (order.quantity || 0);
-                    }
                     const pnlClass = orderPnl > 0 ? 'text-success' : orderPnl < 0 ? 'text-danger' : 'text-muted';
                     const pnlText = `$${this.app.formatNumber(orderPnl)}`;
                     const executionPrice = order.avg_fill_price || 0;
@@ -523,7 +707,7 @@
                     `;
                 }).join('');
 
-                if ((riskRuleOrders || []).length === 0) {
+                if ((data.orders || []).length === 0) {
                     tbody.innerHTML = `
                         <tr>
                             <td colspan="10" class="text-center text-muted">暂无该风险规则关联的订单</td>
