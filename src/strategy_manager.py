@@ -61,6 +61,26 @@ if TYPE_CHECKING:
 # Module-specific logger for strategy_manager
 strategy_logger = logger.bind(module="strategy_manager", request_id="-")
 
+
+def _coerce_bool(value: Any, default: bool = True) -> bool:
+    """Safely convert persisted configuration values to booleans."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+    if value is None:
+        return default
+    try:
+        return bool(value)
+    except Exception:  # pragma: no cover - defensive guard
+        return default
+
 from .database import DatabaseManager, get_db_manager, Strategy as DatabaseStrategy
 
 
@@ -140,6 +160,7 @@ class StrategyManager:
         self._heartbeat_job_id = "strategy_manager_heartbeat"
         self._heartbeat_interval_seconds = 300
         self._data_push_log_limit = 20
+        self.pause_data_push_on_holidays: bool = True
 
         # 加载数据
         self._load_from_database()
@@ -763,7 +784,8 @@ class StrategyManager:
                     },
                     "strategy_path": DEFAULT_STRATEGY_PATH,
                     "enable_auth": False,
-                    "auth_token": None
+                    "auth_token": None,
+                    "pause_data_push_on_holidays": True,
                 }
                 # 保存默认设置到数据库
                 self.db_manager.save_strategy_config(self.settings)
@@ -778,6 +800,19 @@ class StrategyManager:
                     self.db_manager.save_strategy_config(self.settings)
                 except Exception as exc:  # pragma: no cover - defensive guard
                     strategy_logger.warning(f"Failed to persist normalized strategy_path: {exc}")
+
+            pause_flag = _coerce_bool(
+                self.settings.get("pause_data_push_on_holidays"), True
+            )
+            if self.settings.get("pause_data_push_on_holidays") != pause_flag:
+                self.settings["pause_data_push_on_holidays"] = pause_flag
+                try:
+                    self.db_manager.save_strategy_config(self.settings)
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(
+                        f"Failed to persist holiday pause flag: {exc}"
+                    )
+            self.pause_data_push_on_holidays = pause_flag
 
             # 更新实例变量
             self.api_endpoint = self.settings["api_endpoint"]
@@ -880,10 +915,17 @@ class StrategyManager:
             },
             "strategy_path": DEFAULT_STRATEGY_PATH,
             "enable_auth": False,
-            "auth_token": None
+            "auth_token": None,
+            "pause_data_push_on_holidays": True,
         }
 
         self.settings = {**defaults, **data}
+
+        pause_flag = _coerce_bool(
+            self.settings.get("pause_data_push_on_holidays"), True
+        )
+        self.settings["pause_data_push_on_holidays"] = pause_flag
+        self.pause_data_push_on_holidays = pause_flag
 
         normalized_strategy_path = self._normalize_strategy_path_value(self.settings.get("strategy_path"))
         if normalized_strategy_path != self.settings.get("strategy_path"):
@@ -1474,10 +1516,11 @@ class StrategyManager:
         )
 
         dom_service = None
+        pause_on_holidays = bool(getattr(self, "pause_data_push_on_holidays", True))
 
         if enabled:
             market_open, session_reason = get_us_market_session()
-            if not market_open:
+            if not market_open and pause_on_holidays:
                 reason = session_reason or "美股休市"
                 state.update(
                     {
@@ -1922,6 +1965,10 @@ class StrategyManager:
             cleaned = {k: v for k, v in new_settings.items() if v is not None}
             if "strategy_path" in cleaned:
                 cleaned["strategy_path"] = self._normalize_strategy_path_value(cleaned["strategy_path"])
+            if "pause_data_push_on_holidays" in cleaned:
+                cleaned["pause_data_push_on_holidays"] = _coerce_bool(
+                    cleaned["pause_data_push_on_holidays"], True
+                )
             self.settings.update(cleaned)
             self._save_settings()
             self._load_from_database()  # 重新加载以更新实例变量
@@ -2458,7 +2505,12 @@ class StrategyManager:
         if not market_open and is_running_tests():
             market_open = True
             market_reason = ""
+        pause_on_holidays = bool(getattr(self, "pause_data_push_on_holidays", True))
+        effective_market_open = bool(market_open) or not pause_on_holidays
         status["is_us_market_open"] = bool(market_open)
+        status["data_push_pause_on_holidays"] = pause_on_holidays
+        status["data_push_market_open"] = effective_market_open
+        status["data_push_market_closed"] = not effective_market_open
         if market_reason:
             status["market_status_reason"] = market_reason
 
@@ -2557,7 +2609,7 @@ class StrategyManager:
                 status["is_receiving_data"] = True
 
             is_receiving = bool(status.get("is_receiving_data"))
-            if not market_open:
+            if not effective_market_open:
                 active_flag = False
                 awaiting_data = False
                 push_state["active"] = False
@@ -2566,7 +2618,6 @@ class StrategyManager:
                 self._set_data_push_reason(name, closed_reason)
                 status["data_push_reason"] = closed_reason
                 status.setdefault("data_push", {})["status_reason"] = closed_reason
-                status["data_push_market_closed"] = True
                 if push_state.get("enabled"):
                     self._schedule_data_push_disable(
                         name,

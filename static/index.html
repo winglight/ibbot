@@ -178,6 +178,24 @@
                 </div>
             </div>
 
+            <div class="card config-card mb-3" id="dataPushSettingsCard">
+                <div class="card-header">
+                    <h6 class="mb-0"><i class="fas fa-stream me-2"></i> Data Push Settings</h6>
+                </div>
+                <div class="card-body">
+                    <div class="form-check form-switch requires-write mb-2">
+                        <input class="form-check-input" type="checkbox" id="holidayDataPushSwitch" checked>
+                        <label class="form-check-label" for="holidayDataPushSwitch">节假日暂停数据推送</label>
+                    </div>
+                    <div class="small text-muted" id="holidayDataPushStatusText">
+                        当前状态：已启用，在美股节假日会自动暂停数据推送。
+                    </div>
+                    <div class="form-text mt-2">
+                        关闭后，即使遇到节假日也会继续推送策略数据。
+                    </div>
+                </div>
+            </div>
+
             <div id="configurationCards" class="configuration-cards">
                 <div class="card config-card mb-3" id="gRulesCard">
                     <div class="card-header p-0">

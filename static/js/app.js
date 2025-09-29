@@ -1092,6 +1092,7 @@ class TradingApp {
             this.notificationsManager.init();
             // 加载配置和状态
             this.loadGSRulesStatus();
+            this.refreshHolidayDataPushSetting();
             // 加载风险规则
             this.riskRulesManager.loadRiskRules();
             // 已改为WebSocket推送更新订单，取消轮询刷新
@@ -1114,6 +1115,7 @@ class TradingApp {
         // Login events are now handled by LoginManager
 
         this.initSidePanels();
+        this.initHolidayDataPushToggle();
 
         this.monitorDomHistoryList = document.getElementById('monitorDomHistoryList');
         this.monitorDomHistoryMeta = document.getElementById('monitorDomHistoryMeta');
@@ -2381,6 +2383,17 @@ class TradingApp {
             if (banner) {
                 banner.classList.toggle('d-none', !this.isReadOnly);
             }
+        }
+
+        const holidayToggle = document.getElementById('holidayDataPushSwitch');
+        if (holidayToggle) {
+            const storedState = holidayToggle.dataset.currentState;
+            const currentState = storedState === 'on'
+                ? true
+                : storedState === 'off'
+                    ? false
+                    : !!holidayToggle.checked;
+            this.setHolidayDataPushState(currentState);
         }
     }
 
@@ -5087,6 +5100,120 @@ class TradingApp {
 
         updateButtonState();
         this.sidePanelManagerInitialized = true;
+    }
+
+    setHolidayDataPushState(enabled, options = {}) {
+        const toggle = document.getElementById('holidayDataPushSwitch');
+        const statusText = document.getElementById('holidayDataPushStatusText');
+        const pending = Boolean(options.pending);
+        const effective = enabled !== false;
+
+        if (toggle) {
+            toggle.checked = effective;
+            toggle.dataset.currentState = effective ? 'on' : 'off';
+            toggle.disabled = pending || this.isReadOnly;
+        }
+
+        if (statusText) {
+            statusText.classList.remove('text-success', 'text-warning', 'text-muted');
+            if (pending) {
+                statusText.textContent = '保存中…';
+                statusText.classList.add('text-muted');
+            } else if (effective) {
+                statusText.textContent = '当前状态：已启用，在美股节假日会自动暂停数据推送。';
+                statusText.classList.add('text-success');
+            } else {
+                statusText.textContent = '当前状态：已关闭，节假日也会继续推送数据。';
+                statusText.classList.add('text-warning');
+            }
+        }
+    }
+
+    async refreshHolidayDataPushSetting(options = {}) {
+        const toggle = document.getElementById('holidayDataPushSwitch');
+        if (!toggle) {
+            return;
+        }
+
+        const resolveState = () => {
+            const stored = toggle.dataset.currentState;
+            if (stored === 'on') return true;
+            if (stored === 'off') return false;
+            return !!toggle.checked;
+        };
+
+        if (options.pending) {
+            this.setHolidayDataPushState(resolveState(), { pending: true });
+        }
+
+        try {
+            const data = await this.apiCall('/strategy/settings');
+            const settings = data?.settings || {};
+            const enabled = settings.pause_data_push_on_holidays;
+            this.setHolidayDataPushState(enabled !== false);
+        } catch (error) {
+            console.error('Failed to load holiday data push setting:', error);
+            if (options.pending) {
+                this.setHolidayDataPushState(resolveState());
+            }
+        }
+    }
+
+    initHolidayDataPushToggle() {
+        const toggle = document.getElementById('holidayDataPushSwitch');
+        if (!toggle || toggle.dataset.initialized === 'true') {
+            return;
+        }
+        toggle.dataset.initialized = 'true';
+
+        const resolveState = () => {
+            const stored = toggle.dataset.currentState;
+            if (stored === 'on') return true;
+            if (stored === 'off') return false;
+            return !!toggle.checked;
+        };
+
+        this.setHolidayDataPushState(resolveState());
+
+        toggle.addEventListener('change', async (event) => {
+            if (this.isReadOnly) {
+                event.preventDefault();
+                this.setHolidayDataPushState(resolveState());
+                return;
+            }
+
+            const desired = !!event.target.checked;
+            const previous = resolveState();
+            if (desired === previous) {
+                this.setHolidayDataPushState(desired);
+                return;
+            }
+
+            this.setHolidayDataPushState(desired, { pending: true });
+            const card = document.getElementById('dataPushSettingsCard');
+
+            try {
+                await this.apiCall('/strategy/settings', {
+                    method: 'POST',
+                    body: JSON.stringify({ pause_data_push_on_holidays: desired }),
+                });
+                this.setHolidayDataPushState(desired);
+                if (card) {
+                    card.classList.add('panel-focus-highlight');
+                    setTimeout(() => card.classList.remove('panel-focus-highlight'), 1400);
+                }
+                this.showAlert(
+                    'success',
+                    desired
+                        ? '节假日暂停数据推送已启用'
+                        : '已关闭节假日暂停数据推送'
+                );
+            } catch (error) {
+                console.error('Failed to update holiday data push setting:', error);
+                this.showAlert('danger', '保存节假日推送设置失败');
+                this.setHolidayDataPushState(previous);
+            }
+        });
     }
 
     applySuggestedQuantity() {
