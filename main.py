@@ -142,6 +142,7 @@ async def lifespan(app: FastAPI):
     # Startup
     auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
     main_logger = get_module_logger("main")
+    background_tasks: list[asyncio.Task[Any]] = []
     
     if auto_connect:
         main_logger.info("Auto-connect enabled, will attempt to connect to IBKR asynchronously...")
@@ -184,7 +185,22 @@ async def lifespan(app: FastAPI):
 
     try:
         strategy_manager.start()
-        await strategy_manager.restore_data_push_states()
+
+        async def _restore_data_push_states() -> None:
+            try:
+                await strategy_manager.restore_data_push_states()
+                main_logger.info("Strategy data push states restored after startup")
+            except asyncio.CancelledError:  # pragma: no cover - background task cancellation
+                raise
+            except Exception as exc:  # pragma: no cover - defensive guard
+                main_logger.warning(f"Deferred data push restoration failed: {exc}")
+
+        restore_task = asyncio.create_task(
+            _restore_data_push_states(),
+            name="restore-data-push-states",
+        )
+        background_tasks.append(restore_task)
+
         main_logger.info("Strategy manager initialized during application startup")
     except Exception as e:
         main_logger.warning(f"Strategy manager startup warning: {e}")
@@ -209,6 +225,16 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     main_logger.info("Application shutting down...")
+    # Cancel background tasks
+    for task in background_tasks:
+        task.cancel()
+    for task in background_tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # pragma: no cover - defensive guard
+            main_logger.warning(f"Background task shutdown warning: {exc}")
     # Gracefully shutdown risk manager scheduler
     try:
         if getattr(risk_manager, 'scheduler', None) and risk_manager.scheduler.running:
