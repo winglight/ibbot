@@ -386,10 +386,11 @@
 
 ## 现状评估（2024-xx）
 
-目前仓库已存在 `static/js/monitoring/`, `static/js/strategies/`, `static/js/ui/` 等目录，也在 `app.js` 中增加了 `appModules.*` 命名空间的探测与回退逻辑。但按照上文新的迁移步骤，仍停留在“步骤 1”初期：
+结合当前代码库，可以看到拆分工作已经打开战场，但大量回退实现仍让 `app.js` 维持在 5k+ 行体量，需要继续按步骤推进：
 
-- `monitoring/constants.js` 与 `monitoring/utils.js` 已定义常量与工具，不过 `app.js` 继续保留完整的回退实现，导致即使加载了模块也会执行旧逻辑。【F:static/js/app.js†L1-L105】
-- `monitoring/manager.js` 目前仅实现了状态字段与少量选择器方法，大量监控与策略图表逻辑仍直接驻留在 `app.js`（如 `updateMonitorRealtime`、`renderStrategyChart` 等），需要按步骤 2 和步骤 3 迁移。【F:static/js/app.js†L5954-L5979】【F:static/js/app.js†L9468-L9555】
-- `TradingApp` 中虽然新增了 `bindMonitoringStateProxies`、`bindStrategiesStateProxies` 等代理，但 200 多个实例方法依旧定义在 `app.js`。部分方法改为探测子模块再回退执行旧实现，导致文件体量没有下降，也让真实的迁移进度难以衡量。【F:static/js/app.js†L239-L368】【F:static/js/app.js†L7449-L7498】
+- **步骤 1 仍未完全收尾**：`MonitoringManager` 已负责策略图表默认状态、区间/时长计算等逻辑，但 `app.js` 仍初始化整套监控状态（`initializeMonitoringStateFallback`）并维护同名字段，导致状态分散在两个类中。【F:static/js/app.js†L503-L555】【F:static/js/monitoring/manager.js†L1560-L1638】
+- **步骤 2 / 3 的核心逻辑尚未迁出**：监控实时渲染、订阅与模态交互在 `monitoring/manager.js` 中仍以内联 `legacy*` 方法形式保留了完整旧实现，新的类只是简单代理，未真正解耦。需要将这些函数拆分成实例方法并从 `app.js` 中删除重复代码。【F:static/js/monitoring/manager.js†L902-L1109】【F:static/js/monitoring/manager.js†L2578-L2610】
+- **步骤 4 / 5 已取得明显进展**：策略详情和列表的大部分逻辑已经落地在 `StrategiesManager` 与 `StrategyDetailsController`，`app.js` 只负责把 WebSocket 消息与 UI 事件转给子模块，后续可在确认无遗留后删除回退分支。【F:static/js/strategies/manager.js†L20-L200】【F:static/js/strategies/details.js†L1-L200】【F:static/js/app.js†L329-L342】
+- **步骤 6 仍需系统推进**：风险管理模块虽然有单独的 `RiskRulesManager`，但其渲染和交互仍频繁回调 `app` 上的工具方法（如 `formatNumber`），而这些通用工具依旧定义在 `app.js` 内，需要迁移到共享 `utils` 并由各模块引用，顺便完成风险弹窗相关逻辑的剥离。【F:static/js/risk/manager.js†L62-L160】【F:static/js/app.js†L3252-L3283】
 
-只有按上述步骤逐组迁移并删除回退实现，`app.js` 的行数才会从当前的 10k+ 行逐步下降，真正实现模块化目标。
+若要把 `app.js` 压缩到 2000 行以下，必须按照计划逐步删除这些回退实现：优先让监控模块完全自洽（完成步骤 1~3），随后聚焦风险与通用工具（步骤 6），并在确认无外部依赖后移除 `app.js` 中的旧函数。每次迁移后都要同步清理 `legacy*` 代理与重复字段，才能真正显著降低文件体量。
