@@ -1,3 +1,4 @@
+import asyncio
 import types
 
 from src import strategy_manager as sm
@@ -41,6 +42,7 @@ def _minimal_manager() -> StrategyManager:
     manager.scheduler = None
     manager._heartbeat_job_id = "test"
     manager._data_push_log_limit = 20
+    manager.pause_data_push_on_holidays = True
     return manager
 
 
@@ -144,3 +146,79 @@ def test_stall_detection_triggers_after_inactivity(monkeypatch):
 
     assert status is not None
     assert restart_called["flag"] is True
+
+
+def test_market_closed_allows_data_push_when_holiday_pause_disabled(monkeypatch):
+    monkeypatch.setattr(sm, "get_us_market_session", lambda *args, **kwargs: (False, "Holiday"))
+
+    manager = _minimal_manager()
+    name = "DOM Strategy"
+    strategy = Strategy(name=name, strategy_type="internal")
+    manager.strategies[name] = strategy
+    manager.settings = {"pause_data_push_on_holidays": False}
+    manager.pause_data_push_on_holidays = False
+
+    class DummyRuntime:
+        def __init__(self):
+            self.active = True
+            self.enabled = True
+
+        def get_runtime_status(self):
+            return {
+                "processed_count": 0,
+                "last_data_timestamp": 0.0,
+                "is_receiving_data": False,
+            }
+
+    runtime = DummyRuntime()
+    manager.internal_strategies_runtime[name] = runtime
+
+    manager.data_push_state[name] = {
+        "enabled": True,
+        "active": True,
+        "subscription": "dom_trend",
+        "symbol": "MNQ",
+        "awaiting_data": False,
+    }
+
+    manager._record_data_push_event = lambda *args, **kwargs: None
+    manager._set_data_push_reason = lambda *args, **kwargs: None
+
+    status = manager.get_internal_strategy_status(name)
+
+    assert status is not None
+    assert status.get("data_push_market_closed") is False
+    assert manager.data_push_state[name]["active"] is True
+
+
+def test_set_data_push_ignores_holiday_pause_when_disabled(monkeypatch):
+    monkeypatch.setattr(sm, "get_us_market_session", lambda *args, **kwargs: (False, "Holiday"))
+
+    manager = _minimal_manager()
+    name = "DOM Strategy"
+    strategy = Strategy(name=name, strategy_type="internal")
+    manager.strategies[name] = strategy
+    manager.settings = {
+        f"{name}_data_subscription": "dom_trend",
+        f"{name}_primary_symbol": "MNQ",
+        "pause_data_push_on_holidays": False,
+    }
+    manager.pause_data_push_on_holidays = False
+    manager._record_data_push_event = lambda *args, **kwargs: None
+    manager._set_data_push_reason = lambda *args, **kwargs: None
+
+    class DummyDomService:
+        async def start_stream(self, symbol, force_restart=False):
+            assert symbol == "MNQ"
+            return True
+
+        def get_last_start_error(self):
+            return None, None
+
+    monkeypatch.setattr("src.dom_service.get_dom_service", lambda: DummyDomService())
+
+    result = asyncio.run(manager.set_data_push(name, True))
+
+    assert result["success"] is True
+    assert result.get("market_closed") is not True
+    assert manager.data_push_state[name]["active"] is True

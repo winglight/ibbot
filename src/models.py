@@ -171,6 +171,7 @@ class StrategySettingsRequest(BaseModel):
     strategy_path: Optional[str] = None
     enable_auth: Optional[bool] = None
     auth_token: Optional[str] = None
+    pause_data_push_on_holidays: Optional[bool] = None
 
 
 class StrategyRiskSettings(BaseModel):
