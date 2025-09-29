@@ -198,6 +198,9 @@ class TradingApp {
         this.notificationsManager = typeof NotificationsManagerClass === 'function'
             ? new NotificationsManagerClass(this)
             : new NotificationsManager(this);
+        this.logsManagerInitialized = false;
+        this.notificationsManagerInitialized = false;
+        this.authenticatedModulesInitialized = false;
         this.uiController = typeof UIControllerClass === 'function'
             ? new UIControllerClass(this)
             : null;
@@ -716,6 +719,97 @@ class TradingApp {
         }
     }
 
+    isAuthenticated() {
+        try {
+            if (this.loginManager && typeof this.loginManager.isLoggedIn === 'function') {
+                return this.loginManager.isLoggedIn();
+            }
+        } catch (error) {
+            console.warn('Failed to determine authentication state from login manager:', error);
+        }
+        try {
+            return !!localStorage.getItem('access_token');
+        } catch (error) {
+            console.warn('Failed to read authentication token from storage:', error);
+        }
+        return false;
+    }
+
+    initializeAuthenticatedModules(options = {}) {
+        if (!this.isAuthenticated()) {
+            return false;
+        }
+
+        const { force = false } = options || {};
+
+        if (!this.logsManagerInitialized && this.logsManager?.init) {
+            try {
+                const maybePromise = this.logsManager.init();
+                if (maybePromise?.catch) {
+                    maybePromise.catch((error) => {
+                        console.error('Failed to initialize logs manager:', error);
+                    });
+                }
+            } catch (error) {
+                console.error('Failed to initialize logs manager:', error);
+            }
+            this.logsManagerInitialized = true;
+        } else if (force) {
+            try {
+                this.loadLogModules();
+                this.loadLogs();
+            } catch (error) {
+                console.error('Failed to refresh logs after authentication:', error);
+            }
+        }
+
+        if (!this.notificationsManagerInitialized && this.notificationsManager?.init) {
+            try {
+                this.notificationsManager.init();
+            } catch (error) {
+                console.error('Failed to initialize notifications manager:', error);
+            }
+            this.notificationsManagerInitialized = true;
+        } else if (force && this.notificationsManager?.filterNotificationHistory) {
+            try {
+                this.notificationsManager.filterNotificationHistory();
+            } catch (error) {
+                console.error('Failed to refresh notification history after authentication:', error);
+            }
+        }
+
+        try {
+            this.strategiesManager?.loadStrategies?.();
+        } catch (error) {
+            console.error('Failed to load strategies after authentication:', error);
+        }
+
+        try {
+            this.loadGSRulesStatus();
+        } catch (error) {
+            console.error('Failed to load G/S rules status after authentication:', error);
+        }
+
+        try {
+            this.refreshHolidayDataPushSetting();
+        } catch (error) {
+            console.error('Failed to refresh holiday data push setting after authentication:', error);
+        }
+
+        try {
+            this.riskRulesManager?.loadRiskRules?.();
+        } catch (error) {
+            console.error('Failed to load risk rules after authentication:', error);
+        }
+
+        this.authenticatedModulesInitialized = true;
+        return true;
+    }
+
+    handleLogout() {
+        this.authenticatedModulesInitialized = false;
+    }
+
     async init() {
         try {
             if (window.Chart && window.Chart.register) {
@@ -754,18 +848,10 @@ class TradingApp {
             // 不阻塞首屏：自动登录与自动连接在后台进行
             void this.loginManager.tryAutoLogin({ timeout: 7000, maxRetries: 0, connectTimeout: 10000, connectRetries: 0 });
             await this.ibkrManager.checkConnectionStatus({ timeout: 4000, maxRetries: 0 });
-            // 加载账户和投资组合数据
-            // this.dataManager.loadAccountInfo(); // 改为由 WebSocket account_update 推送
-            // this.portfolioManager.loadPortfolio(); // 移到登录成功后调用
-            this.strategiesManager.loadStrategies();
-            this.logsManager.init();
-            // 初始化通知管理器
-            this.notificationsManager.init();
-            // 加载配置和状态
-            this.loadGSRulesStatus();
-            this.refreshHolidayDataPushSetting();
-            // 加载风险规则
-            this.riskRulesManager.loadRiskRules();
+            const initialized = this.initializeAuthenticatedModules();
+            if (!initialized) {
+                console.info('Authentication not available yet, deferring protected requests until login.');
+            }
             // 已改为WebSocket推送更新订单，取消轮询刷新
             await cfgPromise.catch(() => {});
         }, 50);
@@ -4046,6 +4132,13 @@ class TradingApp {
             this.setHolidayDataPushState(resolveState(), { pending: true });
         }
 
+        if (!this.isAuthenticated()) {
+            if (options.pending) {
+                this.setHolidayDataPushState(resolveState());
+            }
+            return;
+        }
+
         try {
             const data = await this.apiCall('/strategy/settings');
             const settings = data?.settings || {};
@@ -4079,6 +4172,13 @@ class TradingApp {
             if (this.isReadOnly) {
                 event.preventDefault();
                 this.setHolidayDataPushState(resolveState());
+                return;
+            }
+
+            if (!this.isAuthenticated()) {
+                event.preventDefault();
+                this.setHolidayDataPushState(resolveState());
+                this.showAlert('warning', '请先登录后再修改节假日推送设置');
                 return;
             }
 
