@@ -403,12 +403,42 @@ app.openapi = custom_openapi
 # 启用GZip压缩，减小大文件(如 app.js)传输体积
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
+def _build_cors_origins() -> List[str]:
+    """Construct the list of allowed CORS origins.
+
+    The web UI and API are typically served from the same FastAPI process but
+    the exposed port is configurable through ``WEB_PORT``.  When the port is
+    changed (for example to 8005 as used in several deployment guides) the
+    hard-coded 8000 origins prevented browsers from calling the API because the
+    ``Origin`` header no longer matched the allow list.  Building the origin
+    list dynamically keeps local development behaviour intact while supporting
+    custom ports or hosts.
+    """
+
+    configured = os.getenv("CORS_ALLOW_ORIGINS")
+    if configured:
+        origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+        return origins or ["*"]
+
+    web_port = os.getenv("WEB_PORT", "8000").strip() or "8000"
+    web_host = os.getenv("WEB_HOST", "0.0.0.0").strip() or "0.0.0.0"
+
+    # Default localhost candidates plus the explicit host if it's not a wildcard.
+    host_candidates = ["localhost", "127.0.0.1"]
+    if web_host not in {"0.0.0.0", "::"}:
+        host_candidates.append(web_host)
+
+    origins: List[str] = []
+    for host in dict.fromkeys(host_candidates):  # Preserve order while deduplicating
+        origins.append(f"http://{host}:{web_port}")
+        origins.append(f"https://{host}:{web_port}")
+
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8000",
-        "http://127.0.0.1:8000"
-    ],
+    allow_origins=_build_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
