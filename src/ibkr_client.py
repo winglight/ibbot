@@ -1008,7 +1008,8 @@ class IBKRClient:
                     ibkr_logger.error(f"Error requesting market data for {symbol} in connection thread: {e}")
                     return None
             
-            ticker = self.connection_manager.run_in_connection_thread(
+            ticker = await asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
                 _req_ticker,
                 timeout=10.0,
             )
@@ -1103,7 +1104,8 @@ class IBKRClient:
                     ib.cancelMktData(contract)
                 except Exception as e:
                     ibkr_logger.warning(f"Failed to cancel market data for {symbol}: {e}")
-            self.connection_manager.run_in_connection_thread(
+            await asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
                 _cancel_mkt_data,
                 timeout=5.0,
             )
