@@ -54,6 +54,43 @@ class InfluxPersistenceBackend(PersistenceBackend):
 
         self._client = InfluxDBClient(url=url, token=token, org=org)
         self._write_api = self._client.write_api()
+        buckets_api = self._client.buckets_api()
+
+        existing_bucket = None
+        try:
+            response = buckets_api.find_buckets()
+            bucket_entries = getattr(response, "buckets", response)
+        except Exception as exc:  # pragma: no cover - network errors
+            logger.warning("Failed to list InfluxDB buckets: {}", exc)
+            bucket_entries = []
+
+        for bucket_entry in bucket_entries or []:
+            if getattr(bucket_entry, "name", None) == bucket:
+                existing_bucket = bucket_entry
+                break
+
+        if existing_bucket is not None:
+            logger.info("Found existing InfluxDB bucket {}", bucket)
+        else:
+            org_api = self._client.organizations_api()
+            try:
+                org_response = org_api.find_organizations()
+            except Exception as exc:  # pragma: no cover - network errors
+                raise RuntimeError("Failed to list InfluxDB organizations") from exc
+
+            organizations = getattr(org_response, "orgs", org_response) or []
+            org_id = None
+            for org_entry in organizations:
+                if getattr(org_entry, "name", None) == org:
+                    org_id = getattr(org_entry, "id", None)
+                    break
+
+            if org_id is None:
+                raise RuntimeError(f"Unable to find InfluxDB organization '{org}'")
+
+            buckets_api.create_bucket(bucket_name=bucket, org_id=org_id)
+            logger.info("Created InfluxDB bucket {}", bucket)
+
         self._bucket = bucket
         self._org = org
         self._measurement = measurement
