@@ -118,8 +118,8 @@ class StrategyRequest(BaseModel):
     tp_enabled: bool = False
     sl_price: Optional[float] = None
     tp_price: Optional[float] = None
-    sl_type: str = "amount"  # "amount" or "percent"
-    tp_type: str = "amount"  # "amount" or "percent"
+    sl_type: Literal["amount", "percent", "trailing"] = "amount"
+    tp_type: Literal["amount", "percent", "trailing"] = "amount"
     data_subscription: Optional[str] = None
     position_add_cooldown_minutes: Optional[int] = None
     close_before_close_minutes: Optional[int] = None
