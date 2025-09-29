@@ -96,6 +96,21 @@ def _get_persistence_backend():
     if influx_url and influx_bucket and influx_org:
         token = os.getenv("DATA_LAYER_INFLUX_TOKEN")
         measurement = os.getenv("DATA_LAYER_INFLUX_MEASUREMENT", "market_events")
+        timeout_raw = os.getenv("DATA_LAYER_INFLUX_TIMEOUT_MS")
+        timeout = None
+        if timeout_raw:
+            try:
+                timeout_candidate = int(timeout_raw.strip())
+            except ValueError:
+                logger.warning(
+                    "Invalid DATA_LAYER_INFLUX_TIMEOUT_MS value %r - falling back to default",
+                    timeout_raw,
+                )
+                timeout = None
+            else:
+                if timeout_candidate > 0:
+                    timeout = timeout_candidate
+
         try:
             _persistence_backend = InfluxPersistenceBackend(
                 influx_url,
@@ -103,6 +118,7 @@ def _get_persistence_backend():
                 org=influx_org,
                 token=token,
                 measurement=measurement,
+                timeout=timeout,
             )
             logger.info("Using InfluxDB persistence backend at {}", influx_url)
             return _persistence_backend
