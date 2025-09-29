@@ -524,11 +524,68 @@ async def set_strategy_data_push_api(
     if signature and "force_restart" in signature.parameters:
         call_kwargs["force_restart"] = bool(payload.force_restart)
 
-    result = await set_data_push(name, **call_kwargs)
+    timeout_seconds = getattr(strategy_manager, "data_push_request_timeout", 8.0)
+    timed_out = False
+    result: Optional[Dict[str, Any]] = None
+    background_task: Optional[asyncio.Task] = None
+
+    try:
+        background_task = asyncio.create_task(set_data_push(name, **call_kwargs))
+    except RuntimeError:
+        background_task = None
+        result = await set_data_push(name, **call_kwargs)
+    else:
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(background_task), timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+
+            def _log_background_completion(
+                fut: asyncio.Future, strategy: str = name
+            ) -> None:
+                try:
+                    fut.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.error(
+                        "Background data push update failed",
+                        strategy=strategy,
+                        error=str(exc),
+                    )
+
+            background_task.add_done_callback(_log_background_completion)
+            logger.warning(
+                "Timed out waiting for strategy data push update; continuing in background",
+                strategy=name,
+                timeout=timeout_seconds,
+            )
+        except Exception:
+            if background_task:
+                background_task.cancel()
+            raise
+
+    if result is None:
+        result = {}
 
     state_snapshot = strategy_manager.get_data_push_state(name) or {}
     if not state_snapshot:
         state_snapshot = result
+    if not state_snapshot:
+        state_snapshot = {}
+
+    if timed_out:
+        state_snapshot.setdefault("subscription", call_kwargs.get("subscription"))
+        state_snapshot.setdefault("symbol", call_kwargs.get("symbol"))
+        state_snapshot.setdefault("last_data_timestamp", None)
+        if payload.enabled:
+            state_snapshot.setdefault("active", True)
+            state_snapshot.setdefault("awaiting_data", True)
+            state_snapshot.setdefault("status_reason", "推送启动请求处理中")
+        else:
+            state_snapshot.setdefault("active", False)
+            state_snapshot.setdefault("awaiting_data", False)
+            state_snapshot.setdefault("status_reason", "推送停止请求处理中")
 
     state_payload = {
         "active": bool(state_snapshot.get("active")),
@@ -540,15 +597,19 @@ async def set_strategy_data_push_api(
         "status_reason": state_snapshot.get("status_reason") or result.get("status_reason"),
     }
 
-    if not result.get("success"):
+    success = True
+    error_message: Optional[str] = None
+    if result.get("success") is False:
+        success = False
         error_message = result.get("error") or "Failed to update data push state"
-        return {
-            "success": False,
-            "error": error_message,
-            "state": state_payload,
-        }
 
-    return {"success": True, "state": state_payload}
+    response: Dict[str, Any] = {"success": success, "state": state_payload}
+    if error_message:
+        response["error"] = error_message
+    if timed_out:
+        response["pending"] = True
+
+    return response
 
 @router.put("/api/strategies/{name}")
 async def update_strategy_api(name: str, updates: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
