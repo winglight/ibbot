@@ -222,6 +222,35 @@ class IBKRClient:
         self._setup_async_components()
         return self.connection_manager.is_connected()
 
+    async def _is_connected_async(self, timeout: float = 1.0) -> bool:
+        """Non-blocking connection check suitable for asyncio contexts.
+
+        ``IB`` exposes several synchronous helpers for checking the
+        connection state.  Under degraded network conditions those helpers
+        may block the caller for a noticeable amount of time which in turn
+        stalls the FastAPI event loop.  Running the check in a worker thread
+        with a short timeout keeps the HTTP/WebSocket handlers responsive
+        while still reporting the last known state when the check cannot
+        finish in time.
+        """
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self.connection_manager.is_connected),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            ibkr_logger.warning(
+                "Connection state check timed out; falling back to cached state",
+            )
+            return getattr(self.connection_manager, "connected", False)
+        except Exception as exc:
+            ibkr_logger.warning(
+                "Connection state check failed: {}",
+                exc,
+            )
+            return getattr(self.connection_manager, "connected", False)
+
     @property
     def ib(self) -> Optional[IB]:
         """获取IB实例"""
@@ -276,7 +305,7 @@ class IBKRClient:
 
         previous_state = False
         try:
-            previous_state = self.is_connected()
+            previous_state = await self._is_connected_async()
         except Exception as exc:
             ibkr_logger.debug(f"Initial connection check failed: {exc}")
             previous_state = False
@@ -298,7 +327,7 @@ class IBKRClient:
                     continue
 
                 try:
-                    connected = self.is_connected()
+                    connected = await self._is_connected_async()
                 except Exception as exc:
                     ibkr_logger.warning(f"IBKR connection check failed: {exc}")
                     connected = False
@@ -386,7 +415,7 @@ class IBKRClient:
         ibkr_logger.debug("IBKR reconnect loop started")
         try:
             while True:
-                if self.is_connected():
+                if await self._is_connected_async():
                     return
 
                 delay = self._compute_backoff_delay(self._reconnect_attempt)
@@ -401,7 +430,7 @@ class IBKRClient:
                     except asyncio.CancelledError:
                         raise
 
-                if self.is_connected():
+                if await self._is_connected_async():
                     return
 
                 attempt_number = self._reconnect_attempt + 1
@@ -982,7 +1011,7 @@ class IBKRClient:
             
             # 2. 确保连接
             ibkr_logger.debug(f"Checking IBKR connection for {symbol}")
-            if not self.is_connected():
+            if not await self._is_connected_async():
                 ibkr_logger.warning(f"IBKR not connected; skipping real-time data request for {symbol}")
                 return None
             
@@ -2008,7 +2037,7 @@ class IBKRClient:
         """获取账户信息"""
         try:
             # 确保连接
-            if not self.is_connected():
+            if not await self._is_connected_async():
                 ibkr_logger.error("Cannot retrieve account info: IBKR is not connected")
                 return self._return_cached_account_info()
 
@@ -2093,7 +2122,7 @@ class IBKRClient:
         """
         try:
             # 确保连接
-            if not self.is_connected():
+            if not await self._is_connected_async():
                 ibkr_logger.error("Cannot retrieve account summary: IBKR is not connected")
                 return []
 
@@ -2126,7 +2155,7 @@ class IBKRClient:
         fast=True 时仅使用缓存或 portfolio 的 marketPrice/averageCost，跳过逐个实时行情请求以显著降低延迟"""
         try:
             # 确保连接
-            if not self.is_connected():
+            if not await self._is_connected_async():
                 ibkr_logger.error("Cannot retrieve positions: IBKR is not connected")
                 return []
             
