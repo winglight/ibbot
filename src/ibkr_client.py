@@ -1008,7 +1008,10 @@ class IBKRClient:
                     ibkr_logger.error(f"Error requesting market data for {symbol} in connection thread: {e}")
                     return None
             
-            ticker = self.connection_manager.run_in_connection_thread(_req_ticker)
+            ticker = self.connection_manager.run_in_connection_thread(
+                _req_ticker,
+                timeout=10.0,
+            )
             if not ticker:
                 ibkr_logger.error(f"Failed to obtain ticker for {symbol}")
                 return None
@@ -1100,7 +1103,10 @@ class IBKRClient:
                     ib.cancelMktData(contract)
                 except Exception as e:
                     ibkr_logger.warning(f"Failed to cancel market data for {symbol}: {e}")
-            self.connection_manager.run_in_connection_thread(_cancel_mkt_data)
+            self.connection_manager.run_in_connection_thread(
+                _cancel_mkt_data,
+                timeout=5.0,
+            )
             
             if result_payload:
                 return result_payload
@@ -1631,7 +1637,10 @@ class IBKRClient:
                 # 继续执行取消操作，不因刷新失败而中断
 
             # 尝试使用连接管理器在正确的线程中执行操作
-            result = self.connection_manager.run_in_connection_thread(_cancel_orders_operation)
+            result = self.connection_manager.run_in_connection_thread(
+                _cancel_orders_operation,
+                timeout=15.0,
+            )
             
             if result is not None:
                 return result
@@ -2132,6 +2141,7 @@ class IBKRClient:
             portfolio_items = await asyncio.to_thread(
                 self.connection_manager.run_in_connection_thread,
                 _portfolio_snapshot,
+                timeout=10.0,
             )
             if portfolio_items is None:
                 portfolio_items = []

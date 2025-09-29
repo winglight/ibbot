@@ -18,6 +18,9 @@ if TYPE_CHECKING:  # pragma: no cover - import only for type checking
 # Module-specific logger
 _depth_logger = logger.bind(module="depth_subscriber", request_id="-")
 
+_SUBSCRIBE_TIMEOUT_SEC = 15.0
+_CANCEL_TIMEOUT_SEC = 5.0
+
 
 @dataclass
 class _DepthStream:
@@ -121,7 +124,10 @@ class DepthSubscriber:
                         )
 
             try:
-                self.connection_manager.run_in_connection_thread(_cancel_previous)
+                self.connection_manager.run_in_connection_thread(
+                    _cancel_previous,
+                    timeout=_CANCEL_TIMEOUT_SEC,
+                )
             except Exception as exc:
                 _depth_logger.warning(
                     f"Failed to cancel previous depth stream for {symbol}: {exc}"
@@ -160,7 +166,10 @@ class DepthSubscriber:
             _depth_logger.warning(f"Ticker initial state - domBids: {getattr(ticker, 'domBids', 'None')}, domAsks: {getattr(ticker, 'domAsks', 'None')}")
             return ticker, contract
 
-        result = self.connection_manager.run_in_connection_thread(_subscribe)
+        result = self.connection_manager.run_in_connection_thread(
+            _subscribe,
+            timeout=_SUBSCRIBE_TIMEOUT_SEC,
+        )
         if not result:
             reason = f"Failed to subscribe market depth for {symbol}"
             self._set_last_error(reason, 500)
@@ -219,7 +228,10 @@ class DepthSubscriber:
                 except Exception as e:
                     _depth_logger.error(f"cancelMktDepth error for {symbol}: {e}")
 
-        self.connection_manager.run_in_connection_thread(_cancel)
+        self.connection_manager.run_in_connection_thread(
+            _cancel,
+            timeout=_CANCEL_TIMEOUT_SEC,
+        )
         try:
             stream.ticker.updateEvent.clear()
         except Exception:

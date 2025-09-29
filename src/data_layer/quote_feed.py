@@ -170,7 +170,10 @@ class IBQuoteFeed(QuoteFeed):
             ticker = ib.reqMktData(contract, "", False, False)
             return ticker, contract
 
-        result = cm.run_in_connection_thread(_subscribe)
+        result = cm.run_in_connection_thread(
+            _subscribe,
+            timeout=15.0,
+        )
         if not result:
             raise RuntimeError(f"reqMktData failed for {symbol}")
         ticker, contract = result
@@ -217,7 +220,10 @@ class IBQuoteFeed(QuoteFeed):
                 except Exception:
                     pass
 
-        cm.run_in_connection_thread(_cancel)
+        cm.run_in_connection_thread(
+            _cancel,
+            timeout=5.0,
+        )
 
     def _remove_callback(self, symbol: str, callback: Callback) -> None:
         subscription: Optional[_Subscription]
