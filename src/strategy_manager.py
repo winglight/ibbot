@@ -514,6 +514,23 @@ class StrategyManager:
         state = self.data_push_state.setdefault(strategy_name, {})
         state["status_reason"] = reason
 
+    def _enqueue_pending_data_push_retry(
+        self,
+        strategy_name: str,
+        subscription: Optional[str],
+        symbol: Optional[str],
+        force_restart: bool,
+    ) -> None:
+        """Queue a deferred data push activation when the IBKR connection is unavailable."""
+
+        entry = (strategy_name, subscription, symbol, force_restart)
+        if entry not in self._pending_data_push_requests:
+            self._pending_data_push_requests.append(entry)
+
+        pending_count = len(self._pending_data_push_requests)
+        if pending_count:
+            self._schedule_restore_after_connection(pending_count)
+
     def _notify_scheduler_state(self, state: str) -> None:
         """Send scheduler state change notifications when enabled."""
         manager = self.notification_manager
@@ -1798,6 +1815,58 @@ class StrategyManager:
                 ok = False
 
             if not ok:
+                retry_reason: Optional[str] = None
+                normalized_error = (error or "").strip().lower()
+                if stored_subscription == "dom_trend":
+                    connection_ready = connection_manager.is_connected()
+                    if not connection_ready:
+                        retry_reason = "IBKR连接尚未就绪，已安排自动重试"
+                    elif "connection" in normalized_error:
+                        retry_reason = "IBKR连接异常，等待恢复后重试"
+
+                if retry_reason:
+                    state.update({
+                        "enabled": False,
+                        "active": False,
+                        "subscription": stored_subscription,
+                        "symbol": target_symbol,
+                        "awaiting_data": False,
+                        "last_data_timestamp": None,
+                    })
+                    state.pop("_last_gap_warning_at", None)
+                    state.pop("_last_restart_attempt", None)
+                    self._set_data_push_reason(strategy_name, retry_reason)
+                    self._enqueue_pending_data_push_retry(
+                        strategy_name,
+                        stored_subscription,
+                        target_symbol,
+                        force_restart,
+                    )
+                    self._record_data_push_event(
+                        strategy_name,
+                        "IBKR连接未就绪，推送等待自动重试",
+                        level="warning",
+                        reason=retry_reason,
+                        details={"error": error} if error else None,
+                    )
+                    strategy_logger.warning(
+                        "Deferring data push start until IBKR connection is active",
+                        strategy=strategy_name,
+                        subscription=stored_subscription,
+                        symbol=target_symbol,
+                        error=error,
+                    )
+                    return {
+                        "success": False,
+                        "error": error or "IBKR connection not ready",
+                        "status_reason": retry_reason,
+                        "subscription": stored_subscription,
+                        "symbol": target_symbol,
+                        "active": False,
+                        "awaiting_data": False,
+                        "retry_scheduled": True,
+                    }
+
                 state.update({
                     "enabled": False,
                     "active": False,
