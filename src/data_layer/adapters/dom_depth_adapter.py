@@ -180,30 +180,52 @@ class DomDepthAdapter(DataSourceAdapter):
         self._publish_async(envelope)
 
     def _publish_async(self, envelope: EventEnvelope) -> None:
+        """Publish *envelope* without assuming the current event loop context."""
+
+        def _schedule(loop: asyncio.AbstractEventLoop) -> None:
+            loop.create_task(self.event_bus.publish(envelope))
+
         try:
             loop = self._loop
-            if loop and loop.is_running():
-                try:
-                    running_loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    running_loop = None
-
-                if running_loop is loop:
-                    loop.create_task(self.event_bus.publish(envelope))
-                else:
-                    loop.call_soon_threadsafe(
-                        loop.create_task, self.event_bus.publish(envelope)
-                    )
-                return
+            if loop and loop.is_closed():
+                loop = None
+                self._loop = None
 
             try:
                 running_loop = asyncio.get_running_loop()
             except RuntimeError:
                 running_loop = None
 
+            if loop and loop.is_running():
+                if running_loop is loop:
+                    _schedule(loop)
+                    return
+
+                try:
+                    loop.call_soon_threadsafe(lambda: _schedule(loop))
+                    return
+                except RuntimeError as exc:
+                    if "closed" in str(exc).lower():
+                        self._loop = None
+                        loop = None
+                    else:  # pragma: no cover - defensive guard
+                        logger.exception("Failed to dispatch DOM depth publish: {}", exc)
+                        return
+
             if running_loop and running_loop.is_running():
-                running_loop.create_task(self.event_bus.publish(envelope))
+                _schedule(running_loop)
+                if self._loop is None:
+                    self._loop = running_loop
                 return
+
+            if loop and not loop.is_closed():
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.event_bus.publish(envelope), loop
+                    )
+                    return
+                except RuntimeError:
+                    pass
 
             asyncio.run(self.event_bus.publish(envelope))
         except RuntimeError as exc:
