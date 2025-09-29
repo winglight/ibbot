@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 from typing import Optional, Dict, Any
 from datetime import datetime
+from copy import deepcopy
 
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
@@ -29,6 +30,10 @@ from .orders import (
 )
 
 router = APIRouter()
+
+# Cache the most recent successful risk configuration so that the endpoint can
+# respond immediately even if the underlying manager becomes unresponsive.
+_last_risk_config: Dict[str, Any] = {}
 
 @router.post("/api/risk_rules")
 async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get_current_user)):
@@ -170,21 +175,22 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
         except Exception:
             leverage = {'MNQ': 20.0}
 
-        # 新增：返回完整风控配置，添加超时保护
+        # 新增：返回完整风控配置，添加超时保护并使用缓存避免阻塞
         full_cfg = {}
+        global _last_risk_config
         try:
             if 'risk_manager' in globals() and risk_manager is not None:
-                loop = asyncio.get_event_loop()
                 full_cfg = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: risk_manager.get_config()),
-                    timeout=3.0  # 3秒超时
+                    asyncio.to_thread(risk_manager.get_config),
+                    timeout=1.5  # 更短的超时，快速回落到缓存
                 )
+                _last_risk_config = deepcopy(full_cfg)
         except asyncio.TimeoutError:
-            logger.warning("get_risk_config: fetch full config timed out")
-            full_cfg = {}
+            logger.warning("get_risk_config: fetch full config timed out; using cached snapshot")
+            full_cfg = deepcopy(_last_risk_config)
         except Exception as e:
-            logger.warning(f"get_risk_config: fetch full config failed: {e}")
-            full_cfg = {}
+            logger.warning(f"get_risk_config: fetch full config failed: {e}; using cached snapshot")
+            full_cfg = deepcopy(_last_risk_config)
 
         return {
             "stop_loss_ratio": stop_loss_ratio,
@@ -204,6 +210,8 @@ async def update_risk_config(payload: RiskConfigUpdateRequest, user: Optional[st
     try:
         updates = {k: v for k, v in payload.dict(exclude_none=True).items()}
         new_cfg = risk_manager.update_config(updates)
+        global _last_risk_config
+        _last_risk_config = deepcopy(new_cfg)
         return {"success": True, "risk_config": new_cfg}
     except Exception as e:
         logger.error(f"Update risk config error: {e}")
