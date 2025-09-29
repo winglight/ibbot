@@ -63,6 +63,7 @@ class RiskRule:
     timestamp: str = None
     auto_trailing: bool = False
     atr_params: Optional[Dict[str, Any]] = None
+    rule_type: str = "fixed"
 
 
 @dataclass
@@ -236,7 +237,8 @@ class DatabaseManager:
                     max_time_span INTEGER,
                     timestamp TEXT NOT NULL,
                     auto_trailing BOOLEAN DEFAULT 0,
-                    atr_params TEXT
+                    atr_params TEXT,
+                    rule_type TEXT DEFAULT 'fixed'
                 )
                 """
             )
@@ -247,6 +249,15 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE risk_rules ADD COLUMN auto_trailing BOOLEAN DEFAULT 0")
             if 'atr_params' not in risk_columns:
                 cursor.execute("ALTER TABLE risk_rules ADD COLUMN atr_params TEXT")
+            if 'rule_type' not in risk_columns:
+                cursor.execute("ALTER TABLE risk_rules ADD COLUMN rule_type TEXT DEFAULT 'fixed'")
+            cursor.execute(
+                """
+                UPDATE risk_rules
+                SET rule_type = CASE WHEN COALESCE(auto_trailing, 0) = 1 THEN 'trailing' ELSE 'fixed' END
+                WHERE rule_type IS NULL OR TRIM(rule_type) = ''
+                """
+            )
 
             # 创建策略表
             cursor.execute("""
@@ -498,7 +509,8 @@ class DatabaseManager:
                 """
                 SELECT symbol, stop_loss_price, take_profit_price, max_loss_percent,
                        COALESCE(enabled, 1) as enabled, max_time_span, timestamp,
-                       COALESCE(auto_trailing, 0) as auto_trailing, atr_params
+                       COALESCE(auto_trailing, 0) as auto_trailing, atr_params,
+                       COALESCE(rule_type, CASE WHEN COALESCE(auto_trailing, 0) = 1 THEN 'trailing' ELSE 'fixed' END) AS rule_type
                 FROM risk_rules
                 """
             )
@@ -506,23 +518,26 @@ class DatabaseManager:
 
             rules = []
             for row in rows:
-                atr_payload = row[8]
+                atr_payload = row["atr_params"]
                 parsed_params = None
                 if atr_payload:
                     try:
                         parsed_params = json.loads(atr_payload)
                     except json.JSONDecodeError:
                         parsed_params = None
+                if parsed_params is None:
+                    parsed_params = {}
                 rule = RiskRule(
-                    symbol=row[0],
-                    stop_loss_price=row[1],
-                    take_profit_price=row[2],
-                    max_loss_percent=row[3],
-                    enabled=bool(row[4]),
-                    max_time_span=row[5],
-                    timestamp=row[6],
-                    auto_trailing=bool(row[7]),
+                    symbol=row["symbol"],
+                    stop_loss_price=row["stop_loss_price"],
+                    take_profit_price=row["take_profit_price"],
+                    max_loss_percent=row["max_loss_percent"],
+                    enabled=bool(row["enabled"]),
+                    max_time_span=row["max_time_span"],
+                    timestamp=row["timestamp"],
+                    auto_trailing=bool(row["auto_trailing"]),
                     atr_params=parsed_params,
+                    rule_type=(row["rule_type"] or 'fixed'),
                 )
                 rules.append(rule)
             
@@ -540,14 +555,20 @@ class DatabaseManager:
                     atr_payload = json.dumps(rule.atr_params)
                 except TypeError:
                     atr_payload = None
+            rule_type_val = getattr(rule, "rule_type", None)
+            if not rule_type_val:
+                rule_type_val = 'trailing' if getattr(rule, "auto_trailing", False) else 'fixed'
+            rule_type_val = str(rule_type_val).lower()
+            if rule_type_val not in {"fixed", "trailing"}:
+                rule_type_val = 'fixed'
 
             cursor.execute(
                 """
                 INSERT INTO risk_rules (
                     symbol, stop_loss_price, take_profit_price, max_loss_percent,
-                    enabled, max_time_span, timestamp, auto_trailing, atr_params
+                    enabled, max_time_span, timestamp, auto_trailing, atr_params, rule_type
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     stop_loss_price=excluded.stop_loss_price,
                     take_profit_price=excluded.take_profit_price,
@@ -556,7 +577,8 @@ class DatabaseManager:
                     max_time_span=excluded.max_time_span,
                     timestamp=excluded.timestamp,
                     auto_trailing=excluded.auto_trailing,
-                    atr_params=excluded.atr_params
+                    atr_params=excluded.atr_params,
+                    rule_type=excluded.rule_type
                 """,
                 (
                     rule.symbol,
@@ -568,6 +590,7 @@ class DatabaseManager:
                     ts,
                     int(getattr(rule, "auto_trailing", False)),
                     atr_payload,
+                    rule_type_val,
                 ),
             )
             database_logger.debug(f"Risk rule saved: {rule.symbol}")

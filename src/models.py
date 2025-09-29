@@ -4,7 +4,7 @@ Pydantic 请求模型定义
 基于 main.py 中的 API 端点分析，定义所有必需的请求模型
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -84,14 +84,24 @@ class RiskRuleRequest(BaseModel):
     take_profit_price: Optional[float] = None
     max_loss_percent: Optional[float] = None
     max_time_span: Optional[int] = 30  # 以分钟为单位的最大持仓时间，默认30分钟
+    rule_type: Literal['fixed', 'trailing'] = 'fixed'
+    atr_params: Optional[Dict[str, Any]] = None
+
+    @field_validator('stop_loss_price', 'take_profit_price')
+    def prices_must_be_positive(cls, value: Optional[float]):
+        if value is not None and value <= 0:
+            raise ValueError('stop_loss_price and take_profit_price must be greater than 0 when provided')
+        return value
 
     # 至少提供一个止盈/止损价格，且提供的价格必须 > 0
     @model_validator(mode='after')
     def validate_sl_tp_prices(cls, values: 'RiskRuleRequest'):
         sl = values.stop_loss_price
         tp = values.take_profit_price
-        if (sl is None or sl <= 0) and (tp is None or tp <= 0):
-            raise ValueError('At least one of stop_loss_price or take_profit_price must be provided and > 0')
+        rule_type = getattr(values, 'rule_type', 'fixed')
+        if rule_type != 'trailing':
+            if (sl is None or sl <= 0) and (tp is None or tp <= 0):
+                raise ValueError('At least one of stop_loss_price or take_profit_price must be provided and > 0')
         return values
 
 class StrategyRequest(BaseModel):
