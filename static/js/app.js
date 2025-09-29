@@ -4,7 +4,7 @@ const monitoringModules = appModules.monitoring || {};
 const MonitoringConstants = monitoringModules.constants || {};
 const MonitoringUtils = monitoringModules.utils || {};
 const MonitoringManagerModule = monitoringModules.manager || {};
-const MonitoringManagerClass = MonitoringManagerModule.MonitoringManager;
+const MonitoringManagerClass = MonitoringManagerModule.MonitoringManager || globalScope.MonitoringManager;
 const SharedUtils = appModules.utils || {};
 const strategiesModules = appModules.strategies || {};
 const StrategiesManagerModule = strategiesModules.manager || {};
@@ -32,255 +32,6 @@ const {
     TREND_LEVEL_STYLES = {}
 } = MonitoringConstants;
 
-const fallbackNormalizeIntervalKey = (value) => {
-    if (typeof value === 'string') {
-        return value.replace(/\s+/g, '').toLowerCase();
-    }
-    if (typeof value === 'number') {
-        return String(value);
-    }
-    return '';
-};
-
-const fallbackNormalizeDurationKey = (value) => {
-    if (typeof value === 'string') {
-        return value.replace(/\s+/g, '').toUpperCase();
-    }
-    if (typeof value === 'number') {
-        return String(value);
-    }
-    return '';
-};
-
-const fallbackGetMonitorDurationMinutes = (durationValue) => {
-    const normalized = fallbackNormalizeDurationKey(durationValue);
-    if (!normalized) return null;
-
-    if (Object.prototype.hasOwnProperty.call(MONITOR_DURATION_MINUTES_MAP, normalized)) {
-        return MONITOR_DURATION_MINUTES_MAP[normalized];
-    }
-
-    const match = normalized.match(/^(\d+)([A-Z]+)$/);
-    if (!match) {
-        const numericValue = Number(normalized);
-        return Number.isFinite(numericValue) && numericValue > 0 ? numericValue : null;
-    }
-
-    const value = Number(match[1]);
-    const unit = match[2];
-    if (!Number.isFinite(value) || value <= 0) {
-        return null;
-    }
-
-    switch (unit) {
-        case 'MIN':
-        case 'MINS':
-        case 'MINUTE':
-        case 'MINUTES':
-            return value;
-        case 'M':
-            return value <= 10 ? value * 43200 : value;
-        case 'H':
-        case 'HR':
-        case 'HRS':
-        case 'HOUR':
-        case 'HOURS':
-            return value * 60;
-        case 'D':
-        case 'DAY':
-        case 'DAYS':
-            return value * 1440;
-        case 'W':
-        case 'WK':
-        case 'WKS':
-        case 'WEEK':
-        case 'WEEKS':
-            return value * 10080;
-        case 'MON':
-        case 'MONTH':
-        case 'MONTHS':
-            return value * 43200;
-        case 'Y':
-        case 'YR':
-        case 'YRS':
-        case 'YEAR':
-        case 'YEARS':
-            return value * 525600;
-        default:
-            return null;
-    }
-};
-
-const fallbackGetMonitorDurationOptions = (intervalValue) => {
-    const intervalKey = typeof intervalValue === 'string'
-        ? intervalValue.trim().toLowerCase()
-        : '';
-    return MONITOR_DURATION_OPTIONS[intervalKey] || MONITOR_DURATION_OPTIONS['1 min'] || [];
-};
-
-const fallbackRefreshMonitorDurationSelect = (intervalValue, options = {}) => {
-    const selectEl = options.selectEl || document.getElementById('monitorDuration');
-    if (!selectEl) return [];
-
-    const availableOptions = fallbackGetMonitorDurationOptions(intervalValue);
-    const previousValue = selectEl.value;
-    const preferredValue = options.preferredValue;
-
-    selectEl.innerHTML = '';
-    availableOptions.forEach((item, index) => {
-        const optionEl = document.createElement('option');
-        optionEl.value = item.value;
-        optionEl.textContent = item.label;
-        if (index === 0 && !preferredValue && !previousValue) {
-            optionEl.selected = true;
-        }
-        selectEl.appendChild(optionEl);
-    });
-
-    const hasPreferred = preferredValue && availableOptions.some((option) => option.value === preferredValue);
-    const hasPrevious = availableOptions.some((option) => option.value === previousValue);
-    const fallbackValue = availableOptions[0]?.value || '';
-
-    if (hasPreferred) {
-        selectEl.value = preferredValue;
-    } else if (hasPrevious) {
-        selectEl.value = previousValue;
-    } else if (fallbackValue) {
-        selectEl.value = fallbackValue;
-    }
-
-    const changed = selectEl.value !== previousValue;
-    if (options.triggerChange && changed) {
-        selectEl.dispatchEvent(new Event('change'));
-    }
-
-    return availableOptions;
-};
-
-const fallbackGetTrendLevelStyle = (level) => {
-    const key = Number.isFinite(level) ? Number(level) : 0;
-    return TREND_LEVEL_STYLES[key] || TREND_LEVEL_STYLES[0] || {};
-};
-
-const fallbackGetTrendSuggestionLabel = (suggestion, level) => {
-    if (!suggestion) return '';
-    const numericLevel = Number(level);
-    const resolvedLevel = Number.isFinite(numericLevel)
-        ? Math.min(4, Math.max(1, Math.round(numericLevel)))
-        : 1;
-    if (suggestion === 'buy') return `B${resolvedLevel}`;
-    if (suggestion === 'sell') return `S${resolvedLevel}`;
-    return '';
-};
-
-const fallbackTrendSignalLabelPlugin = {
-    id: 'trendSignalLabel',
-    afterDatasetsDraw(chart, args, opts) {
-        const dataset = chart.data?.datasets?.[0];
-        if (!dataset) return;
-        const meta = chart.getDatasetMeta(0);
-        if (!meta || !meta.data) return;
-        const ctx = chart.ctx;
-        const offset = typeof opts?.offset === 'number' ? opts.offset : 16;
-        const font = opts?.font || 'bold 12px sans-serif';
-        const buyColor = opts?.buyColor || '#16a34a';
-        const sellColor = opts?.sellColor || '#dc2626';
-        meta.data.forEach((element, index) => {
-            if (!element) return;
-            const raw = dataset.data?.[index];
-            if (!raw || !raw.suggestion) return;
-            const { x, y } = element.tooltipPosition();
-            const level = raw.level ?? 0;
-            const style = fallbackGetTrendLevelStyle(level);
-            const text = fallbackGetTrendSuggestionLabel(raw.suggestion, raw.level)
-                || (raw.suggestion === 'buy' ? 'Buy' : 'Sell');
-            const resolvedOffset = style.labelOffset ?? offset;
-            const yOffset = raw.suggestion === 'buy' ? -resolvedOffset : resolvedOffset;
-            ctx.save();
-            ctx.font = style.labelFont || font;
-            const fillColor = raw.suggestion === 'buy'
-                ? (style.labelBuyColor || style.buyColor || buyColor)
-                : (style.labelSellColor || style.sellColor || sellColor);
-            ctx.fillStyle = fillColor;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            if (style.shadowBlur) {
-                ctx.shadowColor = style.shadowColor || fillColor;
-                ctx.shadowBlur = style.shadowBlur;
-            }
-            if (style.outlineColor) {
-                ctx.strokeStyle = style.outlineColor;
-                ctx.lineWidth = style.outlineWidth || 1;
-                ctx.strokeText(text, x, y + yOffset);
-            }
-            ctx.fillText(text, x, y + yOffset);
-            ctx.restore();
-        });
-    }
-};
-
-const fallbackSlugifyStrategyName = (name) => (name || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
-
-const fallbackFormatNumber = (num) => {
-    if (num === null || num === undefined || num === '') return 'N/A';
-    const numeric = Number(num);
-    if (!Number.isFinite(numeric)) return 'N/A';
-    return numeric.toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-    });
-};
-
-const fallbackEscapeHtml = (value) => {
-    if (value === null || value === undefined) {
-        return '';
-    }
-    return String(value)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-};
-
-const fallbackFormatDuration = (seconds) => {
-    const numeric = Number(seconds);
-    if (!Number.isFinite(numeric) || numeric <= 0) {
-        return '0 秒';
-    }
-
-    const absolute = Math.max(0, numeric);
-    const unitConfig = [
-        { threshold: 60, unit: '秒', divisor: 1 },
-        { threshold: 3600, unit: '分钟', divisor: 60 },
-        { threshold: 86400, unit: '小时', divisor: 3600 },
-        { threshold: Infinity, unit: '天', divisor: 86400 },
-    ];
-
-    const selected = unitConfig.find(({ threshold }) => absolute < threshold) || unitConfig[0];
-    const rawValue = absolute / selected.divisor;
-    const rounded = Math.round(rawValue * 100) / 100;
-    const valueStr = Number.isInteger(rounded)
-        ? String(rounded)
-        : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
-
-    return `${valueStr} ${selected.unit}`;
-};
-
-const fallbackIsSameDay = (dateInput, referenceDate = new Date()) => {
-    if (!dateInput) return false;
-    const d = new Date(dateInput);
-    if (Number.isNaN(d.getTime())) return false;
-    const compareTarget = referenceDate instanceof Date ? referenceDate : new Date(referenceDate);
-    return d.getFullYear() === compareTarget.getFullYear()
-        && d.getMonth() === compareTarget.getMonth()
-        && d.getDate() === compareTarget.getDate();
-};
-
 const fallbackNormalizeRuleStatus = (status) => {
     if (!status || typeof status !== 'object') {
         return { passed: true, message: '正常' };
@@ -306,24 +57,58 @@ const fallbackNormalizeRuleStatus = (status) => {
     return { passed, message };
 };
 
-const {
-    normalizeIntervalKey = fallbackNormalizeIntervalKey,
-    normalizeDurationKey = fallbackNormalizeDurationKey,
-    getMonitorDurationMinutes = fallbackGetMonitorDurationMinutes,
-    getMonitorDurationOptions = fallbackGetMonitorDurationOptions,
-    refreshMonitorDurationSelect = fallbackRefreshMonitorDurationSelect,
-    getTrendLevelStyle = fallbackGetTrendLevelStyle,
-    getTrendSuggestionLabel = fallbackGetTrendSuggestionLabel
-} = MonitoringUtils;
+const requireMonitoringUtil = (fn, name) => {
+    if (typeof fn !== 'function') {
+        throw new Error(`monitoring.utils.${name} is required`);
+    }
+    return fn;
+};
 
 const {
-    TrendSignalLabelPlugin = fallbackTrendSignalLabelPlugin,
-    slugifyStrategyName = fallbackSlugifyStrategyName,
-    formatNumber: sharedFormatNumber = fallbackFormatNumber,
-    escapeHtml: sharedEscapeHtml = fallbackEscapeHtml,
-    formatDuration: sharedFormatDuration = fallbackFormatDuration,
-    isSameDay: sharedIsSameDay = fallbackIsSameDay,
+    normalizeIntervalKey,
+    normalizeDurationKey,
+    getMonitorDurationMinutes,
+    getMonitorDurationOptions,
+    refreshMonitorDurationSelect,
+    getTrendLevelStyle,
+    getTrendSuggestionLabel
+} = MonitoringUtils;
+
+requireMonitoringUtil(normalizeIntervalKey, 'normalizeIntervalKey');
+requireMonitoringUtil(normalizeDurationKey, 'normalizeDurationKey');
+requireMonitoringUtil(getMonitorDurationMinutes, 'getMonitorDurationMinutes');
+requireMonitoringUtil(getMonitorDurationOptions, 'getMonitorDurationOptions');
+requireMonitoringUtil(refreshMonitorDurationSelect, 'refreshMonitorDurationSelect');
+requireMonitoringUtil(getTrendLevelStyle, 'getTrendLevelStyle');
+requireMonitoringUtil(getTrendSuggestionLabel, 'getTrendSuggestionLabel');
+
+const {
+    TrendSignalLabelPlugin,
+    slugifyStrategyName,
+    formatNumber: sharedFormatNumber,
+    escapeHtml: sharedEscapeHtml,
+    formatDuration: sharedFormatDuration,
+    isSameDay: sharedIsSameDay,
 } = SharedUtils;
+
+if (!TrendSignalLabelPlugin || typeof TrendSignalLabelPlugin.afterDatasetsDraw !== 'function') {
+    throw new Error('utils.TrendSignalLabelPlugin is required');
+}
+if (typeof slugifyStrategyName !== 'function') {
+    throw new Error('utils.slugifyStrategyName is required');
+}
+if (typeof sharedFormatNumber !== 'function') {
+    throw new Error('utils.formatNumber is required');
+}
+if (typeof sharedEscapeHtml !== 'function') {
+    throw new Error('utils.escapeHtml is required');
+}
+if (typeof sharedFormatDuration !== 'function') {
+    throw new Error('utils.formatDuration is required');
+}
+if (typeof sharedIsSameDay !== 'function') {
+    throw new Error('utils.isSameDay is required');
+}
 
 class TradingApp {
     constructor() {
@@ -342,15 +127,12 @@ class TradingApp {
         // 通知列表
         this.notifications = [];
 
-        this.monitoringManager = typeof MonitoringManagerClass === 'function'
-            ? new MonitoringManagerClass(this)
-            : null;
-        this.monitoring = this.monitoringManager;
-        if (this.monitoringManager) {
-            this.bindMonitoringStateProxies();
-        } else {
-            this.initializeMonitoringStateFallback();
+        if (typeof MonitoringManagerClass !== 'function') {
+            throw new Error('MonitoringManager module is required');
         }
+        this.monitoringManager = new MonitoringManagerClass(this);
+        this.monitoring = this.monitoringManager;
+        this.bindMonitoringStateProxies();
         this.authRole = localStorage.getItem('user_role') || 'admin';
         this.isReadOnly = localStorage.getItem('is_read_only') === '1';
         this.lastReadOnlyWarningAt = 0;
@@ -421,15 +203,28 @@ class TradingApp {
             : null;
         this.domManager = new DOMManager(this);
 
-        this.guardChartScriptableDescriptors();
+        this.callMonitoringManager('guardChartScriptableDescriptors');
         this.init();
     }
 
-    bindMonitoringStateProxies() {
+    getMonitoringManager(methodName = null) {
         const manager = this.monitoringManager;
-        if (!manager || typeof manager.getManagedProperties !== 'function') {
-            return;
+        if (!manager) {
+            throw new Error('MonitoringManager is not initialized');
         }
+        if (methodName && typeof manager[methodName] !== 'function') {
+            throw new Error(`MonitoringManager.${methodName} is not available`);
+        }
+        return manager;
+    }
+
+    callMonitoringManager(methodName, ...args) {
+        const manager = this.getMonitoringManager(methodName);
+        return manager[methodName](...args);
+    }
+
+    bindMonitoringStateProxies() {
+        const manager = this.getMonitoringManager('getManagedProperties');
         const properties = manager.getManagedProperties();
         properties.forEach((prop) => {
             if (Object.prototype.hasOwnProperty.call(this, prop)) {
@@ -599,45 +394,6 @@ class TradingApp {
         return this.strategiesManager.loadInternalStrategyOrders(name, options);
     }
 
-    initializeMonitoringStateFallback() {
-        // 当前订阅实时行情的合约符号，null 表示未订阅
-        this.monitorRealtimeSymbol = null;
-        // 记录用户是否希望在重新打开时自动恢复实时行情
-        this.monitorRealtimeShouldResume = false;
-        this.monitorRealtimeResumeSymbol = null;
-        this.monitorChartTimezone = null;
-        // 价格缓存机制
-        this.priceCache = new Map();
-        this.priceCacheTimeout = 30000; // 30秒缓存
-        this.domSignals = [];
-        this.monitorTrendChart = null;
-        this.monitorTrendData = [];
-        this.monitorTrendDatasetMap = { trend: 0, events: 1, price: 2 };
-        this.monitorDomHistoryList = null;
-        this.monitorDomHistoryMeta = null;
-        this.candlestickSupported = false;
-        this.candlestickLoader = null;
-        this.luxonScriptUrl = 'https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js';
-        this.luxonLoader = null;
-        this.chartDateAdapterUrl = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js';
-        this.dateAdapterReady = false;
-        this.dateAdapterLoader = null;
-        this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.umd.min.js';
-        this.chartScriptableGuardApplied = false;
-        this.strategyChartInstance = null;
-        this.strategyChartFallbackNotified = false;
-        this.strategyChartState = this.createDefaultStrategyChartState();
-        // 渲染监控图表时使用的定时器句柄，防止重复渲染导致死循环
-        this.monitorChartRenderTimeout = null;
-        // 缓存待渲染的图表回调，确保快速连续请求只触发一次绘制
-        this.pendingMonitorChartRender = null;
-        // 图表联动时的递归保护开关
-        this._syncingCharts = false;
-        // 监控弹窗全屏状态
-        this.monitorModalFullscreen = false;
-        this._monitorFullscreenChangeHandler = null;
-    }
-
     /**
      * 向后兼容：保持原有的日志加载接口
      * 迁移到 LogsManager 后仍然暴露同名方法，避免未更新的调用出现异常
@@ -802,102 +558,43 @@ class TradingApp {
     }
 
     addDomSignal(signal) {
-        this.domSignals.push(signal);
-        if (this.domSignals.length > 1000) this.domSignals.shift();
-        this.updateDomSignalAnnotations();
+        return this.callMonitoringManager('addDomSignal', signal);
     }
 
     ensureMonitorAnnotations() {
-        if (!this.monitorChart || !this.monitorChart.options) return null;
-
-        const options = this.monitorChart.options;
-        let plugins = options.plugins;
-        if (!plugins) {
-            options.plugins = {};
-            plugins = options.plugins;
-        }
-
-        let annotationConfig = plugins.annotation;
-        if (!annotationConfig) {
-            plugins.annotation = { annotations: {} };
-            annotationConfig = plugins.annotation;
-        }
-
-        if (!annotationConfig.annotations) {
-            annotationConfig.annotations = {};
-        }
-
-        return annotationConfig.annotations;
+        return this.callMonitoringManager('ensureMonitorAnnotations');
     }
 
     updateDomSignalAnnotations() {
-        if (!this.monitorChart || this.monitorChart.config.type !== 'candlestick') return;
-        const annotations = this.ensureMonitorAnnotations();
-        if (!annotations) return;
-        Object.keys(annotations).filter(k => k.startsWith('domSignal')).forEach(k => delete annotations[k]);
-        const sizeMap = {1: 12, 2: 16, 3: 20, 4: 24};
-        this.domSignals.forEach((sig, idx) => {
-            const content = sig.score > 0 ? '↑' : '↓';
-            const color = sig.score > 0 ? 'green' : 'red';
-            annotations[`domSignal${idx}`] = {
-                type: 'label',
-                xValue: sig.time,
-                yValue: sig.price,
-                backgroundColor: 'rgba(0,0,0,0)',
-                color,
-                font: {size: sizeMap[sig.level] || 12, weight: 'bold'},
-                content,
-                yAdjust: sig.score > 0 ? 10 : -10
-            };
-        });
-        this.monitorChart.update('none');
+        return this.callMonitoringManager('updateDomSignalAnnotations');
     }
 
     setMonitorTrendHistory(points = []) {
-        if (this.monitoringManager?.setMonitorTrendHistory) {
-            return this.monitoringManager.setMonitorTrendHistory(points);
-        }
-        return undefined;
+        return this.callMonitoringManager('setMonitorTrendHistory', points);
     }
 
     resetMonitorTrendData() {
-        if (this.monitoringManager?.resetMonitorTrendData) {
-            return this.monitoringManager.resetMonitorTrendData();
-        }
-        return undefined;
+        return this.callMonitoringManager('resetMonitorTrendData');
     }
 
     formatTrendPointForChart(point) {
-        if (this.monitoringManager?.formatTrendPointForChart) {
-            return this.monitoringManager.formatTrendPointForChart(point);
-        }
-        return null;
+        return this.callMonitoringManager('formatTrendPointForChart', point);
     }
 
     getFormattedTrendChartData() {
-        if (this.monitoringManager?.getFormattedTrendChartData) {
-            return this.monitoringManager.getFormattedTrendChartData();
-        }
-        return [];
+        return this.callMonitoringManager('getFormattedTrendChartData');
     }
 
     updateMonitorSignalOverlayDatasets() {
-        if (this.monitoringManager?.updateMonitorSignalOverlayDatasets) {
-            return this.monitoringManager.updateMonitorSignalOverlayDatasets();
-        }
+        return this.callMonitoringManager('updateMonitorSignalOverlayDatasets');
     }
 
     renderMonitorSignalHistory() {
-        if (this.monitoringManager?.renderMonitorSignalHistory) {
-            return this.monitoringManager.renderMonitorSignalHistory();
-        }
+        return this.callMonitoringManager('renderMonitorSignalHistory');
     }
 
     getTrendValues(chart) {
-        if (this.monitoringManager?.getTrendValues) {
-            return this.monitoringManager.getTrendValues(chart);
-        }
-        return null;
+        return this.callMonitoringManager('getTrendValues', chart);
     }
 
     fmt(v, digits = 2) {
@@ -927,71 +624,45 @@ class TradingApp {
 
     // 仅在创建 chart 后、首轮配置时调用一次
     setupTrendLegendAndAnnotations(chart) {
-        if (this.monitoringManager?.setupTrendLegendAndAnnotations) {
-            return this.monitoringManager.setupTrendLegendAndAnnotations(chart);
-        }
+        return this.callMonitoringManager('setupTrendLegendAndAnnotations', chart);
     }
 
     // 需要时手动调用；只在数值变化时更新 yMin/yMax，避免触发外层 watch 循环
     refreshTrend(chart) {
-        if (this.monitoringManager?.refreshTrend) {
-            return this.monitoringManager.refreshTrend(chart);
-        }
+        return this.callMonitoringManager('refreshTrend', chart);
     }
 
 
     syncTrendReferenceLines() {
-        if (this.monitoringManager?.syncTrendReferenceLines) {
-            return this.monitoringManager.syncTrendReferenceLines();
-        }
+        return this.callMonitoringManager('syncTrendReferenceLines');
     }
 
     deriveTrendLevel(score) {
-        if (this.monitoringManager?.deriveTrendLevel) {
-            return this.monitoringManager.deriveTrendLevel(score);
-        }
-        return 0;
+        return this.callMonitoringManager('deriveTrendLevel', score);
     }
 
     addMonitorTrendPoint(time, score, options = {}) {
-        if (this.monitoringManager?.addMonitorTrendPoint) {
-            return this.monitoringManager.addMonitorTrendPoint(time, score, options);
-        }
-        return undefined;
+        return this.callMonitoringManager('addMonitorTrendPoint', time, score, options);
     }
 
     syncCharts(source, target) {
-        if (this.monitoringManager?.syncCharts) {
-            return this.monitoringManager.syncCharts(source, target);
-        }
+        return this.callMonitoringManager('syncCharts', source, target);
     }
 
     normalizeMonitorTime(value) {
-        if (this.monitoringManager?.normalizeMonitorTime) {
-            return this.monitoringManager.normalizeMonitorTime(value);
-        }
-        return null;
+        return this.callMonitoringManager('normalizeMonitorTime', value);
     }
 
     getMonitorDisplayTimes() {
-        if (this.monitoringManager?.getMonitorDisplayTimes) {
-            return this.monitoringManager.getMonitorDisplayTimes();
-        }
-        return [];
+        return this.callMonitoringManager('getMonitorDisplayTimes');
     }
 
     getMonitorDisplayLabels() {
-        if (this.monitoringManager?.getMonitorDisplayLabels) {
-            return this.monitoringManager.getMonitorDisplayLabels();
-        }
-        return [];
+        return this.callMonitoringManager('getMonitorDisplayLabels');
     }
 
     extractRangeFromMonitorChart() {
-        if (this.monitoringManager?.extractRangeFromMonitorChart) {
-            return this.monitoringManager.extractRangeFromMonitorChart();
-        }
-        return null;
+        return this.callMonitoringManager('extractRangeFromMonitorChart');
     }
 
     // Detect security type based on symbol (simple heuristic for common cases)
@@ -1061,9 +732,9 @@ class TradingApp {
                     window.Chart.register(window.zoomPlugin);
                 }
 
-                this.registerCandlestickControllers();
-                if (!this.candlestickSupported) {
-                    this.ensureCandlestickPlugin().catch((err) => {
+                const candlestickRegistered = this.callMonitoringManager('registerCandlestickControllers');
+                if (!candlestickRegistered) {
+                    this.callMonitoringManager('ensureCandlestickPlugin').catch((err) => {
                         console.warn('[Monitor] candlestick plugin load deferred:', err?.message || err);
                     });
                 }
@@ -1805,546 +1476,7 @@ class TradingApp {
         }
     }
 
-    guardChartScriptableDescriptors() {
-        if (this.chartScriptableGuardApplied) {
-            return;
-        }
-        const chart = window.Chart;
-        const defaults = chart?.defaults;
-        if (!defaults || typeof defaults !== 'object') {
-            return;
-        }
 
-        const guardFn = (fn) => {
-            if (typeof fn !== 'function') {
-                return fn;
-            }
-            if (fn.__ibbotGuarded) {
-                return fn;
-            }
-            const wrapped = (key, ...args) => {
-                if (typeof key !== 'string') {
-                    if (key != null) {
-                        console.warn('[Chart] Non-string descriptor key encountered', { key });
-                    }
-                    return false;
-                }
-                try {
-                    return fn(key, ...args);
-                } catch (err) {
-                    console.warn('[Chart] Descriptor check failed, suppressing error', err);
-                    return false;
-                }
-            };
-            wrapped.__ibbotGuarded = true;
-            return wrapped;
-        };
-
-        const visited = new WeakSet();
-        const traverseDescriptors = (node, depth = 0) => {
-            if (!node || typeof node !== 'object' || depth > 8) {
-                return;
-            }
-            if (visited.has(node)) {
-                return;
-            }
-            visited.add(node);
-
-            if (Object.prototype.hasOwnProperty.call(node, '_scriptable')) {
-                node._scriptable = guardFn(node._scriptable);
-            }
-            if (Object.prototype.hasOwnProperty.call(node, '_indexable')) {
-                node._indexable = guardFn(node._indexable);
-            }
-
-            if (Array.isArray(node)) {
-                node.forEach((item) => traverseDescriptors(item, depth + 1));
-                return;
-            }
-
-            for (const key of Reflect.ownKeys(node)) {
-                if (key === '_scriptable' || key === '_indexable') {
-                    continue;
-                }
-                const value = node[key];
-                if (!value || typeof value !== 'object') {
-                    continue;
-                }
-                traverseDescriptors(value, depth + 1);
-            }
-        };
-
-        traverseDescriptors(defaults);
-        this.chartScriptableGuardApplied = true;
-    }
-
-    registerCandlestickControllers() {
-        try {
-            this.guardChartScriptableDescriptors();
-            const chartLib = window.Chart;
-            if (!chartLib) {
-                return false;
-            }
-
-            const registry = chartLib.registry;
-            const controllers = registry?.controllers;
-            const elements = registry?.elements;
-            const hasEntry = (collection, key) => typeof collection?.has === 'function' && collection.has(key);
-            const keys = ['candlestick', 'financial', 'ohlc'];
-            const controllerReady = keys.some((key) => hasEntry(controllers, key));
-            const elementReady = !elements || keys.some((key) => hasEntry(elements, key));
-
-            if (controllerReady && elementReady) {
-                this.candlestickSupported = true;
-                return true;
-            }
-
-            if (typeof chartLib.register !== 'function') {
-                return false;
-            }
-            const financialCandidates = [
-                window.ChartFinancial,
-                window['chartjs-chart-financial'],
-                window.chartFinancial,
-                window.chartjsChartFinancial,
-                window.financialChart
-            ].filter(Boolean);
-
-            for (const fin of financialCandidates) {
-                const components = [
-                    fin?.CandlestickController,
-                    fin?.OhlcController,
-                    fin?.CandlestickElement,
-                    fin?.OhlcElement,
-                    fin?.FinancialController,
-                    fin?.FinancialElement
-                ].filter(Boolean);
-                if (components.length) {
-                    chartLib.register(...components);
-                    if (!registry) {
-                        this.candlestickSupported = true;
-                        return true;
-                    }
-                    if (keys.some((key) => hasEntry(controllers, key)) && (!elements || keys.some((key) => hasEntry(elements, key)))) {
-                        this.candlestickSupported = true;
-                        return true;
-                    }
-                }
-            }
-        } catch (error) {
-            console.error('Failed to register candlestick controllers', error);
-        }
-        return this.candlestickSupported;
-    }
-
-    loadExternalScript(url) {
-        return new Promise((resolve, reject) => {
-            const normalizedUrl = (url || '').trim();
-            if (!normalizedUrl) {
-                resolve(true);
-                return;
-            }
-
-            const scripts = Array.from(document.getElementsByTagName('script'));
-            const existing = scripts.find((script) => script.src && script.src.includes('chartjs-chart-financial'));
-
-            if (existing) {
-                const markLoaded = () => {
-                    existing.dataset.loaded = 'true';
-                    resolve(true);
-                };
-
-                const checkReady = () => {
-                    if (this.candlestickSupported) {
-                        return true;
-                    }
-                    try {
-                        if (this.registerCandlestickControllers()) {
-                            this.candlestickSupported = true;
-                            return true;
-                        }
-                    } catch (err) {
-                        console.warn('Candlestick controller registration check failed:', err);
-                    }
-                    if (existing.dataset.loaded === 'true') {
-                        return true;
-                    }
-                    const readyState = existing.readyState;
-                    return readyState === 'complete' || readyState === 'loaded';
-                };
-
-                if (checkReady()) {
-                    markLoaded();
-                    return;
-                }
-
-                existing.addEventListener('load', () => {
-                    console.log('[Chart] Existing candlestick script load event triggered');
-                    markLoaded();
-                }, { once: true });
-                existing.addEventListener('error', (err) => reject(err || new Error(`Failed to load ${normalizedUrl}`)), { once: true });
-
-                setTimeout(() => {
-                    if (checkReady()) {
-                        console.log('[Chart] Candlestick plugin already available on existing script');
-                        markLoaded();
-                    }
-                }, 0);
-                return;
-            }
-
-            const script = document.createElement('script');
-            script.src = normalizedUrl;
-            script.async = true;
-            script.defer = true;
-            script.crossOrigin = 'anonymous';
-            script.dataset.dynamic = 'chartjs-financial';
-            script.addEventListener('load', () => {
-                script.dataset.loaded = 'true';
-                resolve(true);
-            }, { once: true });
-            script.addEventListener('error', (err) => {
-                reject(err || new Error(`Failed to load ${normalizedUrl}`));
-            }, { once: true });
-            document.head.appendChild(script);
-        });
-    }
-
-    async ensureCandlestickPlugin() {
-        if (this.candlestickSupported) {
-            return true;
-        }
-        if (this.registerCandlestickControllers()) {
-            return true;
-        }
-        if (this.candlestickLoader) {
-            return this.candlestickLoader;
-        }
-
-        this.candlestickLoader = this.loadExternalScript(this.financialScriptUrl)
-            .then(() => {
-                const registered = this.registerCandlestickControllers();
-                if (!registered) {
-                    throw new Error('chartjs-chart-financial loaded but controllers unavailable');
-                }
-                return true;
-            })
-            .catch((error) => {
-                console.error('Failed to load chartjs-chart-financial plugin', error);
-                return false;
-            })
-            .finally(() => {
-                this.candlestickLoader = null;
-            });
-
-        return this.candlestickLoader;
-    }
-
-    async waitForCandlestickPlugin(options = {}) {
-        const { promise = null, timeoutMs = 2500 } = options || {};
-        const loaderPromise = Promise.resolve(promise ?? this.ensureCandlestickPlugin());
-        const timeoutToken = Symbol('candlestick-timeout');
-        try {
-            const result = await Promise.race([
-                loaderPromise,
-                new Promise((resolve) => setTimeout(() => resolve(timeoutToken), Math.max(0, timeoutMs)))
-            ]);
-            if (result === timeoutToken) {
-                console.warn(`[Chart] Candlestick plugin load timed out after ${timeoutMs}ms; proceeding without it.`);
-                return { ready: false, timedOut: true, promise: loaderPromise };
-            }
-            return { ready: !!result, timedOut: false, promise: loaderPromise };
-        } catch (error) {
-            console.warn('[Chart] Candlestick plugin load failed:', error);
-            return { ready: false, timedOut: false, promise: loaderPromise };
-        }
-    }
-
-    createCandlestickChartConfig(options = {}) {
-        const {
-            symbol = '',
-            ohlcData = [],
-            labels = [],
-            priceAxisId = 'y',
-            volumeAxisId = 'volume',
-            includeLabels = true,
-            datasetLabel = null,
-            volumeLabel = 'Volume',
-            priceDatasetOptions = {},
-            volumeDatasetOptions = {}
-        } = options || {};
-
-        const safeBars = Array.isArray(ohlcData)
-            ? ohlcData.filter((bar) => bar && Number.isFinite(bar.x))
-            : [];
-
-        const volumeData = safeBars.map((bar) => {
-            const rawVolume = Number.isFinite(bar.volume)
-                ? bar.volume
-                : Number.isFinite(bar.v)
-                    ? bar.v
-                    : 0;
-            return {
-                x: bar.x,
-                y: Number.isFinite(rawVolume) ? rawVolume : 0
-            };
-        });
-
-        const maxVolume = volumeData.reduce((acc, point) => {
-            const value = Number.isFinite(point?.y) ? point.y : 0;
-            return value > acc ? value : acc;
-        }, 0);
-
-        const resolvedLabel = datasetLabel
-            ? String(datasetLabel)
-            : `${symbol ? `${symbol} ` : ''}OHLC`.trim();
-
-        const candlestickDataset = {
-            type: 'candlestick',
-            label: resolvedLabel,
-            data: safeBars,
-            yAxisID: priceAxisId,
-            parsing: false,
-            ...priceDatasetOptions
-        };
-
-        const volumeDataset = {
-            type: 'bar',
-            label: String(volumeLabel || 'Volume'),
-            data: volumeData,
-            yAxisID: volumeAxisId,
-            backgroundColor: 'rgba(75, 192, 192, 0.6)',
-            borderWidth: 0,
-            parsing: false,
-            ...volumeDatasetOptions
-        };
-
-        const shouldIncludeLabels = includeLabels !== false;
-        const data = {
-            datasets: [candlestickDataset, volumeDataset]
-        };
-        if (shouldIncludeLabels && Array.isArray(labels) && labels.length) {
-            data.labels = labels;
-        }
-
-        return {
-            type: 'candlestick',
-            data,
-            datasets: {
-                price: candlestickDataset,
-                volume: volumeDataset
-            },
-            meta: {
-                volumeData,
-                maxVolume
-            }
-        };
-    }
-
-    isLuxonReady() {
-        return typeof luxon !== 'undefined' && luxon && typeof luxon.DateTime === 'function';
-    }
-
-    async ensureLuxon(options = {}) {
-        if (this.isLuxonReady()) {
-            return true;
-        }
-
-        if (this.luxonLoader) {
-            try {
-                return await this.luxonLoader;
-            } catch (error) {
-                console.warn('Luxon loading promise rejected:', error);
-                return this.isLuxonReady();
-            }
-        }
-
-        const targetUrl = (options && options.url) || this.luxonScriptUrl;
-        if (!targetUrl) {
-            return this.isLuxonReady();
-        }
-
-        const normalizedUrl = targetUrl.trim();
-        const dynamicScriptSelector = 'script[data-dynamic="luxon"]';
-        const existingDynamic = document.querySelector(dynamicScriptSelector);
-
-        const buildLoaderPromise = (scriptElement, newlyCreated = false) => new Promise((resolve, reject) => {
-            const cleanup = () => {
-                scriptElement.removeEventListener('load', handleLoad);
-                scriptElement.removeEventListener('error', handleError);
-            };
-            const finalize = () => {
-                setTimeout(() => {
-                    resolve(this.isLuxonReady());
-                }, 0);
-            };
-            const handleLoad = () => {
-                if (newlyCreated) {
-                    scriptElement.dataset.loaded = 'true';
-                }
-                cleanup();
-                finalize();
-            };
-            const handleError = (err) => {
-                cleanup();
-                reject(err || new Error(`Failed to load Luxon script ${normalizedUrl}`));
-            };
-
-            scriptElement.addEventListener('load', handleLoad, { once: true });
-            scriptElement.addEventListener('error', handleError, { once: true });
-
-            if (scriptElement.dataset && scriptElement.dataset.loaded === 'true') {
-                finalize();
-            }
-        });
-
-        if (existingDynamic) {
-            if (existingDynamic.dataset.loading !== 'true' && existingDynamic.dataset.loaded === 'true') {
-                return this.isLuxonReady();
-            }
-            this.luxonLoader = buildLoaderPromise(existingDynamic);
-        } else {
-            const script = document.createElement('script');
-            script.src = normalizedUrl;
-            script.crossOrigin = 'anonymous';
-            script.async = true;
-            script.dataset.loading = 'true';
-            script.dataset.dynamic = 'luxon';
-            this.luxonLoader = buildLoaderPromise(script, true);
-            script.addEventListener('load', () => { delete script.dataset.loading; }, { once: true });
-            script.addEventListener('error', () => { delete script.dataset.loading; }, { once: true });
-            document.head.appendChild(script);
-        }
-
-        try {
-            const ready = await this.luxonLoader;
-            return ready;
-        } catch (error) {
-            console.warn('Failed to load Luxon:', error);
-            return this.isLuxonReady();
-        } finally {
-            this.luxonLoader = null;
-        }
-    }
-
-    isDateAdapterReady() {
-        const chart = window.Chart;
-        const adapterClass = chart?._adapters?._date;
-        if (!adapterClass) {
-            return false;
-        }
-        const proto = typeof adapterClass === 'function'
-            ? adapterClass.prototype
-            : adapterClass;
-        if (!proto || typeof proto.formats !== 'function') {
-            return false;
-        }
-        const source = Function.prototype.toString.call(proto.formats);
-        if (source.includes('This method is not implemented')) {
-            return false;
-        }
-        return true;
-    }
-
-    async ensureDateAdapter(options = {}) {
-        if (this.dateAdapterReady && this.isDateAdapterReady()) {
-            return true;
-        }
-
-        const attemptMarkReady = () => {
-            const ready = this.isDateAdapterReady();
-            this.dateAdapterReady = ready;
-            return ready;
-        };
-
-        if (attemptMarkReady()) {
-            return true;
-        }
-
-        if (this.dateAdapterLoader) {
-            try {
-                const result = await this.dateAdapterLoader;
-                return result;
-            } catch (error) {
-                console.warn('Date adapter loading promise rejected:', error);
-                return false;
-            }
-        }
-
-        const luxonReady = await this.ensureLuxon();
-        if (!luxonReady) {
-            console.warn('Luxon library unavailable - date adapter may not initialize correctly.');
-        }
-
-        const targetUrl = (options && options.url) || this.chartDateAdapterUrl;
-        if (!targetUrl) {
-            return attemptMarkReady();
-        }
-
-        const normalizedUrl = targetUrl.trim();
-        const dynamicScriptSelector = 'script[data-dynamic="chartjs-adapter-luxon"]';
-        const existingDynamic = document.querySelector(dynamicScriptSelector);
-
-        const buildLoaderPromise = (scriptElement, newlyCreated = false) => new Promise((resolve, reject) => {
-            const cleanup = () => {
-                scriptElement.removeEventListener('load', handleLoad);
-                scriptElement.removeEventListener('error', handleError);
-            };
-            const finalize = () => {
-                setTimeout(() => {
-                    const ready = attemptMarkReady();
-                    resolve(ready);
-                }, 0);
-            };
-            const handleLoad = () => {
-                if (newlyCreated) {
-                    scriptElement.dataset.loaded = 'true';
-                }
-                cleanup();
-                finalize();
-            };
-            const handleError = (err) => {
-                cleanup();
-                reject(err || new Error(`Failed to load date adapter script ${normalizedUrl}`));
-            };
-
-            scriptElement.addEventListener('load', handleLoad, { once: true });
-            scriptElement.addEventListener('error', handleError, { once: true });
-
-            if (scriptElement.dataset && scriptElement.dataset.loaded === 'true') {
-                finalize();
-            }
-        });
-
-        if (existingDynamic) {
-            if (existingDynamic.dataset.loading !== 'true' && existingDynamic.dataset.loaded === 'true') {
-                return attemptMarkReady();
-            }
-            this.dateAdapterLoader = buildLoaderPromise(existingDynamic);
-        } else {
-            const script = document.createElement('script');
-            script.src = normalizedUrl;
-            script.crossOrigin = 'anonymous';
-            script.defer = false;
-            script.async = true;
-            script.dataset.loading = 'true';
-            script.dataset.dynamic = 'chartjs-adapter-luxon';
-            this.dateAdapterLoader = buildLoaderPromise(script, true);
-            script.addEventListener('load', () => { delete script.dataset.loading; }, { once: true });
-            script.addEventListener('error', () => { delete script.dataset.loading; }, { once: true });
-            document.head.appendChild(script);
-        }
-
-        try {
-            const ready = await this.dateAdapterLoader;
-            return ready;
-        } catch (error) {
-            console.warn('Failed to load Chart.js date adapter:', error);
-            return false;
-        } finally {
-            this.dateAdapterLoader = null;
-        }
-    }
 
     updateReadOnlyMode(isReadOnly, role = 'admin', options = {}) {
         const persist = options.persist !== false;
@@ -2558,30 +1690,19 @@ class TradingApp {
     }
 
     shouldResumeMonitorRealtime(symbol) {
-        if (this.monitoringManager?.shouldResumeMonitorRealtime) {
-            return this.monitoringManager.shouldResumeMonitorRealtime(symbol);
-        }
-        return false;
+        return this.callMonitoringManager('shouldResumeMonitorRealtime', symbol);
     }
 
     async subscribeMonitorRealtime(symbol, options = {}) {
-        if (this.monitoringManager?.subscribeMonitorRealtime) {
-            return this.monitoringManager.subscribeMonitorRealtime(symbol, options);
-        }
-        return false;
+        return this.callMonitoringManager('subscribeMonitorRealtime', symbol, options);
     }
 
     unsubscribeMonitorRealtime(options = {}) {
-        if (this.monitoringManager?.unsubscribeMonitorRealtime) {
-            return this.monitoringManager.unsubscribeMonitorRealtime(options);
-        }
-        return null;
+        return this.callMonitoringManager('unsubscribeMonitorRealtime', options);
     }
 
     async exitMonitorFullscreen(options = {}) {
-        if (this.monitoringManager?.exitMonitorFullscreen) {
-            return this.monitoringManager.exitMonitorFullscreen(options);
-        }
+        return this.callMonitoringManager('exitMonitorFullscreen', options);
     }
 
     async closePosition(symbol, options = {}) {
@@ -2589,17 +1710,13 @@ class TradingApp {
     }
 
     async openMonitorModal(...args) {
-        if (this.monitoringManager?.openMonitorModal) {
-            return this.monitoringManager.openMonitorModal(...args);
-        }
+        return this.callMonitoringManager('openMonitorModal', ...args);
     }
 
 
 
     async syncMonitorModalData(...args) {
-        if (this.monitoringManager?.syncMonitorModalData) {
-            return this.monitoringManager.syncMonitorModalData(...args);
-        }
+        return this.callMonitoringManager('syncMonitorModalData', ...args);
     }
 
 
@@ -2613,10 +1730,7 @@ class TradingApp {
     }
 
     async loadMonitorOrdersList(symbol, status = 'working') {
-        if (this.monitoringManager?.loadMonitorOrdersList) {
-            return this.monitoringManager.loadMonitorOrdersList(symbol, status);
-        }
-        return null;
+        return this.callMonitoringManager('loadMonitorOrdersList', symbol, status);
     }
 
 
@@ -2791,145 +1905,19 @@ class TradingApp {
     }
 
     getMonitorTimezone() {
-        if (!this.monitorChartTimezone) {
-            let zone = null;
-            if (typeof luxon !== 'undefined' && luxon && luxon.DateTime) {
-                try {
-                    zone = luxon.DateTime.local().zoneName;
-                } catch (err) {
-                    console.warn('Failed to resolve timezone from Luxon, falling back to Intl API.', err);
-                }
-            }
-            if (!zone && typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function') {
-                try {
-                    zone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
-                } catch (err) {
-                    console.warn('Failed to resolve timezone from Intl API, using fallback timezone.', err);
-                }
-            }
-            this.monitorChartTimezone = zone || MONITOR_FALLBACK_TZ;
-        }
-        return this.monitorChartTimezone;
+        return this.callMonitoringManager('getMonitorTimezone');
     }
 
     parseMonitorChartTime(raw, options = {}) {
-        const { skipDstAdjustment = false } = options || {};
-        const buildFallbackDate = () => {
-            if (raw == null || raw === '') {
-                return new Date();
-            }
-            if (raw instanceof Date) {
-                return raw;
-            }
-            if (typeof raw === 'number' && !Number.isNaN(raw)) {
-                const value = raw > 1e10 ? raw : raw * 1000;
-                const date = new Date(value);
-                if (!Number.isNaN(date.getTime())) {
-                    return date;
-                }
-            }
-            if (typeof raw === 'string') {
-                const trimmed = raw.trim();
-                if (trimmed) {
-                    const numeric = Number(trimmed);
-                    if (!Number.isNaN(numeric)) {
-                        const value = numeric > 1e10 ? numeric : numeric * 1000;
-                        const date = new Date(value);
-                        if (!Number.isNaN(date.getTime())) {
-                            return date;
-                        }
-                    }
-                    const parsed = new Date(trimmed);
-                    if (!Number.isNaN(parsed.getTime())) {
-                        return parsed;
-                    }
-                }
-            }
-            const fallback = new Date(raw);
-            return Number.isNaN(fallback.getTime()) ? new Date() : fallback;
-        };
-
-        try {
-            if (typeof luxon !== 'undefined' && luxon && luxon.DateTime) {
-                const { DateTime } = luxon;
-                const targetZone = this.getMonitorTimezone();
-                let dt = null;
-
-                if (raw instanceof Date) {
-                    return raw;
-                }
-
-                if (typeof raw === 'string') {
-                    const value = raw.trim();
-                    if (value) {
-                        if (/[zZ]|[+\-]\d{2}:?\d{2}$/.test(value)) {
-                            dt = DateTime.fromISO(value);
-                        }
-                        if (!dt || !dt.isValid) {
-                            dt = DateTime.fromISO(value, { zone: MONITOR_SOURCE_TZ });
-                        }
-                        if (!dt || !dt.isValid) {
-                            dt = DateTime.fromSQL(value, { zone: MONITOR_SOURCE_TZ });
-                        }
-                        if (!dt || !dt.isValid) {
-                            dt = DateTime.fromFormat(value, 'yyyy-MM-dd HH:mm:ss', { zone: MONITOR_SOURCE_TZ });
-                        }
-                        if (!dt || !dt.isValid) {
-                            dt = DateTime.fromFormat(value, 'yyyyMMdd HH:mm:ss', { zone: MONITOR_SOURCE_TZ });
-                        }
-                        if (!dt || !dt.isValid) {
-                            dt = DateTime.fromFormat(value, "yyyyMMdd'T'HHmmss", { zone: MONITOR_SOURCE_TZ });
-                        }
-                        if (!dt || !dt.isValid) {
-                            dt = DateTime.fromFormat(value, 'yyyy-MM-dd', { zone: MONITOR_SOURCE_TZ });
-                        }
-                        if (!dt || !dt.isValid) {
-                            dt = DateTime.fromFormat(value, 'yyyyMMdd', { zone: MONITOR_SOURCE_TZ });
-                        }
-                        if ((!dt || !dt.isValid) && !Number.isNaN(Number(value))) {
-                            const numeric = Number(value);
-                            const isSeconds = numeric < 1e12;
-                            dt = isSeconds
-                                ? DateTime.fromSeconds(numeric, { zone: 'utc' })
-                                : DateTime.fromMillis(numeric, { zone: 'utc' });
-                        }
-                    }
-                } else if (typeof raw === 'number' && !Number.isNaN(raw)) {
-                    const isSeconds = raw < 1e12;
-                    dt = isSeconds
-                        ? DateTime.fromSeconds(raw, { zone: 'utc' })
-                        : DateTime.fromMillis(raw, { zone: 'utc' });
-                }
-
-                if (dt && dt.isValid) {
-                    const sourceTime = dt.setZone(MONITOR_SOURCE_TZ);
-                    const isEasternDst = sourceTime.isValid ? sourceTime.isInDST : false;
-                    let localTime = dt.setZone('local');
-                    if (!skipDstAdjustment && isEasternDst) {
-                        localTime = localTime.plus({ hours: 1 });
-                    }
-                    const dstLabel = isEasternDst ? (skipDstAdjustment ? 'DST' : 'DST +1h') : '标准';
-                    // console.log(`[时间转换] 原始: ${raw} -> 本地时间: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')} (${dstLabel})`);
-                    return localTime.toJSDate();
-                }
-            }
-        } catch (error) {
-            console.warn('Failed to parse monitor chart time with Luxon, falling back to native Date.', error, raw);
-        }
-
-        return buildFallbackDate();
+        return this.callMonitoringManager('parseMonitorChartTime', raw, options);
     }
 
     async loadMonitorChart(...args) {
-        if (this.monitoringManager?.loadMonitorChart) {
-            return this.monitoringManager.loadMonitorChart(...args);
-        }
+        return this.callMonitoringManager('loadMonitorChart', ...args);
     }
 
     displayChart(...args) {
-        if (this.monitoringManager?.displayChart) {
-            return this.monitoringManager.displayChart(...args);
-        }
+        return this.callMonitoringManager('displayChart', ...args);
     }
 
 
@@ -2976,36 +1964,6 @@ class TradingApp {
 
     renderInternalOrders(name, orders = null) {
         return this.orderManager.renderInternalOrders(name, orders);
-    }
-
-    async loadInternalStrategyOrders(name, { executions = null, limit = this.strategyExecutionsDefaultLimit, force = false } = {}) {
-        try {
-            const rawExecutions = Array.isArray(executions)
-                ? executions
-                : await this.fetchStrategyExecutions(name, { limit, force });
-            if (!Array.isArray(rawExecutions)) {
-                this.internalStrategyOrders = [];
-                this.renderInternalOrders(name, []);
-                return [];
-            }
-            const orders = rawExecutions.slice();
-            orders.sort((a, b) => {
-                const at = a?.timestamp ? new Date(a.timestamp).getTime() : 0;
-                const bt = b?.timestamp ? new Date(b.timestamp).getTime() : 0;
-                if (bt !== at) return bt - at;
-                const aid = Number(a?.order_id) || 0;
-                const bid = Number(b?.order_id) || 0;
-                return bid - aid;
-            });
-            this.internalStrategyOrders = orders;
-            this.renderInternalOrders(name, orders);
-            return orders;
-        } catch (error) {
-            console.error('Failed to load internal strategy orders:', error);
-            this.internalStrategyOrders = [];
-            this.renderInternalOrders(name, []);
-            return [];
-        }
     }
 
     async loadPortfolio(options = {}) {
@@ -3474,30 +2432,7 @@ class TradingApp {
     }
 
     createDefaultStrategyChartState() {
-        if (this.monitoringManager?.createDefaultStrategyChartState) {
-            return this.monitoringManager.createDefaultStrategyChartState();
-        }
-        return {
-            initialized: false,
-            currentStrategy: null,
-            symbol: '',
-            interval: '5 mins',
-            duration: '1 D',
-            fullBars: [],
-            orders: [],
-            visibleCount: 0,
-            isRealtime: false,
-            realtimeTimer: null,
-            isReplaying: false,
-            replayTimer: null,
-            loadToken: null,
-            loading: false,
-            slEnabled: false,
-            tpEnabled: false,
-            currentSlPrice: null,
-            currentTpPrice: null,
-            useCandlestick: true,
-        };
+        return this.callMonitoringManager('createDefaultStrategyChartState');
     }
 
     createEmptyStrategyDetailsState() {
@@ -3523,32 +2458,15 @@ class TradingApp {
     }
 
     getStrategyChartState() {
-        if (this.monitoringManager?.getStrategyChartState) {
-            return this.monitoringManager.getStrategyChartState();
-        }
-        if (!this.strategyChartState) {
-            this.strategyChartState = this.createDefaultStrategyChartState();
-        }
-        return this.strategyChartState;
+        return this.callMonitoringManager('getStrategyChartState');
     }
 
     getStrategyChartRefreshIntervalMs(intervalValue) {
-        if (this.monitoringManager?.getStrategyChartRefreshIntervalMs) {
-            return this.monitoringManager.getStrategyChartRefreshIntervalMs(intervalValue);
-        }
-        const key = normalizeIntervalKey(intervalValue || '');
-        const minutes = INTERVAL_MINUTES_MAP[key] || 5;
-        return Math.max(15000, minutes * 60000);
+        return this.callMonitoringManager('getStrategyChartRefreshIntervalMs', intervalValue);
     }
 
     getStrategyChartTimeUnit(intervalValue) {
-        if (this.monitoringManager?.getStrategyChartTimeUnit) {
-            return this.monitoringManager.getStrategyChartTimeUnit(intervalValue);
-        }
-        const value = (intervalValue || '').toLowerCase();
-        if (value.includes('day')) return 'day';
-        if (value.includes('hour')) return 'hour';
-        return 'minute';
+        return this.callMonitoringManager('getStrategyChartTimeUnit', intervalValue);
     }
 
     getLocalDayKey(timestamp) {
@@ -3752,26 +2670,7 @@ class TradingApp {
     }
 
     refreshStrategyChartDuration(intervalValue, options = {}) {
-        if (this.monitoringManager?.refreshStrategyChartDuration) {
-            return this.monitoringManager.refreshStrategyChartDuration(intervalValue, options);
-        }
-        const selectEl = options.selectEl || document.getElementById('strategyChartDuration');
-        if (!selectEl) return;
-        const available = getMonitorDurationOptions(intervalValue);
-        const preferred = options.preferredValue || selectEl.value || '1 D';
-        selectEl.innerHTML = '';
-        available.forEach((item, index) => {
-            const option = document.createElement('option');
-            option.value = item.value;
-            option.textContent = item.label;
-            if (index === 0 && !preferred) {
-                option.selected = true;
-            }
-            selectEl.appendChild(option);
-        });
-        const hasPreferred = preferred && available.some((item) => item.value === preferred);
-        const fallback = available[0]?.value || '1 D';
-        selectEl.value = hasPreferred ? preferred : fallback;
+        return this.callMonitoringManager('refreshStrategyChartDuration', intervalValue, options);
     }
 
     resetStrategyChartState(options = {}) {
@@ -4035,7 +2934,7 @@ class TradingApp {
         let baseDatasetForCreation;
 
         if (useCandles) {
-            const candlestickConfig = this.createCandlestickChartConfig({
+            const candlestickConfig = this.callMonitoringManager('createCandlestickChartConfig', {
                 symbol: state.symbol || '',
                 ohlcData: ohlc,
                 labels: [],
@@ -4414,7 +3313,8 @@ class TradingApp {
         const forceExecutions = options.forceExecutions === true;
 
         try {
-            const pluginPromise = this.ensureCandlestickPlugin();
+            await this.callMonitoringManager('ensureDateAdapter');
+            const pluginPromise = this.callMonitoringManager('ensureCandlestickPlugin');
 
             let executions = Array.isArray(options.executions) ? options.executions : null;
             if (!executions || forceExecutions) {
@@ -4468,7 +3368,7 @@ class TradingApp {
                 return;
             }
 
-            const pluginStatus = await this.waitForCandlestickPlugin({ promise: pluginPromise });
+            const pluginStatus = await this.callMonitoringManager('waitForCandlestickPlugin', { promise: pluginPromise });
             const pluginReady = pluginStatus.ready;
             console.log('[StrategyChart] 蜡烛图插件状态', { pluginReady, timedOut: pluginStatus.timedOut });
             state.useCandlestick = Boolean(pluginReady);
