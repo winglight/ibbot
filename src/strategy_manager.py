@@ -2055,8 +2055,18 @@ class StrategyManager:
             sl_tp_settings = {}
             if strategy_data.get('sl_enabled'):
                 sl_tp_settings[f"{name}_sl_enabled"] = True
-                sl_tp_settings[f"{name}_sl_price"] = strategy_data.get('sl_price')
+                sl_price = strategy_data.get('sl_price')
+                if sl_price is not None:
+                    sl_tp_settings[f"{name}_sl_price"] = sl_price
                 sl_tp_settings[f"{name}_sl_type"] = strategy_data.get('sl_type', 'amount')
+                sl_atr_params = strategy_data.get('sl_atr_params')
+                if sl_atr_params:
+                    try:
+                        sl_tp_settings[f"{name}_sl_atr_params"] = json.dumps(sl_atr_params)
+                    except TypeError:
+                        strategy_logger.warning(
+                            "Invalid sl_atr_params provided for strategy", strategy=name
+                        )
             if strategy_data.get('tp_enabled'):
                 sl_tp_settings[f"{name}_tp_enabled"] = True
                 sl_tp_settings[f"{name}_tp_price"] = strategy_data.get('tp_price')
@@ -2105,6 +2115,8 @@ class StrategyManager:
                             subscription=stored_subscription,
                             symbol=stored_symbol,
                         )
+
+            self._sync_strategy_trailing_rule(name)
 
             strategy_logger.info(f"Strategy {name} added successfully")
             # 重新启动调度器以应用新的调度配置
@@ -2165,6 +2177,16 @@ class StrategyManager:
             strategy_dict['tp_price'] = settings.get(f"{name}_tp_price") if tp_enabled else None
             strategy_dict['sl_type'] = settings.get(f"{name}_sl_type", 'amount')
             strategy_dict['tp_type'] = settings.get(f"{name}_tp_type", 'amount')
+            sl_atr_raw = settings.get(f"{name}_sl_atr_params")
+            if isinstance(sl_atr_raw, str) and sl_atr_raw:
+                try:
+                    strategy_dict['sl_atr_params'] = json.loads(sl_atr_raw)
+                except json.JSONDecodeError:
+                    strategy_dict['sl_atr_params'] = None
+            elif isinstance(sl_atr_raw, dict):
+                strategy_dict['sl_atr_params'] = sl_atr_raw
+            else:
+                strategy_dict['sl_atr_params'] = None
             strategy_dict['schedule'] = settings.get(f"{name}_schedule")
             strategy_dict['data_subscription'] = settings.get(f"{name}_data_subscription")
             cooldown_val = settings.get(f"{name}_position_add_cooldown_minutes")
@@ -2215,6 +2237,16 @@ class StrategyManager:
         snapshot["tp_price"] = (
             settings.get(f"{name}_tp_price") if snapshot["tp_enabled"] else None
         )
+        sl_atr_raw = settings.get(f"{name}_sl_atr_params")
+        if isinstance(sl_atr_raw, str) and sl_atr_raw:
+            try:
+                snapshot["sl_atr_params"] = json.loads(sl_atr_raw)
+            except json.JSONDecodeError:
+                snapshot["sl_atr_params"] = None
+        elif isinstance(sl_atr_raw, dict):
+            snapshot["sl_atr_params"] = sl_atr_raw
+        else:
+            snapshot["sl_atr_params"] = None
 
         primary_symbol = snapshot.get("primary_symbol") or settings.get(
             f"{name}_primary_symbol"
@@ -2777,7 +2809,7 @@ class StrategyManager:
                 runtime.get_parameter_definitions() if runtime else {}
             )
             # 将SL/TP更新与常规字段分离
-            sl_tp_keys = {"sl_enabled", "sl_price", "sl_type", "tp_enabled", "tp_price", "tp_type"}
+            sl_tp_keys = {"sl_enabled", "sl_price", "sl_type", "sl_atr_params", "tp_enabled", "tp_price", "tp_type"}
             position_setting_map = {
                 "data_subscription": "data_subscription",
                 "position_add_cooldown_minutes": "position_add_cooldown_minutes",
@@ -2793,7 +2825,22 @@ class StrategyManager:
                     # 构造持久化键
                     if key.startswith('sl_'):
                         settings_key = f"{name}_{key}"
-                        settings_to_save[settings_key] = value
+                        if key == 'sl_atr_params':
+                            if value:
+                                if isinstance(value, str):
+                                    settings_to_save[settings_key] = value
+                                else:
+                                    try:
+                                        settings_to_save[settings_key] = json.dumps(value)
+                                    except TypeError:
+                                        strategy_logger.warning(
+                                            "Invalid sl_atr_params provided during update",
+                                            strategy=name,
+                                        )
+                            else:
+                                settings_to_remove.add(settings_key)
+                        else:
+                            settings_to_save[settings_key] = value
                     elif key.startswith('tp_'):
                         settings_key = f"{name}_{key}"
                         settings_to_save[settings_key] = value
@@ -2884,6 +2931,8 @@ class StrategyManager:
                             strategy_logger.warning(
                                 f"Failed to auto-start DOM stream for {name}: {exc}"
                             )
+
+            self._sync_strategy_trailing_rule(name)
 
             if settings_to_remove:
                 strategy_logger.info(f"Removed strategy settings for {name}: {', '.join(sorted(settings_to_remove))}")
@@ -3547,6 +3596,67 @@ if __name__ == "__main__":
             
             
             
+    def _sync_strategy_trailing_rule(self, strategy_name: str) -> None:
+        """Ensure trailing stop settings are mirrored to risk rules."""
+        if not self.risk_manager or not getattr(self.risk_manager, "add_risk_rule", None):
+            return
+
+        try:
+            symbol = self._resolve_strategy_primary_symbol(strategy_name)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            strategy_logger.warning(
+                "Failed to resolve primary symbol for trailing rule sync",
+                strategy=strategy_name,
+                error=str(exc),
+            )
+            return
+
+        if not symbol:
+            return
+
+        settings = getattr(self, "settings", {}) or {}
+        sl_enabled = _coerce_bool(settings.get(f"{strategy_name}_sl_enabled"), False)
+        sl_type = (settings.get(f"{strategy_name}_sl_type") or "amount").strip().lower()
+        if not sl_enabled or sl_type != "trailing":
+            return
+
+        atr_payload = settings.get(f"{strategy_name}_sl_atr_params")
+        atr_params: Optional[Dict[str, Any]] = None
+        if isinstance(atr_payload, dict):
+            atr_params = atr_payload
+        elif isinstance(atr_payload, str) and atr_payload:
+            try:
+                atr_params = json.loads(atr_payload)
+            except json.JSONDecodeError:
+                strategy_logger.warning(
+                    "Failed to parse stored sl_atr_params for strategy",
+                    strategy=strategy_name,
+                )
+
+        try:
+            existing_rule = getattr(self.risk_manager, "risk_rules", {}).get(symbol)
+            if existing_rule:
+                self.risk_manager.update_risk_rule(
+                    symbol,
+                    rule_type="trailing",
+                    auto_trailing=True,
+                    atr_params=atr_params,
+                )
+            else:
+                self.risk_manager.add_risk_rule(
+                    symbol=symbol,
+                    rule_type="trailing",
+                    auto_trailing=True,
+                    atr_params=atr_params,
+                )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            strategy_logger.warning(
+                "Failed to sync trailing risk rule",
+                strategy=strategy_name,
+                symbol=symbol,
+                error=str(exc),
+            )
+
     def _resolve_strategy_primary_symbol(self, strategy_name: str) -> Optional[str]:
         """Resolve the active primary symbol for a strategy, upper-cased when found."""
         raw_symbol = self._get_strategy_setting(strategy_name, "primary_symbol")

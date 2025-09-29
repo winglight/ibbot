@@ -39,11 +39,20 @@ class RiskRule:
     created_at: datetime = None
     auto_trailing: bool = False
     atr_params: Dict[str, Any] = field(default_factory=dict)
+    rule_type: str = "fixed"
 
     def __post_init__(self):
         self.created_at = ensure_local_timezone(self.created_at) or now_local()
         if not isinstance(self.atr_params, dict):
             self.atr_params = dict(self.atr_params or {})
+        rule_type = (self.rule_type or "").strip().lower()
+        if rule_type not in {"fixed", "trailing"}:
+            rule_type = "trailing" if self.auto_trailing else "fixed"
+        if rule_type == "trailing":
+            self.auto_trailing = True
+        else:
+            self.auto_trailing = False
+        self.rule_type = rule_type
 
 @dataclass
 class OrderRequest:
@@ -245,7 +254,8 @@ class RiskManager:
                     max_time_span=getattr(rule_db, 'max_time_span', None),
                     created_at=parse_local_datetime(rule_db.timestamp) if rule_db.timestamp else now_local(),
                     auto_trailing=getattr(rule_db, 'auto_trailing', False),
-                    atr_params=getattr(rule_db, 'atr_params', {})
+                    atr_params=getattr(rule_db, 'atr_params', {}),
+                    rule_type=getattr(rule_db, 'rule_type', None),
                 )
                 self.risk_rules[rule.symbol] = rule
 
@@ -661,11 +671,17 @@ class RiskManager:
     def add_risk_rule(self, symbol: str, stop_loss_price: Optional[float] = None,
                       take_profit_price: Optional[float] = None, max_loss_percent: Optional[float] = None,
                       max_time_span: Optional[int] = None, auto_trailing: bool = False,
-                      atr_params: Optional[Dict[str, Any]] = None):
+                      atr_params: Optional[Dict[str, Any]] = None,
+                      rule_type: Optional[str] = None):
         """添加风险规则"""
         try:
+            normalized_type = (rule_type or "").strip().lower()
+            if normalized_type not in {"fixed", "trailing"}:
+                normalized_type = "trailing" if auto_trailing else "fixed"
+            auto_trailing = normalized_type == "trailing"
+
             risk_logger.info(
-                f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}, max_time_span={max_time_span}, auto_trailing={auto_trailing}"
+                f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}, max_time_span={max_time_span}, auto_trailing={auto_trailing}, rule_type={normalized_type}"
             )
             rule = RiskRule(
                 symbol=symbol,
@@ -676,7 +692,8 @@ class RiskManager:
                 max_time_span=max_time_span,
                 created_at=now_local(),
                 auto_trailing=auto_trailing,
-                atr_params=atr_params or {}
+                atr_params=atr_params or {},
+                rule_type=normalized_type,
             )
 
             # 转换为数据库层的 RiskRule 并保存到数据库
@@ -689,7 +706,8 @@ class RiskManager:
                 max_time_span=rule.max_time_span,
                 timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
                 auto_trailing=rule.auto_trailing,
-                atr_params=rule.atr_params
+                atr_params=rule.atr_params,
+                rule_type=rule.rule_type,
             )
             self.db_manager.save_risk_rule(db_rule)
             risk_logger.debug(f"Risk rule persisted: {db_rule}")
@@ -728,11 +746,12 @@ class RiskManager:
                          take_profit_price: float = None, enabled: Optional[bool] = None,
                          max_time_span: Optional[int] = None,
                          auto_trailing: Optional[bool] = None,
-                         atr_params: Optional[Dict[str, Any]] = None) -> bool:
+                         atr_params: Optional[Dict[str, Any]] = None,
+                         rule_type: Optional[str] = None) -> bool:
         """更新风险规则"""
         try:
             risk_logger.info(
-                f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}, max_time_span={max_time_span}, auto_trailing={auto_trailing}"
+                f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}, max_time_span={max_time_span}, auto_trailing={auto_trailing}, rule_type={rule_type}"
             )
             if symbol in self.risk_rules:
                 rule = self.risk_rules[symbol]
@@ -747,8 +766,20 @@ class RiskManager:
                     rule.enabled = enabled
                 if max_time_span is not None:
                     rule.max_time_span = max_time_span
-                if auto_trailing is not None:
-                    rule.auto_trailing = auto_trailing
+                normalized_type = None
+                if rule_type is not None:
+                    candidate = (rule_type or "").strip().lower()
+                    if candidate in {"fixed", "trailing"}:
+                        normalized_type = candidate
+                if normalized_type is None and auto_trailing is not None:
+                    normalized_type = "trailing" if auto_trailing else "fixed"
+                if normalized_type is not None:
+                    rule.rule_type = normalized_type
+                    rule.auto_trailing = normalized_type == "trailing"
+                elif auto_trailing is not None:
+                    rule.auto_trailing = bool(auto_trailing)
+                    if not rule.auto_trailing and rule.rule_type == "trailing":
+                        rule.rule_type = "fixed"
                 if atr_params is not None:
                     rule.atr_params = dict(atr_params)
 
@@ -762,7 +793,8 @@ class RiskManager:
                     max_time_span=rule.max_time_span,
                     timestamp=to_local_iso(rule.created_at),
                     auto_trailing=rule.auto_trailing,
-                    atr_params=rule.atr_params
+                    atr_params=rule.atr_params,
+                    rule_type=rule.rule_type,
                 )
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.debug(f"Risk rule persisted after update: {db_rule}")

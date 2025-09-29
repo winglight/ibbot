@@ -570,6 +570,7 @@
                                         <th>Stop Loss</th>
                                         <th>Take Profit</th>
                                         <th>Max Time</th>
+                                        <th>Type</th>
                                         <th>Status</th>
                                         <th>Actions</th>
                                     </tr>
@@ -1563,10 +1564,17 @@
                             <input type="text" class="form-control" id="riskSymbol" placeholder="AAPL">
                         </div>
                         <div class="mb-3">
+                            <label class="form-label">Rule Type</label>
+                            <select class="form-select" id="riskRuleType">
+                                <option value="fixed" selected>固定 (Manual Prices)</option>
+                                <option value="trailing">移动 (ATR Trailing)</option>
+                            </select>
+                        </div>
+                        <div class="mb-3" data-rule-section="fixed">
                             <label class="form-label">Stop Loss Price</label>
                             <input type="number" class="form-control" id="riskStopLossPrice" step="0.01">
                         </div>
-                        <div class="mb-3">
+                        <div class="mb-3" data-rule-section="fixed">
                             <label class="form-label">Take Profit Price</label>
                             <input type="number" class="form-control" id="riskTakeProfitPrice" step="0.01">
                         </div>
@@ -1575,9 +1583,62 @@
                             <input type="text" class="form-control" id="riskMaxTime" name="max_time_span" placeholder="e.g., 1d, 2h, 30m">
                             <div class="form-text">Maximum time to hold position before auto-close</div>
                         </div>
-                        
+
+                        <div class="mb-3" id="atrParamsSection" data-rule-section="trailing" style="display: none;">
+                            <label class="form-label">ATR Parameters (optional)</label>
+                            <div class="row g-2">
+                                <div class="col-sm-4">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">Lookback</span>
+                                        <input type="number" min="1" class="form-control" id="riskAtrLookback" placeholder="14">
+                                    </div>
+                                </div>
+                                <div class="col-sm-4">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">Bar (min)</span>
+                                        <input type="number" min="1" class="form-control" id="riskAtrBarMinutes" placeholder="5">
+                                    </div>
+                                </div>
+                                <div class="col-sm-4">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">Stream (s)</span>
+                                        <input type="number" min="1" class="form-control" id="riskAtrStreamInterval" placeholder="5">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row g-2 mt-2">
+                                <div class="col-sm-4">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">Update (s)</span>
+                                        <input type="number" min="1" class="form-control" id="riskAtrUpdateThrottle" placeholder="30">
+                                    </div>
+                                </div>
+                                <div class="col-sm-4">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">SL × ATR</span>
+                                        <input type="number" step="0.01" class="form-control" id="riskAtrMultiplierSl" placeholder="1.0">
+                                    </div>
+                                </div>
+                                <div class="col-sm-4">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">TP × ATR</span>
+                                        <input type="number" step="0.01" class="form-control" id="riskAtrMultiplierTp" placeholder="2.0">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row g-2 mt-2">
+                                <div class="col-sm-4">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">Δ Threshold</span>
+                                        <input type="number" step="0.01" min="0" class="form-control" id="riskAtrDeltaThreshold" placeholder="0.25">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-text">Leave blank to use default ATR trailing settings.</div>
+                        </div>
+
                         <!-- PnL Preview Section -->
-                        <div class="mb-3" id="pnlPreviewSection" style="display: none;">
+                        <div class="mb-3" id="pnlPreviewSection" data-rule-section="fixed" style="display: none;">
                             <hr>
                             <h6 class="text-muted"><i class="fas fa-calculator"></i> Expected PnL</h6>
                             <div class="row">
@@ -2024,6 +2085,7 @@
                     <select class="form-select" id="slTypeSelect" style="max-width: 140px;">
                       <option value="amount" selected>Amount</option>
                       <option value="percent">Percent</option>
+                      <option value="trailing">Trailing</option>
                     </select>
                   </div>
                 </div>
@@ -2038,6 +2100,7 @@
                     <select class="form-select" id="tpTypeSelect" style="max-width: 140px;">
                       <option value="amount" selected>Amount</option>
                       <option value="percent">Percent</option>
+                      <option value="trailing">Trailing</option>
                     </select>
                   </div>
                 </div>
@@ -2113,6 +2176,7 @@
                   <select class="form-select" id="editSlTypeSelect" style="max-width: 140px;">
                     <option value="amount">Amount</option>
                     <option value="percent">Percent</option>
+                    <option value="trailing">Trailing</option>
                   </select>
                 </div>
               </div>
@@ -2128,6 +2192,7 @@
                   <select class="form-select" id="editTpTypeSelect" style="max-width: 140px;">
                     <option value="amount">Amount</option>
                     <option value="percent">Percent</option>
+                    <option value="trailing">Trailing</option>
                   </select>
                 </div>
               </div>

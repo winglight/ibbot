@@ -769,6 +769,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             "created_at": getattr(rule, "created_at", None).isoformat()
                             if getattr(rule, "created_at", None)
                             else None,
+                            "rule_type": getattr(rule, "rule_type", None),
+                            "atr_params": getattr(rule, "atr_params", None),
                         }
                     payload = {
                         "type": "risk_rules",

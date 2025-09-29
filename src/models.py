@@ -27,7 +27,7 @@ class ChartDataRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-class RiskRuleRequest(BaseModel):
+class OrderRiskRuleRequest(BaseModel):
     """风险规则请求模型"""
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
@@ -49,7 +49,7 @@ class OrderRequest(BaseModel):
     price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
-    risk_rule: Optional[RiskRuleRequest] = None  # 新增风险规则字段
+    risk_rule: Optional[OrderRiskRuleRequest] = None  # 新增风险规则字段
 
     # 校验：数量必须大于0
     @field_validator('quantity')
@@ -80,18 +80,51 @@ class ExternalStrategyOrderRequest(BaseModel):
 class RiskRuleRequest(BaseModel):
     """风险规则请求模型"""
     symbol: str
+    rule_type: str = "fixed"
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
     max_loss_percent: Optional[float] = None
     max_time_span: Optional[int] = 30  # 以分钟为单位的最大持仓时间，默认30分钟
+    atr_params: Optional[Dict[str, Any]] = None
 
-    # 至少提供一个止盈/止损价格，且提供的价格必须 > 0
+    @field_validator('rule_type')
+    def normalize_rule_type(cls, value: Optional[str]) -> str:
+        text = (value or 'fixed').strip().lower()
+        allowed = {'fixed', 'trailing'}
+        if text not in allowed:
+            raise ValueError(f'rule_type must be one of {sorted(allowed)}')
+        return text
+
+    @field_validator('stop_loss_price', 'take_profit_price')
+    def prices_must_be_positive(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and value <= 0:
+            raise ValueError('stop_loss_price/take_profit_price must be greater than 0 when provided')
+        return value
+
+    @field_validator('atr_params')
+    def normalize_atr_params(cls, payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            raise ValueError('atr_params must be a mapping when provided')
+        cleaned: Dict[str, Any] = {}
+        for key, val in payload.items():
+            if val is None:
+                continue
+            try:
+                cleaned[key] = float(val)
+            except (TypeError, ValueError):
+                raise ValueError(f'atr_params values must be numeric, got {key}={val!r}')
+        return cleaned or None
+
+    # 至少提供一个止盈/止损价格，且提供的价格必须 > 0（固定规则适用）
     @model_validator(mode='after')
     def validate_sl_tp_prices(cls, values: 'RiskRuleRequest'):
-        sl = values.stop_loss_price
-        tp = values.take_profit_price
-        if (sl is None or sl <= 0) and (tp is None or tp <= 0):
-            raise ValueError('At least one of stop_loss_price or take_profit_price must be provided and > 0')
+        if values.rule_type != 'trailing':
+            sl = values.stop_loss_price
+            tp = values.take_profit_price
+            if (sl is None or sl <= 0) and (tp is None or tp <= 0):
+                raise ValueError('At least one of stop_loss_price or take_profit_price must be provided and > 0')
         return values
 
 class StrategyRequest(BaseModel):
@@ -108,11 +141,12 @@ class StrategyRequest(BaseModel):
     tp_enabled: bool = False
     sl_price: Optional[float] = None
     tp_price: Optional[float] = None
-    sl_type: str = "amount"  # "amount" or "percent"
-    tp_type: str = "amount"  # "amount" or "percent"
+    sl_type: str = "amount"  # "amount", "percent" 或 "trailing"
+    tp_type: str = "amount"  # "amount", "percent" 或 "trailing"
     data_subscription: Optional[str] = None
     position_add_cooldown_minutes: Optional[int] = None
     close_before_close_minutes: Optional[int] = None
+    sl_atr_params: Optional[Dict[str, Any]] = None
 
     @field_validator('data_subscription')
     def validate_data_subscription(cls, value: Optional[str]):
@@ -135,6 +169,30 @@ class StrategyRequest(BaseModel):
         if value is not None and value < 0:
             raise ValueError('minute values must be >= 0 when provided')
         return value
+
+    @field_validator('sl_type', 'tp_type')
+    def validate_sl_tp_type(cls, value: str):
+        allowed = {'amount', 'percent', 'trailing'}
+        text = (value or '').strip().lower()
+        if text not in allowed:
+            raise ValueError(f'sl/tp type must be one of {sorted(allowed)}')
+        return text
+
+    @field_validator('sl_atr_params')
+    def validate_sl_atr_params(cls, value: Optional[Dict[str, Any]]):
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError('sl_atr_params must be a mapping when provided')
+        cleaned: Dict[str, Any] = {}
+        for key, raw in value.items():
+            if raw is None:
+                continue
+            try:
+                cleaned[key] = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f'sl_atr_params values must be numeric, got {key}={raw!r}')
+        return cleaned or None
 
 class StrategyRenameRequest(BaseModel):
     new_name: str
