@@ -82,6 +82,7 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
     except Exception:  # pragma: no cover - defensive guard
         return default
 
+from .connection_manager import connection_manager
 from .database import DatabaseManager, get_db_manager, Strategy as DatabaseStrategy
 
 
@@ -149,6 +150,7 @@ class StrategyManager:
         self._pending_data_push_requests: List[
             Tuple[str, Optional[str], Optional[str], bool]
         ] = []
+        self._connection_restore_task: Optional[asyncio.Task] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._background_tasks: Set[asyncio.Task] = set()
         self._strategies_cache: Dict[str, Any] = {
@@ -1948,26 +1950,9 @@ class StrategyManager:
                 count=len(pending_requests),
             )
 
-        for strategy_name, subscription, symbol, force_restart in pending_requests:
-            try:
-                strategy_logger.info(
-                    "Replaying deferred data push request",
-                    strategy=strategy_name,
-                    subscription=subscription,
-                    symbol=symbol,
-                    force_restart=force_restart,
-                )
-                await self.set_data_push(
-                    strategy_name,
-                    True,
-                    subscription=subscription,
-                    symbol=symbol,
-                    force_restart=force_restart,
-                )
-            except Exception as exc:  # pragma: no cover - defensive guard
-                strategy_logger.warning(
-                    f"Deferred data push activation failed for {strategy_name}: {exc}"
-                )
+        restore_queue: List[Tuple[Tuple[str, Optional[str], Optional[str], bool], str]] = []
+
+        stored_candidates: List[Tuple[str, Optional[str], Optional[str]]] = []
 
         for record in list(self.strategies.values()):
             if record.strategy_type != "internal" or not record.enabled:
@@ -1989,28 +1974,129 @@ class StrategyManager:
             if not target_symbol:
                 continue
 
-            try:
-                strategy_logger.info(
-                    "Restoring stored data push",
-                    strategy=record.name,
-                    subscription=subscription,
-                    symbol=target_symbol,
+            stored_candidates.append((record.name, subscription, target_symbol))
+
+        if not connection_manager.is_connected():
+            total_pending = len(pending_requests) + len(stored_candidates)
+            if total_pending:
+                strategy_logger.warning(
+                    "Deferring data push restoration until IBKR connection is active",
+                    pending=total_pending,
                 )
+                if pending_requests:
+                    self._pending_data_push_requests.extend(pending_requests)
+                self._schedule_restore_after_connection(total_pending)
+            return
+
+        restore_queue.extend(
+            ((strategy_name, subscription, symbol, force_restart), "pending")
+            for strategy_name, subscription, symbol, force_restart in pending_requests
+        )
+
+        for strategy_name, subscription, symbol in stored_candidates:
+            restore_queue.append(((strategy_name, subscription, symbol, False), "stored"))
+
+        for (strategy_name, subscription, symbol, force_restart), source in restore_queue:
+            try:
+                if source == "pending":
+                    strategy_logger.info(
+                        "Replaying deferred data push request",
+                        strategy=strategy_name,
+                        subscription=subscription,
+                        symbol=symbol,
+                        force_restart=force_restart,
+                    )
+                else:
+                    strategy_logger.info(
+                        "Restoring stored data push",
+                        strategy=strategy_name,
+                        subscription=subscription,
+                        symbol=symbol,
+                    )
+
                 result = await self.set_data_push(
-                    record.name,
+                    strategy_name,
                     True,
                     subscription=subscription,
-                    symbol=target_symbol,
+                    symbol=symbol,
+                    force_restart=force_restart,
                 )
-                if not result.get("success"):
+
+                if source == "stored" and not result.get("success"):
                     error_msg = result.get("error") or "unknown error"
                     strategy_logger.warning(
-                        f"Failed to restore data push for {record.name}: {error_msg}"
+                        f"Failed to restore data push for {strategy_name}: {error_msg}"
                     )
             except Exception as exc:  # pragma: no cover - defensive guard
+                if source == "pending":
+                    strategy_logger.warning(
+                        f"Deferred data push activation failed for {strategy_name}: {exc}"
+                    )
+                else:
+                    strategy_logger.warning(
+                        f"Exception while restoring data push for {strategy_name}: {exc}"
+                    )
+
+    def _schedule_restore_after_connection(self, pending_count: int) -> None:
+        """Ensure data push restoration retries once the IBKR connection is ready."""
+
+        task = self._connection_restore_task
+        if task and not task.done():
+            return
+
+        async def _wait_for_connection() -> None:
+            logged_wait = False
+            try:
+                while not connection_manager.is_connected():
+                    if not logged_wait:
+                        strategy_logger.info(
+                            "Waiting for IBKR connection before restoring data push",
+                            pending=pending_count,
+                        )
+                        logged_wait = True
+                    await asyncio.sleep(1.0)
+
+                if logged_wait:
+                    strategy_logger.info(
+                        "IBKR connection detected; retrying data push restoration"
+                    )
+
+                await self.restore_data_push_states()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive guard
                 strategy_logger.warning(
-                    f"Exception while restoring data push for {record.name}: {exc}"
+                    f"Deferred data push restoration failed while waiting for connection: {exc}"
                 )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self._event_loop if self._event_loop and self._event_loop.is_running() else None
+
+        if not loop:
+            loop = asyncio.get_event_loop()
+
+        task = loop.create_task(
+            _wait_for_connection(),
+            name="wait-for-ibkr-connection",
+        )
+        self._connection_restore_task = task
+        self._background_tasks.add(task)
+
+        def _cleanup(done: asyncio.Task) -> None:
+            self._background_tasks.discard(done)
+            self._connection_restore_task = None
+            if done.cancelled():
+                return
+            try:
+                done.result()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    f"Connection wait task failed during cleanup: {exc}"
+                )
+
+        task.add_done_callback(_cleanup)
 
     def _handle_position_setting_change(self, strategy_name: str) -> None:
         """Adjust runtime helpers when position-related settings are updated."""
