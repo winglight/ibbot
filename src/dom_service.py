@@ -5,10 +5,11 @@ import inspect
 import copy
 import threading
 import atexit
-from datetime import datetime
-from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from threading import Lock
+from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
 
 from zoneinfo import ZoneInfo
 
@@ -727,9 +728,27 @@ class DOMService:
         self._on_depth_update(symbol, payload)
 
     def _run_sync_coroutine(self, coro: Awaitable[bool]) -> bool:
+        """Execute *coro* from synchronous contexts safely."""
+
         loop = self._loop
-        if loop and loop.is_running() and not loop.is_closed():
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if (
+            loop
+            and loop is not running_loop
+            and loop.is_running()
+            and not loop.is_closed()
+        ):
             return bool(asyncio.run_coroutine_threadsafe(coro, loop).result())
+
+        if running_loop and running_loop.is_running():
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, coro)
+                return bool(future.result())
+
         return bool(asyncio.run(coro))
 
     async def _start_stream_unified(
