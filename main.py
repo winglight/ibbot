@@ -25,6 +25,7 @@ import uuid
 import contextvars
 import time
 import re
+import threading
 from contextlib import asynccontextmanager
 
 # FastAPI imports
@@ -696,20 +697,64 @@ def main():
     main_logger.info(f"Web UI available at: http://{display_host}:{web_port}")
     main_logger.info("Press Ctrl+C to stop the application")
     
+    server_thread: Optional[threading.Thread] = None
+    server_loop_holder: dict[str, asyncio.AbstractEventLoop] = {}
+    server_exception: list[BaseException] = []
+    server_holder: dict[str, Any] = {}
+
+    def _request_server_shutdown() -> None:
+        server = server_holder.get("server")
+        if server is not None:
+            server.should_exit = True
+            loop = server_loop_holder.get("loop")
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(lambda: None)
+        if server_thread and server_thread.is_alive():
+            server_thread.join()
+
     try:
         import uvicorn
-        uvicorn.run(
+
+        config = uvicorn.Config(
             app,
             host=web_host,
             port=web_port,
-            log_level="warning"  # 减少HTTP请求日志显示
+            log_level="warning",  # 减少HTTP请求日志显示
         )
-        
+        server = uvicorn.Server(config)
+        server_holder["server"] = server
+
+        def _run_server() -> None:
+            async def _serve() -> None:
+                loop = asyncio.get_running_loop()
+                server_loop_holder["loop"] = loop
+                await server.serve()
+
+            try:
+                asyncio.run(_serve())
+            except BaseException as exc:  # pragma: no cover - defensive guard
+                server_exception.append(exc)
+
+        server_thread = threading.Thread(
+            target=_run_server,
+            name="uvicorn-server",
+            daemon=False,
+        )
+        server_thread.start()
+
+        while server_thread.is_alive():
+            server_thread.join(timeout=0.5)
+            if server_exception:
+                raise server_exception[0]
+
     except KeyboardInterrupt:
         main_logger.info("Shutting down...")
+        _request_server_shutdown()
     except Exception as e:
-        main_logger.error(f"Application error: {e}")
+        main_logger.exception(f"Application error: {e}")
+        _request_server_shutdown()
     finally:
+        _request_server_shutdown()
         main_logger.info("Application stopped")
 
 if __name__ == "__main__":
