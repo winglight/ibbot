@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import time
 from dataclasses import asdict
 from typing import Optional, Dict, Any
 from datetime import datetime
@@ -34,6 +35,37 @@ router = APIRouter()
 # Cache the most recent successful risk configuration so that the endpoint can
 # respond immediately even if the underlying manager becomes unresponsive.
 _last_risk_config: Dict[str, Any] = {}
+_risk_config_lock: asyncio.Lock = asyncio.Lock()
+_last_risk_config_updated_at: float = 0.0
+_last_risk_config_attempt_at: float = 0.0
+_RISK_CONFIG_REFRESH_INTERVAL: float = 30.0
+
+
+async def _refresh_risk_config(timeout: float) -> Optional[Dict[str, Any]]:
+    """Fetch the latest risk configuration without blocking the request path."""
+
+    global _last_risk_config, _last_risk_config_updated_at, _last_risk_config_attempt_at
+
+    if 'risk_manager' not in globals() or risk_manager is None:
+        return None
+
+    async with _risk_config_lock:
+        _last_risk_config_attempt_at = time.monotonic()
+        try:
+            config = await asyncio.wait_for(
+                asyncio.to_thread(risk_manager.get_config),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("refresh_risk_config: fetching config timed out")
+            return None
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning(f"refresh_risk_config: failed to fetch config: {exc}")
+            return None
+
+        _last_risk_config = deepcopy(config)
+        _last_risk_config_updated_at = _last_risk_config_attempt_at
+        return deepcopy(config)
 
 @router.post("/api/risk_rules")
 async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get_current_user)):
@@ -176,21 +208,27 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
             leverage = {'MNQ': 20.0}
 
         # 新增：返回完整风控配置，添加超时保护并使用缓存避免阻塞
-        full_cfg = {}
-        global _last_risk_config
-        try:
-            if 'risk_manager' in globals() and risk_manager is not None:
-                full_cfg = await asyncio.wait_for(
-                    asyncio.to_thread(risk_manager.get_config),
-                    timeout=1.5  # 更短的超时，快速回落到缓存
-                )
-                _last_risk_config = deepcopy(full_cfg)
-        except asyncio.TimeoutError:
-            logger.warning("get_risk_config: fetch full config timed out; using cached snapshot")
-            full_cfg = deepcopy(_last_risk_config)
-        except Exception as e:
-            logger.warning(f"get_risk_config: fetch full config failed: {e}; using cached snapshot")
-            full_cfg = deepcopy(_last_risk_config)
+        global _last_risk_config, _last_risk_config_attempt_at, _last_risk_config_updated_at
+
+        now = time.monotonic()
+        cached_snapshot = deepcopy(_last_risk_config)
+        if not cached_snapshot:
+            # 没有可用缓存时尝试快速获取一次
+            if (now - _last_risk_config_attempt_at > 1.0) and not _risk_config_lock.locked():
+                refreshed = await _refresh_risk_config(timeout=0.5)
+                if refreshed:
+                    cached_snapshot = deepcopy(refreshed)
+        else:
+            should_refresh = (
+                ('risk_manager' in globals() and risk_manager is not None)
+                and (now - _last_risk_config_updated_at > _RISK_CONFIG_REFRESH_INTERVAL)
+                and (now - _last_risk_config_attempt_at > 1.0)
+                and not _risk_config_lock.locked()
+            )
+            if should_refresh:
+                asyncio.create_task(_refresh_risk_config(timeout=1.5))
+
+        full_cfg = cached_snapshot
 
         return {
             "stop_loss_ratio": stop_loss_ratio,
@@ -210,8 +248,11 @@ async def update_risk_config(payload: RiskConfigUpdateRequest, user: Optional[st
     try:
         updates = {k: v for k, v in payload.dict(exclude_none=True).items()}
         new_cfg = risk_manager.update_config(updates)
-        global _last_risk_config
+        global _last_risk_config, _last_risk_config_attempt_at, _last_risk_config_updated_at
         _last_risk_config = deepcopy(new_cfg)
+        now = time.monotonic()
+        _last_risk_config_attempt_at = now
+        _last_risk_config_updated_at = now
         return {"success": True, "risk_config": new_cfg}
     except Exception as e:
         logger.error(f"Update risk config error: {e}")
