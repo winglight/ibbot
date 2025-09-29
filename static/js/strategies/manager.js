@@ -527,7 +527,7 @@
         async handleSummaryDataFeedChange() {
             const currentName = this.app?.currentStrategyDetails;
             if (!currentName) return;
-            const apiCall = this.app?.apiCall;
+            const apiCall = this.app?.apiCall?.bind(this.app);
             if (typeof apiCall !== 'function') {
                 console.warn('Strategy data feed update unavailable: apiCall missing');
                 return;
@@ -575,7 +575,7 @@
             const currentName = this.app?.currentStrategyDetails;
             if (!currentName) return null;
 
-            const apiCall = this.app?.apiCall;
+            const apiCall = this.app?.apiCall?.bind(this.app);
             if (typeof apiCall !== 'function') {
                 console.warn('Strategy data push update unavailable: apiCall missing');
                 return { error: 'api_unavailable' };
@@ -717,7 +717,7 @@
                 }
             }
 
-            const apiCall = this.app?.apiCall;
+            const apiCall = this.app?.apiCall?.bind(this.app);
             if (typeof apiCall !== 'function') {
                 console.warn('Strategy status request unavailable: apiCall missing');
                 this.applyStrategyStatusPayload({
