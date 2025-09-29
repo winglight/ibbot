@@ -3338,6 +3338,15 @@
         async loadCurrentConfig(options = {}) {
             const { auto = false } = options || {};
             try {
+                if (this.app && typeof this.app.isAuthenticated === 'function' && !this.app.isAuthenticated()) {
+                    if (!auto) {
+                        this.notify('warning', '请先登录后再加载配置');
+                    } else {
+                        console.info('Skipping DOM config load: user is not authenticated yet.');
+                    }
+                    return null;
+                }
+
                 if (!auto) {
                     this.setButtonLoading(this.elements.loadConfigBtn, true, '载入中');
                 }

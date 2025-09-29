@@ -210,13 +210,17 @@ class LoginManager {
      * 登录成功后的处理
      */
     onLoginSuccess() {
+        if (this.app && typeof this.app.initializeAuthenticatedModules === 'function') {
+            try {
+                this.app.initializeAuthenticatedModules({ force: true });
+            } catch (error) {
+                console.error('Failed to initialize authenticated modules after login:', error);
+            }
+        }
+
         // 检查连接状态
         this.app.ibkrManager.checkConnectionStatus();
-        
-        // 加载基础数据
-        this.app.strategiesManager.loadStrategies();
-        this.app.loadLogs();
-        
+
         // 只在连接成功后加载需要IB连接的数据
         if (this.app.connected) {
             this.app.loadOrders();
@@ -264,6 +268,14 @@ class LoginManager {
 
                 // 自动连接使用保存的连接设置
                 await this.tryAutoConnect(connectTimeout, connectRetries);
+
+                if (this.app && typeof this.app.initializeAuthenticatedModules === 'function') {
+                    try {
+                        this.app.initializeAuthenticatedModules({ force: true });
+                    } catch (error) {
+                        console.error('Failed to initialize authenticated modules after auto login:', error);
+                    }
+                }
             }
         } catch (e) {
             console.warn('Auto login failed:', e);
@@ -328,6 +340,13 @@ class LoginManager {
         localStorage.removeItem('user_role');
         this.toggleAuthButtons(false);
         this.applyReadOnlyMode(false, 'admin');
+        if (this.app && typeof this.app.handleLogout === 'function') {
+            try {
+                this.app.handleLogout();
+            } catch (error) {
+                console.error('Failed to handle logout:', error);
+            }
+        }
         this.app.showAlert('info', '已退出登录');
     }
 
