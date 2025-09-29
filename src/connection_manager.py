@@ -953,8 +953,18 @@ class ConnectionManager:
         """获取当前配置"""
         return self.config
     
-    def run_in_connection_thread(self, func, *args, **kwargs):
-        """在连接线程的事件循环中执行同步函数，跨线程安全调度并等待结果。"""
+    def run_in_connection_thread(
+        self,
+        func,
+        *args,
+        timeout: Optional[float] = 60.0,
+        **kwargs,
+    ):
+        """在连接线程的事件循环中执行同步函数，跨线程安全调度并等待结果。
+
+        ``timeout`` 参数允许调用者为等待连接线程执行结果设置自定义超时时间，
+        从而避免在底层 API 卡住时长时间阻塞调用方的协程。
+        """
         try:
             loop = self._loop
             if not loop or loop.is_closed():
@@ -988,10 +998,34 @@ class ConnectionManager:
                 connection_logger.error(f"Failed to schedule function on connection loop: {e}")
                 return None
 
+            wait_for: Optional[float]
+            if timeout is None:
+                wait_for = None
+            else:
+                try:
+                    wait_for = float(timeout)
+                except (TypeError, ValueError):
+                    wait_for = 60.0
+                    connection_logger.debug(
+                        "Invalid timeout %r provided to run_in_connection_thread; falling back to 60s",
+                        timeout,
+                    )
+                else:
+                    if wait_for <= 0:
+                        wait_for = 60.0
+
             try:
-                return result_future.result(timeout=60)
+                return result_future.result(timeout=wait_for)
             except concurrent.futures.TimeoutError:
-                connection_logger.error("Execution in connection thread timed out after 60 seconds")
+                if wait_for is None:
+                    connection_logger.error(
+                        "Execution in connection thread timed out with no limit"
+                    )
+                else:
+                    connection_logger.error(
+                        "Execution in connection thread timed out after %.1f seconds",
+                        wait_for,
+                    )
                 return None
             except Exception as e:
                 connection_logger.error(f"Execution in connection thread raised error: {e}")
