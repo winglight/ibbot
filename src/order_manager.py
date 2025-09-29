@@ -786,7 +786,11 @@ class OrderManager:
                     take_profit_price=rule.take_profit_price,
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
-                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat()
+                    max_time_span=rule.max_time_span,
+                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                    auto_trailing=rule.auto_trailing,
+                    atr_params=rule.atr_params,
+                    rule_type=rule.rule_type,
                 )
                 self.risk_manager.db_manager.save_risk_rule(db_rule)
                 
