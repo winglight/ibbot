@@ -128,6 +128,8 @@ class ConnectionManager:
         self._connect_wait_limit_sec: float = max(
             1.0, _get_env_float("IBKR_CONNECT_WAIT_LIMIT_SEC", 8.0)
         )
+        self._connect_result_event: threading.Event = threading.Event()
+        self._connect_cancelled: bool = False
         self._project_root = Path(__file__).resolve().parents[1]
         self._pre_restart_script = self._project_root / "vps-setup" / "quick-start.sh"
         self._pre_restart_attempted = False
@@ -582,7 +584,11 @@ class ConnectionManager:
                 # 保存事件循环引用
                 self._loop = loop
                 self._connection_thread_alive = True
-                
+                self._connect_cancelled = False
+
+                # 通知等待线程连接已建立
+                self._connect_result_event.set()
+
                 # 保持事件循环运行，直到明确要求断开连接
                 try:
                     while self._connection_thread_alive and self.ib.isConnected():
@@ -598,14 +604,23 @@ class ConnectionManager:
                     # 不在这里批量取消任务，避免递归取消；仅记录日志
                     connection_logger.info("IBKR connection loop ended")
             
+            except asyncio.CancelledError:
+                self.connected = False
+                self._connect_cancelled = True
+                self._last_connect_error = "Connection attempt cancelled"
+                self._connect_result_event.set()
+                raise
             except Exception as e:
                 connection_logger.error(f"Failed to connect to IBKR: {e}")
                 self.connected = False
+                self._connect_cancelled = False
                 # 标记错误以便主线程快速返回
                 try:
                     self._last_connect_error = str(e)
                 except Exception:
                     self._last_connect_error = "Unknown connection error"
+                finally:
+                    self._connect_result_event.set()
                      
                  
         
@@ -650,23 +665,36 @@ class ConnectionManager:
         # 使用守护线程而不是线程池，确保线程能够持续运行
         self._connection_thread = threading.Thread(target=run_worker, daemon=True)
         self._connection_thread.start()
-        
-        # 等待连接建立或快速失败
+
+        # 等待连接线程发出成功或失败的信号
         max_wait = 12  # 将最大等待缩短，避免API超时
-        wait_time = 0
-        while wait_time < max_wait:
-            time.sleep(0.2)
-            wait_time += 0.2
-            # 若连接成功
+        signalled = self._connect_result_event.wait(timeout=max_wait)
+
+        if signalled:
             if self.connected:
                 connection_logger.info("IBKR connection established successfully")
                 return True
-            # 若出现错误则立即失败返回
-            if self._last_connect_error:
-                connection_logger.error(f"IBKR connection failed fast: {self._last_connect_error}")
+
+            if self._connect_cancelled:
+                connection_logger.warning("IBKR connection attempt cancelled before completion")
                 return False
-        
+
+            if self._last_connect_error:
+                connection_logger.error(
+                    f"IBKR connection failed fast: {self._last_connect_error}"
+                )
+                self._force_stop_connection_thread(mark_cancelled=False)
+                return False
+
+            connection_logger.error("IBKR connection failed without error details")
+            self._force_stop_connection_thread(mark_cancelled=False)
+            return False
+
         connection_logger.error("IBKR connection timeout")
+        if not self._last_connect_error:
+            self._last_connect_error = "Connection attempt timed out"
+        self._connect_cancelled = True
+        self._force_stop_connection_thread()
         return False
 
     def _record_connect_result(self, success: bool) -> None:
@@ -851,6 +879,10 @@ class ConnectionManager:
         if force_abort_existing:
             self._force_stop_connection_thread()
 
+        # 重置连接结果事件，用于在新线程中发出连接完成或失败信号
+        self._connect_result_event = threading.Event()
+        self._connect_cancelled = False
+
         connection_logger.info("Connecting to IBKR...")
         success = False
         try:
@@ -863,11 +895,19 @@ class ConnectionManager:
                 self._connect_attempt_started_at = None
                 self._connect_state_cond.notify_all()
 
-    def _force_stop_connection_thread(self) -> None:
+    def _force_stop_connection_thread(self, mark_cancelled: bool = True) -> None:
         thread = self._connection_thread
         loop = self._loop
 
         self._connection_thread_alive = False
+        if mark_cancelled:
+            self._connect_cancelled = True
+
+        # 确保等待中的线程能够及时获知连接已被中断
+        try:
+            self._connect_result_event.set()
+        except Exception:
+            pass
 
         if loop:
             try:
