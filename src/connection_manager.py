@@ -802,6 +802,31 @@ class ConnectionManager:
                 connection_logger.info("Configuration changed, reconnecting...")
                 self.disconnect()
 
+        wait_logged = False
+        with self._connect_state_cond:
+            while self._connect_in_progress:
+                if not wait_logged:
+                    connection_logger.info("Another IBKR connection attempt is in progress; waiting for completion")
+                    wait_logged = True
+
+                # 如果等待期间连接已经建立，则直接返回
+                if self.connected and self.ib and self.ib.isConnected():
+                    connection_logger.info("IBKR connection became available while waiting for existing attempt")
+                    self._record_connect_result(True)
+                    return True
+
+                # 等待其他连接尝试完成
+                self._connect_state_cond.wait(timeout=1.0)
+
+            # 等待结束后再次检查连接状态，避免重复启动连接
+            if self.connected and self.ib and self.ib.isConnected():
+                connection_logger.info("IBKR connection completed while waiting")
+                self._record_connect_result(True)
+                return True
+
+            # 标记当前正在尝试连接，阻止其他线程同时发起连接
+            self._connect_in_progress = True
+
         connection_logger.info("Connecting to IBKR...")
         success = False
         try:
