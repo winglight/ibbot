@@ -46,19 +46,48 @@ async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get
             f"API add_risk_rule: symbol={rule.symbol}, SL={rule.stop_loss_price}, TP={rule.take_profit_price}, "
             f"max_loss%={rule.max_loss_percent}, max_time_span={rule.max_time_span}, rule_type={rule.rule_type}"
         )
-        risk_manager.add_risk_rule(
-            symbol=rule.symbol,
-            stop_loss_price=rule.stop_loss_price,
-            take_profit_price=rule.take_profit_price,
-            max_loss_percent=rule.max_loss_percent,
-            max_time_span=rule.max_time_span,
-            auto_trailing=(rule.rule_type == 'trailing'),
-            atr_params=rule.atr_params,
-            rule_type=rule.rule_type,
+
+        async_task = asyncio.create_task(
+            asyncio.to_thread(
+                risk_manager.add_risk_rule,
+                rule.symbol,
+                rule.stop_loss_price,
+                rule.take_profit_price,
+                rule.max_loss_percent,
+                rule.max_time_span,
+                rule.rule_type == 'trailing',
+                rule.atr_params,
+                rule.rule_type,
+            )
         )
-        
+
+        try:
+            success = await asyncio.wait_for(async_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "add_risk_rule processing timed out; continuing in background"
+            )
+
+            def _log_task_result(task: asyncio.Task):
+                try:
+                    task.result()
+                except Exception as task_err:  # pragma: no cover - best effort logging
+                    logger.error(f"add_risk_rule background task failed: {task_err}")
+
+            async_task.add_done_callback(_log_task_result)
+            return {
+                "success": True,
+                "message": "Risk rule save is processing in background",
+                "pending": True,
+            }
+
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to add risk rule")
+
         return {"success": True, "message": "Risk rule added successfully"}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Add risk rule error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
