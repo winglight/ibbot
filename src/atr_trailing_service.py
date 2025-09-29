@@ -192,24 +192,41 @@ class ATRTrailingService:
         self._states: Dict[str, _SymbolState] = {}
         self._stream_callback = self._handle_stream_bar
 
+    @staticmethod
+    def _is_trailing_rule(rule) -> bool:
+        rule_type = getattr(rule, "rule_type", None)
+        if not rule_type:
+            if getattr(rule, "auto_trailing", False):
+                rule_type = "trailing"
+        return rule_type == "trailing"
+
     def _resolve_params(self, rule) -> ATRTrailingParams:
         payload = getattr(rule, "atr_params", None)
         params = ATRTrailingParams.from_mapping(payload)
         return params
 
-    async def refresh_for_symbol(self, symbol: str, position: Dict, rule) -> None:
-        if not getattr(rule, "auto_trailing", False):
-            return
+    def ensure_subscription(self, symbol: str, rule) -> Optional[_SymbolState]:
+        if not self._is_trailing_rule(rule):
+            self.disable_symbol(symbol)
+            return None
 
-        state = self._states.get(symbol)
         params = self._resolve_params(rule)
+        state = self._states.get(symbol)
         if state is None or state.params.lookback != params.lookback or state.params.bar_minutes != params.bar_minutes:
             builder = FiveMinuteBarBuilder(window_minutes=params.bar_minutes, lookback=max(params.lookback * 2, 32))
             state = _SymbolState(params=params, builder=builder)
+            state.rule = rule
             self._states[symbol] = state
             self.price_stream.subscribe(symbol, self._stream_callback, interval_seconds=params.stream_interval)
         else:
             state.params = params
+            state.rule = rule
+        return state
+
+    async def refresh_for_symbol(self, symbol: str, position: Dict, rule) -> None:
+        state = self.ensure_subscription(symbol, rule)
+        if state is None:
+            return
 
         async with state.lock:
             state.position = position
@@ -223,7 +240,7 @@ class ATRTrailingService:
 
     async def _handle_stream_bar(self, symbol: str, bar: RealTimeBar) -> None:
         state = self._states.get(symbol)
-        if state is None:
+        if state is None or not self._is_trailing_rule(state.rule):
             return
         async with state.lock:
             completed = state.builder.add_bar(bar)
@@ -250,6 +267,8 @@ class ATRTrailingService:
         event_time: datetime,
     ) -> None:
         if state.position is None or state.rule is None:
+            return
+        if not self._is_trailing_rule(state.rule):
             return
         qty = state.position.get("position", 0)
         if qty == 0 or not state.rule.enabled:

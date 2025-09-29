@@ -31,6 +31,9 @@ class RiskRuleRequest(BaseModel):
     """风险规则请求模型"""
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
+    auto_trailing: Optional[bool] = None
+    rule_type: Optional[str] = None
+    atr_params: Optional[Dict[str, Any]] = None
 
     @field_validator('stop_loss_price', 'take_profit_price')
     def prices_must_be_positive(cls, v):
@@ -84,6 +87,9 @@ class RiskRuleRequest(BaseModel):
     take_profit_price: Optional[float] = None
     max_loss_percent: Optional[float] = None
     max_time_span: Optional[int] = 30  # 以分钟为单位的最大持仓时间，默认30分钟
+    auto_trailing: Optional[bool] = None
+    rule_type: Optional[str] = None
+    atr_params: Optional[Dict[str, Any]] = None
 
     # 至少提供一个止盈/止损价格，且提供的价格必须 > 0
     @model_validator(mode='after')
