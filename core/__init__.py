@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 from src.connection_manager import connection_manager, ConnectionConfig
 from src.ibkr_client import IBKRClient
@@ -22,7 +23,7 @@ from src.strategies.buy_the_dip_strategy import BuyTheDipStrategy
 from src.dom_dependencies import DOMConfig, get_dom_processor
 import src.dom_dependencies as dom_dependencies
 from src.strategy_risk import StrategyRiskManager
-from src.cache import init_redis, get_redis_client
+from src.cache import init_redis
 
 # Initialize shared instances
 telegram_notifier = TelegramNotifier()
@@ -50,12 +51,51 @@ atr_trailing_service = ATRTrailingService(
     notification_manager=notification_manager,
 )
 
-try:
-    asyncio.run(init_redis())
-except Exception as exc:  # pragma: no cover - defensive guard
-    logger.warning(f"Redis initialisation skipped: {exc}")
+redis_client = None
 
-redis_client = get_redis_client()
+
+def _initialise_redis_in_background() -> None:
+    """Initialise Redis without blocking the main import path."""
+
+    global redis_client
+    try:
+        client = asyncio.run(init_redis())
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning(f"Redis initialisation skipped: {exc}")
+        return
+
+    if client is not None:
+        redis_client = client
+        logger.info("Redis client ready (background thread)")
+    else:
+        redis_client = None
+        logger.info("Redis client unavailable after background initialisation")
+
+
+def _rebuild_strategy_cache_in_background() -> None:
+    """Rebuild the strategy cache without blocking FastAPI startup."""
+
+    try:
+        strategy_manager.rebuild_strategy_cache(block=True)
+        logger.info("Strategy cache rebuilt in background thread")
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning(f"Failed to rebuild strategy cache during bootstrap: {exc}")
+
+
+def _start_background_threads() -> None:
+    logger.info("Starting background initialisation threads (Redis, strategy cache)")
+
+    threading.Thread(
+        target=_initialise_redis_in_background,
+        name="redis-init",
+        daemon=True,
+    ).start()
+
+    threading.Thread(
+        target=_rebuild_strategy_cache_in_background,
+        name="strategy-cache-rebuild",
+        daemon=True,
+    ).start()
 
 try:
     strategy_manager.set_dependencies(
@@ -67,10 +107,7 @@ try:
 except Exception:
     pass
 
-try:
-    strategy_manager.rebuild_strategy_cache(block=True)
-except Exception as exc:  # pragma: no cover - defensive guard
-    logger.warning(f"Failed to rebuild strategy cache during bootstrap: {exc}")
+_start_background_threads()
 
 order_manager = get_order_manager()
 try:
