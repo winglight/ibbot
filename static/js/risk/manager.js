@@ -4,6 +4,16 @@
     const riskNs = appModules.risk = appModules.risk || {};
     const managerNs = riskNs.manager = riskNs.manager || {};
 
+    const ATR_PARAM_FIELDS = [
+        { id: 'atrLookback', key: 'lookback', parser: (value) => parseInt(value, 10) },
+        { id: 'atrBarMinutes', key: 'bar_minutes', parser: (value) => parseInt(value, 10) },
+        { id: 'atrStreamInterval', key: 'stream_interval', parser: (value) => parseInt(value, 10) },
+        { id: 'atrUpdateThrottle', key: 'update_throttle', parser: (value) => parseFloat(value) },
+        { id: 'atrMultiplierSl', key: 'multiplier_sl', parser: (value) => parseFloat(value) },
+        { id: 'atrMultiplierTp', key: 'multiplier_tp', parser: (value) => parseFloat(value) },
+        { id: 'atrDeltaThreshold', key: 'delta_threshold', parser: (value) => parseFloat(value) },
+    ];
+
     class RiskRulesManager {
         constructor(app) {
             this.app = app;
@@ -11,6 +21,7 @@
             this.currentRiskRuleData = null;
             this.stopLossListener = null;
             this.takeProfitListener = null;
+            this.ruleTypeChangeHandler = null;
 
             if (this.app && typeof this.app.registerWebSocketHandler === 'function') {
                 this.unsubscribe = this.app.registerWebSocketHandler('risk_rules', (payload) => this.applySnapshot(payload));
@@ -72,8 +83,24 @@
             }
 
             const rules = payload.rules || {};
-            this.app.riskRules = rules;
-            this.renderRiskRulesTable(rules);
+            const normalizedRules = {};
+            if (Array.isArray(rules)) {
+                rules.forEach((rule) => {
+                    const normalized = this.buildNormalizedRule(rule);
+                    if (normalized) {
+                        normalizedRules[normalized.symbol] = normalized;
+                    }
+                });
+            } else {
+                Object.entries(rules).forEach(([symbolKey, rule]) => {
+                    const normalized = this.buildNormalizedRule(rule, symbolKey);
+                    if (normalized) {
+                        normalizedRules[normalized.symbol] = normalized;
+                    }
+                });
+            }
+            this.app.riskRules = normalizedRules;
+            this.renderRiskRulesTable(normalizedRules);
             return true;
         }
 
@@ -88,6 +115,9 @@
             });
 
             tbody.innerHTML = Object.values(rules).map(rule => {
+                const normalizedType = this.normalizeRuleType(rule);
+                const typeLabel = normalizedType === 'trailing' ? 'Trailing' : 'Fixed';
+                const typeClass = normalizedType === 'trailing' ? 'primary' : 'secondary';
                 const portfolioItem = portfolioMap[rule.symbol];
                 const currentPrice = portfolioItem ? portfolioItem.current_price : 0;
                 const avgCost = portfolioItem ? portfolioItem.avg_cost : 0;
@@ -100,6 +130,7 @@
                 return `
                     <tr>
                         <td>${rule.symbol}</td>
+                        <td><span class="badge bg-${typeClass}">${typeLabel}</span></td>
                         <td>${rule.stop_loss_price ? '$' + this.app.formatNumber(rule.stop_loss_price) : 'N/A'}</td>
                         <td>${rule.take_profit_price ? '$' + this.app.formatNumber(rule.take_profit_price) : 'N/A'}</td>
                         <td>${rule.max_time_span || 'N/A'}</td>
@@ -121,6 +152,101 @@
                     </tr>
                 `;
             }).join('');
+        }
+
+        normalizeRuleType(rule) {
+            if (!rule) return 'fixed';
+            const type = (rule.rule_type || '').toString().toLowerCase();
+            if (type === 'trailing') return 'trailing';
+            if (type === 'fixed') return 'fixed';
+            return rule.auto_trailing ? 'trailing' : 'fixed';
+        }
+
+        buildNormalizedRule(rule, fallbackSymbol) {
+            if (!rule) return null;
+            const symbol = (rule.symbol || fallbackSymbol || '').toString().toUpperCase();
+            if (!symbol) return null;
+            const normalizedType = this.normalizeRuleType(rule);
+            const atrParams = rule.atr_params && typeof rule.atr_params === 'object' ? { ...rule.atr_params } : {};
+            return {
+                ...rule,
+                symbol,
+                rule_type: normalizedType,
+                atr_params: atrParams,
+            };
+        }
+
+        updateRuleTypeSections(ruleType) {
+            const normalized = (ruleType || 'fixed').toLowerCase();
+            const isTrailing = normalized === 'trailing';
+            document.querySelectorAll('.fixed-rule-field').forEach((el) => {
+                if (!el) return;
+                el.style.display = isTrailing ? 'none' : '';
+            });
+            const atrSection = document.getElementById('atrParamsSection');
+            if (atrSection) {
+                atrSection.style.display = isTrailing ? 'block' : 'none';
+            }
+            const pnlSection = document.getElementById('pnlPreviewSection');
+            if (pnlSection) {
+                pnlSection.style.display = isTrailing ? 'none' : 'block';
+            }
+        }
+
+        collectAtrParams() {
+            const params = {};
+            ATR_PARAM_FIELDS.forEach(({ id, key, parser }) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                const raw = el.value;
+                if (raw === '' || raw === null || raw === undefined) return;
+                const value = parser(raw);
+                if (Number.isFinite(value)) {
+                    params[key] = value;
+                }
+            });
+            return params;
+        }
+
+        populateAtrParams(atrParams = {}) {
+            ATR_PARAM_FIELDS.forEach(({ id, key }) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                const defaultValue = el.getAttribute('data-default');
+                if (Object.prototype.hasOwnProperty.call(atrParams, key)) {
+                    const value = atrParams[key];
+                    el.value = value !== undefined && value !== null ? value : (defaultValue ?? el.defaultValue ?? '');
+                } else if (defaultValue !== null && defaultValue !== undefined) {
+                    el.value = defaultValue;
+                } else if (el.defaultValue !== undefined) {
+                    el.value = el.defaultValue;
+                } else {
+                    el.value = '';
+                }
+            });
+        }
+
+        resetRuleTypeListener() {
+            if (this.ruleTypeChangeHandler) {
+                const typeSelect = document.getElementById('riskRuleType');
+                if (typeSelect) {
+                    typeSelect.removeEventListener('change', this.ruleTypeChangeHandler);
+                }
+                this.ruleTypeChangeHandler = null;
+            }
+        }
+
+        handleRuleTypeSwitch(ruleType) {
+            const normalized = (ruleType || 'fixed').toLowerCase();
+            this.updateRuleTypeSections(normalized);
+            if (this.currentRiskRuleData) {
+                this.currentRiskRuleData.ruleType = normalized;
+            }
+            this.removePnLUpdateListeners();
+            if (normalized === 'fixed') {
+                this.addPnLUpdateListeners();
+                this.updatePnLPreview();
+            }
         }
 
         normalizeRuleStatus(status) {
@@ -192,7 +318,9 @@
                         this.app.riskRules[symbol] = Object.assign({}, existingRule || {}, {
                             symbol,
                             stop_loss_price: sl ?? (existingRule ? existingRule.stop_loss_price : undefined),
-                            take_profit_price: tp ?? (existingRule ? existingRule.take_profit_price : undefined)
+                            take_profit_price: tp ?? (existingRule ? existingRule.take_profit_price : undefined),
+                            rule_type: existingRule ? this.normalizeRuleType(existingRule) : 'fixed',
+                            atr_params: existingRule && existingRule.atr_params ? { ...existingRule.atr_params } : {},
                         });
                     }
                 }
@@ -355,36 +483,65 @@
             return this.app.orderManager?.updatePositionValueField?.();
         }
 
-        openRiskRuleModal(symbol = '', stopLoss = '', takeProfit = '', maxTime = '', position = 0, currentPrice = 0, avgCost = 0, isEditMode = false) {
-            document.getElementById('riskSymbol').value = symbol;
-            document.getElementById('riskStopLossPrice').value = stopLoss;
-            document.getElementById('riskTakeProfitPrice').value = takeProfit;
-            document.getElementById('riskMaxTime').value = maxTime;
+        openRiskRuleModal(symbol = '', stopLoss = '', takeProfit = '', maxTime = '', position = 0, currentPrice = 0, avgCost = 0, isEditMode = false, ruleType = 'fixed', atrParams = {}) {
+            const symbolInput = document.getElementById('riskSymbol');
+            const stopLossInput = document.getElementById('riskStopLossPrice');
+            const takeProfitInput = document.getElementById('riskTakeProfitPrice');
+            const maxTimeInput = document.getElementById('riskMaxTime');
+            if (symbolInput) symbolInput.value = symbol;
+            if (stopLossInput) stopLossInput.value = stopLoss;
+            if (takeProfitInput) takeProfitInput.value = takeProfit;
+            if (maxTimeInput) maxTimeInput.value = maxTime ?? '';
+
+            const normalizedType = (ruleType || 'fixed').toLowerCase();
+            const atrPayload = atrParams && typeof atrParams === 'object' ? { ...atrParams } : {};
 
             this.currentRiskRuleData = {
-                symbol: symbol,
-                position: position,
-                currentPrice: currentPrice,
-                avgCost: avgCost
+                symbol,
+                position,
+                currentPrice,
+                avgCost,
+                ruleType: normalizedType,
+                atrParams: atrPayload,
             };
 
-            const pnlSection = document.getElementById('pnlPreviewSection');
-            pnlSection.style.display = 'block';
-            this.updatePnLPreview();
+            this.populateAtrParams(atrPayload);
 
-            const submitBtn = document.getElementById('submitRiskRuleBtn');
-            if (isEditMode) {
-                submitBtn.innerHTML = '<i class="fas fa-save"></i> Save Changes';
-            } else {
-                submitBtn.innerHTML = '<i class="fas fa-plus"></i> Add Risk Rule';
+            const typeSelect = document.getElementById('riskRuleType');
+            if (typeSelect) {
+                typeSelect.value = normalizedType;
             }
 
-            this.addPnLUpdateListeners();
+            const submitBtn = document.getElementById('submitRiskRuleBtn');
+            if (submitBtn) {
+                if (isEditMode) {
+                    submitBtn.innerHTML = '<i class="fas fa-save"></i> Save Changes';
+                } else {
+                    submitBtn.innerHTML = '<i class="fas fa-plus"></i> Add Risk Rule';
+                }
+            }
 
-            const modal = new bootstrap.Modal(document.getElementById('riskRuleModal'));
+            this.handleRuleTypeSwitch(normalizedType);
 
-            document.getElementById('riskRuleModal').addEventListener('hidden.bs.modal', () => {
+            if (typeSelect) {
+                this.resetRuleTypeListener();
+                this.ruleTypeChangeHandler = (event) => {
+                    const selectedType = event?.target?.value || 'fixed';
+                    this.handleRuleTypeSwitch(selectedType);
+                };
+                typeSelect.addEventListener('change', this.ruleTypeChangeHandler);
+            }
+
+            const modalElement = document.getElementById('riskRuleModal');
+            if (!modalElement) {
+                return;
+            }
+            const modal = new bootstrap.Modal(modalElement);
+
+            modalElement.addEventListener('hidden.bs.modal', () => {
                 this.removePnLUpdateListeners();
+                this.resetRuleTypeListener();
+                this.currentRiskRuleData = null;
             }, { once: true });
 
             modal.show();
@@ -392,36 +549,56 @@
 
         updatePnLPreview() {
             if (!this.currentRiskRuleData) return;
+            if ((this.currentRiskRuleData.ruleType || 'fixed') === 'trailing') {
+                return;
+            }
 
             const { position, currentPrice, avgCost } = this.currentRiskRuleData;
             const stopLossPrice = parseFloat(document.getElementById('riskStopLossPrice').value) || 0;
             const takeProfitPrice = parseFloat(document.getElementById('riskTakeProfitPrice').value) || 0;
 
             if (position === 0 || !avgCost) {
-                document.getElementById('stopLossPnL').textContent = 'N/A';
-                document.getElementById('takeProfitPnL').textContent = 'N/A';
-                document.getElementById('stopLossPnL').className = 'fw-bold text-muted';
-                document.getElementById('takeProfitPnL').className = 'fw-bold text-muted';
+                const stopLossEl = document.getElementById('stopLossPnL');
+                const takeProfitEl = document.getElementById('takeProfitPnL');
+                if (stopLossEl) {
+                    stopLossEl.textContent = 'N/A';
+                    stopLossEl.className = 'fw-bold text-muted';
+                }
+                if (takeProfitEl) {
+                    takeProfitEl.textContent = 'N/A';
+                    takeProfitEl.className = 'fw-bold text-muted';
+                }
                 return;
             }
 
             const stopLossPnL = (stopLossPrice - avgCost) * position;
             const takeProfitPnL = (takeProfitPrice - avgCost) * position;
 
-            document.getElementById('stopLossPnL').textContent = `$${stopLossPnL.toFixed(2)}`;
-            document.getElementById('takeProfitPnL').textContent = `$${takeProfitPnL.toFixed(2)}`;
-
             const stopLossElement = document.getElementById('stopLossPnL');
             const takeProfitElement = document.getElementById('takeProfitPnL');
-
-            stopLossElement.className = stopLossPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
-            takeProfitElement.className = takeProfitPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
+            if (stopLossElement) {
+                stopLossElement.textContent = `$${stopLossPnL.toFixed(2)}`;
+                stopLossElement.className = stopLossPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
+            }
+            if (takeProfitElement) {
+                takeProfitElement.textContent = `$${takeProfitPnL.toFixed(2)}`;
+                takeProfitElement.className = takeProfitPnL >= 0 ? 'fw-bold text-success' : 'fw-bold text-danger';
+            }
         }
 
         addPnLUpdateListeners() {
             this.removePnLUpdateListeners();
 
-            const symbol = document.getElementById('riskSymbol').value;
+            if (this.currentRiskRuleData && (this.currentRiskRuleData.ruleType || 'fixed') === 'trailing') {
+                return;
+            }
+
+            const symbolInput = document.getElementById('riskSymbol');
+            if (!symbolInput) return;
+            const symbol = symbolInput.value;
+            const stopLossEl = document.getElementById('riskStopLossPrice');
+            const takeProfitEl = document.getElementById('riskTakeProfitPrice');
+            if (!stopLossEl || !takeProfitEl) return;
 
             this.stopLossListener = (e) => {
                 const correctedPrice = this.app.correctPriceStep(e.target.value, symbol);
@@ -439,16 +616,22 @@
                 this.updatePnLPreview();
             };
 
-            document.getElementById('riskStopLossPrice').addEventListener('input', this.stopLossListener);
-            document.getElementById('riskTakeProfitPrice').addEventListener('input', this.takeProfitListener);
+            stopLossEl.addEventListener('input', this.stopLossListener);
+            takeProfitEl.addEventListener('input', this.takeProfitListener);
         }
 
         removePnLUpdateListeners() {
             if (this.stopLossListener) {
-                document.getElementById('riskStopLossPrice').removeEventListener('input', this.stopLossListener);
+                const stopLossEl = document.getElementById('riskStopLossPrice');
+                if (stopLossEl) {
+                    stopLossEl.removeEventListener('input', this.stopLossListener);
+                }
             }
             if (this.takeProfitListener) {
-                document.getElementById('riskTakeProfitPrice').removeEventListener('input', this.takeProfitListener);
+                const takeProfitEl = document.getElementById('riskTakeProfitPrice');
+                if (takeProfitEl) {
+                    takeProfitEl.removeEventListener('input', this.takeProfitListener);
+                }
             }
         }
 
@@ -475,6 +658,16 @@
 
                 let stopLoss, takeProfit;
 
+                const existingRule = this.app?.riskRules?.[symbol] || null;
+                const normalizedType = this.normalizeRuleType(existingRule);
+                const atrParams = existingRule?.atr_params || {};
+                const existingMaxTime = existingRule?.max_time_span ?? '';
+
+                if (normalizedType === 'trailing') {
+                    this.openRiskRuleModal(symbol, '', '', existingMaxTime || '', position, currentPrice, avgCost, true, normalizedType, atrParams);
+                    return;
+                }
+
                 if (presetStopLoss !== '' && presetTakeProfit !== '') {
                     stopLoss = presetStopLoss;
                     takeProfit = presetTakeProfit;
@@ -488,11 +681,21 @@
                     }
                 }
 
-                this.openRiskRuleModal(symbol, stopLoss, takeProfit, '', position, currentPrice, avgCost, true);
+                this.openRiskRuleModal(symbol, stopLoss, takeProfit, existingMaxTime || '', position, currentPrice, avgCost, true, normalizedType, atrParams);
             } catch (error) {
                 console.error('Failed to get risk config:', error);
                 let stopLoss, takeProfit;
                 const isShortPosition = position < 0;
+
+                const existingRule = this.app?.riskRules?.[symbol] || null;
+                const normalizedType = this.normalizeRuleType(existingRule);
+                const atrParams = existingRule?.atr_params || {};
+                const existingMaxTime = existingRule?.max_time_span ?? '';
+
+                if (normalizedType === 'trailing') {
+                    this.openRiskRuleModal(symbol, '', '', existingMaxTime || '', position, currentPrice, avgCost, true, normalizedType, atrParams);
+                    return;
+                }
 
                 if (presetStopLoss !== '' && presetTakeProfit !== '') {
                     stopLoss = presetStopLoss;
@@ -522,7 +725,7 @@
                     }
                 }
 
-                this.openRiskRuleModal(symbol, stopLoss, takeProfit, '', position, currentPrice, avgCost, true);
+                this.openRiskRuleModal(symbol, stopLoss, takeProfit, existingMaxTime || '', position, currentPrice, avgCost, true, normalizedType, atrParams);
             }
         }
 
@@ -564,19 +767,30 @@
         }
 
         async addRiskRule() {
+            const ruleTypeSelect = document.getElementById('riskRuleType');
+            const selectedRuleType = ruleTypeSelect ? (ruleTypeSelect.value || 'fixed').toLowerCase() : 'fixed';
+            const atrParams = this.collectAtrParams();
             const rule = {
                 symbol: document.getElementById('riskSymbol').value.toUpperCase(),
                 stop_loss_price: document.getElementById('riskStopLossPrice').value ? parseFloat(document.getElementById('riskStopLossPrice').value) : null,
                 take_profit_price: document.getElementById('riskTakeProfitPrice').value ? parseFloat(document.getElementById('riskTakeProfitPrice').value) : null,
-                max_time_span: document.getElementById('riskMaxTime').value || null
+                max_time_span: document.getElementById('riskMaxTime').value || null,
+                rule_type: selectedRuleType,
             };
+
+            if (selectedRuleType === 'trailing') {
+                rule.stop_loss_price = null;
+                rule.take_profit_price = null;
+                rule.max_time_span = null;
+                rule.atr_params = atrParams;
+            }
 
             if (!rule.symbol) {
                 this.app.showAlert('warning', 'Please enter a symbol');
                 return;
             }
 
-            if (!rule.stop_loss_price && !rule.take_profit_price) {
+            if (selectedRuleType !== 'trailing' && !rule.stop_loss_price && !rule.take_profit_price) {
                 this.app.showAlert('warning', 'Please enter at least one price level');
                 return;
             }
@@ -589,6 +803,8 @@
 
                 this.app.showAlert('success', 'Risk rule added successfully');
                 document.getElementById('riskRuleForm').reset();
+                this.populateAtrParams({});
+                this.handleRuleTypeSwitch('fixed');
                 this.loadRiskRules({ force: true });
 
                 const modal = bootstrap.Modal.getInstance(document.getElementById('riskRuleModal'));

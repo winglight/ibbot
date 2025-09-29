@@ -13,6 +13,7 @@ import importlib
 import importlib.util
 import sys
 import asyncio
+from collections.abc import Mapping
 from copy import deepcopy
 from threading import RLock
 from pathlib import Path
@@ -107,7 +108,17 @@ class Strategy:
 
 class StrategyManager:
     """Strategy Manager Class"""
-    
+
+    _ATR_PARAM_CASTERS = {
+        "lookback": int,
+        "bar_minutes": int,
+        "stream_interval": int,
+        "update_throttle": float,
+        "multiplier_sl": float,
+        "multiplier_tp": float,
+        "delta_threshold": float,
+    }
+
     def __init__(self, data_dir: str = "data", strategy_dir: str = DEFAULT_STRATEGY_PATH):
         self.data_dir = Path(data_dir)
         normalized_strategy_dir = self._normalize_strategy_path_value(strategy_dir)
@@ -987,6 +998,145 @@ class StrategyManager:
     def _get_strategy_setting(self, strategy_name: str, suffix: str, default: Any = None) -> Any:
         key = f"{strategy_name}_{suffix}"
         return (self.settings or {}).get(key, default)
+
+    @staticmethod
+    def _normalize_symbol_value(symbol: Optional[str]) -> Optional[str]:
+        if symbol is None:
+            return None
+        try:
+            text = str(symbol).strip().upper()
+        except Exception:  # pragma: no cover - defensive guard
+            return None
+        return text or None
+
+    def _convert_atr_value(self, key: str, value: Any) -> Optional[Any]:
+        caster = self._ATR_PARAM_CASTERS.get(key)
+        if not caster or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            if caster is int:
+                return int(float(value))
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                if caster is int:
+                    return int(float(text))
+                return float(text)
+            except (TypeError, ValueError):
+                return None
+        try:
+            if caster is int:
+                return int(float(value))
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _extract_atr_params(self, payload: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        if not payload:
+            return {}
+
+        params: Dict[str, Any] = {}
+        mappings: List[Mapping[str, Any]] = []
+
+        if isinstance(payload, Mapping):
+            mappings.append(payload)
+            for nested_key in ("atr_params", "sl_atr_params"):
+                nested = payload.get(nested_key)
+                if isinstance(nested, Mapping):
+                    mappings.append(nested)
+
+        for mapping in mappings:
+            for raw_key, raw_value in mapping.items():
+                if not isinstance(raw_key, str):
+                    continue
+                key = raw_key.strip().lower()
+                if key.startswith('sl_atr_'):
+                    key = key[7:]
+                elif key.startswith('atr_'):
+                    key = key[4:]
+                if key not in self._ATR_PARAM_CASTERS:
+                    continue
+                converted = self._convert_atr_value(key, raw_value)
+                if converted is not None:
+                    params[key] = converted
+
+        return params
+
+    def _resolve_symbol_for_strategy(self, strategy: Strategy, payload: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+        candidates: List[Any] = []
+        if payload and isinstance(payload, Mapping):
+            primary = payload.get('primary_symbol')
+            if primary:
+                candidates.append(primary)
+            symbol_value = payload.get('symbol')
+            if symbol_value:
+                candidates.append(symbol_value)
+        if getattr(strategy, 'primary_symbol', None):
+            candidates.append(strategy.primary_symbol)
+        stored_primary = self._get_strategy_setting(strategy.name, 'primary_symbol')
+        if stored_primary:
+            candidates.append(stored_primary)
+        for candidate in candidates:
+            normalized = self._normalize_symbol_value(candidate)
+            if normalized:
+                return normalized
+        return None
+
+    def _configure_trailing_risk_rule(
+        self,
+        strategy_name: str,
+        symbol: Optional[str],
+        atr_params: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self.risk_manager:
+            strategy_logger.warning(
+                "Risk manager unavailable for trailing stop configuration",
+                strategy=strategy_name,
+            )
+            return
+
+        normalized_symbol = self._normalize_symbol_value(symbol)
+        if not normalized_symbol:
+            strategy_logger.warning(
+                "Cannot configure trailing risk rule without symbol",
+                strategy=strategy_name,
+            )
+            return
+
+        payload = atr_params or {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        try:
+            existing_rules = getattr(self.risk_manager, 'risk_rules', {}) or {}
+            existing_rule = existing_rules.get(normalized_symbol)
+            if not payload and existing_rule and getattr(existing_rule, 'atr_params', None):
+                payload = dict(existing_rule.atr_params)
+            if existing_rule:
+                self.risk_manager.update_risk_rule(
+                    normalized_symbol,
+                    rule_type='trailing',
+                    atr_params=payload,
+                    enabled=True,
+                )
+            else:
+                self.risk_manager.add_risk_rule(
+                    normalized_symbol,
+                    rule_type='trailing',
+                    atr_params=payload,
+                )
+            strategy_logger.info(
+                "Configured trailing risk rule via risk manager",
+                strategy=strategy_name,
+                symbol=normalized_symbol,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            strategy_logger.error(
+                f"Failed to configure trailing risk rule for {strategy_name} ({normalized_symbol}): {exc}"
+            )
 
     def _normalize_strategy_file_display(
         self,
@@ -2053,6 +2203,7 @@ class StrategyManager:
             
             # 保存SL/TP配置到策略设置
             sl_tp_settings = {}
+            atr_params_payload: Dict[str, Any] = {}
             if strategy_data.get('sl_enabled'):
                 sl_tp_settings[f"{name}_sl_enabled"] = True
                 sl_tp_settings[f"{name}_sl_price"] = strategy_data.get('sl_price')
@@ -2061,7 +2212,12 @@ class StrategyManager:
                 sl_tp_settings[f"{name}_tp_enabled"] = True
                 sl_tp_settings[f"{name}_tp_price"] = strategy_data.get('tp_price')
                 sl_tp_settings[f"{name}_tp_type"] = strategy_data.get('tp_type', 'amount')
-                
+
+            if strategy.strategy_type == "internal":
+                atr_params_payload = self._extract_atr_params(strategy_data)
+                if atr_params_payload:
+                    sl_tp_settings[f"{name}_sl_atr_params"] = atr_params_payload
+
             if sl_tp_settings:
                 self._persist_strategy_settings(sl_tp_settings)
                 strategy_logger.info(f"Saved SL/TP settings for strategy {name}")
@@ -2105,6 +2261,11 @@ class StrategyManager:
                             subscription=stored_subscription,
                             symbol=stored_symbol,
                         )
+
+                trailing_selected = bool(strategy_data.get('sl_enabled')) and str(strategy_data.get('sl_type', 'amount')).lower() == 'trailing'
+                if trailing_selected:
+                    trailing_symbol = self._resolve_symbol_for_strategy(strategy, strategy_data)
+                    self._configure_trailing_risk_rule(name, trailing_symbol, atr_params_payload)
 
             strategy_logger.info(f"Strategy {name} added successfully")
             # 重新启动调度器以应用新的调度配置
@@ -2788,6 +2949,7 @@ class StrategyManager:
             position_settings_changed = False
             restart_data_push = False
             parameter_updates: Dict[str, Any] = {}
+            atr_params_update: Dict[str, Any] = {}
             for key, value in updates.items():
                 if key in sl_tp_keys:
                     # 构造持久化键
@@ -2840,6 +3002,11 @@ class StrategyManager:
                     parameter_updates[key] = value
                 elif hasattr(strategy, key):
                     setattr(strategy, key, value)
+
+            if strategy.strategy_type == "internal":
+                atr_params_update = self._extract_atr_params(updates)
+                if atr_params_update:
+                    settings_to_save[f"{name}_sl_atr_params"] = atr_params_update
 
             # 先保存策略实体（常规字段）
             self._save_strategies()
@@ -2911,6 +3078,20 @@ class StrategyManager:
                         )
                 except Exception as exc:  # pragma: no cover - defensive guard
                     strategy_logger.warning(f"Failed to restart data push for {name}: {exc}")
+
+            if strategy.strategy_type == "internal":
+                final_sl_enabled = _coerce_bool(
+                    self._get_strategy_setting(name, 'sl_enabled', False),
+                    default=False,
+                )
+                final_sl_type = str(
+                    self._get_strategy_setting(name, 'sl_type', 'amount') or 'amount'
+                ).lower()
+                if final_sl_enabled and final_sl_type == 'trailing':
+                    trailing_symbol = self._resolve_symbol_for_strategy(strategy, updates)
+                    stored_atr = self._get_strategy_setting(name, 'sl_atr_params') or {}
+                    atr_payload = atr_params_update or self._extract_atr_params(stored_atr)
+                    self._configure_trailing_risk_rule(name, trailing_symbol, atr_payload)
 
             strategy_logger.info(f"Updated strategy: {name}")
             if 'enabled' in updates:
