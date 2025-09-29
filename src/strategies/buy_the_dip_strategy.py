@@ -210,7 +210,7 @@ class BuyTheDipStrategy(CandleSubscriptionStrategy):
         rolling = df["cvd"].rolling(self.cvd_window)
         df["z_cvd"] = (df["cvd"] - rolling.mean()) / rolling.std(ddof=0)
         df.replace({"z_cvd": {pd.NA: 0, math.inf: 0, -math.inf: 0}}, inplace=True)
-        df["z_cvd"].fillna(0.0, inplace=True)
+        df.loc[:, "z_cvd"] = df["z_cvd"].fillna(0.0)
         latest = df.iloc[-1]
         if latest["ma_fast"] is None or latest["ma_slow"] is None:
             return
