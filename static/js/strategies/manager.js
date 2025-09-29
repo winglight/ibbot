@@ -527,7 +527,8 @@
         async handleSummaryDataFeedChange() {
             const currentName = this.app?.currentStrategyDetails;
             if (!currentName) return;
-            const apiCall = this.app?.apiCall?.bind(this.app);
+            const app = this.app;
+            const apiCall = app?.apiCall;
             if (typeof apiCall !== 'function') {
                 console.warn('Strategy data feed update unavailable: apiCall missing');
                 return;
@@ -540,7 +541,7 @@
             if (value === this.summaryDataFeedCurrent) return;
 
             try {
-                await apiCall(`/strategies/${encodeURIComponent(currentName)}`, {
+                await apiCall.call(app, `/strategies/${encodeURIComponent(currentName)}`, {
                     method: 'PUT',
                     body: JSON.stringify({ data_subscription: value || null }),
                 });
@@ -575,7 +576,8 @@
             const currentName = this.app?.currentStrategyDetails;
             if (!currentName) return null;
 
-            const apiCall = this.app?.apiCall?.bind(this.app);
+            const app = this.app;
+            const apiCall = app?.apiCall;
             if (typeof apiCall !== 'function') {
                 console.warn('Strategy data push update unavailable: apiCall missing');
                 return { error: 'api_unavailable' };
@@ -612,7 +614,7 @@
                 this.summaryPushUpdating = true;
                 if (statusEl) statusEl.textContent = enabled ? '推送中…' : '未推送';
 
-                const res = await apiCall(`/strategies/${encodeURIComponent(currentName)}/data-push`, {
+                const res = await apiCall.call(app, `/strategies/${encodeURIComponent(currentName)}/data-push`, {
                     method: 'POST',
                     body: JSON.stringify({
                         enabled,
@@ -717,7 +719,8 @@
                 }
             }
 
-            const apiCall = this.app?.apiCall?.bind(this.app);
+            const app = this.app;
+            const apiCall = app?.apiCall;
             if (typeof apiCall !== 'function') {
                 console.warn('Strategy status request unavailable: apiCall missing');
                 this.applyStrategyStatusPayload({
@@ -730,7 +733,7 @@
             }
 
             try {
-                const res = await apiCall(`/strategies/${encodeURIComponent(name)}/status`);
+                const res = await apiCall.call(app, `/strategies/${encodeURIComponent(name)}/status`);
                 const payload = {
                     type: 'strategy_status',
                     name,
