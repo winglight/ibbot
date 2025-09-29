@@ -124,6 +124,10 @@ class ConnectionManager:
         self._connect_state_lock = threading.Lock()
         self._connect_state_cond = threading.Condition(self._connect_state_lock)
         self._connect_in_progress = False
+        self._connect_attempt_started_at: Optional[float] = None
+        self._connect_wait_limit_sec: float = max(
+            1.0, _get_env_float("IBKR_CONNECT_WAIT_LIMIT_SEC", 8.0)
+        )
         self._project_root = Path(__file__).resolve().parents[1]
         self._pre_restart_script = self._project_root / "vps-setup" / "quick-start.sh"
         self._pre_restart_attempted = False
@@ -803,6 +807,7 @@ class ConnectionManager:
                 self.disconnect()
 
         wait_logged = False
+        force_abort_existing = False
         with self._connect_state_cond:
             while self._connect_in_progress:
                 if not wait_logged:
@@ -815,6 +820,21 @@ class ConnectionManager:
                     self._record_connect_result(True)
                     return True
 
+                started_at = self._connect_attempt_started_at
+                if started_at is not None:
+                    elapsed = time.monotonic() - started_at
+                    if elapsed >= self._connect_wait_limit_sec:
+                        connection_logger.warning(
+                            "Existing IBKR connection attempt exceeded wait limit; forcing new attempt",
+                            elapsed_seconds=round(elapsed, 1),
+                            wait_limit=self._connect_wait_limit_sec,
+                        )
+                        self._connect_in_progress = False
+                        self._connect_attempt_started_at = None
+                        self._connect_state_cond.notify_all()
+                        force_abort_existing = True
+                        break
+
                 # 等待其他连接尝试完成
                 self._connect_state_cond.wait(timeout=1.0)
 
@@ -826,6 +846,10 @@ class ConnectionManager:
 
             # 标记当前正在尝试连接，阻止其他线程同时发起连接
             self._connect_in_progress = True
+            self._connect_attempt_started_at = time.monotonic()
+
+        if force_abort_existing:
+            self._force_stop_connection_thread()
 
         connection_logger.info("Connecting to IBKR...")
         success = False
@@ -836,8 +860,41 @@ class ConnectionManager:
             self._record_connect_result(success)
             with self._connect_state_cond:
                 self._connect_in_progress = False
+                self._connect_attempt_started_at = None
                 self._connect_state_cond.notify_all()
-    
+
+    def _force_stop_connection_thread(self) -> None:
+        thread = self._connection_thread
+        loop = self._loop
+
+        self._connection_thread_alive = False
+
+        if loop:
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                try:
+                    loop.stop()
+                except Exception:
+                    pass
+
+        if thread and thread.is_alive():
+            try:
+                thread.join(timeout=2.0)
+            except Exception:
+                pass
+
+        if self.ib:
+            try:
+                self.ib.disconnect()
+            except Exception:
+                pass
+
+        self.connected = False
+        self.ib = None
+        self._loop = None
+        self._connection_thread = None
+
     def disconnect(self) -> None:
         """断开与IBKR服务器的连接，并停止事件循环"""
         try:
