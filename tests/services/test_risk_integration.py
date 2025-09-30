@@ -1,0 +1,182 @@
+import asyncio
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from services.risk import RiskRuntime
+
+
+class RecordingWriter:
+    def __init__(self) -> None:
+        self.points: list[dict[str, object]] = []
+
+    async def __call__(self, points):  # type: ignore[override]
+        batch = list(points)
+        self.points.extend(batch)
+        return len(batch)
+
+
+class _InMemoryRedis:
+    def __init__(self) -> None:
+        self._streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        self._queues: dict[str, list[str]] = {}
+        self._groups: dict[tuple[str, str], int] = {}
+        self._counter = 0
+
+    async def flushall(self) -> None:
+        self._streams.clear()
+        self._queues.clear()
+        self._groups.clear()
+        self._counter = 0
+
+    async def close(self) -> None:  # pragma: no cover - behaviour mirrors fakeredis
+        return None
+
+    async def xadd(self, key: str, fields: dict[str, Any]) -> str:
+        self._counter += 1
+        message_id = f"{self._counter}-0"
+        stream = self._streams.setdefault(key, [])
+        stream.append((message_id, {str(k): str(v) for k, v in fields.items()}))
+        return message_id
+
+    async def xgroup_create(self, stream: str, group: str, *, id: str = "$", mkstream: bool = False) -> None:
+        if mkstream:
+            self._streams.setdefault(stream, [])
+        self._groups[(stream, group)] = len(self._streams.get(stream, []))
+
+    async def xreadgroup(
+        self,
+        *,
+        groupname: str,
+        consumername: str,
+        streams: dict[str, str],
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
+        results: list[tuple[str, list[tuple[str, dict[str, str]]]]] = []
+        for stream, _ in streams.items():
+            entries = self._streams.get(stream, [])
+            index = self._groups.get((stream, groupname), 0)
+            if index >= len(entries):
+                continue
+            new_entries = entries[index:]
+            if count is not None:
+                new_entries = new_entries[:count]
+            if not new_entries:
+                continue
+            self._groups[(stream, groupname)] = index + len(new_entries)
+            results.append((stream, [(msg_id, dict(payload)) for msg_id, payload in new_entries]))
+        if not results and block:
+            await asyncio.sleep(block / 1000.0)
+        return results
+
+    async def xack(self, stream: str, group: str, *message_ids: str) -> int:
+        return len(message_ids)
+
+    async def rpush(self, key: str, value: str) -> int:
+        queue = self._queues.setdefault(key, [])
+        queue.append(value)
+        return len(queue)
+
+    async def blpop(self, key: str, timeout: float | int | None = 0) -> tuple[str, str] | None:
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        while True:
+            queue = self._queues.setdefault(key, [])
+            if queue:
+                value = queue.pop(0)
+                return key, value
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.01)
+
+
+async def _wait_for(condition, *, timeout: float = 2.0, interval: float = 0.05):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        result = await condition()
+        if result:
+            return result
+        await asyncio.sleep(interval)
+    raise AssertionError("timeout waiting for condition")
+
+
+def test_risk_runtime_triggers_stop_loss(tmp_path: Path) -> None:
+    try:
+        import fakeredis.aioredis as fakeredis  # type: ignore
+
+        redis = fakeredis.FakeRedis(decode_responses=True)
+    except ModuleNotFoundError:
+        redis = _InMemoryRedis()
+    asyncio.run(_run_integration(tmp_path, redis))
+
+
+async def _run_integration(tmp_path: Path, redis: Any) -> None:
+    await redis.flushall()
+
+    writer = RecordingWriter()
+
+    async def redis_factory():
+        return redis
+
+    runtime = RiskRuntime(
+        redis_factory=redis_factory,
+        write_fn=writer,
+        logger_name="risk-service-test",
+        service_name="risk-service-test",
+        log_dir=tmp_path,
+        poll_interval=0.05,
+    )
+
+    config = {
+        "rules": json.dumps([{"symbol": "MNQ", "stop_loss": 100.0}]),
+        "market_stream": "stream:market-service",
+        "market_group": "group:risk:market",
+        "results_stream": "stream:ib:results",
+        "results_group": "group:risk:results",
+        "command_queue": "queue:ib:commands",
+    }
+    await runtime.update_config(config)
+
+    await runtime.start()
+    try:
+        payload = json.dumps({"symbol": "MNQ", "last": 95.0})
+        await redis.xadd("stream:market-service", {"symbol": "MNQ", "type": "price", "payload": payload})
+
+        async def _pop_command():
+            item = await redis.blpop("queue:ib:commands", timeout=1)
+            if item is None:
+                return None
+            return json.loads(item[1])
+
+        command = await _wait_for(_pop_command)
+        assert command["kwargs"]["symbol"] == "MNQ"
+        assert command["kwargs"]["reason"] == "risk_stop_loss"
+
+        # Send a mock result message to release the trigger
+        await redis.xadd(
+            "stream:ib:results",
+            {
+                "command_id": command["command_id"],
+                "status": "success",
+            },
+        )
+
+        async def _points_available():
+            return writer.points if writer.points else None
+
+        await _wait_for(_points_available)
+
+        log_file = tmp_path / "risk-service-test.log"
+        assert log_file.exists()
+        log_content = log_file.read_text(encoding="utf-8")
+        assert "Triggered stop_loss" in log_content
+
+        assert any(point["measurement"] == "logs" for point in writer.points)
+    finally:
+        await runtime.stop()
+        await redis.flushall()
+        await redis.close()
