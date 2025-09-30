@@ -1,162 +1,280 @@
-# IB Trading Platform Refactor Design
+# IB Trading Platform Refactor Design (v2)
 
 ## 1. 背景
-- 现有 `main.py`/`core.__init__` 在导入阶段就构造出连接管理、风控、策略、队列、订单、通知、DOM 等所有核心组件，并把它们互相注入依赖。
-- 所有组件在同一个事件循环内运行，共享一个 SQLite 数据库连接、单个 IB 客户端、同一个线程池以及内存队列。
-- 队列执行、风控监控、行情订阅、订单处理等耗时逻辑直接调用同步 API；一旦某个任务阻塞，整个 FastAPI Web 层也会被拖慢。
-- 随着策略数量和 IB 请求量增加，主程序频繁出现响应超时、UI 卡顿甚至死锁，严重影响实盘能力。
+- 现有 `main.py` 在导入阶段即初始化风控、策略、队列、订单、行情等所有核心对象，并通过内存引用互相耦合。
+- 所有 IB 调用、数据库访问、行情刷新、风控循环都在同一个进程的事件循环内执行，线程桥接广泛使用同步 `result()` 阻塞，导致 UI 卡顿。
+- 优化器、队列、风控、行情、通知等组件缺乏清晰的边界，没有统一的数据访问/日志/监控基础设施，难以扩展也难以排错。
+- 用户要求将功能拆成独立程序，通过 Redis 队列/订阅协作，持久化改为 Redis + InfluxDB，并让主程序集中监控与可视化。
 
 ## 2. 主要问题
-1. **IB 桥接阻塞**：`ConnectionManager.run_in_connection_thread()` 和下单函数通过 `future.result()` 阻塞线程，导致 `asyncio` 事件循环与线程池被占满。
-2. **数据库串行化**：SQLite 单连接+互斥锁，查询/写入均在主线程同步执行，队列/风控循环会等待磁盘 IO 完成。
-3. **状态耦合**：组件通过内存引用共享状态，任何耗时操作都会阻塞其它逻辑；无法平滑拆分或横向扩容。
-4. **无统一异步通信机制**：策略任务、风控事件、行情更新都依赖本地函数调用；缺乏跨进程/跨机器通信的能力。
-5. **缺少可靠持久化方案**：高频行情和 DOM 数据落在 SQLite，无法支撑高吞吐；风险、订单、配置等结构化数据缺乏多实例共享能力。
+1. **同步阻塞严重**：IB 桥接、SQLite 访问、行情轮询、风控循环均在主线程同步等待，导致 FastAPI 响应超时。
+2. **状态耦合**：模块直接持有彼此对象引用，缺乏消息协议；很难拆分或横向扩展。
+3. **数据通道不明确**：行情、DOM、订单、日志写入由多个模块自行处理，缺乏统一策略，历史数据查询路径混乱。
+4. **基础设施缺失**：没有统一的 Redis/Influx/日志访问库，环境变量散落在代码中，模块部署/监控困难。
+5. **测试与验证薄弱**：缺少针对新架构的分步测试计划，难以保证拆分后的可靠性。
 
 ## 3. 总体设计
 
 ### 3.1 模块划分
-- **IB 网关服务 (ib-gateway-service)**：专职维护与 IB Gateway/TWS 的连接，负责行情订阅、DOM、账户/持仓刷新、订单执行。
-- **风险控制服务 (risk-service)**：订阅行情与账户事件，执行风控规则、持仓监控和保护性下单。
-- **策略执行服务 (strategy-worker)**：消费策略任务队列，执行长耗时运算及策略下单请求。
-- **通知服务 (notification-service)**：处理 Telegram、WebSocket、邮件等外部通知，解耦 IO 阻塞。
-- **主控/前端服务 (ui-gateway)**：FastAPI Web/UI 服务，负责配置管理、可视化和任务编排，不直接访问 IB。
-- **数据服务 (可选扩展)**：若需要，可引入历史数据回放、报告生成等独立模块。
+- **基础能力库 (foundation-libs)**：
+  - `ibbot.config`: 环境变量加载与配置中心。
+  - `ibbot.redis`: Redis 连接池、队列、Pub/Sub、Stream 封装。
+  - `ibbot.influx`: InfluxDB 写入/查询适配。
+  - `ibbot.logging`: 统一日志封装，默认写入 `data/logs/<module>.log` 并支持标准输出。
+- **IB 指令执行服务 (ib-command-service)**：独占 IB Gateway/TWS 连接，串行处理 Redis 队列中的下单/撤单/查询指令，并回写结果。
+- **IB 数据采集服务 (ib-feed-service)**：使用独立 IB 客户端订阅实时行情与 DOM，写入 Redis Pub/Sub/缓存，同时负责 InfluxDB 持久化。
+- **市场数据服务 (market-data-service)**：
+  - 对外提供统一的 HTTP/WebSocket/Redis 接口，聚合实时价格、DOM、账号信息，统一缓存与二次分发。
+  - 订阅 `ib-feed-service` 的 Redis 通道并维护可查询快照，使调用方只需访问一个服务即可获得行情/DOM。
+- **风险控制服务 (risk-service)**：
+  - 订阅市场数据服务推送的行情和账户信息，执行风险规则；通过 `ib-command-service` 队列发送保护性指令。
+- **策略执行服务 (strategy-service)**：
+  - 消费策略任务，调用市场数据服务获取行情，生成信号后将订单请求写入 `ib-command-service`。
+- **队列监控/调度服务 (queue-monitor)**：
+  - 负责 Redis 队列/Stream 的消费情况统计，供主程序展示；可选作为轻量守护进程。
+- **通知服务 (notification-service)**：
+  - 消费事件 Stream，统一发送 Telegram/邮件/WebSocket 推送。
+- **优化器服务 (optimizer-service)**：
+  - 复用 `foundation-libs`，提供策略/参数优化 API 与任务执行（不依赖主程序实例，可单独部署）。
+- **主程序 (ui-gateway)**：
+  - FastAPI + 前端，负责配置管理、监控、日志查看、任务编排、一键重启容器。
 
-### 3.2 交互方式
+### 3.2 数据与通信流
 - **Redis**
-  - Pub/Sub：行情/DOM/账户更新 (`market:price:<symbol>`、`market:dom:<symbol>` 等)。
-  - Stream / List 队列：策略任务队列 (`queue:strategy`)、订单执行命令 (`queue:orders`)、通知任务 (`queue:notifications`)。
-  - Hash/Key-Value：运行配置、风控参数、服务健康状态。
-- **MariaDB**
-  - 保存订单、风控规则、策略配置、执行日志等结构化数据，支持多服务读写。
+  - `queue:ib:commands`：主程序/策略/风控发送 IB 指令；`ib-command-service` 按 FIFO 串行消费。
+  - `stream:ib:results`：`ib-command-service` 将执行结果写入（含订单状态、错误码），其他模块订阅。
+  - `pubsub:ib:price:<symbol>`、`pubsub:ib:dom:<symbol>`：`ib-feed-service` 实时推送行情与 DOM。
+  - `hash:market:snapshot:<symbol>`：市场数据服务维护的快照，供 REST/WS 查询。
+  - `stream:strategy:events`、`stream:risk:events`、`stream:notification:events`：各模块事件总线。
+  - `hash:service:health:<module>`：每个服务上报健康信息（心跳时间、最近错误）。
+  - `hash:config:<module>`：配置参数，由主程序写入，模块订阅变化。
+  - `list:queue:strategy`：策略任务队列。
 - **InfluxDB**
-  - 持久化 tick、DOM 快照、历史行情等高频时序数据。
-- **gRPC/HTTP 健康探针**（选项）：各服务对外暴露健康检查/管理接口，主控服务汇总显示。
+  - `measurement=orders`：记录订单请求/执行结果（时间、策略、状态、数量、错误码）。
+  - `measurement=market_price`：tick、mid-price、成交价。
+  - `measurement=market_dom`：DOM 快照（级别、bid/ask 量）。
+  - `measurement=logs`：可选，将关键日志写入 Influx 以便查询（保留窗口短）。
+  - `measurement=service_metrics`：服务写入吞吐、延迟、队列深度。
+- **日志**
+  - 每个服务使用 `foundation-libs` 的日志封装写入 `data/logs/<module>.log`。
+  - 主程序读取并索引日志文件供前端展示，可结合 WebSocket 推送最新日志。
 
-### 3.3 基础服务
-- Redis 集群或单节点（具备持久化 AOF/快照）。
-- MariaDB 高可用实例（或云 RDS）。
-- InfluxDB OSS/Cloud（Retention Policy、Downsampling）。
-- 日志与追踪：统一采集（例如 Loki/ELK）以及分布式追踪（可选）。
+### 3.3 Pub/Sub 工作流
+1. `ib-feed-service` 从 IB 订阅行情与 DOM。
+2. 收到更新后，写入 `pubsub:ib:*` 通道，并通过 `ibbot.redis` 工具更新 `hash:market:snapshot` 与 Influx。
+3. `market-data-service` 订阅对应通道，聚合为快照；提供 REST `/market/<symbol>` 和 WebSocket `/ws/market` 接口返回最新价格、DOM、账户指标。
+4. 其他模块（策略、风险、主程序）只需访问市场数据服务的接口或 Redis 快照，不再直接与 IB 服务交互。
+
+### 3.4 订单流转
+1. 任一模块调用基础库 `ibbot.redis.enqueue_ib_command()` 将订单/查询写入 `queue:ib:commands`，指令含 `command_id`。
+2. `ib-command-service` 逐条执行，写入执行日志到 `data/logs/ib-command.log`，并将结果（成功/失败、订单状态、填充详情）写入 Redis Stream `stream:ib:results` 与 Influx `orders`。
+3. 主程序、风险、策略订阅 `stream:ib:results` 或通过 `command_id` 查询 Redis Hash `hash:ib:result:<id>` 获取结果。
+
+### 3.5 环境与配置
+- 所有服务在启动时仅依赖必要环境变量（Redis/Influx 地址、服务名称等）；其他可运行时调整的参数（订阅列表、风控阈值、策略配置、行情刷新周期）通过配置模块加载：
+  - `configuration` 模块从 Redis `hash:config:<module>` 读取，支持热更新（订阅 `pubsub:config:update`）。
+  - 主程序提供页面与 API 管理配置，并写回 Redis。
+  - 每个服务仅在首次启动时需要的环境变量保留在 `.env`（如 IB 账号、密码、客户端 ID）。
 
 ## 4. 独立模块设计
 
-### 4.1 IB 网关服务
-- **职责**：
-  - 管理 IB API 连接、重连、心跳监控。
-  - 统一执行订单请求，串行化处理并写入 MariaDB。
-  - 订阅行情/DOM/账户/持仓并推送到 Redis；同步写入 InfluxDB。
-- **关键组件**：
-  - `IBSessionManager`：封装连接生命周期、心跳、重连策略。
-  - `MarketPublisher`：将行情、DOM、账户更新序列化后发布到 Redis/InfluxDB。
-  - `OrderExecutor`：消费 `queue:orders`，执行下单/撤单，写入结果 (`orders:<id>`)。
-- **接口契约**：
-  - `queue:orders` 命令格式包含请求 ID、指令类型、参数（合约、数量、价格、策略标签等）。
-  - 处理完成后向 Redis Hash `order:result:<request_id>` 写入结果并发送事件到 `stream:order-events`。
+### 4.1 基础能力库 (foundation-libs)
+- **redis 子模块**：
+  - 初始化连接池、提供 `enqueue_ib_command`, `publish_market_update`, `read_stream`, `ack_stream` 等高层 API。
+  - 封装 Pub/Sub 监听器，支持自动重连与订阅处理。
+  - 提供队列/Stream 监控 API（队列长度、消费速率）。
+- **influx 子模块**：
+  - 提供批量写入、查询、retention policy 管理、写入速率统计。
+  - 定义标准数据点结构（订单、行情、DOM、服务指标）。
+- **logging 子模块**：
+  - 统一格式化（JSON/文本），支持按模块名称写入 `data/logs`。
+  - 提供日志读取工具，供主程序分页展示。
+- **config 子模块**：
+  - 支持 `.env` + Redis 配置合并，提供 `ConfigProvider` 接口；监听配置变更。
+- 所有服务必须依赖这些库，不可直接访问底层客户端，保证一致性。
 
-### 4.2 风险控制服务
-- **职责**：
-  - 订阅 `stream:order-events`、行情/账户 Pub/Sub，维护实时仓位、风险指标。
-  - 执行规则（止损、敞口、账户权益等），通过 `queue:orders` 发送保护性操作。
-  - 将风控状态写入 Redis (`risk:state`)、MariaDB（日志）。
-- **实现要点**：
-  - 内置规则引擎，可热加载 Redis Hash `risk:config`。
-  - 所有 IB 交互通过队列间接执行，避免直接依赖 IB 客户端。
+### 4.2 IB 指令执行服务
+- 单一职责：顺序执行来自 Redis 队列的 IB 指令。
+- 组件：
+  - `CommandConsumer`: 从 `queue:ib:commands` 拉取任务，写执行状态。
+  - `IBCommandExecutor`: 调用 IB API，处理异常与重试策略。
+  - `ResultPublisher`: 写回 Redis/Influx，并记录日志。
+- 健康监控：定期更新 `hash:service:health:ib-command`，字段含 `last_seen`, `queue_depth`, `last_error`。
+- 验证：
+  - 单元测试覆盖指令解析、重试逻辑。
+  - 集成测试使用 IB 模拟环境验证下单与回执。
 
-### 4.3 策略执行服务
-- **职责**：
-  - 作为消费者监听 `queue:strategy`，运行策略脚本或模型评估。
-  - 需要行情数据时订阅 Redis Pub/Sub 或查询 InfluxDB/MariaDB。
-  - 生成的交易指令通过 `queue:orders` 提交，等待 `order:result`。
-- **实现要点**：
-  - 支持并发策略实例，使用协程池或多进程。
-  - 提供任务状态回写 (`stream:strategy-events`) 供 UI 订阅。
+### 4.3 IB 数据采集服务
+- 职责：管理 IB 行情订阅，推送至 Redis 并落 Influx。
+- 行情缓存：使用 `foundation-libs.redis` 更新 `hash:market:snapshot:<symbol>`。
+- DOM 处理：将多个级别的数据打包为结构化 JSON，写入 Influx `market_dom`。
+- 落库职责明确：**此服务是行情/DOM 的唯一落库者**，其他服务禁止直接写入相关 Influx measurement。
+- 验证：
+  - 模拟行情流测试吞吐与落库。
+  - 对 Influx 查询接口编写回归测试，验证数据完整性。
 
-### 4.4 通知服务
-- **职责**：
-  - 订阅 `stream:order-events`、`stream:risk-events`、`queue:notifications`。
-  - 调用 Telegram、邮件、WebSocket 推送等 IO 操作。
-  - 写入 MariaDB（通知日志）并更新 Redis (`notify:status`)。
+### 4.4 市场数据服务
+- 对外 API：
+  - REST `/market/<symbol>` 返回价格+DOM+账户快照。
+  - WebSocket `/ws/market` 推送订阅符号列表。
+  - Redis `stream:market-service` 提供统一的事件流。
+- 内部：订阅 `ib-feed-service` 的 Pub/Sub，维护内存快照；定期将统计信息写入 `service_metrics`。
+- 还提供历史查询聚合：从 Influx 拉取数据并缓存。
+- 验证：
+  - 单元测试覆盖缓存更新、接口响应。
+  - 性能测试验证高频订阅下的延迟。
 
-### 4.5 主控/前端服务
-- **职责**：
-  - 提供配置管理、监控仪表板、策略/队列调度 API。
-  - 所有长耗时操作改为向 Redis 队列发送消息，并通过事件流/回调获知结果。
-  - 展示来自 Redis 的实时行情、风控状态、订单执行情况。
-- **调整点**：
-  - 重写 `core/__init__`，移除全局单例与同步 IB 调用。
-  - 将数据库访问层替换为 MariaDB/InfluxDB 客户端。
-  - WebSocket 推送改为订阅 Redis 事件。
+### 4.5 风险控制服务
+- 接入：
+  - 从市场数据服务 API 获取最新行情与仓位。
+  - 订阅 `stream:ib:results` 以追踪订单结果。
+- 规则：
+  - 配置从 `config:risk` 读取；变更通过 Pub/Sub 下发。
+  - 触发保护性操作时，将命令写入 `queue:ib:commands`。
+- 日志：写 `data/logs/risk-service.log`，关键事件亦写入 Influx `logs`。
+- 验证：
+  - 单元测试验证规则判定。
+  - 集成测试模拟行情触发止损。
+
+### 4.6 策略执行服务
+- 消费 `list:queue:strategy`；每个任务内：
+  1. 通过市场数据服务拉取行情。
+  2. 运行策略逻辑。
+  3. 生成订单写入 `queue:ib:commands`。
+  4. 将执行状态写入 `stream:strategy:events`。
+- 支持多进程/协程调度，但通过 Redis 控制并发。
+- 验证：
+  - 单元测试策略适配层。
+  - 集成测试验证策略任务 -> 下单 -> 回执链路。
+
+### 4.7 优化器服务
+- 独立 FastAPI 或 CLI 入口，部署为单独容器。
+- 使用基础库：
+  - 从 Redis 获取策略配置、参数空间、历史绩效。
+  - 读取 Influx 历史行情作为训练数据。
+  - 将优化任务进度写入 `stream:optimizer:events`，结果写 Redis `hash:optimizer:result:<task>`。
+- 可选使用自身的任务队列 `list:queue:optimizer`。
+- 主程序通过 REST/WebSocket 订阅其事件，展示优化进度。
+
+### 4.8 通知服务
+- 监听 `stream:ib:results`、`stream:risk:events`、`stream:strategy:events`。
+- 基于配置决定推送渠道；结果记录 Influx `logs`。
+
+### 4.9 主程序 (ui-gateway)
+- 功能：
+  - 登录、配置管理、服务监控。
+  - 订单、策略、风控状态展示。
+  - 日志查看：读取 `data/logs` 文件并分页/搜索；支持实时 tail。
+  - Redis 队列/Stream 可视化：展示队列长度、消费速率、最后消费时间。
+  - Influx 数据写入监控：读取 `service_metrics` 中的写入数量、延迟。
+  - 一键重启：通过容器编排（Docker API 或脚本）触发指定服务重启。
+- 依赖：仅通过基础库访问 Redis/Influx，不直接访问 IB。
 
 ## 5. 主程序修改方案
-1. **依赖注入重构**：
-   - 删除导入时初始化的全局单例，改为在 FastAPI 启动时创建 Redis/MariaDB 客户端。
-   - `StrategyManager`/`RiskManager` 等只保留业务逻辑，通信依赖 Redis/MariaDB。
-2. **队列重写**：
-   - 替换 `QueueManager` 内存队列为 Redis Stream/List 封装；提供 ACK、重试、可视化。
-3. **订单流程调整**：
-   - 下单 API 仅写入 `queue:orders` 并立即返回请求 ID，前端通过事件流追踪。
-   - 订单详情从 MariaDB/Redis 查询，不直接访问 IB 客户端。
-4. **行情展示**：
-   - WebSocket 订阅 Redis Pub/Sub 或 `stream:market-events`，将消息透传给前端。
-5. **风控与策略接口**：
-   - 读取/修改配置时写入 Redis Hash/MariaDB；触发策略任务通过 `queue:strategy`。
-6. **健康监控**：
-   - 主程序汇总各服务心跳（Redis Key、HTTP probe），显示在仪表板。
+1. **模块化启动**：
+   - 移除 `core/__init__` 的全局单例，改为在 FastAPI 启动事件中实例化配置、Redis、Influx 客户端。
+   - 根据配置向各服务暴露的接口发起健康检查，写入 Redis `hash:service:health`。
+2. **API 重写**：
+   - 下单类 API -> 调用 `enqueue_ib_command`，立即返回 `command_id`。
+   - 策略调度 API -> 向 `queue:strategy` 写任务，并订阅事件流反馈。
+   - 行情展示 -> 调用市场数据服务 REST/WS。
+3. **监控面板**：
+   - 汇总 Redis 队列/Stream 指标（队列长度、滞留时间）。
+   - 展示 Influx 写入速率（通过 `service_metrics`）。
+   - 读取 `data/logs` 并提供下载/搜索。
+4. **容器控制**：
+   - 集成 Docker Engine API 或 `docker-compose` 脚本，实现服务重启按钮。
+5. **配置中心**：
+   - UI 表单写入 Redis `hash:config:<module>`；触发 `pubsub:config:update`。
+6. **安全与权限**：
+   - 服务控制与配置修改需鉴权，预留审计日志记录到 Influx。
 
-## 6. 开发步骤
-1. **基础设施搭建**
-   - 部署/配置 Redis、MariaDB、InfluxDB。
-   - 编写连接封装与配置管理。
-2. **数据层迁移**
-   - 抽象数据库访问层；实现 MariaDB ORM/DAO。
-   - 将历史行情写入 InfluxDB；提供查询接口。
-   - 编写迁移脚本从 SQLite 导出数据到 MariaDB。
-3. **Redis 队列/事件框架**
-   - 定义消息协议、序列化格式、错误码。
-   - 实现 `queue:orders`、`queue:strategy`、事件流封装。
-4. **IB 网关服务实现**
-   - 改造 `IBKRClient` 适配新异步模型。
-   - 实现订单执行器、行情发布器、持久化流程。
-   - 增加健康检查、日志。
-5. **风控服务重构**
-   - 调整 `RiskManager` 使用 Redis/MariaDB。
-   - 实现订阅/规则执行、保护性订单下发。
-6. **策略执行服务重构**
-   - 改写 `StrategyManager` 任务流，适配 Redis 队列。
-   - 引入任务状态回写机制。
-7. **通知服务抽离**
-   - 把 `NotificationManager` 改为消费队列/事件。
-8. **主控服务改造**
-   - 重写依赖注入、API、WebSocket。
-   - 接入新的数据源与事件通道。
-9. **清理与文档**
-   - 移除旧单例、线程阻塞代码。
-   - 补充运维、部署、监控文档。
+## 6. 详细开发步骤与验证
+### 阶段 0：准备
+- 任务：整理 `.env`，创建基础目录 `data/logs`，编写 README。
+- 验证：
+  - 编写 `tests/config/test_env_loading.py` 测试配置加载。
+  - 文档：更新部署说明。
 
-### 里程碑建议
-- **M1**：数据层迁移 + Redis 队列基础，保持旧 IB 流程可运行。
-- **M2**：IB 网关服务上线，主程序改用消息驱动下单/行情。
-- **M3**：风控/策略/通知服务独立，完成整体解耦。
-- **M4**：主控服务简化完成，所有功能通过新架构运行。
+### 阶段 1：基础能力库
+1. 实现 `ibbot.config`、`ibbot.redis`、`ibbot.influx`、`ibbot.logging`。
+2. 提供示例脚本 `scripts/diagnose_foundation.py` 验证连通性。
+3. 单元测试：
+   - Redis 队列入队/出队、Pub/Sub 自动重连 (`tests/foundation/test_redis.py`)。
+   - Influx 写入/查询 mock 测试 (`tests/foundation/test_influx.py`)。
+   - 日志封装写入 `data/logs` (`tests/foundation/test_logging.py`)。
+4. 文档：在 `docs/` 增加基础库使用说明。
+
+### 阶段 2：独立服务实现
+#### 2.1 IB 指令执行服务
+- 编写服务入口 `services/ib_command/main.py`。
+- 集成测试：使用 Mock IB 或 sandbox，验证指令执行顺序；在 `tests/services/test_ib_command_flow.py` 编写。
+- 文档：更新 README 子章节说明部署与配置。
+
+#### 2.2 IB 数据采集服务
+- 入口 `services/ib_feed/main.py`。
+- 验证：模拟行情源，断线重连测试；记录 Influx 写入速率。
+- 单元测试：DOM 序列化、Pub/Sub 发布。
+
+#### 2.3 市场数据服务
+- 入口 `services/market_data/main.py`。
+- 编写接口测试（FastAPI test client）覆盖 REST/WS。
+- 文档：说明订阅流程、API 契约。
+
+#### 2.4 风险控制服务
+- 重写规则引擎，编写单元测试覆盖风险判定。
+- 集成测试：模拟行情触发止损；验证命令写入队列。
+
+#### 2.5 策略执行服务
+- 调整策略接口以适配新任务协议。
+- 测试：端到端任务 -> 订单 -> 回执链路。
+
+#### 2.6 优化器服务
+- 将现有 `optimizer_main.py` 复用基础库；拆分配置、队列、数据读取。
+- 编写测试覆盖任务提交、进度回写。
+
+#### 2.7 通知服务
+- 单元测试覆盖事件 -> 推送流程（使用假客户端）。
+
+### 阶段 3：主程序改造
+1. 移除旧依赖注入；整合新 API。
+2. 开发监控仪表板：
+   - Redis 队列视图（读基础库监控 API）。
+   - Influx 写入视图（查询 `service_metrics`）。
+   - 日志查看页面（读 `data/logs`）。
+3. 实现服务健康检查与一键重启。
+4. 测试：
+   - FastAPI 集成测试覆盖新的路由。
+   - 前端端到端测试（如 Cypress/Playwright）验证监控页面。
+
+### 阶段 4：联调与回归
+- 使用 docker-compose 启动所有服务，验证消息流。
+- 编写 `tests/e2e/test_full_pipeline.py` 模拟完整下单流程。
+- 文档：
+  - 更新 `docs/ib_refactor_design.md` 外的操作手册。
+  - 提供故障排查指南。
 
 ## 7. 测试方案
-1. **单元测试**
-   - Redis 队列协议解析、ACK/重试逻辑。
-   - MariaDB DAO、InfluxDB 写入/查询。
-   - 风控规则、策略决策核心函数。
-2. **集成测试**
-   - 使用容器化 IB 模拟器或回测环境，验证订单流与行情发布。
-   - 端到端测试：UI 提交订单 -> Redis -> IB 服务 -> 订单结果事件 -> UI。
-   - 风控触发测试：构造行情事件验证保护订单下发。
-3. **性能测试**
-   - 压测 Redis 队列和 MariaDB 写入吞吐。
-   - 高频行情写入 InfluxDB 的负载测试。
-4. **故障注入**
-   - 模拟 IB 断线、Redis 网络中断、数据库异常，验证重试和降级策略。
-5. **回归测试**
-   - 核对策略绩效、订单记录、通知是否与旧系统一致。
-6. **部署验证**
-   - 在预生产环境运行全套服务 24 小时，检查资源消耗和日志。
+- **单元测试**：覆盖基础库、规则引擎、策略适配、消息协议。
+- **集成测试**：针对每个服务的关键路径编写，使用 Fake Redis/Influx 或 testcontainers。
+- **端到端测试**：
+  - 场景 1：UI 提交订单 -> Redis 队列 -> IB 指令执行 -> 结果回写 -> UI 显示。
+  - 场景 2：行情订阅 -> 市场数据服务 -> 策略消费 -> 风控响应。
+  - 场景 3：优化器任务 -> 结果查看。
+- **性能测试**：
+  - 行情吞吐（ib-feed -> market-data -> UI）。
+  - 队列消费速度（策略/IB 指令）。
+  - Influx 写入速率监控。
+- **故障注入**：
+  - Redis 断开、Influx 不可用、IB 断线；验证自动重连与报警。
+- **监控验证**：
+  - 主程序监控页面能显示日志、队列、Influx 指标，且与实际数据一致。
+- **文档验证**：
+  - 每个阶段完成后，更新相应的开发文档与测试说明，确保团队可复现。
 
+## 8. 其他注意事项
+- 数据库无需迁移：沿用现有数据，默认配置写入 Redis/Influx；历史 SQLite 数据可选离线迁移。
+- 每个服务都应打包为独立容器，主程序可以通过 Docker Compose 或 Kubernetes 管理，一键重启调用容器管理 API。
+- 兼容旧流程：在新服务稳定前，可保留旧模块的只读模式，逐步切换。
+- 安全：对 Redis/Influx 使用访问控制，服务间通信需鉴权；日志中避免泄露敏感信息。
+- 部署脚本：提供统一的部署/启动脚本 `scripts/deploy.sh`，确保服务按依赖顺序启动。
