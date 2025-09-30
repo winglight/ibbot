@@ -92,7 +92,7 @@
             this.chartDateAdapterUrl = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js';
             this.dateAdapterReady = false;
             this.dateAdapterLoader = null;
-            this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.umd.min.js';
+            this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
             this.chartScriptableGuardApplied = false;
             this.strategyChartInstance = null;
             this.strategyChartFallbackNotified = false;
