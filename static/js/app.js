@@ -22,6 +22,7 @@ const OrdersManagerClass = OrdersManagerModule.OrderManager || globalScope.Order
 const notificationsModules = appModules.notifications || {};
 const NotificationsManagerModule = notificationsModules.manager || {};
 const NotificationsManagerClass = NotificationsManagerModule.NotificationsManager || globalScope.NotificationsManager;
+const serviceRestartModules = appModules.serviceRestart || {};
 
 const {
     INTERVAL_MINUTES_MAP = {},
@@ -128,6 +129,7 @@ class TradingApp {
         this.orders = [];
         // 通知列表
         this.notifications = [];
+        this.serviceRestartController = null;
 
         if (typeof MonitoringManagerClass !== 'function') {
             throw new Error('MonitoringManager module is required');
@@ -893,6 +895,46 @@ class TradingApp {
         // DOM 已就绪时同步访客模式下的界面元素状态，避免初始渲染遗漏
         this.updateReadOnlyMode(this.isReadOnly, this.authRole, { persist: false });
 
+        if (!this.serviceRestartController && serviceRestartModules?.createController) {
+            const describeService = (value, selectEl) => {
+                const option = selectEl?.selectedOptions?.[0];
+                return option?.dataset?.label || option?.textContent?.trim() || value;
+            };
+            const controller = serviceRestartModules.createController({
+                document,
+                buttonId: 'serviceRestartBtn',
+                selectId: 'serviceRestartSelect',
+                statusId: 'serviceRestartStatus',
+                spinnerSelector: '.spinner-border',
+                fetcher: (payload) => this.apiCall('/services/restart', {
+                    method: 'POST',
+                    body: JSON.stringify(payload),
+                }),
+                describeService,
+                readOnlyMessage: '访客模式无法执行重启操作',
+                runningMessage: '正在重启 {service}...',
+                successMessage: '已重启 {services}',
+                errorMessage: '重启失败，请稍后重试',
+                initialMessage: '选择服务后执行重启。',
+                onStatusChange: (info) => {
+                    if (info.state === 'success') {
+                        this.showAlert('success', info.message);
+                    } else if (info.state === 'error') {
+                        const errorObj = info.payload?.error;
+                        const level = errorObj?.isReadOnly ? 'warning' : 'danger';
+                        this.showAlert(level, info.message);
+                    }
+                },
+            });
+            if (controller) {
+                this.serviceRestartController = controller;
+                if (this.isReadOnly) {
+                    controller.elements.button.disabled = true;
+                    controller.updateStatus('error', '访客模式无法执行重启操作');
+                }
+            }
+        }
+
         const summaryRange = document.getElementById('dailySummaryRange');
         if (summaryRange) {
             summaryRange.addEventListener('change', () => {
@@ -1613,6 +1655,25 @@ class TradingApp {
             const banner = document.getElementById('readOnlyBanner');
             if (banner) {
                 banner.classList.toggle('d-none', !this.isReadOnly);
+            }
+        }
+
+        if (this.serviceRestartController) {
+            const restartCtrl = this.serviceRestartController;
+            const statusEl = restartCtrl.elements?.status;
+            if (this.isReadOnly) {
+                if (restartCtrl.elements?.button) {
+                    restartCtrl.elements.button.disabled = true;
+                }
+                restartCtrl.updateStatus('error', '访客模式无法执行重启操作');
+            } else {
+                if (restartCtrl.elements?.button) {
+                    restartCtrl.elements.button.disabled = false;
+                }
+                const statusText = statusEl?.textContent?.trim();
+                if (statusText === '访客模式无法执行重启操作' || !statusText) {
+                    restartCtrl.updateStatus('idle', '选择服务后执行重启。');
+                }
             }
         }
 

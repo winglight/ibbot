@@ -69,6 +69,7 @@ from src.routes.notifications import router as notifications_router
 from src.routes.queue import router as queue_router
 from src.routes.logs import router as logs_router
 from src.routes.monitoring import router as monitoring_router
+from src.routes.service import router as service_router
 from src.routes.websocket import router as websocket_router
 from src.routes.dom import router as dom_router
 from src.data_layer import get_data_source_manager
@@ -791,6 +792,7 @@ app.include_router(notifications_router)
 app.include_router(queue_router)
 app.include_router(logs_router)
 app.include_router(monitoring_router)
+app.include_router(service_router)
 app.include_router(websocket_router)
 app.include_router(dom_router)
 
