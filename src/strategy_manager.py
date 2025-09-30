@@ -161,6 +161,10 @@ class StrategyManager:
         self._strategies_cache_lock = RLock()
         self._strategies_cache_ttl = 5.0
 
+        self._cache_rebuild_lock = RLock()
+        self._cache_rebuild_requests: Dict[str, float] = {}
+        self._cache_rebuild_min_interval = 5.0
+
         self._internal_info_cache: Dict[str, Dict[str, Any]] = {}
         self._internal_info_cache_lock = RLock()
         self._internal_info_cache_ttl = 5.0
@@ -264,6 +268,40 @@ class StrategyManager:
                 "Strategy cache coroutine failed during synchronous execution",
                 error=str(exc),
             )
+
+    def _request_strategy_cache_rebuild(
+        self,
+        strategy_names: Sequence[str],
+        *,
+        reason: str,
+    ) -> None:
+        """Schedule background cache rebuilds with basic throttling."""
+
+        if not strategy_names:
+            return
+
+        now = time.monotonic()
+        to_schedule: List[str] = []
+
+        with self._cache_rebuild_lock:
+            for name in strategy_names:
+                if name not in self.strategies:
+                    continue
+                last_request = self._cache_rebuild_requests.get(name, 0.0)
+                if now - last_request < self._cache_rebuild_min_interval:
+                    continue
+                self._cache_rebuild_requests[name] = now
+                to_schedule.append(name)
+
+        if not to_schedule:
+            return
+
+        strategy_logger.debug(
+            "Scheduling strategy cache rebuild",
+            strategies=to_schedule,
+            reason=reason,
+        )
+        self.rebuild_strategy_cache(to_schedule, block=False)
 
     def rebuild_strategy_cache(
         self, strategy_names: Optional[Sequence[str]] = None, *, block: bool = False
@@ -2369,7 +2407,7 @@ class StrategyManager:
             strategy = self.strategies[name]
             strategy_dict = asdict(strategy)
             cache_stats = self._get_cached_stats((strategy.name,)).get(strategy.name)
-            if cache_stats and not cache_stats.get("stale"):
+            if cache_stats:
                 strategy_dict['trigger_count'] = int(cache_stats.get('filled_count', 0) or 0)
                 last_created_at = cache_stats.get('last_trigger_ts')
                 if last_created_at:
@@ -2377,18 +2415,18 @@ class StrategyManager:
                     strategy_dict['last_triggered'] = parsed_time or last_created_at
                 else:
                     strategy_dict['last_triggered'] = None
-            else:
-                order_stats = self.db_manager.get_strategy_order_stats([strategy.name], 'strategy')
-                stats = order_stats.get(strategy.name, {})
-                strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
-                last_created_at = stats.get('last_created_at')
-                if last_created_at:
-                    parsed_time = parse_local_datetime(last_created_at)
-                    strategy_dict['last_triggered'] = parsed_time or last_created_at
-                else:
-                    strategy_dict['last_triggered'] = None
-                if cache_stats and cache_stats.get("stale"):
+                if cache_stats.get("stale"):
                     strategy_dict['cache_stale'] = True
+                    self._request_strategy_cache_rebuild(
+                        (strategy.name,), reason="stale_cache"
+                    )
+            else:
+                strategy_dict['trigger_count'] = 0
+                strategy_dict['last_triggered'] = None
+                strategy_dict['cache_stale'] = True
+                self._request_strategy_cache_rebuild(
+                    (strategy.name,), reason="missing_cache"
+                )
             # Convert datetime objects to strings for JSON serialization
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
                 strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
@@ -2442,6 +2480,24 @@ class StrategyManager:
             return None
 
         snapshot = asdict(record)
+
+        cache_stats = self._get_cached_stats((name,)).get(name)
+        if cache_stats:
+            snapshot['trigger_count'] = int(cache_stats.get('filled_count', 0) or 0)
+            last_created_at = cache_stats.get('last_trigger_ts')
+            if last_created_at:
+                parsed_time = parse_local_datetime(last_created_at)
+                snapshot['last_triggered'] = parsed_time or last_created_at
+            else:
+                snapshot['last_triggered'] = None
+            if cache_stats.get("stale"):
+                snapshot['cache_stale'] = True
+                self._request_strategy_cache_rebuild((name,), reason="stale_cache")
+        else:
+            snapshot['trigger_count'] = 0
+            snapshot['last_triggered'] = None
+            snapshot['cache_stale'] = True
+            self._request_strategy_cache_rebuild((name,), reason="missing_cache")
 
         created_at = snapshot.get("created_at")
         if isinstance(created_at, datetime):
@@ -3655,30 +3711,21 @@ if __name__ == "__main__":
                 return deepcopy(cache["data"])
 
         cached_stats = self._get_cached_stats(strategy_names)
-        missing_for_db = [
-            name
-            for name in strategy_names
-            if name not in cached_stats or cached_stats[name].get("stale")
+        missing_names = [name for name in strategy_names if name not in cached_stats]
+        stale_names = [
+            name for name, stats in cached_stats.items() if stats.get("stale")
         ]
 
-        if missing_for_db:
-            try:
-                order_stats = self.db_manager.get_strategy_order_stats(
-                    missing_for_db, order_source='strategy'
-                )
-            except Exception as exc:
-                strategy_logger.warning(
-                    f"Failed to load strategy order stats: {exc}"
-                )
-                order_stats = {}
-        else:
-            order_stats = {}
+        self._request_strategy_cache_rebuild(
+            missing_names, reason="missing_cache"
+        )
+        self._request_strategy_cache_rebuild(stale_names, reason="stale_cache")
 
         result: List[Dict[str, Any]] = []
         for strategy in self.strategies.values():
             strategy_dict = asdict(strategy)
             cache_snapshot = cached_stats.get(strategy.name)
-            if cache_snapshot and not cache_snapshot.get("stale"):
+            if cache_snapshot:
                 strategy_dict['trigger_count'] = int(cache_snapshot.get('filled_count', 0) or 0)
                 last_created_at = cache_snapshot.get('last_trigger_ts')
                 if last_created_at:
@@ -3686,17 +3733,12 @@ if __name__ == "__main__":
                     strategy_dict['last_triggered'] = parsed_time or last_created_at
                 else:
                     strategy_dict['last_triggered'] = None
-            else:
-                stats = order_stats.get(strategy.name, {})
-                strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
-                last_created_at = stats.get('last_created_at')
-                if last_created_at:
-                    parsed_time = parse_local_datetime(last_created_at)
-                    strategy_dict['last_triggered'] = parsed_time or last_created_at
-                else:
-                    strategy_dict['last_triggered'] = None
-                if cache_snapshot and cache_snapshot.get("stale"):
+                if cache_snapshot.get("stale"):
                     strategy_dict['cache_stale'] = True
+            else:
+                strategy_dict['trigger_count'] = 0
+                strategy_dict['last_triggered'] = None
+                strategy_dict['cache_stale'] = True
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
                 strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
             if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
