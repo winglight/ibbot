@@ -68,6 +68,10 @@ class QueueManager:
         self._backlog_pending_threshold: int = 20
         self._backlog_age_threshold: float = 120.0
 
+        # 记录最近一次延迟日志，避免IB未连接时疯狂刷屏
+        self._last_deferral_notice: Dict[str, float] = {}
+        self._ib_disconnect_backoff: float = 0.5
+
     def set_dependencies(self, risk_manager, strategy_manager, websocket_manager, order_manager=None, notification_manager=None):
         """设置依赖对象"""
         self.risk_manager = risk_manager
@@ -77,6 +81,35 @@ class QueueManager:
         if notification_manager:
             self.notification_manager = notification_manager
         queue_logger.info("Dependencies set for QueueManager")
+
+    def _should_log_deferral(self, task_id: str, interval: float = 2.0) -> bool:
+        """节流IB未连接时的延迟日志"""
+
+        now = time.time()
+        last = self._last_deferral_notice.get(task_id)
+        if last is None or (now - last) >= interval:
+            self._last_deferral_notice[task_id] = now
+            return True
+        return False
+
+    def _ib_connected(self) -> bool:
+        """安全地检测IB连接状态，容忍client缺失或异常"""
+
+        try:
+            import core  # 延迟导入避免循环依赖
+        except ImportError:
+            return False
+
+        client = getattr(core, "ibkr_client", None)
+        if client is None:
+            return False
+
+        try:
+            return bool(client.is_connected())
+        except Exception as exc:
+            if self._should_log_deferral("ib-connection-check", interval=10.0):
+                queue_logger.debug(f"IB connection check failed: {exc}")
+            return False
     
     def add_task(self, task_type: str, payload: Dict[str, Any], max_retries: int = 3) -> str:
         """添加任务到队列"""
@@ -229,16 +262,18 @@ class QueueManager:
                     task_id = self.pending_queue.pop(0)
                     task = self.tasks.get(task_id)
                     
-                    import core
                     if task and task.status == "pending":
                         # 当任务需要IBKR连接但当前未连接时，延后处理，避免无意义的失败与重试
-                        if task.task_type in ("strategy_order",) and not core.ibkr_client.is_connected():
+                        if task.task_type in ("strategy_order",) and not self._ib_connected():
                             # 重新放回队列尾部，并短暂休眠以避免紧密轮询
                             self.pending_queue.append(task_id)
-                            queue_logger.debug(f"Deferring task {task_id} due to IBKR not connected")
-                            await asyncio.sleep(0.5)
+                            if self._should_log_deferral(task_id):
+                                queue_logger.debug(
+                                    f"Deferring task {task_id} due to IBKR not connected"
+                                )
+                            await asyncio.sleep(self._ib_disconnect_backoff)
                             continue
-                        
+
                         # 启动任务处理
                         processing_task = asyncio.create_task(
                             self._process_task(task)
@@ -253,6 +288,7 @@ class QueueManager:
 
                 for task_id in completed_task_ids:
                     del self.processing_tasks[task_id]
+                    self._last_deferral_notice.pop(task_id, None)
 
                 await self._monitor_queue_health()
                 # 短暂休眠避免CPU占用过高
@@ -268,6 +304,7 @@ class QueueManager:
 
     async def _process_task(self, task: QueueTask):
         """处理单个任务"""
+        self._last_deferral_notice.pop(task.task_id, None)
         task.status = "processing"
         task.started_at = now_local()
         self._save_tasks()
@@ -292,8 +329,7 @@ class QueueManager:
             task.error_message = error_msg
 
             # 针对未连接IBKR的情况进行延后处理而非计为失败/重试
-            import core
-            if ("Not connected to IBKR" in error_msg) or (not core.ibkr_client.is_connected()):
+            if ("Not connected to IBKR" in error_msg) or (not self._ib_connected()):
                 task.status = "pending"
                 task.started_at = None
                 # 重新排队等待连接恢复
@@ -302,7 +338,7 @@ class QueueManager:
                     f"Task {task.task_id} deferred: {error_msg}; will retry when connected"
                 )
                 # 小幅休眠避免紧密轮询
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(self._ib_disconnect_backoff)
             elif "Strategy disabled" in error_msg or "Strategy not found" in error_msg:
                 # 对于禁用或不存在的策略，不进行重试，直接标记为失败
                 task.status = "failed"
@@ -452,7 +488,7 @@ class QueueManager:
         
         # 检查连接状态（无需 ibkr_client）
         import core
-        if not core.ibkr_client.is_connected():
+        if not self._ib_connected():
             raise Exception("Not connected to IBKR")
         
         # 验证策略
