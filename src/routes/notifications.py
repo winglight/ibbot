@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from loguru import logger
 
-from core import notification_manager, telegram_notifier
+from core.dependencies import get_notification_manager
 from .auth import get_current_user
 from src.database import get_db_manager, DatabaseManager
 
@@ -20,11 +20,15 @@ class NotificationTestRequest(BaseModel):
     message: str = "Test notification from IBKR Trading Bot"
 
 @router.post("/api/notify")
-async def send_notification(req: NotificationRequest, user: Optional[str] = Depends(get_current_user)):
+async def send_notification(
+    req: NotificationRequest,
+    user: Optional[str] = Depends(get_current_user),
+    manager=Depends(get_notification_manager),
+):
     """发送通知"""
     try:
         event_type = (req.event_type or "general").strip() or "general"
-        results = await notification_manager.send_notification(
+        results = await manager.send_notification(
             message=req.message,
             event_type=event_type,
             category="api"

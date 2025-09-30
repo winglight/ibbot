@@ -9,13 +9,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 import core
-from core import (
-    connection_manager,
-    websocket_manager,
-    order_manager,
-    strategy_manager,
-    risk_manager,
-)
 from src.database import get_db_manager
 from src.dom_optimizer import get_dom_optimization_orchestrator
 from src.dom_service import get_dom_service
@@ -28,6 +21,30 @@ from src.utils.strategy_cache import (
 router = APIRouter()
 
 RATE_LIMIT_SECONDS = 15.0
+
+
+def _services():
+    return core.require_container()
+
+
+def _websocket_manager():
+    return _services().websocket_manager
+
+
+def _order_manager():
+    return _services().order_manager
+
+
+def _strategy_manager():
+    return _services().strategy_manager
+
+
+def _risk_manager():
+    return _services().risk_manager
+
+
+def _connection_manager():
+    return core.connection_manager
 
 async def _send_json(websocket: WebSocket, payload: Dict[str, Any]) -> bool:
     try:
@@ -274,7 +291,7 @@ async def _realtime_price_sender(ws: WebSocket, symbol: str, interval: float = 2
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket_manager.connect(websocket)
+    await _websocket_manager().connect(websocket)
 
     # 新连接建立后，立即向该客户端单播当前连接状态
     try:
@@ -315,13 +332,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # 初次连接后，向该连接单播发送订单快照（最多300条）
     try:
-        if 'order_manager' in globals() and order_manager:
+        manager = _order_manager()
+        if manager:
             loop = asyncio.get_event_loop()
             initial_limit = 10
             result = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: order_manager.get_orders(
+                    lambda: manager.get_orders(
                         limit=initial_limit,
                         offset=0,
                         return_total=True,
@@ -434,7 +452,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if task:
                     task.cancel()
             elif msg_type == "request_orders_snapshot":
-                if 'order_manager' not in globals() or not order_manager:
+                manager = _order_manager()
+                if not manager:
                     await websocket.send_text(json.dumps({
                         "type": "orders_snapshot",
                         "success": False,
@@ -480,7 +499,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     result = await asyncio.wait_for(
                         loop.run_in_executor(
                             None,
-                            lambda: order_manager.get_orders(
+                            lambda: manager.get_orders(
                                 limit=limit,
                                 start_date=start_dt,
                                 offset=offset,
@@ -1114,5 +1133,5 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         for task in realtime_tasks.values():
             task.cancel()
-        websocket_manager.disconnect(websocket)
+        _websocket_manager().disconnect(websocket)
 
