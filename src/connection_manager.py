@@ -619,6 +619,8 @@ class ConnectionManager:
                             self.ib.disconnect()
                         except Exception as e:
                             connection_logger.debug(f"Error during cleanup disconnect: {e}")
+                    self.connected = False
+                    self._connection_thread_alive = False
                     connection_logger.info("IBKR connection loop ended")
             
             except Exception as e:
@@ -647,9 +649,16 @@ class ConnectionManager:
                 
                 # 设置事件循环超时，防止无限运行
                 def stop_loop_on_timeout():
-                    if loop.is_running():
-                        connection_logger.warning("Event loop timeout, stopping...")
-                        loop.call_soon_threadsafe(loop.stop)
+                    if not loop.is_running():
+                        return
+                    # 如果连接线程已经进入稳定运行状态，则不要强制停止事件循环
+                    if self._connection_thread_alive or self.connected:
+                        connection_logger.debug(
+                            "Event loop timeout guard triggered but connection thread is healthy; skipping stop"
+                        )
+                        return
+                    connection_logger.warning("Event loop timeout while waiting for connection; stopping loop")
+                    loop.call_soon_threadsafe(loop.stop)
                 
                 # 30秒后强制停止事件循环（如果还在运行）
                 timeout_timer = threading.Timer(30.0, stop_loop_on_timeout)
