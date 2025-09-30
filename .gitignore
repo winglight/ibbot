@@ -14,6 +14,8 @@ data/logs/*
 __pycache__
 .DS_Store
 strategy
+!services/strategy/
+!services/strategy/**
 test/src
 test/data
 test/strategy
