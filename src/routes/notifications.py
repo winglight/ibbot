@@ -218,7 +218,7 @@ async def update_notification_settings(
         settings["telegram"] = telegram_cfg
 
         db.save_notification_config(settings)
-        
+
         # 更新Telegram通知器配置（使用update_config以重建Bot实例）
         if "telegram" in settings and telegram_notifier:
             telegram_config = settings.get("telegram", {})
@@ -229,7 +229,10 @@ async def update_notification_settings(
                 telegram_notifier.update_config(bot_token=bot_token, chat_id=chat_id)
             except Exception as e:
                 logger.error(f"Update telegram notifier config failed: {e}")
-        
+
+        if hasattr(notification_manager, "invalidate_settings_cache"):
+            notification_manager.invalidate_settings_cache()
+
         return {"success": True, "message": "Notification settings updated"}
     except Exception as e:
         logger.error(f"Update notification settings error: {e}")

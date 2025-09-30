@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from loguru import logger
 
@@ -71,6 +71,10 @@ class NotificationManager:
         self.telegram_notifier = telegram_notifier
         self.websocket_manager = websocket_manager
         self.db_manager = db_manager
+        self._settings_cache: Optional[Dict[str, Any]] = None
+        self._settings_expires: Optional[datetime] = None
+        self._settings_lock: Optional[asyncio.Lock] = None
+        self._settings_ttl_seconds: int = 45
         notification_logger.info("NotificationManager initialized")
 
     # ------------------------------------------------------------------
@@ -153,8 +157,8 @@ class NotificationManager:
         if db_manager:
             self.db_manager = db_manager
 
-    def _load_settings(self) -> Dict[str, Any]:
-        """加载通知配置（若未配置则返回默认），默认值需与后端保持一致。"""
+    def _load_settings(self, raw_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """将数据库配置与默认值合并，确保返回结构完整。"""
         default_settings = {
             "chrome": {
                 "enabled": True,
@@ -180,28 +184,24 @@ class NotificationManager:
             "email_address": "",
         }
 
-        settings: Dict[str, Any] = default_settings
-        try:
-            if self.db_manager:
-                loaded = self.db_manager.load_notification_config()
-                if isinstance(loaded, dict) and loaded:
-                    settings = loaded
-        except Exception as e:
-            notification_logger.error(f"Load notification settings failed: {e}")
+        settings: Dict[str, Any] = dict(default_settings)
+        if isinstance(raw_settings, dict):
+            for key, value in raw_settings.items():
+                settings[key] = value
 
-        chrome_cfg = settings.get("chrome") or {}
+        chrome_cfg = dict(settings.get("chrome") or {})
         chrome_cfg.setdefault("enabled", True)
         chrome_cfg.setdefault("config", {})
         chrome_cfg["events"] = self._normalize_event_list(chrome_cfg.get("events"))
         settings["chrome"] = chrome_cfg
 
-        telegram_cfg = settings.get("telegram") or {}
+        telegram_cfg = dict(settings.get("telegram") or {})
         telegram_cfg.setdefault("enabled", False)
         telegram_cfg.setdefault("config", {"bot_token": "", "chat_id": ""})
         telegram_cfg["events"] = self._normalize_event_list(telegram_cfg.get("events"))
         settings["telegram"] = telegram_cfg
 
-        reminder_cfg = settings.get("trading_reminder") or {}
+        reminder_cfg = dict(settings.get("trading_reminder") or {})
         reminder_cfg.setdefault("enabled", False)
         reminder_cfg.setdefault("start_trading_time", "09:30")
         reminder_cfg.setdefault("end_trading_time", "16:00")
@@ -213,6 +213,50 @@ class NotificationManager:
         settings["email_address"] = settings.get("email_address", "") or ""
 
         return settings
+
+    async def _load_settings_async(self) -> Dict[str, Any]:
+        """异步加载通知配置，并对结果进行缓存以减少数据库访问。"""
+        now = datetime.utcnow()
+        if (
+            self._settings_cache is not None
+            and self._settings_expires is not None
+            and now < self._settings_expires
+        ):
+            return self._settings_cache
+
+        if self._settings_lock is None:
+            self._settings_lock = asyncio.Lock()
+
+        async with self._settings_lock:
+            # 在获取锁后再次检查缓存，避免竞争条件
+            now = datetime.utcnow()
+            if (
+                self._settings_cache is not None
+                and self._settings_expires is not None
+                and now < self._settings_expires
+            ):
+                return self._settings_cache
+
+            loaded: Optional[Dict[str, Any]] = None
+            if self.db_manager:
+                try:
+                    loaded = await asyncio.to_thread(
+                        self.db_manager.load_notification_config
+                    )
+                except Exception as exc:
+                    notification_logger.error(
+                        f"Load notification settings failed: {exc}"
+                    )
+
+            settings = self._load_settings(loaded)
+            self._settings_cache = settings
+            self._settings_expires = now + timedelta(seconds=self._settings_ttl_seconds)
+            return settings
+
+    def invalidate_settings_cache(self) -> None:
+        """手动失效缓存，以便在配置更新后立即生效。"""
+        self._settings_cache = None
+        self._settings_expires = None
 
     async def _save_notification_history(
         self,
@@ -261,7 +305,7 @@ class NotificationManager:
             channels = ['telegram', 'websocket']
 
         # 根据设置过滤实际发送的渠道（仅在启用时才尝试发送）
-        settings = self._load_settings()
+        settings = await self._load_settings_async()
         event_token = self._normalize_event_token(event_type)
         telegram_enabled = bool(settings.get('telegram', {}).get('enabled', False))
         chrome_enabled = bool(settings.get('chrome', {}).get('enabled', True))

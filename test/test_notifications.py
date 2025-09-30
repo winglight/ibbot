@@ -62,6 +62,7 @@ def notification_test_env(monkeypatch, app):
     class StubManager:
         def __init__(self):
             self.calls = []
+            self.cache_invalidated = False
 
         async def send_notification(self, **kwargs):  # type: ignore[override]
             self.calls.append(kwargs)
@@ -69,6 +70,9 @@ def notification_test_env(monkeypatch, app):
             if isinstance(channels, list):
                 return {channel: True for channel in channels}
             return {"websocket": True}
+
+        def invalidate_settings_cache(self):
+            self.cache_invalidated = True
 
     from src.routes import notifications as notifications_module
 
