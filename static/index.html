@@ -139,6 +139,60 @@
                 </button>
             </div>
 
+            <div class="card config-card mb-3" id="configCenterCard">
+                <div class="card-header d-flex flex-wrap gap-2 align-items-center justify-content-between">
+                    <h6 class="mb-0"><i class="fas fa-database me-2"></i> Config Center</h6>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-outline-light btn-sm" type="button" id="configCenterReloadButton" title="刷新服务列表">
+                            <i class="fas fa-rotate-right"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label class="form-label">服务模块</label>
+                        <div class="d-flex gap-2">
+                            <select class="form-select form-select-sm" id="configCenterModuleSelect" aria-label="选择配置模块">
+                                <option value="">选择服务模块</option>
+                            </select>
+                            <button class="btn btn-outline-secondary btn-sm" type="button" id="configCenterHistoryRefresh" title="刷新历史">
+                                <i class="fas fa-sync"></i>
+                            </button>
+                        </div>
+                        <div class="form-text">配置存储在 Redis <code>hash:config:&lt;module&gt;</code> 中。</div>
+                    </div>
+
+                    <div id="configCenterEditor" class="d-none">
+                        <div class="mb-3">
+                            <label class="form-label">配置内容 (JSON)</label>
+                            <textarea id="configCenterTextarea" class="form-control font-monospace" rows="8" spellcheck="false" placeholder="{&#10;  &quot;KEY&quot;: &quot;VALUE&quot;&#10;}"></textarea>
+                            <div class="form-text">保存后会触发 <code>pubsub:config:update</code> 以通知服务热更新。</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">变更说明</label>
+                            <input type="text" class="form-control form-control-sm" id="configCenterMessageInput" maxlength="200" placeholder="用于记录此次修改的备注 (可选)">
+                        </div>
+                        <div class="d-flex justify-content-end gap-2 mb-2">
+                            <button class="btn btn-outline-secondary btn-sm" type="button" id="configCenterResetButton">
+                                <i class="fas fa-undo"></i> 重置
+                            </button>
+                            <button class="btn btn-primary btn-sm" type="button" id="configCenterSaveButton">
+                                <i class="fas fa-save"></i> 保存
+                            </button>
+                        </div>
+                        <div id="configCenterStatusText" class="form-text text-muted"></div>
+
+                        <div class="mt-4">
+                            <div class="d-flex align-items-center justify-content-between mb-2">
+                                <h6 class="mb-0"><i class="fas fa-history me-2"></i> 历史版本</h6>
+                                <small class="text-muted">点击回滚恢复指定版本</small>
+                            </div>
+                            <ul class="list-group" id="configCenterHistoryList"></ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="card config-card mb-3" id="domSettingsCard">
                 <div class="card-header">
                     <h6 class="mb-0"><i class="fas fa-sliders-h me-2"></i> Monitor Settings</h6>
@@ -3216,6 +3270,7 @@
 <script src="/static/js/monitoring/manager.js" defer></script>
 <script src="/static/js/ui/controller.js" defer></script>
 <script src="/static/js/service_restart.js" defer></script>
+<script src="/static/js/config_center.js" defer></script>
 <script src="/static/js/app.js" defer></script>
 </body>
 </html>

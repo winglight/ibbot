@@ -23,6 +23,7 @@ const notificationsModules = appModules.notifications || {};
 const NotificationsManagerModule = notificationsModules.manager || {};
 const NotificationsManagerClass = NotificationsManagerModule.NotificationsManager || globalScope.NotificationsManager;
 const serviceRestartModules = appModules.serviceRestart || {};
+const configCenterModules = appModules.configCenter || {};
 
 const {
     INTERVAL_MINUTES_MAP = {},
@@ -130,6 +131,7 @@ class TradingApp {
         // 通知列表
         this.notifications = [];
         this.serviceRestartController = null;
+        this.configCenterManager = null;
 
         if (typeof MonitoringManagerClass !== 'function') {
             throw new Error('MonitoringManager module is required');
@@ -809,6 +811,12 @@ class TradingApp {
             console.error('Failed to load risk rules after authentication:', error);
         }
 
+        try {
+            this.configCenterManager?.refreshModules?.();
+        } catch (error) {
+            console.error('Failed to refresh config modules after authentication:', error);
+        }
+
         this.authenticatedModulesInitialized = true;
         return true;
     }
@@ -888,6 +896,7 @@ class TradingApp {
 
         this.initSidePanels();
         this.initHolidayDataPushToggle();
+        this.initConfigCenter();
 
         this.monitorDomHistoryList = document.getElementById('monitorDomHistoryList');
         this.monitorDomHistoryMeta = document.getElementById('monitorDomHistoryMeta');
@@ -1674,6 +1683,14 @@ class TradingApp {
                 if (statusText === '访客模式无法执行重启操作' || !statusText) {
                     restartCtrl.updateStatus('idle', '选择服务后执行重启。');
                 }
+            }
+        }
+
+        if (this.configCenterManager?.setReadOnly) {
+            try {
+                this.configCenterManager.setReadOnly(this.isReadOnly);
+            } catch (error) {
+                console.error('Failed to update config center read-only state', error);
             }
         }
 
@@ -4222,6 +4239,49 @@ class TradingApp {
             console.error('Failed to load holiday data push setting:', error);
             if (options.pending) {
                 this.setHolidayDataPushState(resolveState());
+            }
+        }
+    }
+
+    initConfigCenter() {
+        if (this.configCenterManager || !configCenterModules?.createManager) {
+            return;
+        }
+
+        const manager = configCenterModules.createManager({
+            document,
+            moduleSelectId: 'configCenterModuleSelect',
+            textareaId: 'configCenterTextarea',
+            saveButtonId: 'configCenterSaveButton',
+            resetButtonId: 'configCenterResetButton',
+            reloadButtonId: 'configCenterReloadButton',
+            editorId: 'configCenterEditor',
+            messageInputId: 'configCenterMessageInput',
+            statusTextId: 'configCenterStatusText',
+            historyListId: 'configCenterHistoryList',
+            historyReloadId: 'configCenterHistoryRefresh',
+            loadModules: () => this.apiCall('/config/modules', { allowReadOnly: true }),
+            loadConfig: (module) => this.apiCall(`/config/${encodeURIComponent(module)}`, { allowReadOnly: true }),
+            saveConfig: (module, payload) => this.apiCall(`/config/${encodeURIComponent(module)}`, {
+                method: 'PUT',
+                body: JSON.stringify(payload),
+            }),
+            loadHistory: (module) => this.apiCall(`/config/${encodeURIComponent(module)}/history`, { allowReadOnly: true }),
+            rollback: (module, payload) => this.apiCall(`/config/${encodeURIComponent(module)}/rollback`, {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            }),
+            onStatus: (level, message) => {
+                if (!message) return;
+                const tone = level === 'success' ? 'success' : level === 'error' ? 'danger' : 'info';
+                this.showAlert(tone, message);
+            },
+        });
+
+        if (manager) {
+            this.configCenterManager = manager;
+            if (this.isReadOnly) {
+                manager.setReadOnly(true);
             }
         }
     }
