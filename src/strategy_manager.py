@@ -15,7 +15,7 @@ import sys
 import asyncio
 from collections.abc import Mapping
 from copy import deepcopy
-from threading import RLock
+from threading import RLock, Thread
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -261,13 +261,24 @@ class StrategyManager:
                     )
             return
 
-        try:
-            asyncio.run(coro)
-        except Exception as exc:  # pragma: no cover - defensive guard
-            strategy_logger.warning(
-                "Strategy cache coroutine failed during synchronous execution",
-                error=str(exc),
-            )
+        def _run_in_thread() -> None:
+            try:
+                asyncio.run(coro)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    "Strategy cache coroutine failed during synchronous execution",
+                    error=str(exc),
+                )
+
+        worker = Thread(
+            target=_run_in_thread,
+            name="strategy-cache-maintenance",
+            daemon=True,
+        )
+        worker.start()
+
+        if block:
+            worker.join()
 
     def _request_strategy_cache_rebuild(
         self,
