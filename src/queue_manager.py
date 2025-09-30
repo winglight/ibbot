@@ -72,6 +72,13 @@ class QueueManager:
         self._last_deferral_notice: Dict[str, float] = {}
         self._ib_disconnect_backoff: float = 0.5
 
+        # 运行时性能监控配置
+        self._worker_idle_sleep: float = 0.1
+        self._worker_loop_warning_threshold: float = 1.0
+        self._task_processing_warning_threshold: float = 2.0
+        self._io_warning_threshold: float = 0.5
+        self._offthread_warning_threshold: float = 1.5
+
     def set_dependencies(self, risk_manager, strategy_manager, websocket_manager, order_manager=None, notification_manager=None):
         """设置依赖对象"""
         self.risk_manager = risk_manager
@@ -91,6 +98,25 @@ class QueueManager:
             self._last_deferral_notice[task_id] = now
             return True
         return False
+
+    def _log_operation_duration(
+        self,
+        *,
+        event: str,
+        start: float,
+        threshold: float,
+        level: str = "warning",
+        message: str = "Slow queue operation detected",
+        **context: Any,
+    ) -> float:
+        """记录耗时操作，便于排查阻塞问题。"""
+
+        elapsed = time.monotonic() - start
+        if elapsed >= threshold:
+            bound_logger = queue_logger.bind(event=event, duration=f"{elapsed:.3f}s", **context)
+            log_fn = getattr(bound_logger, level, bound_logger.warning)
+            log_fn(message)
+        return elapsed
 
     def _ib_connected(self) -> bool:
         """安全地检测IB连接状态，容忍client缺失或异常"""
@@ -263,6 +289,7 @@ class QueueManager:
         """队列工作器主循环"""
         try:
             while self.is_running:
+                iteration_start = time.monotonic()
                 try:
                     # 检查是否有待处理的任务且未达到并发限制
                     if (len(self.processing_tasks) < self.max_concurrent_tasks and
@@ -289,6 +316,12 @@ class QueueManager:
                                 self._process_task(task)
                             )
                             self.processing_tasks[task_id] = processing_task
+                    elif len(self.pending_queue) > 0 and len(self.processing_tasks) >= self.max_concurrent_tasks:
+                        queue_logger.bind(
+                            pending=len(self.pending_queue),
+                            processing=len(self.processing_tasks),
+                            max_concurrent=self.max_concurrent_tasks,
+                        ).debug("Queue worker at concurrency limit")
 
                     # 清理已完成的任务
                     completed_task_ids = []
@@ -301,8 +334,17 @@ class QueueManager:
                         self._last_deferral_notice.pop(task_id, None)
 
                     await self._monitor_queue_health()
+                    loop_elapsed = self._log_operation_duration(
+                        event="worker_loop_iteration",
+                        start=iteration_start,
+                        threshold=self._worker_loop_warning_threshold,
+                        message="Queue worker iteration slower than expected",
+                        pending=len(self.pending_queue),
+                        processing=len(self.processing_tasks),
+                    )
+                    queue_logger.bind(duration=f"{loop_elapsed:.3f}s").debug("Queue worker iteration completed")
                     # 短暂休眠避免CPU占用过高
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(self._worker_idle_sleep)
 
                 except asyncio.CancelledError:
                     queue_logger.info("Queue worker loop cancellation requested")
@@ -323,6 +365,7 @@ class QueueManager:
 
     async def _process_task(self, task: QueueTask):
         """处理单个任务"""
+        task_start = time.monotonic()
         self._last_deferral_notice.pop(task.task_id, None)
         task.status = "processing"
         task.started_at = now_local()
@@ -385,6 +428,23 @@ class QueueManager:
                     )
 
         finally:
+            total_elapsed = self._log_operation_duration(
+                event="process_task",
+                start=task_start,
+                threshold=self._task_processing_warning_threshold,
+                message="Queue task processing took longer than expected",
+                task_id=task.task_id,
+                task_type=task.task_type,
+                status=task.status,
+                retries=task.retry_count,
+            )
+            queue_logger.bind(
+                task_id=task.task_id,
+                task_type=task.task_type,
+                status=task.status,
+                retries=task.retry_count,
+                duration=f"{total_elapsed:.3f}s",
+            ).debug("Queue task processing finished")
             self._save_tasks()
 
     def _resolve_notification_manager(self):
@@ -447,6 +507,7 @@ class QueueManager:
         )
 
     async def _monitor_queue_health(self) -> None:
+        monitor_start = time.monotonic()
         now = time.time()
         status = self.get_queue_status()
         oldest = self.get_oldest_pending_task_info()
@@ -492,8 +553,18 @@ class QueueManager:
         elif status["pending_count"] == 0:
             self._last_backlog_alert = 0.0
 
+        self._log_operation_duration(
+            event="monitor_queue_health",
+            start=monitor_start,
+            threshold=self._io_warning_threshold,
+            message="Queue health monitor took longer than expected",
+            pending=status["pending_count"],
+            processing=status["processing_count"],
+        )
+
     async def _process_strategy_order(self, task: QueueTask):
         """处理策略订单任务"""
+        strategy_start = time.monotonic()
         from datetime import datetime
 
         # 检查依赖对象是否已设置
@@ -540,11 +611,21 @@ class QueueManager:
         pre_trade_state: Optional[Dict[str, Any]] = None
         if strategy.get('strategy_type') == 'internal' and self.strategy_manager:
             try:
+                pre_trade_start = time.monotonic()
                 pre_trade_state = await self.strategy_manager.prepare_internal_order(
                     strategy_name=strategy['name'],
                     symbol=payload['symbol'],
                     action=action,
                     quantity=payload['qty'],
+                )
+                self._log_operation_duration(
+                    event="prepare_internal_order",
+                    start=pre_trade_start,
+                    threshold=self._io_warning_threshold,
+                    message="Internal strategy pre-trade check slower than expected",
+                    strategy=strategy['name'],
+                    symbol=payload['symbol'],
+                    action=action,
                 )
                 queue_logger.bind(
                     task_id=task.task_id,
@@ -605,12 +686,22 @@ class QueueManager:
 
         if strategy.get('strategy_type') == 'internal' and self.strategy_manager:
             try:
+                finalize_start = time.monotonic()
                 await self.strategy_manager.finalize_internal_order(
                     strategy_name=strategy['name'],
                     symbol=payload['symbol'],
                     action=action,
                     quantity=payload['qty'],
                     pre_trade=pre_trade_state,
+                )
+                self._log_operation_duration(
+                    event="finalize_internal_order",
+                    start=finalize_start,
+                    threshold=self._io_warning_threshold,
+                    message="Internal strategy finalize step slower than expected",
+                    strategy=strategy['name'],
+                    symbol=payload['symbol'],
+                    action=action,
                 )
             except Exception as exc:
                 queue_logger.warning(f"Finalize internal order state failed: {exc}")
@@ -697,6 +788,16 @@ class QueueManager:
             action=action,
             quantity=payload['qty'],
         ).info(f"Strategy order placed successfully: {order_id}")
+        self._log_operation_duration(
+            event="process_strategy_order",
+            start=strategy_start,
+            threshold=self._task_processing_warning_threshold,
+            message="Strategy order processing slower than expected",
+            task_id=task.task_id,
+            strategy=strategy['name'],
+            symbol=payload['symbol'],
+            action=action,
+        )
 
     async def _place_order_off_thread(
         self,
@@ -711,8 +812,17 @@ class QueueManager:
     ):
         """在后台线程中执行下单流程，避免阻塞事件循环。"""
 
+        dispatch_start = time.monotonic()
+        queue_logger.bind(
+            symbol=symbol,
+            action=action,
+            order_type=order_type,
+            exchange=exchange,
+            sec_type=sec_type,
+            quantity=quantity,
+        ).debug("Dispatching order placement to background thread")
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 self._place_order_blocking,
                 symbol,
                 quantity,
@@ -722,6 +832,19 @@ class QueueManager:
                 sec_type,
                 price,
             )
+            self._log_operation_duration(
+                event="place_order_off_thread",
+                start=dispatch_start,
+                threshold=self._offthread_warning_threshold,
+                message="Background order placement slower than expected",
+                symbol=symbol,
+                action=action,
+                order_type=order_type,
+                exchange=exchange,
+                sec_type=sec_type,
+                quantity=quantity,
+            )
+            return result
         except Exception as exc:
             queue_logger.error(
                 "Failed to place order off thread",
@@ -773,6 +896,7 @@ class QueueManager:
 
     def _save_tasks(self):
         """持久化任务到文件"""
+        save_start = time.monotonic()
         try:
             tasks_data = {}
             for task_id, task in self.tasks.items():
@@ -792,16 +916,27 @@ class QueueManager:
             
             with open(self.queue_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-                
+
         except Exception as e:
             queue_logger.error(f"Failed to save tasks: {e}")
-    
+        else:
+            self._log_operation_duration(
+                event="save_tasks",
+                start=save_start,
+                threshold=self._io_warning_threshold,
+                message="Persisting queue tasks took longer than expected",
+                file=str(self.queue_file),
+                pending=len(self.pending_queue),
+                total=len(self.tasks),
+            )
+
     def _load_tasks(self):
         """从文件加载任务"""
+        load_start = time.monotonic()
         try:
             if not self.queue_file.exists():
                 return
-            
+
             with open(self.queue_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
@@ -824,9 +959,19 @@ class QueueManager:
             ]
             
             queue_logger.info(f"Loaded {len(self.tasks)} tasks from persistence, {len(self.pending_queue)} pending")
-            
+
         except Exception as e:
             queue_logger.error(f"Failed to load tasks: {e}")
+        else:
+            self._log_operation_duration(
+                event="load_tasks",
+                start=load_start,
+                threshold=self._io_warning_threshold,
+                message="Loading queue tasks took longer than expected",
+                file=str(self.queue_file),
+                pending=len(self.pending_queue),
+                total=len(self.tasks),
+            )
 
 # 全局队列管理器实例
 queue_manager = QueueManager()
