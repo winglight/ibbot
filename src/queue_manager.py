@@ -1,9 +1,10 @@
 import asyncio
+import threading
 import time
 import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Awaitable, Union
-from concurrent.futures import Future as ConcurrentFuture
+from concurrent.futures import Future as ConcurrentFuture, CancelledError as ConcurrentCancelledError
 from dataclasses import dataclass, asdict
 from loguru import logger
 import json
@@ -52,7 +53,8 @@ class QueueManager:
         self._async_queue: Optional[asyncio.Queue[str]] = None
         self._scheduler: Optional[Scheduler] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        
+        self._serialize_lock = threading.Lock()
+
         # 依赖注入的对象
         self.risk_manager = None
         self.strategy_manager = None
@@ -186,7 +188,7 @@ class QueueManager:
         self._schedule_task_dispatch(task_id)
 
         # 持久化任务
-        self._save_tasks()
+        self._schedule_tasks_persistence()
         
         queue_logger.bind(task_type=task_type, payload=payload).info(
             f"Task {task_id} added to queue, type: {task_type}"
@@ -332,6 +334,11 @@ class QueueManager:
             except Exception as exc:
                 queue_logger.debug(f"Failed to close scheduler: {exc}")
 
+        try:
+            await self._save_tasks_async()
+        except Exception as exc:
+            queue_logger.warning(f"Failed to flush queue persistence during shutdown: {exc}")
+
         self._async_queue = None
         self._loop = None
 
@@ -450,7 +457,7 @@ class QueueManager:
         self._last_deferral_notice.pop(task.task_id, None)
         task.status = "processing"
         task.started_at = now_local()
-        self._save_tasks()
+        await self._save_tasks_async()
 
         queue_logger.bind(payload=task.payload).info(
             f"Processing task {task.task_id}, type: {task.task_type}"
@@ -528,7 +535,7 @@ class QueueManager:
                 retries=task.retry_count,
                 duration=f"{total_elapsed:.3f}s",
             ).debug("Queue task processing finished")
-            self._save_tasks()
+            await self._save_tasks_async()
 
     def _resolve_notification_manager(self):
         if self.notification_manager:
@@ -1034,28 +1041,85 @@ class QueueManager:
 
         raise ValueError(f"Unsupported order type: {order_type}")
 
-    def _save_tasks(self):
-        """持久化任务到文件"""
+    def _handle_persistence_future(self, future: Union[asyncio.Future, ConcurrentFuture]) -> None:
+        """统一处理持久化任务的完成状态，记录可能的异常。"""
+
+        def _log_result(fut: Union[asyncio.Future, ConcurrentFuture]) -> None:
+            try:
+                fut.result()
+            except (asyncio.CancelledError, ConcurrentCancelledError):
+                queue_logger.debug("Queue persistence task was cancelled")
+            except Exception as exc:  # pragma: no cover - best effort logging
+                queue_logger.warning(f"Queue persistence task failed: {exc}")
+
+        try:
+            future.add_done_callback(_log_result)
+        except Exception as exc:  # pragma: no cover - defensive
+            queue_logger.debug(f"Failed to register persistence future callback: {exc}")
+
+    def _schedule_tasks_persistence(self) -> None:
+        """在合适的事件循环中调度异步持久化任务。"""
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        target_loop = self._loop or running_loop
+
+        if running_loop:
+            if target_loop and target_loop is not running_loop:
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._save_tasks_async(),
+                        target_loop,
+                    )
+                except RuntimeError as exc:
+                    queue_logger.debug(f"Failed to schedule persistence on worker loop: {exc}")
+                    self._serialize_tasks()
+                else:
+                    self._handle_persistence_future(future)
+            else:
+                task = running_loop.create_task(self._save_tasks_async())
+                self._handle_persistence_future(task)
+        elif target_loop:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._save_tasks_async(),
+                    target_loop,
+                )
+            except RuntimeError as exc:
+                queue_logger.debug(f"Failed to schedule persistence on stored loop: {exc}")
+                self._serialize_tasks()
+            else:
+                self._handle_persistence_future(future)
+        else:
+            self._serialize_tasks()
+
+    def _serialize_tasks(self) -> None:
+        """将队列任务序列化并写入持久化文件。"""
+
         save_start = time.monotonic()
         try:
-            tasks_data = {}
-            for task_id, task in self.tasks.items():
-                task_dict = asdict(task)
-                # 转换datetime为字符串
-                task_dict['created_at'] = to_local_iso(task.created_at)
-                if task.started_at:
-                    task_dict['started_at'] = to_local_iso(task.started_at)
-                if task.completed_at:
-                    task_dict['completed_at'] = to_local_iso(task.completed_at)
-                tasks_data[task_id] = task_dict
-            
-            data = {
-                'tasks': tasks_data,
-                'pending_queue': self.pending_queue
-            }
-            
-            with open(self.queue_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            with self._serialize_lock:
+                tasks_data = {}
+                for task_id, task in self.tasks.items():
+                    task_dict = asdict(task)
+                    # 转换datetime为字符串
+                    task_dict['created_at'] = to_local_iso(task.created_at)
+                    if task.started_at:
+                        task_dict['started_at'] = to_local_iso(task.started_at)
+                    if task.completed_at:
+                        task_dict['completed_at'] = to_local_iso(task.completed_at)
+                    tasks_data[task_id] = task_dict
+
+                data = {
+                    'tasks': tasks_data,
+                    'pending_queue': self.pending_queue
+                }
+
+                with open(self.queue_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
 
         except Exception as e:
             queue_logger.error(f"Failed to save tasks: {e}")
@@ -1069,6 +1133,11 @@ class QueueManager:
                 pending=len(self.pending_queue),
                 total=len(self.tasks),
             )
+
+    async def _save_tasks_async(self) -> None:
+        """在线程池中执行任务序列化，避免阻塞事件循环。"""
+
+        await asyncio.to_thread(self._serialize_tasks)
 
     def _load_tasks(self):
         """从文件加载任务"""

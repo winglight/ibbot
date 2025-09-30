@@ -1,6 +1,12 @@
+from datetime import datetime
 from http import HTTPStatus
+import json
+
+import pytest
 
 import core
+from src.queue_manager import QueueManager, QueueTask
+from src.utils import now_local
 
 
 def test_queue_status_endpoint(client):
@@ -52,3 +58,46 @@ def test_queue_all_tasks_snapshot(client):
             core.queue_manager.tasks.pop(task_id, None)
             if task_id in core.queue_manager.pending_queue:
                 core.queue_manager.pending_queue.remove(task_id)
+
+
+@pytest.mark.asyncio
+async def test_queue_persistence_flush_and_reload(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    manager = QueueManager()
+    manager.tasks.clear()
+    manager.pending_queue.clear()
+    monkeypatch.setattr(manager, "_resolve_notification_manager", lambda: None)
+
+    sample_task = QueueTask(
+        task_id="persist-test",
+        task_type="unit-test",
+        payload={"value": 1},
+        status="pending",
+        created_at=now_local(),
+    )
+    manager.tasks[sample_task.task_id] = sample_task
+
+    await manager.start_worker()
+    try:
+        sample_task.status = "completed"
+        sample_task.completed_at = now_local()
+        manager.pending_queue.clear()
+        manager._schedule_tasks_persistence()
+    finally:
+        await manager.stop_worker()
+
+    assert manager.queue_file.exists()
+    queue_snapshot = json.loads(manager.queue_file.read_text(encoding="utf-8"))
+    assert queue_snapshot["pending_queue"] == []
+    assert queue_snapshot["tasks"][sample_task.task_id]["status"] == "completed"
+
+    manager.tasks.clear()
+    manager.pending_queue.clear()
+    manager._load_tasks()
+
+    assert sample_task.task_id in manager.tasks
+    reloaded_task = manager.tasks[sample_task.task_id]
+    assert reloaded_task.status == "completed"
+    assert isinstance(reloaded_task.completed_at, datetime)
+    assert manager.pending_queue == []
