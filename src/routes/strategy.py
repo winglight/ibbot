@@ -1,5 +1,7 @@
 import asyncio
 import inspect
+import json
+import uuid
 from dataclasses import asdict
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
@@ -17,7 +19,8 @@ from src.utils.strategy_cache import (
     rebuild_strategy_cache as cache_rebuild_strategy_cache,
 )
 
-from core import strategy_manager, queue_manager, order_manager
+from core import strategy_manager, order_manager
+from src.ibbot.redis import get_redis_client
 from .auth import get_current_user
 from src.database import get_db_manager
 from src.models import (
@@ -46,6 +49,42 @@ _executions_fetch_tasks: Dict[Tuple[str, int], asyncio.Task] = {}
 _daily_pnl_cache: Dict[str, Dict[str, Any]] = {}
 _daily_pnl_cache_lock: Optional[asyncio.Lock] = None
 _daily_pnl_fetch_tasks: Dict[str, asyncio.Task] = {}
+
+STRATEGY_QUEUE_KEY = "list:queue:strategy"
+STRATEGY_EVENT_STREAM = "stream:strategy:events"
+STRATEGY_EVENT_LOOKBACK = 25
+
+
+async def _fetch_strategy_event(
+    redis: Any,
+    task_id: str,
+    *,
+    stream_key: str = STRATEGY_EVENT_STREAM,
+    lookback: int = STRATEGY_EVENT_LOOKBACK,
+) -> Optional[Dict[str, Any]]:
+    try:
+        entries = await redis.xrevrange(stream_key, count=max(lookback, 1))
+    except Exception:
+        logger.debug("Failed to read strategy event stream", exc_info=True)
+        return None
+
+    if not entries:
+        return None
+
+    for _, raw_fields in entries:
+        try:
+            fields = {str(k): raw_fields[k] for k in raw_fields}
+        except Exception:
+            # Some Redis clients return lists of tuples instead of dicts
+            if isinstance(raw_fields, dict):
+                fields = {str(k): raw_fields[k] for k in raw_fields}
+            elif isinstance(raw_fields, (list, tuple)):
+                fields = {str(item[0]): item[1] for item in raw_fields if isinstance(item, (list, tuple)) and len(item) >= 2}
+            else:
+                continue
+        if str(fields.get("task_id")) == task_id:
+            return fields
+    return None
 
 
 def _make_performance_cache_key(
@@ -935,60 +974,74 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
     """策略订单接口 - 立即返回200，异步处理"""
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    
-    # Auth check - strategy interface uses token in body or headers when enabled
-    # Do this check FIRST to avoid any IBKR calls for unauthorized requests
+
     settings = strategy_manager.get_settings()
     if settings.get('enable_auth', False):
-        # 1) Prefer body token
         token = payload.token
-        # 2) Fallback to Authorization: Bearer <token>
         if not token:
             auth_header = req.headers.get('Authorization')
             if auth_header and auth_header.startswith('Bearer '):
                 token = auth_header.split(' ', 1)[1]
-        # 3) Fallback to X-Strategy-Token header
         if not token:
             token = req.headers.get('X-Strategy-Token')
         if not token or not strategy_manager.validate_auth_token(token):
             raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    # Validate strategy exists and enabled - also before IBKR calls
+
     strategy = strategy_manager.get_strategy(payload.strategy)
     if not strategy or not strategy.get('enabled', False):
         raise HTTPException(status_code=400, detail="Strategy disabled or not found")
-    
-    # 基本参数验证
-    if payload.type.upper() == "LIMIT" and not payload.price:
+
+    order_type = payload.type.upper()
+    if order_type == "LIMIT" and payload.price is None:
         raise HTTPException(status_code=400, detail="Price required for limit order")
-    
-    if payload.type.upper() not in ["MARKET", "LIMIT"]:
+    if order_type not in {"MARKET", "LIMIT"}:
         raise HTTPException(status_code=400, detail="Invalid order type")
-    
-    # 将任务加入队列
+
+    try:
+        redis = await get_redis_client()
+    except Exception as exc:
+        logger.error("Failed to acquire Redis client for strategy queue", exc_info=True)
+        raise HTTPException(status_code=503, detail="Strategy queue unavailable") from exc
+
+    task_id = uuid.uuid4().hex
+    metadata = {"source": "api.strategy"}
+    if req.client and req.client.host:
+        metadata["client"] = req.client.host
+
     task_payload = {
+        "task_id": task_id,
         "strategy": payload.strategy,
         "symbol": payload.symbol,
         "action": payload.action,
         "qty": payload.qty,
-        "type": payload.type,
+        "type": order_type,
         "price": payload.price,
         "exchange": payload.exchange,
-        "sec_type": payload.sec_type
+        "sec_type": payload.sec_type,
+        "requested_at": now_local().isoformat(),
+        "metadata": metadata,
     }
-    
-    # 确保队列worker已启动
-    await queue_manager.start_worker()
-    
-    task_id = queue_manager.add_task("strategy_order", task_payload)
-    
-    # 立即返回200
-    return {
+
+    try:
+        await redis.rpush(STRATEGY_QUEUE_KEY, json.dumps(task_payload))
+    except Exception as exc:
+        logger.error("Failed to enqueue strategy task", exc_info=True)
+        raise HTTPException(status_code=503, detail="Failed to enqueue strategy task") from exc
+
+    event = await _fetch_strategy_event(redis, task_id)
+
+    response = {
         "success": True,
         "task_id": task_id,
-        "message": "Strategy order queued for processing",
-        "status": "queued"
+        "status": event.get("status", "queued") if event else "queued",
+        "queue": STRATEGY_QUEUE_KEY,
+        "stream": STRATEGY_EVENT_STREAM,
     }
+    if event:
+        response["event"] = event
+
+    return response
+
 @router.get("/api/strategies/{name}/executions")
 async def get_strategy_executions(
     name: str,

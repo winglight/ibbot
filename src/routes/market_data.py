@@ -1,12 +1,16 @@
 import asyncio
+import contextlib
 import inspect
 import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List
 
+import httpx
+import websockets
+
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from loguru import logger
 
@@ -31,6 +35,9 @@ router = APIRouter()
 
 # Cache controls
 CURRENT_PRICE_CACHE_ONLY = os.getenv("CURRENT_PRICE_CACHE_ONLY", "False").lower() == "true"
+MARKET_DATA_SERVICE_URL = os.getenv("MARKET_DATA_SERVICE_URL", "http://localhost:8010").rstrip("/")
+MARKET_DATA_SERVICE_WS_URL = os.getenv("MARKET_DATA_SERVICE_WS_URL")
+MARKET_DATA_SERVICE_TIMEOUT = float(os.getenv("MARKET_DATA_SERVICE_TIMEOUT", "5.0"))
 historical_data_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_DURATION_MINUTES = 1  # 缓存1分钟
 INDEX_FUTURE_ROOTS = {"ES", "MES", "NQ", "MNQ", "YM", "MYM", "RTY", "M2K", "VX"}
@@ -68,6 +75,29 @@ def _get_data_layer_manager():
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Failed to initialise data source manager: {}", exc)
         return None
+
+
+def _market_service_base_url() -> str:
+    return MARKET_DATA_SERVICE_URL or "http://localhost:8010"
+
+
+def _market_service_ws_url() -> str:
+    if MARKET_DATA_SERVICE_WS_URL:
+        return MARKET_DATA_SERVICE_WS_URL.rstrip("/")
+    base = _market_service_base_url()
+    if "://" not in base:
+        base = f"http://{base}"
+    scheme, rest = base.split("://", 1)
+    ws_scheme = "wss" if scheme == "https" else "ws"
+    return f"{ws_scheme}://{rest.rstrip('/')}/ws/market"
+
+
+async def _market_service_get(path: str) -> httpx.Response:
+    async with httpx.AsyncClient(
+        base_url=_market_service_base_url(),
+        timeout=MARKET_DATA_SERVICE_TIMEOUT,
+    ) as client:
+        return await client.get(path)
 
 
 def _map_bar_size_to_interval(bar_size: str) -> Optional[str]:
@@ -698,71 +728,31 @@ async def get_realtime_data(
     user: Optional[str] = Depends(get_current_user),
 ):
     """获取实时数据"""
-    if not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    try:
+        response = await _market_service_get(f"/market/{symbol}")
+    except httpx.RequestError as exc:
+        logger.error("Market data service request failed", symbol=symbol, error=str(exc))
+        raise HTTPException(status_code=503, detail="Market data service unavailable") from exc
 
-    ib_client = _require_ib_client()
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="No data available")
+    if response.status_code >= 500:
+        logger.error("Market data service error", status=response.status_code, body=response.text)
+        raise HTTPException(status_code=502, detail="Market data service error")
+    if not response.is_success:
+        detail = response.text or "Failed to load market data"
+        raise HTTPException(status_code=response.status_code, detail=detail)
 
     try:
-        loop = asyncio.get_event_loop()
-        try:
-            data = await ib_client.get_real_time_data(symbol, exchange)
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Real-time data request for {symbol} timed out, checking cache"
-            )
-            cached_data = None
-            if hasattr(ib_client, "price_cache") and symbol in ib_client.price_cache:
-                cached_price = ib_client.price_cache.get(symbol)
-                if cached_price:
-                    cached_data = {
-                        "symbol": symbol,
-                        "last": cached_price,
-                        "bid": 0,
-                        "ask": 0,
-                        "volume": 0,
-                        "timestamp": now_local().isoformat(),
-                        "is_cached": True,
-                    }
-            if cached_data:
-                logger.info(f"Returning cached data for {symbol}: {cached_price}")
-                return {"success": True, "data": cached_data}
-            else:
-                logger.warning(
-                    f"No cached data available for {symbol}"
-                )
-                return {
-                    "success": False,
-                    "error": "Real-time data request timed out and no cached data available",
-                }
+        payload = response.json()
+    except ValueError as exc:
+        logger.error("Invalid JSON from market data service", error=str(exc))
+        raise HTTPException(status_code=502, detail="Invalid response from market data service") from exc
 
-        if data:
-            return {"success": True, "data": data}
-        else:
-            if hasattr(ib_client, "price_cache") and symbol in ib_client.price_cache:
-                cached_price = ib_client.price_cache.get(symbol)
-                if cached_price:
-                    cached_data = {
-                        "symbol": symbol,
-                        "last": cached_price,
-                        "bid": 0,
-                        "ask": 0,
-                        "volume": 0,
-                        "timestamp": now_local().isoformat(),
-                        "is_cached": True,
-                    }
-                    logger.info(
-                        f"No fresh data for {symbol}, returning cached: {cached_price}"
-                    )
-                    return {"success": True, "data": cached_data}
-            raise HTTPException(status_code=404, detail="No data available")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="Unexpected market data format")
 
-    except HTTPException as exc:
-        raise exc
-    except Exception as e:
-        logger.error(f"Real-time data error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+    return {"success": True, "data": payload}
 
 @router.post("/api/current_price")
 async def get_current_price(
@@ -901,3 +891,53 @@ async def get_current_price(
     except Exception as e:
         logger.error(f"Current price error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.websocket("/ws/market")
+async def proxy_market_data_stream(websocket: WebSocket) -> None:
+    """Proxy websocket updates from the market data service to UI clients."""
+
+    upstream_url = _market_service_ws_url()
+    await websocket.accept()
+
+    async def _client_to_upstream(upstream: websockets.WebSocketClientProtocol) -> None:
+        try:
+            while True:
+                message = await websocket.receive_text()
+                await upstream.send(message)
+        except WebSocketDisconnect:
+            await upstream.close()
+        except Exception:
+            await upstream.close()
+
+    async def _upstream_to_client(upstream: websockets.WebSocketClientProtocol) -> None:
+        try:
+            async for message in upstream:
+                if isinstance(message, bytes):
+                    await websocket.send_bytes(message)
+                else:
+                    await websocket.send_text(message)
+        except websockets.ConnectionClosed:
+            raise WebSocketDisconnect()
+
+    try:
+        async with websockets.connect(upstream_url, ping_interval=None) as upstream:
+            forward_tasks = {
+                asyncio.create_task(_client_to_upstream(upstream)),
+                asyncio.create_task(_upstream_to_client(upstream)),
+            }
+            done, pending = await asyncio.wait(forward_tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in pending:
+                task.cancel()
+            for task in done:
+                with contextlib.suppress(Exception):
+                    task.result()
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Market data websocket proxy error: {}", exc)
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011, reason="Upstream connection failed")
+    finally:
+        with contextlib.suppress(Exception):
+            await websocket.close()
