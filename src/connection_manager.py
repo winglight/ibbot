@@ -138,6 +138,35 @@ class ConnectionManager:
         )
         self._last_loop_timeout_warning = 0.0
         self._loop_timeout_warning_suppressed = 0
+        # Weak reference back to IBKRClient (assigned during IBKRClient initialisation)
+        self._ibkr_client_ref = None  # type: ignore[attr-defined]
+        self._ibkr_connect_in_progress = False
+
+    def _notify_ibkr_client_connected(self, *, external: bool) -> None:
+        """Inform ``IBKRClient`` when a connection succeeds outside its control."""
+
+        ref = getattr(self, "_ibkr_client_ref", None)
+        if ref is None:
+            return
+
+        try:
+            client = ref()  # type: ignore[operator]
+        except Exception:
+            client = None
+
+        if not client:
+            return
+
+        try:
+            client._on_connection_manager_connected(external=external)  # type: ignore[attr-defined]
+        except AttributeError:
+            # Older ``IBKRClient`` versions will simply not receive the callback.
+            return
+        except Exception as exc:  # pragma: no cover - defensive guard
+            connection_logger.debug(
+                "IBKR client notification after connect failed",
+                error=str(exc),
+            )
         
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
@@ -597,6 +626,12 @@ class ConnectionManager:
                 self._connection_thread_alive = True
                 self._loop_timeout_warning_suppressed = 0
                 self._last_loop_timeout_warning = 0.0
+
+                try:
+                    external = not self._ibkr_connect_in_progress
+                except Exception:
+                    external = True
+                self._notify_ibkr_client_connected(external=external)
 
                 # 保持事件循环运行，直到明确要求断开连接
                 try:

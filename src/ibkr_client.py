@@ -207,9 +207,17 @@ class IBKRClient:
     def connect(self) -> bool:
         """连接到IBKR"""
         self._setup_async_components()
-        result = self.connection_manager.connect()
+        previous_flag = getattr(self.connection_manager, "_ibkr_connect_in_progress", False)
+        self.connection_manager._ibkr_connect_in_progress = True  # type: ignore[attr-defined]
+        try:
+            result = self.connection_manager.connect()
+        finally:
+            self.connection_manager._ibkr_connect_in_progress = previous_flag  # type: ignore[attr-defined]
+
         if result:
             self._handle_connection_restored()
+        else:
+            self._schedule_reconnect_task()
         return result
     
     def disconnect(self):
@@ -221,6 +229,21 @@ class IBKRClient:
         """检查连接状态"""
         self._setup_async_components()
         return self.connection_manager.is_connected()
+
+    def _schedule_reconnect_task(self) -> None:
+        """Ensure the reconnect monitor restarts after manual connection attempts."""
+
+        loop = self._async_loop
+        if loop is None:
+            return
+
+        if loop.is_running():
+            try:
+                loop.call_soon_threadsafe(self._start_connection_monitor_task)
+            except RuntimeError:
+                self._start_connection_monitor_task()
+        else:
+            self._start_connection_monitor_task()
 
     @property
     def ib(self) -> Optional[IB]:
@@ -255,6 +278,21 @@ class IBKRClient:
         except RuntimeError:
             if loop.is_running():
                 self._start_connection_monitor_task()
+
+    def _on_connection_manager_connected(self, *, external: bool) -> None:
+        """ConnectionManager callback when a connection succeeds."""
+
+        if not external:
+            return
+
+        self._setup_async_components()
+        try:
+            self._handle_connection_restored(initial=True)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            ibkr_logger.debug(
+                "Failed to finalize external connection restoration",
+                error=str(exc),
+            )
 
     def _start_connection_monitor_task(self) -> None:
         loop = self._async_loop
