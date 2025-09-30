@@ -5,6 +5,8 @@ const MonitoringConstants = monitoringModules.constants || {};
 const MonitoringUtils = monitoringModules.utils || {};
 const MonitoringManagerModule = monitoringModules.manager || {};
 const MonitoringManagerClass = MonitoringManagerModule.MonitoringManager || globalScope.MonitoringManager;
+const MonitoringDashboardModule = monitoringModules.dashboard || {};
+const MonitoringDashboardClass = MonitoringDashboardModule.MonitoringDashboard || globalScope.MonitoringDashboard;
 const SharedUtils = appModules.utils || {};
 const strategiesModules = appModules.strategies || {};
 const StrategiesManagerModule = strategiesModules.manager || {};
@@ -132,6 +134,9 @@ class TradingApp {
         }
         this.monitoringManager = new MonitoringManagerClass(this);
         this.monitoring = this.monitoringManager;
+        this.monitoringDashboard = typeof MonitoringDashboardClass === 'function'
+            ? new MonitoringDashboardClass(this)
+            : null;
         this.bindMonitoringStateProxies();
         this.authRole = localStorage.getItem('user_role') || 'admin';
         this.isReadOnly = localStorage.getItem('is_read_only') === '1';
@@ -855,6 +860,14 @@ class TradingApp {
             // 已改为WebSocket推送更新订单，取消轮询刷新
             await cfgPromise.catch(() => {});
         }, 50);
+
+        if (this.monitoringDashboard && typeof this.monitoringDashboard.init === 'function') {
+            try {
+                this.monitoringDashboard.init();
+            } catch (error) {
+                console.error('Failed to initialise monitoring dashboard', error);
+            }
+        }
     }
 
     setupEventListeners() {
