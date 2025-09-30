@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 from loguru import logger
 import json
+import anyio
 
 # 为队列管理器绑定模块日志记录器
 queue_logger = logger.bind(module="queue_manager", request_id="-")
@@ -40,10 +41,12 @@ class QueueManager:
     def __init__(self, max_concurrent_tasks: int = 5):
         self.tasks: Dict[str, QueueTask] = {}
         self.pending_queue: List[str] = []  # 存储task_id的FIFO队列
-        self.processing_tasks: Dict[str, asyncio.Task] = {}
+        self.processing_tasks: Dict[str, Any] = {}
         self.max_concurrent_tasks = max_concurrent_tasks
         self.is_running = False
         self._worker_task: Optional[asyncio.Task] = None
+        self._task_group = None
+        self._capacity_limiter = None
         
         # 依赖注入的对象
         self.risk_manager = None
@@ -245,9 +248,33 @@ class QueueManager:
         if self.is_running:
             return
 
+        try:
+            limiter = anyio.CapacityLimiter(self.max_concurrent_tasks)
+            task_group = await anyio.create_task_group().__aenter__()
+        except Exception as exc:
+            queue_logger.error(f"Failed to initialize queue task group: {exc}")
+            raise
+
+        self._capacity_limiter = limiter
+        self._task_group = task_group
+
         self.is_running = True
-        self._worker_task = asyncio.create_task(self._worker_loop())
-        queue_logger.info("Queue worker started")
+        recovered_tasks: List[str] = []
+        for task_id, task in self.tasks.items():
+            if task.status == "processing":
+                task.status = "pending"
+                task.started_at = None
+                if task_id not in self.pending_queue:
+                    recovered_tasks.append(task_id)
+        if recovered_tasks:
+            self.pending_queue.extend(recovered_tasks)
+            queue_logger.info(
+                f"Recovered {len(recovered_tasks)} in-flight tasks back to pending queue"
+            )
+            self._save_tasks()
+
+        self._worker_task = asyncio.create_task(self._queue_consumer())
+        queue_logger.info("Queue worker started with AnyIO task group")
         self._last_queue_heartbeat = 0.0
         self._last_backlog_alert = 0.0
         try:
@@ -258,15 +285,12 @@ class QueueManager:
     async def stop_worker(self):
         """停止队列工作器"""
         self.is_running = False
+        task_group = self._task_group
+        self._task_group = None
+        self._capacity_limiter = None
 
-        # 取消所有正在处理的任务，并等待它们优雅退出
-        tasks_to_cancel = list(self.processing_tasks.values())
-        self.processing_tasks.clear()
-        for task in tasks_to_cancel:
-            task.cancel()
-
-        if tasks_to_cancel:
-            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        if task_group:
+            task_group.cancel_scope.cancel()
 
         # 等待工作器任务完成
         worker_task = self._worker_task
@@ -279,89 +303,108 @@ class QueueManager:
             except asyncio.CancelledError:
                 pass
 
+        if task_group:
+            try:
+                await task_group.__aexit__(None, None, None)
+            except Exception as exc:
+                queue_logger.warning(f"Failed to close task group: {exc}")
+
+        self.processing_tasks.clear()
+
         queue_logger.info("Queue worker stopped")
         try:
             await self._notify_queue_state("stopped")
         except Exception as exc:
             queue_logger.warning(f"Queue worker stop notification failed: {exc}")
 
-    async def _worker_loop(self):
-        """队列工作器主循环"""
+    async def _queue_consumer(self):
+        """队列工作器主循环，基于 AnyIO 任务组"""
         try:
             while self.is_running:
                 iteration_start = time.monotonic()
                 try:
-                    # 检查是否有待处理的任务且未达到并发限制
-                    if (len(self.processing_tasks) < self.max_concurrent_tasks and
-                        len(self.pending_queue) > 0):
-
-                        # 从队列头部取出任务
+                    task_group = self._task_group
+                    limiter = self._capacity_limiter
+                    if task_group is None or limiter is None:
+                        queue_logger.debug("Task group not ready, skipping iteration")
+                    elif self.pending_queue:
                         task_id = self.pending_queue.pop(0)
                         task = self.tasks.get(task_id)
 
                         if task and task.status == "pending":
-                            # 当任务需要IBKR连接但当前未连接时，延后处理，避免无意义的失败与重试
                             if task.task_type in ("strategy_order",) and not self._ib_connected():
-                                # 重新放回队列尾部，并短暂休眠以避免紧密轮询
                                 self.pending_queue.append(task_id)
                                 if self._should_log_deferral(task_id):
                                     queue_logger.debug(
                                         f"Deferring task {task_id} due to IBKR not connected"
                                     )
                                 await asyncio.sleep(self._ib_disconnect_backoff)
-                                continue
-
-                            # 启动任务处理
-                            processing_task = asyncio.create_task(
-                                self._process_task(task)
+                            else:
+                                await limiter.acquire()
+                                try:
+                                    task_group.start_soon(self._run_task_wrapper, task, limiter)
+                                    self.processing_tasks[task_id] = True
+                                except Exception:
+                                    limiter.release()
+                                    raise
+                        else:
+                            queue_logger.debug(
+                                "Discarding unavailable task", task_id=task_id
                             )
-                            self.processing_tasks[task_id] = processing_task
-                    elif len(self.pending_queue) > 0 and len(self.processing_tasks) >= self.max_concurrent_tasks:
-                        queue_logger.bind(
-                            pending=len(self.pending_queue),
-                            processing=len(self.processing_tasks),
-                            max_concurrent=self.max_concurrent_tasks,
-                        ).debug("Queue worker at concurrency limit")
-
-                    # 清理已完成的任务
-                    completed_task_ids = []
-                    for task_id, processing_task in self.processing_tasks.items():
-                        if processing_task.done():
-                            completed_task_ids.append(task_id)
-
-                    for task_id in completed_task_ids:
-                        del self.processing_tasks[task_id]
-                        self._last_deferral_notice.pop(task_id, None)
-
-                    await self._monitor_queue_health()
-                    loop_elapsed = self._log_operation_duration(
-                        event="worker_loop_iteration",
-                        start=iteration_start,
-                        threshold=self._worker_loop_warning_threshold,
-                        message="Queue worker iteration slower than expected",
-                        pending=len(self.pending_queue),
-                        processing=len(self.processing_tasks),
-                    )
-                    queue_logger.bind(duration=f"{loop_elapsed:.3f}s").debug("Queue worker iteration completed")
-                    # 短暂休眠避免CPU占用过高
-                    await asyncio.sleep(self._worker_idle_sleep)
+                    else:
+                        self._last_deferral_notice.clear()
 
                 except asyncio.CancelledError:
                     queue_logger.info("Queue worker loop cancellation requested")
                     raise
-                except Exception as e:
-                    queue_logger.error(f"Worker loop error: {e}")
-                    try:
-                        await self._monitor_queue_health()
-                    except Exception:
-                        pass
+                except Exception as exc:
+                    queue_logger.error(f"Worker loop error: {exc}")
                     await asyncio.sleep(1)
+
+                try:
+                    await self._monitor_queue_health()
+                except Exception as exc:
+                    queue_logger.warning(f"Queue health monitor failed: {exc}")
+
+                loop_elapsed = self._log_operation_duration(
+                    event="worker_loop_iteration",
+                    start=iteration_start,
+                    threshold=self._worker_loop_warning_threshold,
+                    message="Queue worker iteration slower than expected",
+                    pending=len(self.pending_queue),
+                    processing=len(self.processing_tasks),
+                )
+                queue_logger.bind(duration=f"{loop_elapsed:.3f}s").debug("Queue worker iteration completed")
+
+                await asyncio.sleep(self._worker_idle_sleep)
         except asyncio.CancelledError:
             queue_logger.info("Queue worker loop cancelled")
             raise
         finally:
             self.is_running = False
             self._worker_task = None
+
+    async def _run_task_wrapper(
+        self,
+        task: QueueTask,
+        limiter: Optional[anyio.CapacityLimiter] = None,
+    ):
+        """包装任务处理，确保调度器任务正确清理"""
+        try:
+            await self._process_task(task)
+        except asyncio.CancelledError:
+            queue_logger.info(f"Task {task.task_id} cancelled; returning to pending queue")
+            if task.status == "processing":
+                task.status = "pending"
+                task.started_at = None
+                self.pending_queue.insert(0, task.task_id)
+                self._save_tasks()
+            raise
+        finally:
+            self.processing_tasks.pop(task.task_id, None)
+            self._last_deferral_notice.pop(task.task_id, None)
+            if limiter is not None:
+                limiter.release()
 
     async def _process_task(self, task: QueueTask):
         """处理单个任务"""
