@@ -1936,6 +1936,110 @@
         </div>
     </div>
 
+    <!-- Monitoring Overview -->
+    <div class="row mt-4" id="monitoringOverviewRow">
+        <div class="col-lg-6 mb-3">
+            <div class="card" id="redisQueuesCard">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="fas fa-database me-2"></i>Redis 队列 / Streams</h5>
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="badge bg-secondary" id="queueMetricsSource">-</span>
+                        <button class="btn btn-sm btn-outline-light" id="refreshQueueMetricsBtn" title="Refresh">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
+                        <span>队列状态更新时间：<span id="queueMetricsUpdatedAt">-</span></span>
+                        <span id="queueMetricsError" class="text-danger"></span>
+                    </div>
+                    <div class="table-responsive mb-3">
+                        <table class="table table-sm align-middle" id="queueMetricsTable">
+                            <thead>
+                                <tr>
+                                    <th>名称</th>
+                                    <th>队列键</th>
+                                    <th class="text-end">长度</th>
+                                    <th class="text-end">消费速率</th>
+                                    <th class="text-end">空闲时长</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td colspan="5" class="text-center text-muted py-3">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle" id="streamMetricsTable">
+                            <thead>
+                                <tr>
+                                    <th>名称</th>
+                                    <th>Stream</th>
+                                    <th>Group</th>
+                                    <th class="text-end">待处理</th>
+                                    <th class="text-end">消费速率</th>
+                                    <th class="text-end">空闲时长</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td colspan="6" class="text-center text-muted py-3">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6 mb-3">
+            <div class="card" id="influxWriteRateCard">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="fas fa-wave-square me-2"></i>Influx 写入速率</h5>
+                    <div class="d-flex align-items-center gap-2">
+                        <select class="form-select form-select-sm" id="influxWindowSelect">
+                            <option value="30m">30 分钟</option>
+                            <option value="1h" selected>1 小时</option>
+                            <option value="6h">6 小时</option>
+                            <option value="12h">12 小时</option>
+                            <option value="24h">24 小时</option>
+                        </select>
+                        <button class="btn btn-sm btn-outline-light" id="refreshInfluxMetricsBtn" title="Refresh">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="row g-2 align-items-center mb-2 small">
+                        <div class="col-auto">
+                            <label for="influxServiceSelect" class="col-form-label">服务</label>
+                        </div>
+                        <div class="col-auto">
+                            <select class="form-select form-select-sm" id="influxServiceSelect">
+                                <option value="">全部</option>
+                                <option value="queue-monitor">queue-monitor</option>
+                                <option value="market-data">market-data</option>
+                                <option value="ib-command">ib-command</option>
+                            </select>
+                        </div>
+                        <div class="col-auto">
+                            <label for="influxMetricSelect" class="col-form-label">Metric</label>
+                        </div>
+                        <div class="col-auto">
+                            <input type="text" class="form-control form-control-sm" id="influxMetricSelect" placeholder="可选关键词">
+                        </div>
+                    </div>
+                    <div class="ratio ratio-16x9">
+                        <canvas id="influxWriteRateChart"></canvas>
+                    </div>
+                    <div class="small text-muted mt-2" id="influxSummaryText">-</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Logs Panel -->
     <div class="row mt-4">
         <div class="col-md-12">
@@ -1977,12 +2081,26 @@
                                 <option value="critical">CRITICAL</option>
                             </select>
                         </div>
-                        <div class="col-md-4">
-                            <input type="text" class="form-control form-control-sm" id="logRequestId" placeholder="Request ID">
+                        <div class="col-md-3">
+                            <input type="text" class="form-control form-control-sm" id="logRequestId" placeholder="Request ID / Trace">
                         </div>
-                        <div class="col-md-2">
-                            <button class="btn btn-sm btn-primary w-100" id="searchLogsBtn">Search</button>
+                        <div class="col-md-3">
+                            <input type="text" class="form-control form-control-sm" id="logSearchText" placeholder="Search text / regex">
                         </div>
+                        <div class="col-md-2 d-grid">
+                            <button class="btn btn-sm btn-primary" id="searchLogsBtn">Search</button>
+                        </div>
+                    </div>
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Log pagination">
+                            <button class="btn btn-outline-secondary" id="logsPrevPageBtn"><i class="fas fa-arrow-up"></i> Older</button>
+                            <button class="btn btn-outline-secondary" id="logsNextPageBtn"><i class="fas fa-arrow-down"></i> Newer</button>
+                        </div>
+                        <div class="form-check form-switch form-switch-sm">
+                            <input class="form-check-input" type="checkbox" id="logsTailToggle" checked>
+                            <label class="form-check-label" for="logsTailToggle">Auto tail</label>
+                        </div>
+                        <div class="small text-muted" id="logsStatusText">准备就绪</div>
                     </div>
                     <pre id="logsContent" class="bg-dark text-light p-2" style="max-height:300px; overflow:auto;"></pre>
                 </div>
@@ -3075,6 +3193,7 @@
 <script src="/static/js/dom_optimizer.js" defer></script>
 <script src="/static/js/monitoring/constants.js" defer></script>
 <script src="/static/js/monitoring/utils.js" defer></script>
+<script src="/static/js/monitoring/dashboard.js" defer></script>
 <script src="/static/js/monitoring/manager.js" defer></script>
 <script src="/static/js/ui/controller.js" defer></script>
 <script src="/static/js/app.js" defer></script>

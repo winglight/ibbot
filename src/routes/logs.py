@@ -14,18 +14,22 @@ router = APIRouter()
 
 @router.get("/api/logs")
 async def get_logs(
-    lines: int = 50,  # 减少默认行数
+    lines: int = 50,  # backwards compatibility fallback
     level: str = "all",
     request_id: Optional[str] = None,
     module: str = "all",
     range: str = "today",
+    cursor: Optional[int] = None,
+    page_size: int = 200,
+    direction: str = "backward",
+    search: Optional[str] = None,
     user: Optional[str] = Depends(get_current_user),
 ):
     try:
         log_file = "logs/trading_bot.log"
         if not os.path.exists(log_file):
-            return {"success": True, "logs": []}
-        
+            return {"success": True, "logs": [], "pagination": {"total": 0}}
+
         # 使用异步文件读取，避免阻塞
         import aiofiles
         async with aiofiles.open(log_file, "r") as f:
@@ -90,7 +94,64 @@ async def get_logs(
         if request_id:
             content = [line for line in content if request_id in line]
 
-        return {"success": True, "logs": content[-lines:]}
+        if search:
+            try:
+                pattern = re.compile(search, re.IGNORECASE)
+                content = [line for line in content if pattern.search(line)]
+            except re.error:
+                content = [line for line in content if search.lower() in line.lower()]
+
+        total = len(content)
+        if total == 0:
+            return {
+                "success": True,
+                "logs": [],
+                "pagination": {
+                    "total": 0,
+                    "page_size": page_size,
+                    "direction": direction,
+                    "cursor": 0,
+                    "has_more_backward": False,
+                    "has_more_forward": False,
+                },
+            }
+
+        # Backwards compatibility: honour legacy `lines` parameter when explicit
+        effective_page_size = max(1, min(page_size or lines, 500))
+        if page_size <= 0 and lines > 0:
+            effective_page_size = min(lines, 500)
+
+        normalised_direction = direction.lower() if direction else "backward"
+        if normalised_direction not in {"backward", "forward"}:
+            normalised_direction = "backward"
+
+        if cursor is None:
+            cursor = total if normalised_direction == "backward" else 0
+        cursor = max(0, min(cursor, total))
+
+        if normalised_direction == "forward":
+            start = cursor
+            end = min(total, cursor + effective_page_size)
+        else:
+            end = cursor or total
+            start = max(0, end - effective_page_size)
+
+        window = content[start:end]
+        pagination = {
+            "total": total,
+            "page_size": effective_page_size,
+            "direction": normalised_direction,
+            "cursor": cursor,
+            "start": start,
+            "end": end,
+            "has_more_backward": start > 0,
+            "has_more_forward": end < total,
+            "next_backward_cursor": start if start > 0 else None,
+            "next_forward_cursor": end if end < total else None,
+            "tail_cursor": total,
+        }
+
+        return {"success": True, "logs": window, "pagination": pagination}
     except Exception as e:
         logger.error(f"Get logs error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
