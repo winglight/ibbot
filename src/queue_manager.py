@@ -252,6 +252,16 @@ class QueueManager:
         if self.is_running:
             return
 
+        try:
+            limiter = anyio.CapacityLimiter(self.max_concurrent_tasks)
+            task_group = await anyio.create_task_group().__aenter__()
+        except Exception as exc:
+            queue_logger.error(f"Failed to initialize queue task group: {exc}")
+            raise
+
+        self._capacity_limiter = limiter
+        self._task_group = task_group
+
         self.is_running = True
         recovered_tasks: List[str] = []
         for task_id, task in self.tasks.items():
@@ -278,7 +288,6 @@ class QueueManager:
             exc = worker_task.exception()
             if exc:
                 raise exc
-
         queue_logger.info("Queue worker started with AnyIO task group")
         self._last_queue_heartbeat = 0.0
         self._last_backlog_alert = 0.0
@@ -421,6 +430,28 @@ class QueueManager:
         except asyncio.CancelledError:
             queue_logger.info("Queue worker loop cancelled")
             raise
+
+    async def _run_task_wrapper(
+        self,
+        task: QueueTask,
+        limiter: Optional[anyio.CapacityLimiter] = None,
+    ):
+        """包装任务处理，确保调度器任务正确清理"""
+        try:
+            await self._process_task(task)
+        except asyncio.CancelledError:
+            queue_logger.info(f"Task {task.task_id} cancelled; returning to pending queue")
+            if task.status == "processing":
+                task.status = "pending"
+                task.started_at = None
+                self.pending_queue.insert(0, task.task_id)
+                self._save_tasks()
+            raise
+        finally:
+            self.processing_tasks.pop(task.task_id, None)
+            self._last_deferral_notice.pop(task.task_id, None)
+            if limiter is not None:
+                limiter.release()
 
     async def _run_task_wrapper(
         self,
