@@ -1,0 +1,263 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from collections import deque
+from typing import Any, Callable, Iterable, Mapping, Sequence
+
+import pytest
+
+from services.ib_feed import MarketDataFeedService
+
+
+class DummyRedis:
+    def __init__(self) -> None:
+        self.published: deque[tuple[str, str]] = deque()
+        self.hashes: dict[str, dict[str, str]] = {}
+
+    async def publish(self, channel: str, payload: str) -> int:
+        self.published.append((channel, payload))
+        return len(self.published)
+
+    async def hset(self, key: str, *, mapping: Mapping[str, str]) -> int:
+        values = self.hashes.setdefault(key, {})
+        values.update(mapping)
+        return len(mapping)
+
+    async def hgetall(self, key: str) -> dict[str, str]:
+        return dict(self.hashes.get(key, {}))
+
+
+class RecordingWriter:
+    def __init__(self) -> None:
+        self.points: list[dict[str, Any]] = []
+
+    def __call__(self, points: Iterable[Mapping[str, Any]]) -> int:
+        batch = []
+        for point in points:
+            copied: dict[str, Any] = {}
+            for key, value in point.items():
+                if isinstance(value, Mapping):
+                    copied[key] = dict(value)
+                else:
+                    copied[key] = value
+            batch.append(copied)
+        self.points.extend(batch)
+        return len(batch)
+
+
+class FakeIBClient:
+    def __init__(self) -> None:
+        self._price_listeners: list[Callable[[str, Mapping[str, Any]], None]] = []
+        self._dom_listeners: list[Callable[[str, Sequence[Mapping[str, Any]]], None]] = []
+        self._disconnect_listeners: list[Callable[[], None]] = []
+        self.connect_count = 0
+        self.subscribe_calls: list[tuple[int, str]] = []
+        self.connected = False
+
+    async def connect(self) -> None:
+        self.connected = True
+        self.connect_count += 1
+
+    async def disconnect(self) -> None:
+        self.connected = False
+
+    async def subscribe_market_data(self, symbol: str) -> None:
+        self.subscribe_calls.append((self.connect_count, symbol))
+
+    def add_price_listener(self, callback: Callable[[str, Mapping[str, Any]], None]) -> None:
+        self._price_listeners.append(callback)
+
+    def add_dom_listener(self, callback: Callable[[str, Sequence[Mapping[str, Any]]], None]) -> None:
+        self._dom_listeners.append(callback)
+
+    def add_disconnect_listener(self, callback: Callable[[], None]) -> None:
+        self._disconnect_listeners.append(callback)
+
+    def emit_price(self, symbol: str, data: Mapping[str, Any]) -> None:
+        for listener in list(self._price_listeners):
+            listener(symbol, data)
+
+    def emit_dom(self, symbol: str, levels: Sequence[Mapping[str, Any]]) -> None:
+        for listener in list(self._dom_listeners):
+            listener(symbol, levels)
+
+    def trigger_disconnect(self) -> None:
+        self.connected = False
+        for listener in list(self._disconnect_listeners):
+            listener()
+
+
+async def _run_price_update_flow() -> None:
+    redis = DummyRedis()
+    writer = RecordingWriter()
+    client = FakeIBClient()
+    service = MarketDataFeedService(
+        client,
+        redis,
+        subscriptions=["AAPL"],
+        write_fn=writer,
+        reconnect_delay=0.05,
+        logger_name="tests.ib_feed",
+    )
+
+    await service.start()
+    client.emit_price(
+        "AAPL",
+        {
+            "bid": 199.5,
+            "ask": 200.5,
+            "last": 200.0,
+            "bid_size": 10,
+            "ask_size": 12,
+            "volume": 1500,
+        },
+    )
+    await asyncio.sleep(0.05)
+
+    assert service.price_updates == 1
+    assert redis.published
+    channel, payload = redis.published[-1]
+    assert channel == "pubsub:ib:price:AAPL"
+    data = json.loads(payload)
+    assert data["symbol"] == "AAPL"
+    assert pytest.approx(data["bid"], rel=1e-6) == 199.5
+
+    snapshot = await redis.hgetall("hash:market:snapshot:AAPL")
+    assert snapshot["symbol"] == "AAPL"
+    assert snapshot["bid"] == "199.5"
+    assert "timestamp" in snapshot
+
+    assert writer.points
+    last_point = writer.points[-1]
+    assert last_point["measurement"] == "market_price"
+    assert last_point["fields"]["bid"] == 199.5
+
+    await service.stop()
+
+
+def test_price_updates_publish_and_persist() -> None:
+    asyncio.run(_run_price_update_flow())
+
+
+async def _run_dom_serialisation_flow() -> None:
+    redis = DummyRedis()
+    writer = RecordingWriter()
+    client = FakeIBClient()
+    service = MarketDataFeedService(
+        client,
+        redis,
+        subscriptions=["ES"],
+        write_fn=writer,
+        reconnect_delay=0.05,
+        logger_name="tests.ib_feed",
+    )
+
+    await service.start()
+    client.emit_dom(
+        "ES",
+        [
+            {"side": "bid", "level": 0, "price": 4300.25, "size": 5},
+            {"side": "bid", "level": 1, "price": 4300.0, "size": 8},
+            {"side": "ask", "level": 0, "price": 4300.5, "size": 7},
+        ],
+    )
+    await asyncio.sleep(0.05)
+
+    assert service.dom_updates == 1
+    dom_snapshot = await redis.hgetall("hash:market:snapshot:ES")
+    payload = json.loads(dom_snapshot["dom"])
+    assert payload["symbol"] == "ES"
+    assert payload["bids"][0]["level"] == 0
+    assert payload["asks"][0]["price"] == 4300.5
+
+    dom_point = writer.points[-1]
+    assert dom_point["measurement"] == "market_dom"
+    encoded = dom_point["fields"]["payload"]
+    decoded = json.loads(encoded)
+    assert decoded["bids"][1]["level"] == 1
+
+    await service.stop()
+
+
+def test_dom_updates_are_serialised() -> None:
+    asyncio.run(_run_dom_serialisation_flow())
+
+
+async def _run_throughput_flow() -> None:
+    redis = DummyRedis()
+    writer = RecordingWriter()
+    client = FakeIBClient()
+    service = MarketDataFeedService(
+        client,
+        redis,
+        subscriptions=["NQ"],
+        write_fn=writer,
+        reconnect_delay=0.01,
+        logger_name="tests.ib_feed",
+    )
+
+    await service.start()
+
+    for idx in range(50):
+        client.emit_price(
+            "NQ",
+            {
+                "bid": 15000.0 + idx,
+                "ask": 15000.5 + idx,
+                "last": 15000.25 + idx,
+                "bid_size": 1 + idx,
+                "ask_size": 2 + idx,
+                "volume": 1000 + idx,
+            },
+        )
+    await asyncio.sleep(0.2)
+
+    assert service.price_updates == 50
+    assert len(writer.points) >= 50
+    assert len(redis.published) >= 50
+
+    await service.stop()
+
+
+def test_service_handles_high_throughput() -> None:
+    asyncio.run(_run_throughput_flow())
+
+
+async def _run_reconnect_flow() -> None:
+    redis = DummyRedis()
+    writer = RecordingWriter()
+    client = FakeIBClient()
+    service = MarketDataFeedService(
+        client,
+        redis,
+        subscriptions=["CL", "GC"],
+        write_fn=writer,
+        reconnect_delay=0.05,
+        logger_name="tests.ib_feed",
+    )
+
+    await service.start()
+    assert client.connect_count == 1
+    assert [symbol for _, symbol in client.subscribe_calls] == ["CL", "GC"]
+
+    client.trigger_disconnect()
+
+    async def _wait_for_reconnect() -> None:
+        while client.connect_count < 2:
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(_wait_for_reconnect(), timeout=2.0)
+    await asyncio.sleep(0.1)
+
+    assert client.connect_count >= 2
+    # Each reconnect should re-subscribe all symbols
+    subscribed_symbols = [symbol for _, symbol in client.subscribe_calls]
+    assert subscribed_symbols.count("CL") >= 2
+    assert subscribed_symbols.count("GC") >= 2
+
+    await service.stop()
+
+
+def test_reconnect_restores_subscriptions() -> None:
+    asyncio.run(_run_reconnect_flow())
