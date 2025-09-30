@@ -121,6 +121,8 @@ def config_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
     async def allow_user(request: Request) -> str:
         request.state.is_read_only = False
+        request.state.user_role = 'admin'
+        request.state.username = 'tester'
         return 'tester'
 
     monkeypatch.setattr(config_module, 'ensure_redis', fake_ensure)
@@ -187,6 +189,8 @@ def test_update_rejects_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     async def read_only(request: Request) -> str:
         request.state.is_read_only = True
+        request.state.user_role = 'visitor'
+        request.state.username = 'visitor'
         return 'visitor'
 
     monkeypatch.setattr(config_module, 'ensure_redis', fake_ensure)

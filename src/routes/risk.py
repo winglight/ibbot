@@ -7,12 +7,17 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 from copy import deepcopy
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
 
 import core
 from src.connection_manager import connection_manager
-from .auth import get_current_user
+from .auth import (
+    audit_log_failure,
+    audit_log_success,
+    get_current_user,
+    require_roles,
+)
 from src.models import (
     RiskRuleRequest,
     RiskConfigUpdateRequest,
@@ -74,10 +79,15 @@ async def _refresh_risk_config(timeout: float) -> Optional[Dict[str, Any]]:
         return deepcopy(config)
 
 @router.post("/api/risk_rules")
-async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get_current_user)):
+async def add_risk_rule(
+    rule: RiskRuleRequest,
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.add_rule")),
+):
     """添加风险管理规则"""
     manager = _get_risk_manager()
     if manager is None:
+        await audit_log_failure(request, detail="risk manager unavailable")
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
 
     try:
@@ -114,6 +124,11 @@ async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get
                     logger.error(f"add_risk_rule background task failed: {task_err}")
 
             async_task.add_done_callback(_log_task_result)
+            await audit_log_success(
+                request,
+                detail="risk rule add queued",
+                extra={"symbol": rule.symbol, "rule_type": rule.rule_type, "pending": True},
+            )
             return {
                 "success": True,
                 "message": "Risk rule save is processing in background",
@@ -121,14 +136,34 @@ async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get
             }
 
         if not success:
+            await audit_log_failure(
+                request,
+                detail="failed to add risk rule",
+                extra={"symbol": rule.symbol},
+            )
             raise HTTPException(status_code=500, detail="Failed to add risk rule")
 
+        await audit_log_success(
+            request,
+            detail="risk rule added",
+            extra={"symbol": rule.symbol, "rule_type": rule.rule_type},
+        )
         return {"success": True, "message": "Risk rule added successfully"}
 
-    except HTTPException:
+    except HTTPException as exc:
+        await audit_log_failure(
+            request,
+            detail=str(getattr(exc, "detail", "add risk rule failed")),
+            extra={"symbol": rule.symbol},
+        )
         raise
     except Exception as e:
         logger.error(f"Add risk rule error: {e}")
+        await audit_log_failure(
+            request,
+            detail=str(e),
+            extra={"symbol": rule.symbol},
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/risk_rules")
@@ -171,42 +206,81 @@ async def get_risk_rules(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/api/risk_rules/{symbol}")
-async def update_risk_rule(symbol: str, enabled: bool, user: Optional[str] = Depends(get_current_user)):
+async def update_risk_rule(
+    symbol: str,
+    enabled: bool,
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.update_rule")),
+):
     """更新风险管理规则状态"""
     manager = _get_risk_manager()
     if manager is None:
+        await audit_log_failure(request, detail="risk manager unavailable", extra={"symbol": symbol})
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
 
     try:
         logger.info(f"API update_risk_rule: symbol={symbol}, enabled={enabled}")
         success = manager.update_risk_rule(symbol, enabled=enabled)
         if not success:
-            # 让404错误向外传播
+            await audit_log_failure(
+                request,
+                detail="risk rule not found",
+                extra={"symbol": symbol},
+            )
             raise HTTPException(status_code=404, detail=f"Risk rule for {symbol} not found")
-        
+
+        await audit_log_success(
+            request,
+            detail="risk rule updated",
+            extra={"symbol": symbol, "enabled": enabled},
+        )
         return {"success": True, "message": f"Risk rule for {symbol} {'enabled' if enabled else 'disabled'} successfully"}
-        
+
     except HTTPException as he:
-        # 直接抛出由业务逻辑产生的HTTP错误（如404）
+        await audit_log_failure(
+            request,
+            detail=str(getattr(he, "detail", "update risk rule failed")),
+            extra={"symbol": symbol},
+        )
         raise he
     except Exception as e:
         logger.error(f"Update risk rule error: {e}")
+        await audit_log_failure(
+            request,
+            detail=str(e),
+            extra={"symbol": symbol},
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/api/risk_rules/{symbol}")
-async def remove_risk_rule(symbol: str, user: Optional[str] = Depends(get_current_user)):
+async def remove_risk_rule(
+    symbol: str,
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.remove_rule")),
+):
     """移除风险管理规则"""
     manager = _get_risk_manager()
     if manager is None:
+        await audit_log_failure(request, detail="risk manager unavailable", extra={"symbol": symbol})
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
 
     try:
         logger.info(f"API remove_risk_rule: symbol={symbol}")
         manager.remove_risk_rule(symbol)
+        await audit_log_success(
+            request,
+            detail="risk rule removed",
+            extra={"symbol": symbol},
+        )
         return {"success": True, "message": "Risk rule removed successfully"}
-        
+
     except Exception as e:
         logger.error(f"Remove risk rule error: {e}")
+        await audit_log_failure(
+            request,
+            detail=str(e),
+            extra={"symbol": symbol},
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/order_queue_status")
@@ -284,9 +358,14 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
 
 # 新增：更新风控配置
 @router.put("/api/risk-config")
-async def update_risk_config(payload: RiskConfigUpdateRequest, user: Optional[str] = Depends(get_current_user)):
+async def update_risk_config(
+    payload: RiskConfigUpdateRequest,
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.update_config")),
+):
     manager = _get_risk_manager()
     if manager is None:
+        await audit_log_failure(request, detail="risk manager unavailable")
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     try:
         updates = {k: v for k, v in payload.dict(exclude_none=True).items()}
@@ -296,9 +375,15 @@ async def update_risk_config(payload: RiskConfigUpdateRequest, user: Optional[st
         now = time.monotonic()
         _last_risk_config_attempt_at = now
         _last_risk_config_updated_at = now
+        await audit_log_success(
+            request,
+            detail="risk config updated",
+            extra={"updated_keys": list(updates.keys())},
+        )
         return {"success": True, "risk_config": new_cfg}
     except Exception as e:
         logger.error(f"Update risk config error: {e}")
+        await audit_log_failure(request, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 # 新增：仓位建议计算
@@ -538,24 +623,34 @@ async def get_config_rules(user: Optional[str] = Depends(get_current_user)):
 
 
 @router.put("/api/config/rules")
-async def update_config_rules(payload: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
+async def update_config_rules(
+    payload: Dict[str, Any],
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.update_rules")),
+):
     try:
         db = get_db_manager()
-        
+
         # 保存G Rules和S Rules到config表
         if "g_rules" in payload:
             db.save_config("g_rules", payload["g_rules"], "G Rules配置")
-        
+
         if "s_rules" in payload:
             db.save_config("s_rules", payload["s_rules"], "S Rules配置")
-        
+
         # 读回确认
         g_rules = db.get_config("g_rules", {})
         s_rules = db.get_config("s_rules", {})
-        
+
+        await audit_log_success(
+            request,
+            detail="risk rules updated",
+            extra={"g_rules": bool(payload.get("g_rules")), "s_rules": bool(payload.get("s_rules"))},
+        )
         return {"success": True, "g_rules": g_rules, "s_rules": s_rules}
     except Exception as e:
         logger.error(f"Update config rules error: {e}")
+        await audit_log_failure(request, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 

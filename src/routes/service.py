@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from .auth import get_current_user
+from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
 from src.service_restart import (
     DockerExecutionError,
     DockerCommandResult,
@@ -37,15 +37,9 @@ def _serialise_result(result: DockerCommandResult) -> dict[str, object]:
 async def restart_service(
     payload: ServiceRestartPayload,
     request: Request,
-    _user: str | None = Depends(get_current_user),
+    _user: str | None = Depends(require_roles("admin", action="services.restart")),
 ) -> dict[str, object]:
     """Restart a docker-compose managed service and its dependencies."""
-
-    if getattr(request.state, "is_read_only", False):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Read-only accounts cannot restart services",
-        )
 
     manager = get_service_restart_manager()
     try:
@@ -53,6 +47,10 @@ async def restart_service(
             payload.service, include_dependencies=payload.include_dependencies
         )
     except UnknownServiceError as exc:
+        await audit_log_failure(
+            request,
+            detail=f"unknown service: {payload.service}",
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except DockerExecutionError as exc:
         result = exc.result
@@ -63,18 +61,25 @@ async def restart_service(
             returncode=result.returncode,
             stderr=result.stderr,
         )
+        await audit_log_failure(
+            request,
+            detail=f"docker restart failed for {result.service}",
+            extra={"returncode": result.returncode},
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to restart {result.service}",
         ) from exc
     except FileNotFoundError as exc:
         logger.exception("Docker compose command not found")
+        await audit_log_failure(request, detail="docker compose not installed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Docker is not available on the server",
         ) from exc
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Unexpected error during service restart")
+        await audit_log_failure(request, detail="unexpected error during restart")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to restart service",
@@ -83,6 +88,12 @@ async def restart_service(
     restarted = [result.service for result in results]
     message = (
         f"已重启 {'、'.join(restarted)}" if restarted else "服务重启完成"
+    )
+
+    await audit_log_success(
+        request,
+        detail=f"restarted {', '.join(restarted) if restarted else payload.service}",
+        extra={"services": restarted or [payload.service]},
     )
 
     return {

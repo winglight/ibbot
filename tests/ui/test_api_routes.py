@@ -3,7 +3,7 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from src.routes import orders as orders_module
@@ -15,7 +15,14 @@ from src.routes import market_data as market_data_module
 def orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     app = FastAPI()
     app.include_router(orders_module.router)
-    app.dependency_overrides[orders_module.get_current_user] = lambda: "tester"
+
+    async def allow_user(request: Request) -> str:
+        request.state.is_read_only = False
+        request.state.user_role = "admin"
+        request.state.username = "tester"
+        return "tester"
+
+    app.dependency_overrides[orders_module.get_current_user] = allow_user
     return app
 
 
