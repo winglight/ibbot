@@ -67,6 +67,7 @@ from core import (
     websocket_manager,
     order_manager,
     account_snapshot_service,
+    get_dom_service,
 )
 
 # Authentication and routers
@@ -82,6 +83,7 @@ from src.routes.queue import router as queue_router
 from src.routes.logs import router as logs_router
 from src.routes.websocket import router as websocket_router
 from src.routes.dom import router as dom_router
+from src.data_layer import get_data_source_manager
 
 
 # Global variables
@@ -303,6 +305,48 @@ async def _module_auto_connect(context: ModuleRuntimeContext) -> ModuleHandle:
     return handle
 
 
+async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+
+    try:
+        get_data_source_manager()
+    except Exception as exc:
+        context.logger.warning(f"Data subscription manager initialisation warning: {exc}")
+    else:
+        context.logger.info("Data source manager initialised for subscriptions")
+
+    try:
+        dom_service = get_dom_service()
+    except Exception as exc:
+        context.logger.warning(f"DOM service unavailable for auto-start: {exc}")
+        return handle
+
+    try:
+        scheduled = dom_service.ensure_auto_start_worker()
+    except Exception as exc:
+        context.logger.warning(f"DOM auto-start scheduling warning: {exc}")
+        return handle
+
+    symbol = dom_service.auto_start_symbol
+    if scheduled:
+        if symbol:
+            context.logger.info(
+                "DOM auto-start worker scheduled for symbol {}",
+                symbol,
+            )
+        else:
+            context.logger.info("DOM auto-start worker scheduled (no default symbol configured)")
+    else:
+        if symbol:
+            context.logger.info(
+                "DOM auto-start worker already initialised for symbol {}",
+                symbol,
+            )
+        else:
+            context.logger.info("DOM auto-start disabled; no default symbol configured")
+
+    return handle
+
 async def _module_risk_manager(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
 
@@ -391,7 +435,6 @@ async def _module_strategy_manager(context: ModuleRuntimeContext) -> ModuleHandl
 
 async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
-
     if getattr(core, "ibkr_client", None) is None:
         try:
             core.ibkr_client = core.IBKRClient()
@@ -429,6 +472,13 @@ def _build_module_registry(main_logger) -> ModuleRegistry:
             name="auto_connect",
             start=_module_auto_connect,
             description="Attempt to connect to IBKR automatically using AUTO_CONNECT flag.",
+        )
+    )
+    registry.register(
+        ModuleDefinition(
+            name="data_subscriptions",
+            start=_module_data_subscriptions,
+            description="Initialise unified data subscriptions and DOM auto-start.",
         )
     )
     registry.register(

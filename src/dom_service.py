@@ -183,7 +183,6 @@ class DOMService:
                     self._auto_start_num_rows = max(
                         5, min(int(defaults.limit), 30)
                     )
-                self._start_auto_start_worker()
 
         atexit.register(self._handle_process_shutdown)
 
@@ -1058,6 +1057,25 @@ class DOMService:
         symbol_key = (symbol or "").upper()
         target_symbol = self._unregister_active_symbol(symbol_key) or symbol
         return self._stop_stream_blocking(target_symbol, symbol_key)
+
+    @property
+    def auto_start_symbol(self) -> Optional[str]:
+        """Return the symbol configured for automatic start, if any."""
+
+        return self._auto_start_symbol
+
+    def ensure_auto_start_worker(self) -> bool:
+        """Start the auto-start worker if it has not been launched yet.
+
+        Returns ``True`` when the worker is scheduled during this call.
+        """
+
+        if not self._auto_start_symbol:
+            return False
+        if self._auto_start_worker_started:
+            return False
+        self._start_auto_start_worker()
+        return True
 
     def _handle_process_shutdown(self) -> None:
         try:
