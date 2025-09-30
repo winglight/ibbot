@@ -1,6 +1,6 @@
 import asyncio
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
 
 import core
@@ -14,7 +14,7 @@ from core import (
     notification_manager,
 )
 from src.connection_manager import ConnectionConfig
-from .auth import get_current_user
+from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
 
 router = APIRouter()
 
@@ -33,7 +33,11 @@ async def get_connection_config():
         raise HTTPException(status_code=500, detail="Failed to get connection config")
 
 @router.post("/api/connect")
-async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(get_current_user)):
+async def connect_ibkr(
+    config: ConnectionConfig,
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="connection.connect")),
+):
     try:
         loop = asyncio.get_event_loop()
         try:
@@ -43,6 +47,7 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
             )
         except asyncio.TimeoutError:
             logger.error("Disconnection operation timed out before reconnect")
+            await audit_log_failure(request, detail="disconnect timeout before connect")
             raise HTTPException(status_code=408, detail="Disconnect request timed out")
 
         # 更新连接配置在断开之后，确保新参数生效
@@ -55,6 +60,7 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
             )
         except asyncio.TimeoutError:
             logger.error("Connection operation timed out")
+            await audit_log_failure(request, detail="connection operation timed out")
             raise HTTPException(status_code=408, detail="Connection operation timed out")
         except Exception as exc:
             logger.warning("Connection attempt failed", error=str(exc))
@@ -65,6 +71,7 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
                 detail = None
             if not detail:
                 detail = str(exc) or "Failed to connect to IBKR"
+            await audit_log_failure(request, detail=str(detail))
             raise HTTPException(status_code=400, detail=detail)
 
         if success:
@@ -116,17 +123,27 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
             except Exception as e:
                 logger.warning(f"Failed to broadcast account_info snapshot after connect: {e}")
 
+            await audit_log_success(
+                request,
+                detail="connected to IBKR",
+                extra={"paper_trading": connection_manager.config.paper_trading},
+            )
             return {"success": True, "message": "Connected successfully"}
         else:
+            await audit_log_failure(request, detail="connection returned unsuccessful state")
             raise HTTPException(status_code=400, detail="Failed to connect to IBKR")
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Connection error: {e}")
+        await audit_log_failure(request, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/disconnect")
-async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
+async def disconnect_ibkr(
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="connection.disconnect")),
+):
     try:
         if risk_manager:
             risk_manager.stop()
@@ -157,9 +174,11 @@ async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
         except Exception as e:
             logger.warning(f"Failed to broadcast account_update after disconnect: {e}")
 
+        await audit_log_success(request, detail="disconnected from IBKR")
         return {"success": True, "message": "Disconnected successfully"}
     except Exception as e:
         logger.error(f"Disconnection error: {e}")
+        await audit_log_failure(request, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/connection_status")

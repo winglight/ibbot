@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, Tuple, Any
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
 
 import core
@@ -14,7 +14,12 @@ from core import (
     order_manager,
     websocket_manager,
 )
-from .auth import get_current_user
+from .auth import (
+    audit_log_failure,
+    audit_log_success,
+    get_current_user,
+    require_roles,
+)
 from src.ibbot.redis import enqueue_ib_command
 from src.models import OrderRequest
 from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
@@ -32,12 +37,18 @@ def _require_ib_client():
     return ib_client
 
 @router.post("/api/place_order")
-async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_current_user)):
+async def place_order(
+    order: OrderRequest,
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="orders.place")),
+):
     """下单"""
     order_type = (order.order_type or "").upper()
     if order_type not in {"MARKET", "LIMIT"}:
+        await audit_log_failure(request, detail=f"invalid order type: {order.order_type}")
         raise HTTPException(status_code=400, detail="Invalid order type")
     if order_type == "LIMIT" and not order.price:
+        await audit_log_failure(request, detail="limit order missing price")
         raise HTTPException(status_code=400, detail="Price required for limit order")
 
     command_id = uuid.uuid4().hex
@@ -71,6 +82,11 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
         await enqueue_ib_command(payload)
     except Exception as exc:
         logger.error("Failed to enqueue IB command", exc_info=True)
+        await audit_log_failure(
+            request,
+            detail="failed to enqueue order command",
+            extra={"command_id": command_id, "symbol": order.symbol},
+        )
         raise HTTPException(status_code=503, detail="Failed to enqueue order command") from exc
 
     try:
@@ -86,6 +102,17 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
     except Exception:
         logger.debug("Failed to broadcast order enqueued event", exc_info=True)
 
+    await audit_log_success(
+        request,
+        detail=f"queued order {command_id}",
+        extra={
+            "command_id": command_id,
+            "symbol": order.symbol,
+            "action": order.action,
+            "order_type": order_type,
+        },
+    )
+
     return {
         "success": True,
         "command_id": command_id,
@@ -93,15 +120,23 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
     }
 
 @router.delete("/api/cancel_order/{order_id}")
-async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_user)):
+async def cancel_order(
+    order_id: int,
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="orders.cancel")),
+):
     """取消订单"""
     if not connection_manager.is_connected():
+        await audit_log_failure(
+            request,
+            detail="cancel attempted while disconnected",
+            extra={"order_id": order_id},
+        )
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     ib_client = _require_ib_client()
 
     try:
-        # Run in executor to avoid blocking event loop with timeout
         loop = asyncio.get_event_loop()
         try:
             success, message = await asyncio.wait_for(
@@ -109,14 +144,18 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
                     None,
                     lambda: ib_client.cancel_order(order_id)
                 ),
-                timeout=35.0  # 35-second timeout for order cancellation
+                timeout=35.0,
             )
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
+            await audit_log_failure(
+                request,
+                detail="order cancellation timed out",
+                extra={"order_id": order_id},
+            )
             return {"success": False, "error": "Order cancellation timed out"}
 
         if success:
-            # 更新 OrderManager 本地状态
             try:
                 if 'order_manager' in globals() and order_manager:
                     updated = order_manager.cancel_order(str(order_id), reason="Cancelled via API")
@@ -127,26 +166,54 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
             except Exception as rec_err:
                 logger.warning(f"Failed to update OrderManager on cancel: {rec_err}")
 
-            await websocket_manager.broadcast({  # 替换 manager
+            await websocket_manager.broadcast({
                 "type": "order_cancelled",
                 "order_id": order_id
             })
 
+            await audit_log_success(
+                request,
+                detail=f"cancelled order {order_id}",
+                extra={"order_id": order_id},
+            )
             return {"success": True, "message": message}
-        else:
-            # 订单未找到或状态不可取消
-            raise HTTPException(status_code=404, detail=message)
 
-    except HTTPException:
+        await audit_log_failure(
+            request,
+            detail=message,
+            extra={"order_id": order_id},
+        )
+        raise HTTPException(status_code=404, detail=message)
+
+    except HTTPException as exc:
+        await audit_log_failure(
+            request,
+            detail=str(getattr(exc, "detail", "order cancellation failed")),
+            extra={"order_id": order_id},
+        )
         raise
     except Exception as e:
         logger.error(f"Order cancellation error: {e}")
+        await audit_log_failure(
+            request,
+            detail=str(e),
+            extra={"order_id": order_id},
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/cancel_order")
-async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_current_user)):
+async def cancel_order_post(
+    request: dict,
+    http_request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="orders.cancel")),
+):
     """取消订单 (POST方法)"""
     if not connection_manager.is_connected():
+        await audit_log_failure(
+            http_request,
+            detail="cancel attempted while disconnected",
+            extra={"order_id": request.get('order_id')},
+        )
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     ib_client = _require_ib_client()
@@ -154,9 +221,9 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
     try:
         order_id = request.get('order_id')
         if not order_id:
+            await audit_log_failure(http_request, detail="order_id missing in cancel request")
             raise HTTPException(status_code=400, detail="order_id is required")
 
-        # Run in executor to avoid blocking event loop
         loop = asyncio.get_event_loop()
         try:
             success, message = await asyncio.wait_for(
@@ -164,14 +231,18 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
                     None,
                     lambda: ib_client.cancel_order(int(order_id))
                 ),
-                timeout=35.0  # 35-second timeout for order cancellation
+                timeout=35.0,
             )
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
+            await audit_log_failure(
+                http_request,
+                detail="order cancellation timed out",
+                extra={"order_id": order_id},
+            )
             return {"success": False, "error": "Order cancellation timed out"}
-        
+
         if success:
-            # 更新 OrderManager 本地状态
             try:
                 if 'order_manager' in globals() and order_manager:
                     updated = order_manager.cancel_order(str(order_id), reason="Cancelled via API")
@@ -181,28 +252,48 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
                     logger.warning("OrderManager is not initialized; local order state not updated")
             except Exception as rec_err:
                 logger.warning(f"Failed to update OrderManager on cancel: {rec_err}")
-            
-            await websocket_manager.broadcast({  # 替换 manager
+
+            await websocket_manager.broadcast({
                 "type": "order_cancelled",
                 "order_id": order_id
             })
-            
+
+            await audit_log_success(
+                http_request,
+                detail=f"cancelled order {order_id}",
+                extra={"order_id": order_id},
+            )
             return {"success": True, "message": message}
-        else:
-            return {"success": False, "error": message}
-            
+
+        return {"success": False, "error": message}
+
     except Exception as e:
         logger.error(f"Order cancellation error: {e}")
+        await audit_log_failure(
+            http_request,
+            detail=str(e),
+            extra={"order_id": request.get('order_id')},
+        )
         return {"success": False, "error": str(e)}
 
 @router.post("/api/close_position")
-async def close_position(request: dict, user: Optional[str] = Depends(get_current_user)):
+async def close_position(
+    request: dict,
+    http_request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="orders.close_position")),
+):
     """平仓接口 - 根据持仓情况自动计算平仓订单"""
     symbol = request.get("symbol")
     if not symbol:
+        await audit_log_failure(http_request, detail="symbol missing for close position")
         raise HTTPException(status_code=400, detail="Symbol is required")
-    
+
     if not connection_manager.is_connected():
+        await audit_log_failure(
+            http_request,
+            detail="close position attempted while disconnected",
+            extra={"symbol": symbol},
+        )
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     ib_client = _require_ib_client()
@@ -216,6 +307,11 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
             )
         except asyncio.TimeoutError:
             logger.error("Timed out while fetching positions for close_position")
+            await audit_log_failure(
+                http_request,
+                detail="fetch positions timeout",
+                extra={"symbol": symbol},
+            )
             raise HTTPException(status_code=504, detail="Fetching positions timed out")
         target_position = None
         
@@ -225,10 +321,20 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
                 break
         
         if not target_position:
+            await audit_log_failure(
+                http_request,
+                detail="no position found",
+                extra={"symbol": symbol},
+            )
             raise HTTPException(status_code=400, detail=f"No position found for symbol {symbol}")
         
         position_qty = float(target_position.get('position', 0))
         if position_qty == 0:
+            await audit_log_failure(
+                http_request,
+                detail="position quantity zero",
+                extra={"symbol": symbol},
+            )
             raise HTTPException(status_code=400, detail=f"No position to close for symbol {symbol}")
         
         # 计算平仓参数
@@ -273,7 +379,18 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
                 "action": action,
                 "quantity": quantity
             })
-            
+
+            await audit_log_success(
+                http_request,
+                detail=f"closed position for {symbol}",
+                extra={
+                    "symbol": symbol,
+                    "order_id": trade.order.orderId,
+                    "quantity": quantity,
+                    "action": action,
+                },
+            )
+
             return {
                 "success": True,
                 "order_id": trade.order.orderId,
@@ -282,12 +399,27 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
                 "message": f"Position closed successfully for {symbol}"
             }
         else:
+            await audit_log_failure(
+                http_request,
+                detail="failed to place close position order",
+                extra={"symbol": symbol},
+            )
             raise HTTPException(status_code=400, detail="Failed to place close position order")
-            
-    except HTTPException:
+
+    except HTTPException as exc:
+        await audit_log_failure(
+            http_request,
+            detail=str(getattr(exc, "detail", "close position failed")),
+            extra={"symbol": symbol},
+        )
         raise
     except Exception as e:
         logger.error(f"Close position error: {e}")
+        await audit_log_failure(
+            http_request,
+            detail=str(e),
+            extra={"symbol": symbol},
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/orders/validate")
@@ -680,9 +812,13 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/api/cancel_all_orders")
-async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
+async def cancel_all_orders(
+    request: Request,
+    user: Optional[str] = Depends(require_roles("admin", "operator", action="orders.cancel_all")),
+):
     """取消所有订单"""
     if not connection_manager.is_connected():
+        await audit_log_failure(request, detail="cancel all attempted while disconnected")
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     ib_client = _require_ib_client()
@@ -695,15 +831,22 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
             "type": "all_orders_cancelled",
             "count": cancelled_count
         })
-        
+
+        await audit_log_success(
+            request,
+            detail=f"cancelled {cancelled_count} orders",
+            extra={"count": cancelled_count},
+        )
+
         return {
             "success": True,
             "cancelled_count": cancelled_count,
             "message": f"Cancelled {cancelled_count} orders"
         }
-        
+
     except Exception as e:
         logger.error(f"Cancel all orders error: {e}")
+        await audit_log_failure(request, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 # 订单缓存，避免频繁查询数据库

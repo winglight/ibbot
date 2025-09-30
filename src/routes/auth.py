@@ -1,8 +1,15 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import os
-from fastapi import APIRouter, HTTPException, Request
+from typing import Mapping, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from jose import JWTError, jwt
 from pydantic import BaseModel
+
+from src.utils.audit import log_audit_event
 
 router = APIRouter()
 
@@ -11,6 +18,10 @@ JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256')
 JWT_EXPIRE_DAYS = int(os.getenv('JWT_EXPIRE_DAYS', '7'))
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change_me')
+OPERATOR_USERNAME = os.getenv('OPERATOR_USERNAME')
+OPERATOR_PASSWORD = os.getenv('OPERATOR_PASSWORD')
+AUDITOR_USERNAME = os.getenv('AUDITOR_USERNAME')
+AUDITOR_PASSWORD = os.getenv('AUDITOR_PASSWORD')
 VISITOR_USERNAME = os.getenv('VISITOR_USERNAME')
 VISITOR_PASSWORD = os.getenv('VISITOR_PASSWORD')
 READ_ONLY_SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS'}
@@ -30,6 +41,33 @@ class TokenResponse(BaseModel):
     expires_in: int
     role: str = 'admin'
     is_read_only: bool = False
+
+READ_ONLY_ROLES = {'visitor', 'auditor'}
+
+
+@dataclass(frozen=True)
+class UserAccount:
+    username: str
+    password: str
+    role: str
+    read_only: bool = False
+
+
+def _build_user_accounts() -> list[UserAccount]:
+    users: list[UserAccount] = [
+        UserAccount(ADMIN_USERNAME, ADMIN_PASSWORD, 'admin', False),
+    ]
+    if OPERATOR_USERNAME and OPERATOR_PASSWORD:
+        users.append(UserAccount(OPERATOR_USERNAME, OPERATOR_PASSWORD, 'operator', False))
+    if AUDITOR_USERNAME and AUDITOR_PASSWORD:
+        users.append(UserAccount(AUDITOR_USERNAME, AUDITOR_PASSWORD, 'auditor', True))
+    if VISITOR_USERNAME and VISITOR_PASSWORD:
+        users.append(UserAccount(VISITOR_USERNAME, VISITOR_PASSWORD, 'visitor', True))
+    return users
+
+
+USER_ACCOUNTS = _build_user_accounts()
+
 
 EXEMPT_PATHS = {
     '/',
@@ -63,7 +101,7 @@ async def get_current_user(request: Request):
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         username = payload.get('sub')
         role = payload.get('role', 'admin')
-        read_only = bool(payload.get('read_only', False) or role == 'visitor')
+        read_only = bool(payload.get('read_only', False) or role in READ_ONLY_ROLES)
 
         # Enforce read-only restrictions based on HTTP method/path
         method = request.method.upper()
@@ -83,24 +121,76 @@ async def get_current_user(request: Request):
 
 @router.post('/api/login', response_model=TokenResponse)
 async def login(req: LoginRequest):
-    user_role = 'admin'
-    is_read_only = False
+    matched: Optional[UserAccount] = None
+    for account in USER_ACCOUNTS:
+        if req.username == account.username and req.password == account.password:
+            matched = account
+            break
 
-    if req.username == ADMIN_USERNAME and req.password == ADMIN_PASSWORD:
-        user_role = 'admin'
-        is_read_only = False
-    elif VISITOR_USERNAME and VISITOR_PASSWORD and req.username == VISITOR_USERNAME and req.password == VISITOR_PASSWORD:
-        user_role = 'visitor'
-        is_read_only = True
-    else:
+    if matched is None:
         raise HTTPException(status_code=401, detail='Invalid credentials')
 
-    token_payload = {"sub": req.username, "role": user_role, "read_only": is_read_only}
+    token_payload = {"sub": req.username, "role": matched.role, "read_only": matched.read_only}
     token, expires_in = create_access_token(token_payload)
     return {
         "access_token": token,
         "token_type": "bearer",
         "expires_in": expires_in,
-        "role": user_role,
-        "is_read_only": is_read_only,
+        "role": matched.role,
+        "is_read_only": matched.read_only,
     }
+
+
+def require_roles(*roles: str, action: str | None = None):
+    allowed_roles = {role for role in roles if role}
+
+    async def dependency(request: Request, user: Optional[str] = Depends(get_current_user)):
+        role = getattr(request.state, 'user_role', None) or ('visitor' if getattr(request.state, 'is_read_only', False) else 'admin')
+        username = getattr(request.state, 'username', None) or user or 'anonymous'
+        effective_action = action or f"{request.method.upper()} {request.url.path}"
+        request.state.audit_action = effective_action
+        request.state.audit_username = username
+        request.state.audit_role = role
+        request.state.audit_method = request.method.upper()
+        request.state.audit_path = request.url.path
+
+        if allowed_roles and role not in allowed_roles:
+            await log_audit_event(
+                request,
+                action=effective_action,
+                success=False,
+                detail=f"forbidden: requires {'/'.join(sorted(allowed_roles))}",
+            )
+            detail: Mapping[str, object] = {
+                "error": "RBAC_FORBIDDEN",
+                "message": "Insufficient permissions",
+                "required_roles": sorted(allowed_roles),
+                "role": role,
+            }
+            raise HTTPException(status_code=403, detail=detail)
+
+        return user
+
+    return dependency
+
+
+async def audit_log_success(
+    request: Request,
+    *,
+    action: str | None = None,
+    detail: str | None = None,
+    extra: Mapping[str, object] | None = None,
+) -> None:
+    effective_action = action or getattr(request.state, 'audit_action', f"{request.method.upper()} {request.url.path}")
+    await log_audit_event(request, action=effective_action, success=True, detail=detail, extra=extra)
+
+
+async def audit_log_failure(
+    request: Request,
+    *,
+    action: str | None = None,
+    detail: str | None = None,
+    extra: Mapping[str, object] | None = None,
+) -> None:
+    effective_action = action or getattr(request.state, 'audit_action', f"{request.method.upper()} {request.url.path}")
+    await log_audit_event(request, action=effective_action, success=False, detail=detail, extra=extra)

@@ -42,6 +42,8 @@ def restart_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
     async def allow_user(request: Request) -> str:
         request.state.is_read_only = False
+        request.state.user_role = "admin"
+        request.state.username = "tester"
         return "tester"
 
     manager = MockRestartManager()
@@ -70,6 +72,8 @@ def test_restart_endpoint_blocks_read_only(monkeypatch: pytest.MonkeyPatch) -> N
 
     async def read_only_user(request: Request) -> str:
         request.state.is_read_only = True
+        request.state.user_role = "visitor"
+        request.state.username = "visitor"
         return "visitor"
 
     monkeypatch.setattr(service_module, "get_service_restart_manager", lambda: MockRestartManager())

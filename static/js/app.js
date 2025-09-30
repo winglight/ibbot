@@ -1545,7 +1545,45 @@ class TradingApp {
                 }
 
                 if (response.status === 403) {
-                    const detail = (data && typeof data === 'object' && data.detail) ? data.detail : 'Forbidden';
+                    let detailPayload = (data && typeof data === 'object') ? data.detail : null;
+                    if (detailPayload && typeof detailPayload === 'object') {
+                        const message = detailPayload.message || detailPayload.detail || 'Forbidden';
+                        const lowered = String(message).toLowerCase();
+                        if (lowered.includes('read-only')) {
+                            const now = Date.now();
+                            if (now - this.lastReadOnlyWarningAt > 1500) {
+                                this.showAlert('warning', message);
+                                this.lastReadOnlyWarningAt = now;
+                            }
+                            const err = new Error(message);
+                            err.isReadOnly = true;
+                            err.code = 'READ_ONLY';
+                            throw err;
+                        }
+                        if (detailPayload.error === 'RBAC_FORBIDDEN') {
+                            const requiredRoles = Array.isArray(detailPayload.required_roles)
+                                ? detailPayload.required_roles
+                                : [];
+                            const friendly = requiredRoles.length
+                                ? `You do not have permission to perform this action. Required role: ${requiredRoles.join(', ')}`
+                                : message;
+                            this.showAlert('danger', friendly);
+                            const err = new Error(friendly);
+                            err.code = detailPayload.error;
+                            err.requiredRoles = requiredRoles;
+                            err.status = 403;
+                            throw err;
+                        }
+                        const err = new Error(message);
+                        err.status = 403;
+                        this.showAlert('danger', message);
+                        throw err;
+                    }
+
+                    const rawDetail = (data && typeof data === 'object' && data.detail !== undefined)
+                        ? data.detail
+                        : detailPayload;
+                    const detail = rawDetail ?? 'Forbidden';
                     const lowered = String(detail).toLowerCase();
                     if (lowered.includes('read-only')) {
                         const now = Date.now();
@@ -1558,7 +1596,7 @@ class TradingApp {
                         err.code = 'READ_ONLY';
                         throw err;
                     }
-                    const err = new Error(detail);
+                    const err = new Error(typeof detail === 'string' ? detail : 'Forbidden');
                     err.status = 403;
                     throw err;
                 }
