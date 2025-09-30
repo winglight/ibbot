@@ -386,6 +386,26 @@ class ConnectionManager:
                         """处理IBKR错误，特别是订单相关错误"""
                         connection_logger.info(f"IBKR Error - ReqId: {reqId}, Code: {errorCode}, Message: {errorString}")
 
+                        if errorCode in {2107, 2108}:
+                            connection_logger.info(
+                                f"IBKR data farm status {errorCode}: {errorString}"
+                            )
+                            client = None
+                            ref = getattr(self, "_ibkr_client_ref", None)
+                            if ref is not None:
+                                try:
+                                    client = ref()
+                                except Exception:
+                                    client = None
+                            if client is not None:
+                                try:
+                                    client.handle_data_farm_status(errorCode, errorString)
+                                except Exception as wake_err:  # pragma: no cover - defensive
+                                    connection_logger.debug(
+                                        f"Failed to schedule data farm wake-up: {wake_err}"
+                                    )
+                            return
+
                         try:
                             import core  # 延迟导入避免循环依赖
 
@@ -406,6 +426,22 @@ class ConnectionManager:
                             connection_logger.debug(
                                 f"Snapshot service notification failed: {snapshot_err}"
                             )
+
+                        if errorCode in {2103, 2105}:
+                            client = None
+                            ref = getattr(self, "_ibkr_client_ref", None)
+                            if ref is not None:
+                                try:
+                                    client = ref()
+                                except Exception:
+                                    client = None
+                            if client is not None:
+                                try:
+                                    client.handle_gateway_broken(errorCode, errorString)
+                                except Exception as notify_err:  # pragma: no cover - defensive
+                                    connection_logger.debug(
+                                        f"Failed to dispatch gateway-broken handler: {notify_err}"
+                                    )
 
                         # 检查是否是订单相关错误
                         if reqId and reqId > 0:  # reqId > 0 通常表示订单相关

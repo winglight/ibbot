@@ -137,7 +137,7 @@
                         <div class="col-12 col-sm-6">
                             <label class="form-label">Depth Rows</label>
                             <input type="number" class="form-control form-control-sm" id="domNumRows" value="5">
-                            <div class="form-text">DOM 面板显示的深度层数。</div>
+                            <div class="form-text">Number of depth levels displayed in the DOM panel.</div>
                         </div>
                         <div class="col-12">
                             <label class="form-label">Trend Score Thresholds</label>
@@ -167,7 +167,7 @@
                                     </div>
                                 </div>
                             </div>
-                            <div class="form-text">仅需填写正向阈值，负向阈值会自动取相反数。</div>
+                            <div class="form-text">Enter only positive thresholds; negative thresholds are mirrored automatically.</div>
                         </div>
                     </form>
                     <div class="text-end mt-3">
@@ -185,13 +185,13 @@
                 <div class="card-body">
                     <div class="form-check form-switch requires-write mb-2">
                         <input class="form-check-input" type="checkbox" id="holidayDataPushSwitch" checked>
-                        <label class="form-check-label" for="holidayDataPushSwitch">节假日暂停数据推送</label>
+                        <label class="form-check-label" for="holidayDataPushSwitch">Pause data push on holidays</label>
                     </div>
                     <div class="small text-muted" id="holidayDataPushStatusText">
-                        当前状态：已启用，在美股节假日会自动暂停数据推送。
+                        Current status: Enabled. Data push automatically pauses on US market holidays.
                     </div>
                     <div class="form-text mt-2">
-                        关闭后，即使遇到节假日也会继续推送策略数据。
+                        When disabled, strategy data continues even on holidays.
                     </div>
                 </div>
             </div>
@@ -228,45 +228,45 @@
                                         <tbody>
                                             <tr>
                                                 <td>G0</td>
-                                                <td>账户级断路器</td>
-                                                <td><span id="g0_status" class="badge bg-success">正常</span></td>
+                                                <td>Account-level circuit breaker</td>
+                                                <td><span id="g0_status" class="badge bg-success">Normal</span></td>
                                                 <td id="g0_message">-1.2%</td>
-                                                <td id="g0_last">刚刚</td>
+                                                <td id="g0_last">Just now</td>
                                             </tr>
                                             <tr>
                                                 <td>G1</td>
-                                                <td>单笔最大风险</td>
-                                                <td><span id="g1_status" class="badge bg-success">正常</span></td>
+                                                <td>Maximum risk per trade</td>
+                                                <td><span id="g1_status" class="badge bg-success">Normal</span></td>
                                                 <td id="g1_message">1.5%</td>
-                                                <td id="g1_last">刚刚</td>
+                                                <td id="g1_last">Just now</td>
                                             </tr>
                                             <tr>
                                                 <td>G2</td>
-                                                <td>单标的最大仓位</td>
-                                                <td><span id="g2_status" class="badge bg-success">正常</span></td>
+                                                <td>Max position per symbol</td>
+                                                <td><span id="g2_status" class="badge bg-success">Normal</span></td>
                                                 <td id="g2_message">8.3%</td>
-                                                <td id="g2_last">刚刚</td>
+                                                <td id="g2_last">Just now</td>
                                             </tr>
                                             <tr>
                                                 <td>G3</td>
-                                                <td>相关性检查</td>
-                                                <td><span id="g3_status" class="badge bg-success">正常</span></td>
+                                                <td>Correlation check</td>
+                                                <td><span id="g3_status" class="badge bg-success">Normal</span></td>
                                                 <td id="g3_message">0.65</td>
-                                                <td id="g3_last">刚刚</td>
+                                                <td id="g3_last">Just now</td>
                                             </tr>
                                             <tr>
                                                 <td>G4</td>
-                                                <td>流动性检查</td>
-                                                <td><span id="g4_status" class="badge bg-success">正常</span></td>
-                                                <td id="g4_message">充足</td>
-                                                <td id="g4_last">刚刚</td>
+                                                <td>Liquidity check</td>
+                                                <td><span id="g4_status" class="badge bg-success">Normal</span></td>
+                                                <td id="g4_message">Sufficient</td>
+                                                <td id="g4_last">Just now</td>
                                             </tr>
                                             <tr>
                                                 <td>G5</td>
-                                                <td>时间窗口限制</td>
-                                                <td><span id="g5_status" class="badge bg-success">正常</span></td>
-                                                <td id="g5_message">交易时间内</td>
-                                                <td id="g5_last">刚刚</td>
+                                                <td>Trading window restriction</td>
+                                                <td><span id="g5_status" class="badge bg-success">Normal</span></td>
+                                                <td id="g5_message">During trading hours</td>
+                                                <td id="g5_last">Just now</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -305,38 +305,38 @@
                                         <tbody>
                                             <tr>
                                                 <td>S0</td>
-                                                <td>仓位计算方法</td>
-                                                <td><span id="s0_status" class="badge bg-success">正常</span></td>
-                                                <td id="s0_message">百分比</td>
-                                                <td id="s0_last">刚刚</td>
+                                                <td>Position sizing method</td>
+                                                <td><span id="s0_status" class="badge bg-success">Normal</span></td>
+                                                <td id="s0_message">Percentage</td>
+                                                <td id="s0_last">Just now</td>
                                             </tr>
                                             <tr>
                                                 <td>S1</td>
-                                                <td>仓位数值/百分比</td>
-                                                <td><span id="s1_status" class="badge bg-success">正常</span></td>
+                                                <td>Position size value/percentage</td>
+                                                <td><span id="s1_status" class="badge bg-success">Normal</span></td>
                                                 <td id="s1_message">1.0%</td>
-                                                <td id="s1_last">刚刚</td>
+                                                <td id="s1_last">Just now</td>
                                             </tr>
                                             <tr>
                                                 <td>S2</td>
-                                                <td>最大仓位数量</td>
-                                                <td><span id="s2_status" class="badge bg-success">正常</span></td>
+                                                <td>Maximum number of positions</td>
+                                                <td><span id="s2_status" class="badge bg-success">Normal</span></td>
                                                 <td id="s2_message">10</td>
-                                                <td id="s2_last">刚刚</td>
+                                                <td id="s2_last">Just now</td>
                                             </tr>
                                             <tr>
                                                 <td>S3</td>
-                                                <td>仓位重平衡</td>
-                                                <td><span id="s3_status" class="badge bg-success">正常</span></td>
-                                                <td id="s3_message">启用</td>
-                                                <td id="s3_last">刚刚</td>
+                                                <td>Position rebalancing</td>
+                                                <td><span id="s3_status" class="badge bg-success">Normal</span></td>
+                                                <td id="s3_message">Enabled</td>
+                                                <td id="s3_last">Just now</td>
                                             </tr>
                                             <tr>
                                                 <td>S4</td>
-                                                <td>波动率调整</td>
-                                                <td><span id="s4_status" class="badge bg-success">正常</span></td>
-                                                <td id="s4_message">启用</td>
-                                                <td id="s4_last">刚刚</td>
+                                                <td>Volatility adjustment</td>
+                                                <td><span id="s4_status" class="badge bg-success">Normal</span></td>
+                                                <td id="s4_message">Enabled</td>
+                                                <td id="s4_last">Just now</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -435,7 +435,7 @@
 
     <div class="container-fluid mt-4">
         <div id="readOnlyBanner" class="alert alert-warning d-none" role="alert">
-            <i class="fas fa-eye-slash me-2"></i>访客账号处于只读模式，无法执行交易或修改配置。
+            <i class="fas fa-eye-slash me-2"></i>Visitor accounts are read-only and cannot execute trades or change settings.
         </div>
         <!-- Account Information Panel -->
         <div class="row mb-4">
@@ -444,7 +444,7 @@
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5 class="mb-0"><i class="fas fa-user"></i> Account Information</h5>
                         <button type="button" class="btn btn-outline-secondary btn-sm" id="openDailySummaryBtn" data-bs-toggle="modal" data-bs-target="#dailyAccountSummaryModal">
-                            <i class="fas fa-chart-line me-1"></i>统计
+                            <i class="fas fa-chart-line me-1"></i>Analytics
                         </button>
                     </div>
                     <div class="card-body" id="accountInfo">
@@ -488,10 +488,10 @@
                                         <th>Qty</th>
                                         <th>Price</th>
                                         <th>Status</th>
-                                        <th>创建时间</th>
+                                        <th>Created At</th>
                                         <th>PnL</th>
                                         <th>Commission</th>
-                                        <th>来源</th>
+                                        <th>Source</th>
                                         <th>Actions</th>
                                     </tr>
                                 </thead>
@@ -608,7 +608,7 @@
                             <th>Name</th>
                             <th>Symbol</th>
                             <th>Status</th>
-                            <th>数据接收状态</th>
+                            <th>Data Reception Status</th>
                             <th>P&L</th>
                             <th>Trades</th>
                           </tr>
@@ -710,7 +710,7 @@
                 <div class="modal-body">
                     <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
                         <div class="d-flex flex-wrap align-items-center gap-2">
-                            <label for="dailySummaryRange" class="form-label mb-0 me-2">时间范围</label>
+                            <label for="dailySummaryRange" class="form-label mb-0 me-2">Time Range</label>
                             <select class="form-select form-select-sm" id="dailySummaryRange">
                                 <option value="7">Last 7 days</option>
                                 <option value="14">Last 14 days</option>
@@ -742,7 +742,7 @@
                             <tbody>
                                 <tr>
                                     <td colspan="5" class="text-center text-muted py-3">
-                                        <i class="fas fa-info-circle me-2"></i>登录后加载每日盈余数据
+                                        <i class="fas fa-info-circle me-2"></i>Load daily surplus data after logging in
                                     </td>
                                 </tr>
                             </tbody>
@@ -751,7 +751,7 @@
                     <div class="small text-muted mt-2" id="dailySummaryMeta"></div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
@@ -799,7 +799,7 @@
                   <input type="text" class="form-control" id="strategyAuthToken" placeholder="Click Generate Token" readonly>
                   <button class="btn btn-outline-secondary" type="button" id="generateStrategyTokenBtn">Generate Token</button>
                 </div>
-                <div class="form-text">如果开启鉴权，请在外部策略调用时将 token 放在请求体的 token 字段中</div>
+                <div class="form-text">If authentication is enabled, include the token in the external strategy request body under the token field.</div>
               </div>
             </div>
           </div>
@@ -832,7 +832,7 @@
                                 </div>
                             </div>
                             <div id="currentPriceDisplay" class="mt-2" style="display: none;">
-                                <small class="text-muted">当前价格: <span id="currentPriceValue" class="fw-bold text-primary">--</span></small>
+                                <small class="text-muted">Current Price: <span id="currentPriceValue" class="fw-bold text-primary">--</span></small>
                             </div>
                         </div>
                         <div class="row">
@@ -913,29 +913,29 @@
                         
                         <!-- Suggested Position Size Section -->
                         <div id="suggestedPositionSection" class="border rounded p-3 mb-3" style="background-color: #e8f5e8;">
-                            <h6 class="mb-3"><i class="fas fa-balance-scale"></i> 建议仓位 (S)</h6>
+                            <h6 class="mb-3"><i class="fas fa-balance-scale"></i> Suggested Position (S)</h6>
                             <div class="row g-2 mb-2">
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">建议数量</label>
+                                        <label class="form-label text-muted small">Suggested Quantity</label>
                                         <div class="fw-bold text-success" id="suggestedQuantity">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">止损距离</label>
+                                        <label class="form-label text-muted small">Stop Distance</label>
                                         <div class="fw-bold" id="stopDistance">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">点值</label>
+                                        <label class="form-label text-muted small">Point Value</label>
                                         <div class="fw-bold" id="pointValue">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">总缩放</label>
+                                        <label class="form-label text-muted small">Total Scaling</label>
                                         <div class="fw-bold" id="scaleTotal">--</div>
                                     </div>
                                 </div>
@@ -943,25 +943,25 @@
                             <div class="row g-2 mb-2">
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">波动缩放</label>
+                                        <label class="form-label text-muted small">Volatility Scaling</label>
                                         <div class="fw-bold" id="scaleVol">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">回撤缩放</label>
+                                        <label class="form-label text-muted small">Drawdown Scaling</label>
                                         <div class="fw-bold" id="scaleDd">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">信号缩放</label>
+                                        <label class="form-label text-muted small">Signal Scaling</label>
                                         <div class="fw-bold" id="scaleSig">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">执行缩放</label>
+                                        <label class="form-label text-muted small">Execution Scaling</label>
                                         <div class="fw-bold" id="scaleExec">--</div>
                                     </div>
                                 </div>
@@ -969,33 +969,33 @@
                             <div class="row g-2 mb-2">
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">最大风险 (R)</label>
+                                        <label class="form-label text-muted small">Max Risk (R)</label>
                                         <div class="fw-bold text-danger" id="maxRisk">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">预估投入 (R*)</label>
+                                        <label class="form-label text-muted small">Estimated Capital (R*)</label>
                                         <div class="fw-bold text-primary" id="estimatedInvestment">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-6">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">计算方法</label>
+                                        <label class="form-label text-muted small">Calculation Method</label>
                                         <div class="fw-bold" id="sizingMethod">--</div>
                                     </div>
                                 </div>
                             </div>
                             <div class="mb-2">
-                                <label class="form-label text-muted small">详细说明</label>
+                                <label class="form-label text-muted small">Detailed Explanation</label>
                                 <div class="bg-light p-2 rounded small" id="sizingExplanation" style="white-space: pre-wrap; max-height: 100px; overflow-y: auto;">--</div>
                             </div>
                             <div class="mt-2">
                                 <button type="button" class="btn btn-sm btn-outline-success" id="applySuggestedQuantity">
-                                    <i class="fas fa-check"></i> 应用建议数量
+                                    <i class="fas fa-check"></i> Apply Suggested Quantity
                                 </button>
                                 <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshSuggestion">
-                                    <i class="fas fa-sync"></i> 刷新建议
+                                    <i class="fas fa-sync"></i> Refresh Suggestion
                                 </button>
                             </div>
                         </div>
@@ -1153,7 +1153,7 @@
               </li>
               <li class="nav-item d-none" role="presentation" id="risk-settings-tab-wrap">
                 <button class="nav-link" id="risk-settings-tab" data-bs-toggle="tab" data-bs-target="#risk-settings" type="button" role="tab" aria-controls="risk-settings" aria-selected="false">
-                  <i class="fas fa-shield-alt"></i> 风控设置
+                  <i class="fas fa-shield-alt"></i> Risk Control Settings
                 </button>
               </li>
               <li class="nav-item d-none" role="presentation" id="internal-orders-tab-wrap">
@@ -1168,7 +1168,7 @@
               </li>
               <li class="nav-item" role="presentation" id="strategy-chart-tab-wrap">
                 <button class="nav-link" id="strategy-chart-tab" data-bs-toggle="tab" data-bs-target="#strategy-chart" type="button" role="tab" aria-controls="strategy-chart" aria-selected="false">
-                  <i class="fas fa-chart-area"></i> 策略K线
+                  <i class="fas fa-chart-area"></i> Strategy Candles
                 </button>
               </li>
               <li class="nav-item" role="presentation" id="executions-tab-wrap">
@@ -1235,16 +1235,16 @@
                       <div class="row g-2 align-items-center">
                         <div class="col-sm-7">
                           <select class="form-select form-select-sm" id="summaryDataFeedSelect">
-                            <option value="market_data">实时价格和Volume</option>
-                            <option value="dom_trend">DOM和Trend Score</option>
+                            <option value="market_data">Real-time Price and Volume</option>
+                            <option value="dom_trend">DOM and Trend Score</option>
                           </select>
                         </div>
                         <div class="col-sm-5">
                           <div class="form-check form-switch mb-0 d-flex align-items-center justify-content-sm-end">
                             <input class="form-check-input" type="checkbox" role="switch" id="summaryDataPushSwitch">
-                            <label class="form-check-label ms-2 small" for="summaryDataPushSwitch">推送</label>
+                            <label class="form-check-label ms-2 small" for="summaryDataPushSwitch">Push</label>
                           </div>
-                          <div class="small text-muted text-sm-end" id="summaryDataPushStatus">未推送</div>
+                          <div class="small text-muted text-sm-end" id="summaryDataPushStatus">Not Pushing</div>
                         </div>
                       </div>
                     </div>
@@ -1308,7 +1308,7 @@
                           <span class="fw-semibold small text-uppercase text-muted">Data Feed Log</span>
                         </div>
                         <ul class="list-unstyled small mb-0" id="summaryDataLogList">
-                          <li class="text-muted">暂无记录</li>
+                          <li class="text-muted">No records yet</li>
                         </ul>
                       </div>
                     </div>
@@ -1320,40 +1320,40 @@
               <div class="tab-pane fade d-none" id="risk-settings" role="tabpanel" aria-labelledby="risk-settings-tab">
                 <form id="riskSettingsForm" class="row gy-3">
                   <div class="col-lg-6">
-                    <label class="form-label" for="riskMaxPositions">持仓数量上限</label>
-                    <input type="number" class="form-control" id="riskMaxPositions" min="0" step="1" placeholder="不限">
-                    <div class="form-text">留空表示不限制持仓数量。</div>
+                    <label class="form-label" for="riskMaxPositions">Max Position Count</label>
+                    <input type="number" class="form-control" id="riskMaxPositions" min="0" step="1" placeholder="Unlimited">
+                    <div class="form-text">Leave blank for no limit on positions.</div>
                   </div>
                   <div class="col-lg-6">
-                    <label class="form-label" for="riskLossTimeThreshold">浮亏持续时间阈值 (秒)</label>
-                    <input type="number" class="form-control" id="riskLossTimeThreshold" min="0" step="1" placeholder="如：300">
-                    <div class="form-text">浮亏持续超过该时间后触发自动平仓，0或留空关闭该规则。</div>
+                    <label class="form-label" for="riskLossTimeThreshold">Unrealized loss duration threshold (seconds)</label>
+                    <input type="number" class="form-control" id="riskLossTimeThreshold" min="0" step="1" placeholder="e.g., 300">
+                    <div class="form-text">Trigger auto close when unrealized loss exceeds this duration; set 0 or leave blank to disable.</div>
                   </div>
                   <div class="col-lg-6">
                     <div class="form-check form-switch mt-4">
                       <input class="form-check-input" type="checkbox" id="riskForbidAddOnLoss">
-                      <label class="form-check-label" for="riskForbidAddOnLoss">禁止浮亏时加仓</label>
+                      <label class="form-check-label" for="riskForbidAddOnLoss">Forbid adding positions during unrealized losses</label>
                     </div>
-                    <div class="form-text">任意持仓出现浮亏时，阻止新增仓位或加仓指令。</div>
+                    <div class="form-text">Block new or add-on orders whenever any position has an unrealized loss.</div>
                   </div>
                   <div class="col-lg-6">
-                    <label class="form-label" for="riskLossPnlThreshold">浮亏判定阈值</label>
+                    <label class="form-label" for="riskLossPnlThreshold">Unrealized loss threshold</label>
                     <input type="number" class="form-control" id="riskLossPnlThreshold" step="0.01" placeholder="<= 0">
-                    <div class="form-text">当未实现盈亏低于该值时视为浮亏，常用负数（例如 -50 或 -0.5）。</div>
+                    <div class="form-text">Treat unrealized PnL below this value as a loss; typically a negative number (e.g., -50 or -0.5).</div>
                   </div>
                   <div class="col-12">
                     <div class="form-check form-switch">
                       <input class="form-check-input" type="checkbox" id="riskNotifyOnTrigger">
-                      <label class="form-check-label" for="riskNotifyOnTrigger">重要风控信号发送通知</label>
+                      <label class="form-check-label" for="riskNotifyOnTrigger">Send alerts for critical risk signals</label>
                     </div>
-                    <div class="form-text">关闭后仅在日志中记录，不推送通知，可在 Notification Settings 中统一控制渠道。</div>
+                    <div class="form-text">When disabled, only log the event without notifications; manage channels in Notification Settings.</div>
                   </div>
                   <div class="col-12 d-flex justify-content-end gap-2">
-                    <button type="button" class="btn btn-outline-secondary" id="riskSettingsResetBtn">重置</button>
-                    <button type="submit" class="btn btn-primary" id="riskSettingsSaveBtn">保存设置</button>
+                    <button type="button" class="btn btn-outline-secondary" id="riskSettingsResetBtn">Reset</button>
+                    <button type="submit" class="btn btn-primary" id="riskSettingsSaveBtn">Save Settings</button>
                   </div>
                   <div class="col-12">
-                    <div class="small text-muted" id="riskSettingsStatus">选择策略后加载风控设置。</div>
+                    <div class="small text-muted" id="riskSettingsStatus">Load risk control settings after selecting a strategy.</div>
                   </div>
                 </form>
               </div>
@@ -1370,10 +1370,10 @@
                         <th>Qty</th>
                         <th>Price</th>
                         <th>Status</th>
-                        <th>创建时间</th>
+                        <th>Created At</th>
                         <th>PnL</th>
                         <th>Commission</th>
-                        <th>来源</th>
+                        <th>Source</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
@@ -1460,15 +1460,15 @@
                 </div>
                 <div class="ms-auto d-flex flex-wrap gap-2">
                   <button class="btn btn-outline-success btn-sm" id="strategyChartRealtimeBtn" type="button">
-                    <i class="fas fa-play"></i> 实时
+                    <i class="fas fa-play"></i> Live
                   </button>
                   <button class="btn btn-outline-secondary btn-sm" id="strategyChartReplayBtn" type="button">
-                    <i class="fas fa-history"></i> 回放
+                    <i class="fas fa-history"></i> Replay
                   </button>
                 </div>
               </div>
               <div id="strategyChartContainer" class="border rounded" style="min-height: 420px;">
-                <div class="text-center text-muted py-5" id="strategyChartPlaceholder">加载策略后将显示K线图。</div>
+                <div class="text-center text-muted py-5" id="strategyChartPlaceholder">Charts will display after loading a strategy.</div>
               </div>
               <div class="d-flex justify-content-between align-items-center mt-2 small text-muted">
                 <span id="strategyChartSummary"></span>
@@ -1712,17 +1712,17 @@
         <div class="modal-dialog" style="max-width: 95%; width: 95%;">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-eye"></i> 监控 - <span id="monitorSymbol">SYMBOL</span></h5>
+                    <h5 class="modal-title"><i class="fas fa-eye"></i> Monitor - <span id="monitorSymbol">SYMBOL</span></h5>
                     <div class="d-flex align-items-center gap-2">
-                        <button class="btn btn-sm btn-outline-secondary" id="domSettingsBtn" title="DOM 设置">
+                        <button class="btn btn-sm btn-outline-secondary" id="domSettingsBtn" title="DOM Settings">
                             <i class="fas fa-cog"></i>
                         </button>
-                        <button class="btn btn-sm btn-outline-primary" id="monitorDomHistoryToggle" title="查看当日历史信号"
+                        <button class="btn btn-sm btn-outline-primary" id="monitorDomHistoryToggle" title="View today's historical signals"
                                 type="button" data-bs-toggle="collapse" data-bs-target="#monitorDomHistoryPanel"
                                 aria-expanded="false" aria-controls="monitorDomHistoryPanel">
                             <i class="fas fa-history"></i>
                         </button>
-                        <button class="btn btn-sm btn-outline-secondary" id="monitorFullscreenBtn" title="全屏">
+                        <button class="btn btn-sm btn-outline-secondary" id="monitorFullscreenBtn" title="Fullscreen">
                             <i class="fas fa-expand"></i>
                         </button>
                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -1763,9 +1763,9 @@
                             </div>
                         </div>
                         <div class="col-md-3 d-flex align-items-end justify-content-end flex-wrap gap-2">
-                            <button class="btn btn-outline-success" id="monitorDomToggleBtn"><i class="fas fa-play"></i> 启动DOM</button>
-                            <button class="btn btn-secondary" id="resetChartZoomBtn"><i class="fas fa-expand-arrows-alt"></i> 重置缩放</button>
-                            <button class="btn btn-info" id="monitorRealtimeBtn"><i class="fas fa-play"></i> 实时</button>
+                            <button class="btn btn-outline-success" id="monitorDomToggleBtn"><i class="fas fa-play"></i> Start DOM</button>
+                            <button class="btn btn-secondary" id="resetChartZoomBtn"><i class="fas fa-expand-arrows-alt"></i> Reset Zoom</button>
+                            <button class="btn btn-info" id="monitorRealtimeBtn"><i class="fas fa-play"></i> Live</button>
                         </div>
                     </div>
                     <div class="row g-3">
@@ -1777,18 +1777,18 @@
                                 <div class="card border-0 shadow-sm mb-3">
                                     <div class="card-body py-2">
                                         <div class="d-flex justify-content-between align-items-center mb-2">
-                                            <span class="text-muted small">当日 DOM 信号</span>
+                                            <span class="text-muted small">Today's DOM signals</span>
                                             <small class="text-muted" id="monitorDomHistoryMeta">-</small>
                                         </div>
                                         <div id="monitorDomHistoryList" class="list-group list-group-flush small">
-                                            <div class="list-group-item text-center text-muted py-2">暂无信号</div>
+                                            <div class="list-group-item text-center text-muted py-2">No signals yet</div>
                                         </div>
                                     </div>
                                 </div>
                             </div>
                             <div id="monitorChartContainer" style="height: 660px; border: 1px solid #ddd;">
                                 <div class="d-flex justify-content-center align-items-center h-100">
-                                    <p class="text-muted">图表加载中...</p>
+                                    <p class="text-muted">Chart loading...</p>
                                 </div>
                             </div>
                         </div>
@@ -1796,16 +1796,16 @@
                             <div class="card mb-3">
                                 <div class="card-body p-3">
                                     <div class="d-flex justify-content-between align-items-center mb-2">
-                                        <small class="text-muted">今日涨跌</small>
+                                        <small class="text-muted">Today's change</small>
                                         <div>
                                             <span id="monitorAssetChange" class="fw-bold">$0.00</span>
                                             <small id="monitorAssetChangePercent">(0.00%)</small>
                                         </div>
                                     </div>
                                     <div class="mt-2">
-                                        <div class="text-muted small mb-1">日内价格分布（按价格从低到高）</div>
+                                        <div class="text-muted small mb-1">Intraday price distribution (low to high)</div>
                                         <div id="monitorOhlcStrip" class="w-100" style="height: 14px;">
-                                            <!-- JS 将在此渲染一段高度10px的水平线段与四个点 -->
+                                            <!-- JS renders a 10px-high horizontal line segment with four points here -->
                                         </div>
                                     </div>
                                 </div>
@@ -1814,15 +1814,15 @@
                             <div class="card mb-3">
                                 <div class="card-body p-3">
                                     <div class="d-flex justify-content-between">
-                                        <span class="text-muted">持仓</span>
+                                        <span class="text-muted">Position</span>
                                         <span id="monitorPositionCombined" class="fw-bold">0 ($0.00)</span>
                                     </div>
                                     <div class="d-flex justify-content-between">
-                                        <span class="text-muted">当前价格 <span style="color: rgb(255, 206, 84); font-weight: bold;">——</span></span>
+                                        <span class="text-muted">Current Price <span style="color: rgb(255, 206, 84); font-weight: bold;">——</span></span>
                                         <span id="monitorCurrentPrice" class="fw-bold">$0.00</span>
                                     </div>
                                     <div class="d-flex justify-content-between">
-                                        <span class="text-muted">平均成本 <span style="color: rgb(153, 102, 255); font-weight: bold;">——</span></span>
+                                        <span class="text-muted">Average cost <span style="color: rgb(153, 102, 255); font-weight: bold;">——</span></span>
                                         <span id="monitorAvgCost" class="fw-bold">$0.00</span>
                                     </div>
                                 </div>
@@ -1831,32 +1831,32 @@
                             <div class="card mb-3 border-0">
                                 <div class="card-body p-3">
                                     <div class="d-flex justify-content-between align-items-center mb-2">
-                                        <small class="text-muted">实时PnL</small>
+                                        <small class="text-muted">Live PnL</small>
                                         <div>
                                             <span id="monitorPnL" class="fw-bold">$0.00</span>
                                             <small id="monitorPnLPercent">(0.00%)</small>
                                         </div>
                                     </div>
                                     <div class="d-flex justify-content-between align-items-center">
-                                        <small class="text-muted">风险规则</small>
+                                        <small class="text-muted">Risk Rules</small>
                                         <div class="form-check form-switch">
                                             <input class="form-check-input" type="checkbox" id="monitorRiskToggle">
-                                            <label class="form-check-label" for="monitorRiskToggle">激活</label>
+                                            <label class="form-check-label" for="monitorRiskToggle">Activate</label>
                                         </div>
                                     </div>
                                     <!-- Active Risk Rule Display -->
                                     <div class="mt-2 p-2 bg-success bg-opacity-10 border border-success rounded" id="activeRiskRuleDisplay" style="display: none;">
                                         <div class="d-flex align-items-center">
                                             <i class="fas fa-shield-alt text-success me-2"></i>
-                                            <small class="text-success fw-bold">激活的风险规则</small>
+                                            <small class="text-success fw-bold">Active risk rules</small>
                                         </div>
                                         <div class="row g-1 mt-1">
                                             <div class="col-6">
-                                                <small class="text-muted d-block">止损价格</small>
+                                                <small class="text-muted d-block">Stop-loss price</small>
                                                 <span class="fw-bold text-danger" id="activeStopLossPrice">$0.00</span>
                                             </div>
                                             <div class="col-6">
-                                                <small class="text-muted d-block">止盈价格</small>
+                                                <small class="text-muted d-block">Take-profit price</small>
                                                 <span class="fw-bold text-success" id="activeTakeProfitPrice">$0.00</span>
                                             </div>
                                         </div>
@@ -1864,14 +1864,14 @@
                                     <div class="row g-2 mt-2">
                                         <div class="col-6">
                                             <div class="input-group input-group-sm">
-                                                <span class="input-group-text">止损 <span style="color: rgb(255, 99, 132); font-weight: bold;">- - -</span></span>
+                                                <span class="input-group-text">Stop-loss <span style="color: rgb(255, 99, 132); font-weight: bold;">- - -</span></span>
                                                 <input type="number" step="0.01" class="form-control" id="monitorStopLoss">
                                             </div>
                                             <div><small id="monitorStopLossDelta" class="text-muted">Δ — / —%</small></div>
                                         </div>
                                         <div class="col-6">
                                             <div class="input-group input-group-sm">
-                                                <span class="input-group-text">止盈 <span style="color: rgb(75, 192, 192); font-weight: bold;">- - -</span></span>
+                                                <span class="input-group-text">Take-profit <span style="color: rgb(75, 192, 192); font-weight: bold;">- - -</span></span>
                                                 <input type="number" step="0.01" class="form-control" id="monitorTakeProfit">
                                             </div>
                                             <div><small id="monitorTakeProfitDelta" class="text-muted">Δ — / —%</small></div>
@@ -1880,11 +1880,11 @@
                                     <div class="mt-2 p-2 bg-light rounded" id="expectedPnLSection" style="display: none;">
                                         <div class="row g-2 text-center">
                                             <div class="col-4">
-                                                <small class="text-muted d-block">止损预期</small>
+                                                <small class="text-muted d-block">Expected stop-loss PnL</small>
                                                 <span class="fw-bold text-danger" id="expectedStopLossPnL">$0.00</span>
                                             </div>
                                             <div class="col-4">
-                                                <small class="text-muted d-block">止盈预期</small>
+                                                <small class="text-muted d-block">Expected take-profit PnL</small>
                                                 <span class="fw-bold text-success" id="expectedTakeProfitPnL">$0.00</span>
                                             </div>
                                             <div class="col-4">
@@ -1894,13 +1894,13 @@
                                         </div>
                                     </div>
                                     <div class="d-grid gap-2 mt-3">
-                                        <button class="btn btn-sm btn-warning" id="saveMonitorRiskBtn"><i class="fas fa-save"></i> 保存规则</button>
+                                        <button class="btn btn-sm btn-warning" id="saveMonitorRiskBtn"><i class="fas fa-save"></i> Save Rules</button>
                                         <div class="row g-2 mt-2">
                                             <div class="col-6">
-                                                <button class="btn btn-sm btn-danger w-100" id="closePositionBtn"><i class="fas fa-times-circle"></i> 平仓</button>
+                                                <button class="btn btn-sm btn-danger w-100" id="closePositionBtn"><i class="fas fa-times-circle"></i> Close Position</button>
                                             </div>
                                             <div class="col-6">
-                                                <button class="btn btn-sm btn-info w-100" id="reversePositionBtn"><i class="fas fa-exchange-alt"></i> 反向下单</button>
+                                                <button class="btn btn-sm btn-info w-100" id="reversePositionBtn"><i class="fas fa-exchange-alt"></i> Reverse Order</button>
                                             </div>
                                         </div>
                                     </div>
@@ -1911,7 +1911,7 @@
                             <div class="card">
                                 <div class="card-body p-3">
                                     <div class="d-flex justify-content-between align-items-center mb-2">
-                                        <small class="text-muted">订单列表</small>
+                                        <small class="text-muted">Order List</small>
                                         <div class="btn-group btn-group-sm" role="group">
                                             <input type="radio" class="btn-check" name="orderStatusFilter" id="orderStatusWorking" value="working" checked>
                                             <label class="btn btn-outline-primary" for="orderStatusWorking">Working</label>
@@ -1921,7 +1921,7 @@
                                     </div>
                                     <div id="monitorOrdersList" class="" style="max-height: 200px; overflow-y: auto;">
                                         <div class="text-center text-muted py-2">
-                                            <small>加载中...</small>
+                                            <small>Loading...</small>
                                         </div>
                                     </div>
                                 </div>
@@ -1930,7 +1930,7 @@
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
@@ -1943,18 +1943,18 @@
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <h5 class="mb-0"><i class="fas fa-file-alt"></i> Logs</h5>
                     <div>
-                        <button class="btn btn-sm btn-outline-light me-2" id="logStatsBtn">统计</button>
+                        <button class="btn btn-sm btn-outline-light me-2" id="logStatsBtn">Analytics</button>
                     </div>
                 </div>
                 <div class="card-body">
                     <div class="row g-2 mb-2">
                         <div class="col-md-2">
                             <select class="form-select form-select-sm" id="logModule">
-                                <option value="internal_strategy,queue_manager" selected>策略信号链路</option>
+                                <option value="internal_strategy,queue_manager" selected>Strategy signal pipeline</option>
                                 <option value="all">All Modules</option>
-                                <option value="internal_strategy">内部策略</option>
-                                <option value="queue_manager">队列管理器</option>
-                                <option value="external_strategy">外部策略</option>
+                                <option value="internal_strategy">Internal strategy</option>
+                                <option value="queue_manager">Queue manager</option>
+                                <option value="external_strategy">External strategy</option>
                                 <option value="risk_rule">risk rule</option>
                                 <option value="orders">orders</option>
                                 <option value="portfolio">portfolio</option>
@@ -1995,7 +1995,7 @@
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title">日志统计</h5>
+                    <h5 class="modal-title">Log analytics</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
@@ -2003,11 +2003,11 @@
                         <table class="table table-sm" id="logStatsTable">
                             <thead>
                                 <tr>
-                                    <th>模块</th>
-                                    <th>接口</th>
-                                    <th>请求数</th>
-                                    <th>平均响应时间(ms)</th>
-                                    <th>成功率</th>
+                                    <th>Module</th>
+                                    <th>Endpoint</th>
+                                    <th>Requests</th>
+                                    <th>Avg response time (ms)</th>
+                                    <th>Success rate</th>
                                 </tr>
                             </thead>
                             <tbody></tbody>
@@ -2222,26 +2222,26 @@
       <div class="modal-dialog">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title"><i class="fas fa-sign-in-alt"></i> 登录</h5>
+            <h5 class="modal-title"><i class="fas fa-sign-in-alt"></i> Login</h5>
             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <div class="modal-body">
             <div class="mb-3">
-              <label class="form-label">用户名</label>
+              <label class="form-label">Username</label>
               <input type="text" class="form-control" id="loginUsername" placeholder="admin">
             </div>
             <div class="mb-3">
-              <label class="form-label">密码</label>
+              <label class="form-label">Password</label>
               <input type="password" class="form-control" id="loginPassword" placeholder="••••••">
             </div>
             <div class="form-check">
               <input class="form-check-input" type="checkbox" id="rememberLogin">
-              <label class="form-check-label" for="rememberLogin">记住用户名和密码（仅本机存储）</label>
+              <label class="form-check-label" for="rememberLogin">Remember username and password (stored locally only)</label>
             </div>
           </div>
           <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-            <button type="button" class="btn btn-primary" id="loginSubmitBtn">登录</button>
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            <button type="button" class="btn btn-primary" id="loginSubmitBtn">Login</button>
           </div>
         </div>
       </div>
@@ -2252,28 +2252,28 @@
         <div class="modal-dialog modal-xl">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-list"></i> 风险规则触发的订单</h5>
+                    <h5 class="modal-title"><i class="fas fa-list"></i> Orders Triggered by Risk Rules</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
                     <div class="mb-3">
-                        <strong>规则信息：</strong>
+                        <strong>Rule details:</strong>
                         <span id="ruleInfoText"></span>
                     </div>
                     <div class="table-responsive">
                         <table class="table table-sm" id="riskRuleOrdersTable">
                             <thead>
                                 <tr>
-                                    <th>订单ID</th>
-                                    <th>时间</th>
-                                    <th>标的</th>
-                                    <th>操作</th>
-                                    <th>数量</th>
-                                    <th>价格</th>
-                                    <th>状态</th>
-                                    <th>成交价</th>
+                                    <th>Order ID</th>
+                                    <th>Time</th>
+                                    <th>Symbol</th>
+                                    <th>Action</th>
+                                    <th>Quantity</th>
+                                    <th>Price</th>
+                                    <th>Status</th>
+                                    <th>Fill Price</th>
                                     <th>P&L</th>
-                                    <th>来源</th>
+                                    <th>Source</th>
                                 </tr>
                             </thead>
                             <tbody></tbody>
@@ -2284,7 +2284,7 @@
                             <div class="col-md-4">
                                 <div class="card bg-light">
                                     <div class="card-body text-center">
-                                        <h6>总订单数</h6>
+                                        <h6>Total orders</h6>
                                         <h4 id="totalOrdersCount">0</h4>
                                     </div>
                                 </div>
@@ -2292,7 +2292,7 @@
                             <div class="col-md-4">
                                 <div class="card bg-success text-white">
                                     <div class="card-body text-center">
-                                        <h6>总盈利</h6>
+                                        <h6>Total profit</h6>
                                         <h4 id="totalProfit">$0.00</h4>
                                     </div>
                                 </div>
@@ -2300,7 +2300,7 @@
                             <div class="col-md-4">
                                 <div class="card bg-danger text-white">
                                     <div class="card-body text-center">
-                                        <h6>总亏损</h6>
+                                        <h6>Total loss</h6>
                                         <h4 id="totalLoss">$0.00</h4>
                                     </div>
                                 </div>
@@ -2309,25 +2309,25 @@
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- 订单详情模态框 -->
+    <!-- Order details modal -->
     <div class="modal fade" id="orderDetailsModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-info-circle"></i> 订单详情</h5>
+                    <h5 class="modal-title"><i class="fas fa-info-circle"></i> Order Details</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body" id="orderDetailsModalBody">
-                    <!-- 订单详情内容将通过JavaScript动态填充 -->
+                    <!-- Order details will be populated dynamically via JavaScript -->
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
@@ -2341,7 +2341,7 @@
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="configRulesModalLabel"><i class="fas fa-cog"></i> 规则配置</h5>
+                    <h5 class="modal-title" id="configRulesModalLabel"><i class="fas fa-cog"></i> Rule Configuration</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
@@ -2368,57 +2368,57 @@
                                     <div class="row">
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G0: 最大回撤 (%)</label>
+                                                <label class="form-label">G0: Max drawdown (%)</label>
                                                 <input type="number" class="form-control form-control-sm" id="g0MaxDrawdown" step="0.1" placeholder="5.0" max="20">
-                                                <small class="form-text text-muted">账户最大回撤限制</small>
+                                                <small class="form-text text-muted">Account drawdown limit</small>
                                             </div>
                                         </div>
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G1: 最大亏损 (%)</label>
+                                                <label class="form-label">G1: Max loss (%)</label>
                                                 <input type="number" class="form-control form-control-sm" id="g1MaxLoss" step="0.1" placeholder="2.0" max="10">
-                                                <small class="form-text text-muted">单笔交易最大亏损限制</small>
+                                                <small class="form-text text-muted">Maximum loss per trade</small>
                                             </div>
                                         </div>
                                     </div>
                                     <div class="row">
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G2: 单标的最大仓位 (%)</label>
+                                                <label class="form-label">G2: Max position per symbol (%)</label>
                                                 <input type="number" class="form-control form-control-sm" id="g2MaxPositionPerSymbol" step="0.1" placeholder="10.0" max="50">
-                                                <small class="form-text text-muted">单个标的最大仓位占账户比例</small>
+                                                <small class="form-text text-muted">Maximum allocation per symbol</small>
                                             </div>
                                         </div>
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G3: 相关性检查</label>
+                                                <label class="form-label">G3: Correlation check</label>
                                                 <select class="form-select form-select-sm" id="g3CorrelationCheck">
-                                                    <option value="enabled">启用</option>
-                                                    <option value="disabled">禁用</option>
+                                                    <option value="enabled">Enabled</option>
+                                                    <option value="disabled">Disabled</option>
                                                 </select>
-                                                <small class="form-text text-muted">检查持仓标的间相关性</small>
+                                                <small class="form-text text-muted">Check correlation between positions</small>
                                             </div>
                                         </div>
                                     </div>
                                     <div class="row">
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G4: 流动性检查</label>
+                                                <label class="form-label">G4: Liquidity check</label>
                                                 <select class="form-select form-select-sm" id="g4LiquidityCheck">
-                                                    <option value="enabled">启用</option>
-                                                    <option value="disabled">禁用</option>
+                                                    <option value="enabled">Enabled</option>
+                                                    <option value="disabled">Disabled</option>
                                                 </select>
-                                                <small class="form-text text-muted">检查标的流动性是否充足</small>
+                                                <small class="form-text text-muted">Verify symbol liquidity</small>
                                             </div>
                                         </div>
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G5: 时间窗口限制</label>
+                                                <label class="form-label">G5: Trading window restriction</label>
                                                 <select class="form-select form-select-sm" id="g5TimeWindow">
-                                                    <option value="enabled">启用</option>
-                                                    <option value="disabled">禁用</option>
+                                                    <option value="enabled">Enabled</option>
+                                                    <option value="disabled">Disabled</option>
                                                 </select>
-                                                <small class="form-text text-muted">限制交易时间窗口</small>
+                                                <small class="form-text text-muted">Restrict the trading time window</small>
                                             </div>
                                         </div>
                                     </div>
@@ -2483,10 +2483,10 @@
                     </div>
                 </div>
                 <div class="modal-footer d-flex justify-content-between">
-                    <button type="button" class="btn btn-warning" id="resetConfigRulesBtn">重置</button>
+                    <button type="button" class="btn btn-warning" id="resetConfigRulesBtn">Reset</button>
                     <div>
-                        <button type="button" class="btn btn-secondary me-2" data-bs-dismiss="modal">取消</button>
-                        <button type="button" class="btn btn-primary" id="saveConfigRulesBtn">保存</button>
+                        <button type="button" class="btn btn-secondary me-2" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-primary" id="saveConfigRulesBtn">Save</button>
                     </div>
                 </div>
             </div>
@@ -2505,10 +2505,10 @@
                     <form id="notificationSettingsForm" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-dashlane-ignore="true">
                         <ul class="nav nav-tabs mb-3" id="notificationSettingsTabs" role="tablist">
                           <li class="nav-item" role="presentation">
-                            <button class="nav-link active" id="basicSettingsTab-tab" data-bs-toggle="tab" data-bs-target="#basicSettingsTab" type="button" role="tab" aria-controls="basicSettingsTab" aria-selected="true">基础设置</button>
+                            <button class="nav-link active" id="basicSettingsTab-tab" data-bs-toggle="tab" data-bs-target="#basicSettingsTab" type="button" role="tab" aria-controls="basicSettingsTab" aria-selected="true">Basic Settings</button>
                           </li>
                           <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="moduleSettingsTab-tab" data-bs-toggle="tab" data-bs-target="#moduleSettingsTab" type="button" role="tab" aria-controls="moduleSettingsTab" aria-selected="false">模块设置</button>
+                            <button class="nav-link" id="moduleSettingsTab-tab" data-bs-toggle="tab" data-bs-target="#moduleSettingsTab" type="button" role="tab" aria-controls="moduleSettingsTab" aria-selected="false">Module Settings</button>
                           </li>
                         </ul>
                         <div class="tab-content" id="notificationSettingsTabContent">
@@ -2623,25 +2623,25 @@
                           <div class="tab-pane fade" id="moduleSettingsTab" role="tabpanel" aria-labelledby="moduleSettingsTab-tab">
                             <div class="card">
                               <div class="card-header">
-                                <h6 class="mb-0"><i class="fas fa-layer-group"></i> 模块设置</h6>
+                                <h6 class="mb-0"><i class="fas fa-layer-group"></i> Module Settings</h6>
                               </div>
                               <div class="card-body">
                                 <div class="table-responsive">
                                   <table class="table table-sm align-middle">
                                     <thead>
                                       <tr>
-                                        <th>事件</th>
-                                        <th>Chrome 通知</th>
-                                        <th>Telegram 通知</th>
-                                        <th>Email 通知</th>
+                                        <th>Event</th>
+                                        <th>Chrome Notification</th>
+                                        <th>Telegram Notification</th>
+                                        <th>Email Notification</th>
                                       </tr>
                                     </thead>
                                     <tbody id="moduleSettingsTableBody">
-                                      <!-- JS 渲染模块行 -->
+                                      <!-- JS renders module rows -->
                                     </tbody>
                                   </table>
                                 </div>
-                                <small class="text-muted">默认 Chrome 全部选中，其他不选。</small>
+                                <small class="text-muted">Chrome notifications selected by default; others remain off.</small>
                               </div>
                             </div>
                           </div>
@@ -2672,12 +2672,12 @@
                             <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                 <div>
                                     <h5 class="mb-1"><i class="fas fa-sliders-h me-2"></i>DOM Optimizer</h5>
-                                    <small class="text-muted">参数调节、信号统计与自动化运行概览</small>
+                                    <small class="text-muted">Parameter tuning, signal analytics, and automation overview</small>
                                 </div>
                                 <div class="d-flex align-items-center gap-2">
                                     <span id="domOptimizerStatusBadge" class="badge bg-secondary text-uppercase">Idle</span>
                                     <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerRefreshStatusBtn">
-                                        <i class="fas fa-sync-alt me-1"></i>刷新状态
+                                        <i class="fas fa-sync-alt me-1"></i>Refresh Status
                                     </button>
                                 </div>
                             </div>
@@ -2686,82 +2686,82 @@
                                     <div class="col-lg-4 d-flex flex-column gap-3">
                                         <div class="card h-100 border-0 shadow-sm">
                                             <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                                                <span class="fw-semibold text-uppercase small text-muted">配置与统计</span>
+                                                <span class="fw-semibold text-uppercase small text-muted">Configuration & Analytics</span>
                                                 <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerLoadConfigBtn">
-                                                    <i class="fas fa-download me-1"></i>载入
+                                                    <i class="fas fa-download me-1"></i>Load
                                                 </button>
                                             </div>
                                             <div class="card-body">
                                                 <form id="domOptimizerConfigForm" class="row g-3">
                                                     <div class="col-12">
-                                                        <label for="domOptimizerSymbolInput" class="form-label">交易标的</label>
+                                                        <label for="domOptimizerSymbolInput" class="form-label">Trading symbol</label>
                                                         <div class="input-group input-group-sm">
-                                                            <input type="text" class="form-control" id="domOptimizerSymbolInput" placeholder="例如: MES">
+                                                            <input type="text" class="form-control" id="domOptimizerSymbolInput" placeholder="e.g., MES">
                                                             <button class="btn btn-outline-secondary" type="button" id="domOptimizerUseMonitorBtn">
-                                                                <i class="fas fa-bolt"></i> 监控
+                                                                <i class="fas fa-bolt"></i> Monitor
                                                             </button>
                                                         </div>
-                                                        <div class="form-text">可直接从当前监控或手动输入符号。</div>
+                                                        <div class="form-text">Use the current monitor symbol or enter one manually.</div>
                                                     </div>
                                                     <div class="col-6">
-                                                        <label for="domOptimizerLookbackInput" class="form-label">统计窗口 (分钟)</label>
+                                                        <label for="domOptimizerLookbackInput" class="form-label">Statistics window (minutes)</label>
                                                         <input type="number" class="form-control form-control-sm" id="domOptimizerLookbackInput" min="15" step="15" value="240">
-                                                        <div class="form-text">影响统计面板与信号列表，Outcome 窗口与此保持一致。</div>
+                                                        <div class="form-text">Affects analytics panels and signal lists; the outcome window matches this setting.</div>
                                                     </div>
                                                     <div class="col-12">
-                                                        <label for="domOptimizerLookbackSlider" class="form-label">统计窗口快捷调节</label>
+                                                        <label for="domOptimizerLookbackSlider" class="form-label">Statistics window quick adjust</label>
                                                         <input type="range" class="form-range" id="domOptimizerLookbackSlider" min="0" max="11" step="1">
-                                                        <div class="form-text" id="domOptimizerLookbackDisplay">240 分钟</div>
+                                                        <div class="form-text" id="domOptimizerLookbackDisplay">240 minutes</div>
                                                     </div>
                                                     <div class="col-6">
-                                                        <label for="domOptimizerStatsLimitInput" class="form-label">最大记录数</label>
+                                                        <label for="domOptimizerStatsLimitInput" class="form-label">Max records</label>
                                                         <input type="number" class="form-control form-control-sm" id="domOptimizerStatsLimitInput" min="50" step="50" value="500">
                                                     </div>
                                                     <div class="col-6">
-                                                        <label for="domOptimizerMinSignalsInput" class="form-label">最少信号数</label>
+                                                        <label for="domOptimizerMinSignalsInput" class="form-label">Minimum signals</label>
                                                         <input type="number" class="form-control form-control-sm" id="domOptimizerMinSignalsInput" min="0" value="0">
                                                     </div>
                                                     <div class="col-12">
-                                                        <label class="form-label mb-1">阈值配置</label>
-                                                        <div class="small text-muted mb-2">参数分为两层：基础阈值（OBI / OFI / Trend 等核心指标）与特征阈值（堆单、吸收等特征信号）。</div>
+                                                        <label class="form-label mb-1">Threshold configuration</label>
+                                                        <div class="small text-muted mb-2">Parameters have two layers: base thresholds (OBI / OFI / Trend) and feature thresholds (stacking, absorption, etc.).</div>
                                                         <div class="d-flex justify-content-end mb-2">
                                                             <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerFeaturePresetBtn">
-                                                                <i class="fas fa-download me-1"></i>填充当前配置
+                                                                <i class="fas fa-download me-1"></i>Populate current configuration
                                                             </button>
                                                         </div>
                                                         <div class="border rounded-3 p-3 bg-light mb-3">
-                                                            <div class="fw-semibold text-uppercase small text-muted mb-2">基础阈值 JSON</div>
+                                                            <div class="fw-semibold text-uppercase small text-muted mb-2">Base threshold JSON</div>
                                                             <textarea class="form-control font-monospace" id="domOptimizerBaseThresholdsInput" rows="5" placeholder='{"base_thresholds": {"long": {"obi5": 0.6, "ofi": 0.0}}, "obi_candidates": [0.55, 0.6, 0.65, 0.7], "ofi_candidates": [0, 5, 10, 15], "trend_candidates": [0.5, 0.7, 0.85, 0.95]}'></textarea>
-                                                            <div class="form-text mt-1">可同时编辑基础阈值及候选组合，留空则沿用后端配置。</div>
+                                                            <div class="form-text mt-1">Edit base thresholds and candidate sets; leave blank to keep backend configuration.</div>
                                                         </div>
                                                         <div class="border rounded-3 p-3 bg-light">
-                                                            <div class="fw-semibold text-uppercase small text-muted mb-2">特征阈值 JSON</div>
+                                                            <div class="fw-semibold text-uppercase small text-muted mb-2">Feature threshold JSON</div>
                                                             <textarea class="form-control font-monospace" id="domOptimizerFeatureThresholdsInput" rows="6" placeholder='{"stacking": {"intensity": 0.35}}'></textarea>
-                                                            <div class="form-text mt-1">支持堆单 / 吸收等特征的细粒度阈值配置，留空则保持当前设置。</div>
+                                                            <div class="form-text mt-1">Supports granular thresholds for stacking/absorption; leave blank to keep current settings.</div>
                                                         </div>
                                                     </div>
                                                 </form>
                                                 <div class="d-grid gap-2 mt-2">
                                                     <button type="button" class="btn btn-primary btn-sm" id="domOptimizerRefreshStatsBtn">
-                                                        <i class="fas fa-chart-bar me-1"></i>刷新统计
+                                                        <i class="fas fa-chart-bar me-1"></i>Refresh Analytics
                                                     </button>
                                                 </div>
                                                 <hr>
                                                 <div>
                                                     <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
-                                                        <span>信号总数</span>
+                                                        <span>Total signals</span>
                                                         <span class="fw-semibold" id="domOptimizerStatsTotal">-</span>
                                                     </div>
                                                     <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
-                                                        <span>多头 / 空头</span>
+                                                        <span>Long / Short</span>
                                                         <span class="fw-semibold" id="domOptimizerStatsBySide">-</span>
                                                     </div>
                                                     <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
-                                                        <span>已评估成功率</span>
+                                                        <span>Evaluated win rate</span>
                                                         <span class="fw-semibold text-success" id="domOptimizerStatsSuccessRate">-</span>
                                                     </div>
                                                     <div class="d-flex justify-content-between align-items-center py-1 small text-muted">
-                                                        <span>待评估信号</span>
+                                                        <span>Signals pending review</span>
                                                         <span class="fw-semibold text-warning" id="domOptimizerStatsPending">-</span>
                                                     </div>
                                                 </div>
@@ -2769,51 +2769,51 @@
                                         </div>
                                         <div class="card border-0 shadow-sm">
                                             <div class="card-header py-2">
-                                                <span class="fw-semibold text-uppercase small text-muted">自动化状态</span>
+                                                <span class="fw-semibold text-uppercase small text-muted">Automation status</span>
                                             </div>
                                             <div class="card-body">
                                                 <div class="d-flex justify-content-between small text-muted mb-2">
-                                                    <span>当前状态</span>
+                                                    <span>Current status</span>
                                                     <span class="fw-semibold" id="domOptimizerStatusText">-</span>
                                                 </div>
                                                 <div class="d-flex justify-content-between small text-muted mb-2">
-                                                    <span>最近执行</span>
+                                                    <span>Last run</span>
                                                     <span class="fw-semibold" id="domOptimizerLastRun">-</span>
                                                 </div>
                                                 <div class="d-flex justify-content-between small text-muted mb-2">
-                                                    <span>耗时</span>
+                                                    <span>Duration</span>
                                                     <span class="fw-semibold" id="domOptimizerLastDuration">-</span>
                                                 </div>
                                                 <div class="d-flex justify-content-between small text-muted mb-2">
-                                                    <span>下一次计划</span>
+                                                    <span>Next scheduled run</span>
                                                     <span class="fw-semibold" id="domOptimizerNextRun">-</span>
                                                 </div>
                                                 <div class="border rounded p-2 bg-light small" id="domOptimizerLastResultPanel" style="min-height: 72px;">
-                                                    <div class="text-muted mb-1">最近结果</div>
-                                                    <div id="domOptimizerLastResult">暂无数据</div>
+                                                    <div class="text-muted mb-1">Latest result</div>
+                                                    <div id="domOptimizerLastResult">No data yet</div>
                                                 </div>
                                             </div>
                                         </div>
                                         <div class="card border-0 shadow-sm">
                                             <div class="card-header py-2">
-                                                <span class="fw-semibold text-uppercase small text-muted">性能概览</span>
+                                                <span class="fw-semibold text-uppercase small text-muted">Performance overview</span>
                                             </div>
                                             <div class="card-body">
                                                 <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
-                                                    <span>全部信号精度</span>
+                                                    <span>Overall signal accuracy</span>
                                                     <span class="fw-semibold" id="domOptimizerSummaryPrecision">-</span>
                                                 </div>
                                                 <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
-                                                    <span>平均响应时间</span>
+                                                    <span>Average response time</span>
                                                     <span class="fw-semibold" id="domOptimizerSummaryDelay">-</span>
                                                 </div>
                                                 <div class="d-flex justify-content-between align-items-center small text-muted">
-                                                    <span>最新信号</span>
+                                                    <span>Latest signal</span>
                                                     <span class="fw-semibold" id="domOptimizerSummaryLatest">-</span>
                                                 </div>
                                                 <hr>
                                                 <div class="small text-muted" id="domOptimizerSummaryNotes">
-                                                    <span class="text-muted">刷新统计或查询信号后自动更新。</span>
+                                                    <span class="text-muted">Updates automatically after refreshing analytics or querying signals.</span>
                                                 </div>
                                             </div>
                                         </div>
@@ -2822,8 +2822,8 @@
                                         <div class="card shadow-sm">
                                             <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                                 <div>
-                                                    <h6 class="mb-0">Trend Score 与价格</h6>
-                                                    <small class="text-muted">基于 /api/dom/history 数据绘制</small>
+                                                    <h6 class="mb-0">Trend Score vs. price</h6>
+                                                    <small class="text-muted">Drawn from /api/dom/history data</small>
                                                 </div>
                                                 <div class="btn-group btn-group-sm" role="group">
                                                     <button type="button" class="btn btn-outline-secondary" id="domOptimizerTrendRefreshBtn">
@@ -2843,8 +2843,8 @@
                                         <div class="card shadow-sm">
                                             <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                                 <div>
-                                                    <h6 class="mb-0">OBI / OFI 指标</h6>
-                                                    <small class="text-muted">包含阈值与信号标记</small>
+                                                    <h6 class="mb-0">OBI / OFI metrics</h6>
+                                                    <small class="text-muted">Includes thresholds and signal markers</small>
                                                 </div>
                                                 <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerIndicatorRefreshBtn">
                                                     <i class="fas fa-sync-alt"></i>
@@ -2859,8 +2859,8 @@
                                         <div class="card shadow-sm">
                                             <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                                 <div>
-                                                    <h6 class="mb-0">阈值信号与价格对比</h6>
-                                                    <small class="text-muted">展示阈值轨迹与价格联动</small>
+                                                    <h6 class="mb-0">Threshold signals vs. price</h6>
+                                                    <small class="text-muted">Shows threshold paths alongside price movement</small>
                                                 </div>
                                                 <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerThresholdRefreshBtn">
                                                     <i class="fas fa-sync-alt"></i>
@@ -2876,29 +2876,29 @@
                                             <div class="card-header py-3">
                                                 <div class="row g-2 align-items-end">
                                                     <div class="col-md-3">
-                                                        <label for="domOptimizerStartInput" class="form-label">开始时间</label>
+                                                        <label for="domOptimizerStartInput" class="form-label">Start time</label>
                                                         <input type="datetime-local" class="form-control form-control-sm" id="domOptimizerStartInput">
                                                     </div>
                                                     <div class="col-md-3">
-                                                        <label for="domOptimizerEndInput" class="form-label">结束时间</label>
+                                                        <label for="domOptimizerEndInput" class="form-label">End time</label>
                                                         <input type="datetime-local" class="form-control form-control-sm" id="domOptimizerEndInput">
                                                     </div>
                                                     <div class="col-md-2">
-                                                        <label for="domOptimizerPageSizeInput" class="form-label">分页大小</label>
+                                                        <label for="domOptimizerPageSizeInput" class="form-label">Page size</label>
                                                         <input type="number" class="form-control form-control-sm" id="domOptimizerPageSizeInput" min="10" step="10" value="25">
                                                     </div>
                                                     <div class="col-md-2">
                                                         <label for="domOptimizerOutcomeFilter" class="form-label">Outcome</label>
                                                         <select class="form-select form-select-sm" id="domOptimizerOutcomeFilter">
-                                                            <option value="">全部</option>
-                                                            <option value="success">成功</option>
-                                                            <option value="failed">失败</option>
-                                                            <option value="pending">待评估</option>
+                                                            <option value="">All</option>
+                                                            <option value="success">Success</option>
+                                                            <option value="failed">Failure</option>
+                                                            <option value="pending">Pending review</option>
                                                         </select>
                                                     </div>
                                                     <div class="col-md-2 d-grid">
                                                         <button type="button" class="btn btn-primary btn-sm" id="domOptimizerQuerySignalsBtn">
-                                                            <i class="fas fa-search me-1"></i>查询
+                                                            <i class="fas fa-search me-1"></i>Search
                                                         </button>
                                                     </div>
                                                 </div>
@@ -2908,9 +2908,9 @@
                                                     <table class="table table-sm align-middle" id="domOptimizerSignalsTable">
                                                         <thead class="table-light">
                                                             <tr>
-                                                                <th>时间</th>
-                                                                <th>方向</th>
-                                                                <th>价格</th>
+                                                                <th>Time</th>
+                                                                <th>Direction</th>
+                                                                <th>Price</th>
                                                                 <th>OBI</th>
                                                                 <th>OFI</th>
                                                                 <th>Trend</th>
@@ -2919,15 +2919,15 @@
                                                         </thead>
                                                         <tbody>
                                                             <tr class="text-center text-muted">
-                                                                <td colspan="7">尚未查询信号</td>
+                                                                <td colspan="7">No signals queried yet</td>
                                                             </tr>
                                                         </tbody>
                                                     </table>
                                                 </div>
                                             </div>
                                             <div class="card-footer d-flex flex-column flex-lg-row gap-2 justify-content-between align-items-lg-center">
-                                                <small class="text-muted" id="domOptimizerSignalsRange">实际时间范围：-</small>
-                                                <small class="text-muted" id="domOptimizerSignalsSummary">0 条记录</small>
+                                                <small class="text-muted" id="domOptimizerSignalsRange">Actual time range: -</small>
+                                                <small class="text-muted" id="domOptimizerSignalsSummary">0 records</small>
                                                 <div class="btn-group btn-group-sm" role="group" aria-label="DOM signals pagination" id="domOptimizerPagination">
                                                     <button type="button" class="btn btn-outline-secondary" data-page="prev" disabled>
                                                         <i class="fas fa-chevron-left"></i>
@@ -2945,24 +2945,24 @@
                                             <div class="card-body">
                                                 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                                                     <div>
-                                                        <h6 class="mb-1">手动优化</h6>
-                                                        <small class="text-muted">调用 /api/dom/optimize 进行阈值调参</small>
+                                                        <h6 class="mb-1">Manual optimization</h6>
+                                                        <small class="text-muted">Call /api/dom/optimize to tune thresholds</small>
                                                     </div>
                                                     <div class="form-check form-switch">
                                                         <input class="form-check-input" type="checkbox" id="domOptimizerApplySwitch" checked>
-                                                        <label class="form-check-label" for="domOptimizerApplySwitch">写入并应用</label>
+                                                        <label class="form-check-label" for="domOptimizerApplySwitch">Write and apply</label>
                                                     </div>
                                                 </div>
                                                 <div class="d-flex flex-wrap gap-2 mb-3">
                                                     <button type="button" class="btn btn-success btn-sm" id="domOptimizerOptimizeBtn">
-                                                        <i class="fas fa-magic me-1"></i>立即优化
+                                                        <i class="fas fa-magic me-1"></i>Optimize now
                                                     </button>
                                                     <button type="button" class="btn btn-outline-secondary btn-sm" id="domOptimizerClearResultBtn">
-                                                        <i class="fas fa-eraser me-1"></i>清除结果
+                                                        <i class="fas fa-eraser me-1"></i>Clear results
                                                     </button>
                                                 </div>
                                                 <div class="border rounded p-3 bg-light" id="domOptimizerOptimizeResult">
-                                                    <div class="text-muted small">点击“立即优化”后将在此展示最新结果、精度统计以及阈值建议。</div>
+                                                    <div class="text-muted small">After clicking “Optimize now”, the latest results, accuracy stats, and threshold suggestions appear here.</div>
                                                 </div>
                                             </div>
                                         </div>
@@ -2980,15 +2980,15 @@
         <div class="modal-dialog modal-xl modal-dialog-scrollable">
             <div class="modal-content">
                 <div class="modal-header dom-optimizer-header">
-                    <h5 class="modal-title" id="domOutcomeModalTitle"><i class="fas fa-clipboard-list me-2"></i>信号评估详情</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                    <h5 class="modal-title" id="domOutcomeModalTitle"><i class="fas fa-clipboard-list me-2"></i>Signal evaluation details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
                     <div class="alert alert-info d-none" id="domOutcomeModalAlert"></div>
 
                     <div class="mb-4">
                         <div class="d-flex justify-content-between align-items-center mb-2">
-                            <h6 class="mb-0">信号概览</h6>
+                            <h6 class="mb-0">Signal overview</h6>
                             <span class="badge bg-secondary d-none" id="domOutcomeSignalLevel"></span>
                         </div>
                         <dl class="row row-cols-1 row-cols-md-2 g-3 small mb-0" id="domOutcomeSignalMetrics"></dl>
@@ -2996,27 +2996,27 @@
 
                     <div class="mb-4">
                         <div class="d-flex justify-content-between align-items-center mb-2">
-                            <h6 class="mb-0">关联订单</h6>
+                            <h6 class="mb-0">Related orders</h6>
                             <div class="spinner-border spinner-border-sm text-primary d-none" id="domOutcomeOrdersLoading" role="status">
-                                <span class="visually-hidden">加载中…</span>
+                                <span class="visually-hidden">Loading…</span>
                             </div>
                         </div>
                         <div class="table-responsive">
                             <table class="table table-sm table-striped align-middle mb-0">
                                 <thead class="table-light">
                                     <tr>
-                                        <th>订单ID</th>
-                                        <th>方向</th>
-                                        <th>数量</th>
-                                        <th>均价</th>
-                                        <th>状态</th>
-                                        <th>提交时间</th>
-                                        <th>执行时间</th>
+                                        <th>Order ID</th>
+                                        <th>Direction</th>
+                                        <th>Quantity</th>
+                                        <th>Average Price</th>
+                                        <th>Status</th>
+                                        <th>Submitted At</th>
+                                        <th>Executed At</th>
                                     </tr>
                                 </thead>
                                 <tbody id="domOutcomeOrdersTbody">
                                     <tr>
-                                        <td colspan="7" class="text-center text-muted py-3">暂无关联订单</td>
+                                        <td colspan="7" class="text-center text-muted py-3">No related orders</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -3025,23 +3025,23 @@
 
                     <div>
                         <div class="d-flex justify-content-between align-items-center mb-2">
-                            <h6 class="mb-0">价格变化</h6>
+                            <h6 class="mb-0">Price change</h6>
                             <small class="text-muted" id="domOutcomePriceMeta"></small>
                         </div>
                         <div class="table-responsive">
                             <table class="table table-sm align-middle mb-0">
                                 <thead class="table-light">
                                     <tr>
-                                        <th>时间偏移</th>
-                                        <th>价格</th>
-                                        <th>价格变化</th>
-                                        <th>变化幅度</th>
-                                        <th>采样时间</th>
+                                        <th>Time offset</th>
+                                        <th>Price</th>
+                                        <th>Price change</th>
+                                        <th>Change %</th>
+                                        <th>Sample time</th>
                                     </tr>
                                 </thead>
                                 <tbody id="domOutcomePriceTbody">
                                     <tr>
-                                        <td colspan="5" class="text-center text-muted py-3">暂无可用价格数据</td>
+                                        <td colspan="5" class="text-center text-muted py-3">No price data available</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -3050,7 +3050,7 @@
                 </div>
                 <div class="modal-footer">
                     <small class="text-muted me-auto" id="domOutcomeModalMeta"></small>
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>

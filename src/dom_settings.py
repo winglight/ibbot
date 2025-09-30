@@ -15,6 +15,7 @@ __all__ = [
     "get_automation_defaults",
     "get_logging_settings",
     "get_outcome_settings",
+    "is_parameter_tuner_enabled",
 ]
 
 
@@ -33,6 +34,7 @@ DOM_AUTOMATION_DEFAULT_SYMBOL_ENV = "DOM_AUTOMATION_DEFAULT_SYMBOL"
 DOM_AUTOMATION_DEFAULT_LIMIT_ENV = "DOM_AUTOMATION_DEFAULT_LIMIT"
 DOM_OUTCOME_DELAY_ENV = "DOM_SIGNAL_OUTCOME_DELAY_SECONDS"
 DOM_OUTCOME_THRESHOLD_ENV = "DOM_SIGNAL_OUTCOME_THRESHOLD"
+DOM_DISABLE_PARAMETER_TUNER_ENV = "DOM_DISABLE_PARAMETER_TUNER"
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,12 @@ def get_logging_settings() -> DOMLoggingSettings:
         verbose_penalty_logs=verbose,
         log_level=level or "INFO",
     )
+
+
+def is_parameter_tuner_enabled() -> bool:
+    """Return whether the adaptive DOM parameter tuner should be enabled."""
+
+    return not _env_flag(DOM_DISABLE_PARAMETER_TUNER_ENV, False)
 
 
 def get_automation_defaults() -> DOMAutomationDefaults:

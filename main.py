@@ -347,7 +347,6 @@ async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHan
 
     return handle
 
-
 async def _module_risk_manager(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
 
@@ -436,7 +435,6 @@ async def _module_strategy_manager(context: ModuleRuntimeContext) -> ModuleHandl
 
 async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
-
     if getattr(core, "ibkr_client", None) is None:
         try:
             core.ibkr_client = core.IBKRClient()
