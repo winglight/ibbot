@@ -263,11 +263,15 @@ class ConnectionManager:
                     
                     try:
                         connection_logger.info(f"尝试连接IBKR，客户端ID: {try_client_id}")
-                        await self.ib.connectAsync(
-                            host=self.config.host,
-                            port=self.config.port,
-                            clientId=try_client_id,
-                            timeout=10
+                        # 使用asyncio.wait_for添加额外的超时保护
+                        await asyncio.wait_for(
+                            self.ib.connectAsync(
+                                host=self.config.host,
+                                port=self.config.port,
+                                clientId=try_client_id,
+                                timeout=8  # 减少内部超时
+                            ),
+                            timeout=10  # 外部超时保护
                         )
                                 # 验证连接是否真正建立
                         if self.ib.isConnected():
@@ -279,6 +283,10 @@ class ConnectionManager:
                             break
                         else:
                             raise Exception(f"连接建立失败 - 端口 {self.config.port} 不可达或TWS/Gateway未运行")
+                    except asyncio.TimeoutError:
+                        self._last_connect_error = f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
+                        connection_logger.error(f"客户端ID {try_client_id} 连接超时")
+                        raise Exception(self._last_connect_error)
                     except Exception as conn_error:
                         error_msg = str(conn_error)
                         if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():
@@ -587,15 +595,30 @@ class ConnectionManager:
                 try:
                     while self._connection_thread_alive and self.ib.isConnected():
                         try:
-                            # 使用异步 sleep 避免阻塞事件循环
-                            await asyncio.sleep(0.1)
+                            # 使用异步 sleep 避免阻塞事件循环，添加超时保护
+                            await asyncio.wait_for(asyncio.sleep(0.1), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            # 如果连sleep都超时，说明事件循环可能有问题
+                            connection_logger.warning("Event loop sleep timeout, checking connection health")
+                            if not self.ib.isConnected():
+                                break
                         except RuntimeError as e:
                             if "Event loop stopped before Future completed" in str(e):
                                 connection_logger.debug("Event loop stopped signal received")
                                 break
                             raise
+                        except Exception as e:
+                            connection_logger.warning(f"Unexpected error in connection loop: {e}")
+                            # 继续循环，除非是严重错误
+                            if "cannot be called from a running event loop" in str(e):
+                                break
                 finally:
-                    # 不在这里批量取消任务，避免递归取消；仅记录日志
+                    # 确保连接状态正确设置
+                    if self.ib and self.ib.isConnected():
+                        try:
+                            self.ib.disconnect()
+                        except Exception as e:
+                            connection_logger.debug(f"Error during cleanup disconnect: {e}")
                     connection_logger.info("IBKR connection loop ended")
             
             except Exception as e:
@@ -621,9 +644,26 @@ class ConnectionManager:
             try:
                 # 在事件循环中创建任务并运行整个事件循环，避免 run_until_complete 在停止时抛错
                 task = loop.create_task(connect_worker())
-                loop.run_forever()
+                
+                # 设置事件循环超时，防止无限运行
+                def stop_loop_on_timeout():
+                    if loop.is_running():
+                        connection_logger.warning("Event loop timeout, stopping...")
+                        loop.call_soon_threadsafe(loop.stop)
+                
+                # 30秒后强制停止事件循环（如果还在运行）
+                timeout_timer = threading.Timer(30.0, stop_loop_on_timeout)
+                timeout_timer.start()
+                
+                try:
+                    loop.run_forever()
+                finally:
+                    timeout_timer.cancel()
+                    
             except Exception as e:
                 connection_logger.error(f"Event loop error: {e}")
+                # 设置错误状态，让主线程知道出现了问题
+                self._last_connect_error = f"Event loop error: {e}"
             finally:
                 # 确保任务能够正确完成，避免 "Task was destroyed but it is pending" 警告
                 try:
@@ -631,7 +671,7 @@ class ConnectionManager:
                         task.cancel()
                         # 给任务一点时间来响应取消
                         try:
-                            loop.run_until_complete(asyncio.wait_for(task, timeout=0.5))
+                            loop.run_until_complete(asyncio.wait_for(task, timeout=1.0))
                         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                             # 任务被取消或超时是正常的
                             pass
@@ -639,10 +679,20 @@ class ConnectionManager:
                     connection_logger.debug(f"Error during task cleanup: {e}")
                 finally:
                     try:
+                        # 确保所有待处理的任务都被取消
+                        pending_tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                        if pending_tasks:
+                            connection_logger.debug(f"Cancelling {len(pending_tasks)} pending tasks")
+                            for task in pending_tasks:
+                                task.cancel()
+                        
                         if not loop.is_closed():
                             loop.close()
                     except Exception as e:
                         connection_logger.debug(f"Error closing loop: {e}")
+                    finally:
+                        # 清理循环引用
+                        self._loop = None
         
         # 重置最近错误
         self._last_connect_error = None
@@ -651,22 +701,39 @@ class ConnectionManager:
         self._connection_thread = threading.Thread(target=run_worker, daemon=True)
         self._connection_thread.start()
         
-        # 等待连接建立或快速失败
-        max_wait = 12  # 将最大等待缩短，避免API超时
+        # 等待连接建立或快速失败，增加更强的超时保护
+        max_wait = 15  # 增加等待时间，但添加更多检查点
         wait_time = 0
+        check_interval = 0.1  # 更频繁的检查
+        
         while wait_time < max_wait:
-            time.sleep(0.2)
-            wait_time += 0.2
+            time.sleep(check_interval)
+            wait_time += check_interval
+            
             # 若连接成功
             if self.connected:
                 connection_logger.info("IBKR connection established successfully")
                 return True
+                
             # 若出现错误则立即失败返回
             if self._last_connect_error:
                 connection_logger.error(f"IBKR connection failed fast: {self._last_connect_error}")
+                # 确保清理连接线程
+                self._force_stop_connection_thread()
+                return False
+                
+            # 检查连接线程是否还活着
+            if not self._connection_thread or not self._connection_thread.is_alive():
+                connection_logger.error("Connection thread died unexpectedly")
+                self._last_connect_error = "Connection thread terminated unexpectedly"
                 return False
         
-        connection_logger.error("IBKR connection timeout")
+        # 超时处理
+        connection_logger.error(f"IBKR connection timeout after {max_wait} seconds")
+        self._last_connect_error = f"Connection timeout after {max_wait} seconds"
+        
+        # 强制停止连接线程，防止资源泄漏
+        self._force_stop_connection_thread()
         return False
 
     def _record_connect_result(self, success: bool) -> None:
