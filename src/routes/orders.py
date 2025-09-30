@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, Tuple, Any
@@ -14,6 +15,7 @@ from core import (
     websocket_manager,
 )
 from .auth import get_current_user
+from src.ibbot.redis import enqueue_ib_command
 from src.models import OrderRequest
 from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
@@ -32,109 +34,63 @@ def _require_ib_client():
 @router.post("/api/place_order")
 async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_current_user)):
     """下单"""
-    if not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    order_type = (order.order_type or "").upper()
+    if order_type not in {"MARKET", "LIMIT"}:
+        raise HTTPException(status_code=400, detail="Invalid order type")
+    if order_type == "LIMIT" and not order.price:
+        raise HTTPException(status_code=400, detail="Price required for limit order")
 
-    ib_client = _require_ib_client()
+    command_id = uuid.uuid4().hex
+    method = "place_market_order" if order_type == "MARKET" else "place_limit_order"
+    kwargs: Dict[str, Any] = {
+        "symbol": order.symbol,
+        "quantity": order.quantity,
+        "action": order.action,
+        "exchange": order.exchange,
+        "sec_type": order.sec_type,
+    }
+    if order_type == "LIMIT":
+        kwargs["price"] = order.price
+
+    metadata: Dict[str, Any] = {
+        "source": "api.place_order",
+        "submitted_by": user or "anonymous",
+    }
+    if order.risk_rule:
+        metadata["risk_rule"] = order.risk_rule.model_dump(exclude_none=True)
+
+    payload = {
+        "command_id": command_id,
+        "method": method,
+        "args": [],
+        "kwargs": kwargs,
+        "metadata": metadata,
+    }
 
     try:
-        # 直接调用下单方法，避免嵌套的事件循环调用
-        if order.order_type.upper() == "MARKET":
-            trade = await ib_client.place_market_order(
-                symbol=order.symbol,
-                quantity=order.quantity,
-                action=order.action,
-                exchange=order.exchange,
-                sec_type=order.sec_type
-            )
-        elif order.order_type.upper() == "LIMIT":
-            if not order.price:
-                raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = ib_client.place_limit_order(
-                symbol=order.symbol,
-                quantity=order.quantity,
-                price=order.price,
-                action=order.action,
-                exchange=order.exchange,
-                sec_type=order.sec_type
-            )
-        else:
-            raise HTTPException(status_code=400, detail="Invalid order type")
-        
-        if trade:
-            # 使用 OrderManager 记录订单
-            try:
-                if 'order_manager' in globals() and order_manager:
-                    normalized_order_type = "MKT" if order.order_type.upper() == "MARKET" else "LMT"
-                    
-                    # 准备订单备注，包含风险规则信息
-                    notes_parts = []
-                    if user:
-                        notes_parts.append(f"submitted_by={user}")
-                    
-                    # 如果是限价单且包含风险规则，预设风险规则信息到备注中
-                    if (order.order_type.upper() == "LIMIT" and order.risk_rule and 
-                        (order.risk_rule.stop_loss_price or order.risk_rule.take_profit_price)):
-                        risk_info = []
-                        if order.risk_rule.stop_loss_price:
-                            risk_info.append(f"SL={order.risk_rule.stop_loss_price}")
-                        if order.risk_rule.take_profit_price:
-                            risk_info.append(f"TP={order.risk_rule.take_profit_price}")
-                        notes_parts.append(f"pending_risk_rule:{','.join(risk_info)}")
-                    
-                    order_manager.create_order(
-                        order_id=str(trade.order.orderId),
-                        symbol=order.symbol,
-                        action=order.action,
-                        quantity=order.quantity,
-                        order_type=normalized_order_type,
-                        price=order.price if order.price else None,
-                        order_source="manual",
-                        strategy_name=None,
-                        rule_id="manual",
-                        parent_order_id=None,
-                        exchange=order.exchange,
-                        sec_type=order.sec_type,
-                        notes="; ".join(notes_parts) if notes_parts else None
-                    )
-                else:
-                    logger.warning("OrderManager is not initialized; order will not be recorded in OrderManager")
-            except Exception as rec_err:
-                logger.warning(f"Failed to record order in OrderManager: {rec_err}")
-            
-            # 失效订单缓存，避免3秒缓存导致新订单不可见
-            try:
-                global orders_cache, orders_cache_timestamp
-                orders_cache = {}
-                orders_cache_timestamp = {}
-            except Exception:
-                pass
+        await enqueue_ib_command(payload)
+    except Exception as exc:
+        logger.error("Failed to enqueue IB command", exc_info=True)
+        raise HTTPException(status_code=503, detail="Failed to enqueue order command") from exc
 
-            await websocket_manager.broadcast({  # 替换 manager
-                "type": "order_placed",
-                "order_id": trade.order.orderId,
+    try:
+        await websocket_manager.broadcast(
+            {
+                "type": "order_command_enqueued",
+                "command_id": command_id,
                 "symbol": order.symbol,
                 "action": order.action,
-                "quantity": order.quantity
-            })
-
-            # 触发前端订单列表的通用刷新逻辑
-            await websocket_manager.broadcast({
-                "type": "order_update",
-                "reason": "order_placed",
-                "symbol": order.symbol
-            })
-            
-            return {
-                "success": True,
-                "order_id": trade.order.orderId,
-                "message": "Order placed successfully"
+                "order_type": order_type,
             }
-        else:
-            raise HTTPException(status_code=400, detail="Failed to place order")
-    except Exception as e:
-        logger.error(f"Order placement error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        )
+    except Exception:
+        logger.debug("Failed to broadcast order enqueued event", exc_info=True)
+
+    return {
+        "success": True,
+        "command_id": command_id,
+        "status": "queued",
+    }
 
 @router.delete("/api/cancel_order/{order_id}")
 async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_user)):
