@@ -151,15 +151,20 @@ async def lifespan(app: FastAPI):
             try:
                 # Run connection in executor to avoid blocking
                 loop = asyncio.get_event_loop()
-                success = await loop.run_in_executor(None, connection_manager.connect)
+                def _connect_via_client() -> bool:
+                    import core
+
+                    if getattr(core, "ibkr_client", None) is None:
+                        core.ibkr_client = core.IBKRClient()
+                    return core.ibkr_client.connect()
+
+                success = await loop.run_in_executor(None, _connect_via_client)
                 if not success:
                     main_logger.warning("IBKR auto-connection failed. Continuing without connection...")
                     main_logger.info("You can connect later through the web interface.")
                 else:
                     main_logger.info("IBKR auto-connection successful!")
-                    if core.ibkr_client is None:
-                        core.ibkr_client = core.IBKRClient()
-                        main_logger.info("IBKRClient initialized after auto-connect")
+                    main_logger.info("IBKRClient initialized after auto-connect")
 
             except Exception as e:
                 main_logger.warning(f"Auto-connection failed: {e}")
