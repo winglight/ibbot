@@ -53,7 +53,7 @@ nano docker/.env
 
 ```bash
 cd /opt/ibbot/app
-docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/local.compose.yml up -d
 ```
 
 通过以下地址访问：

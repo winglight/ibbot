@@ -70,7 +70,7 @@ Runner 调用的核心接口：
 在容器或远程 VPS 中运行 Runner 时，请确保：
 
 - 目标主服务监听 `0.0.0.0` 并允许来自 Runner 的访问。
-- `docker/docker-compose.yml` 已挂载 `./strategy` 目录，可直接在宿主机编辑策略脚本。
+- `docker/local.compose.yml` 已挂载 `./strategy` 目录，可直接在宿主机编辑策略脚本。
 - 若 Runner 位于容器外部，API 地址需指向宿主机可达的域名/IP。
 
 ## 7. 常见问题

@@ -23,14 +23,14 @@ fi
 
 # 检查VPS上的服务状态
 echo "🔍 检查VPS服务状态..."
-VPS_STATUS=$(ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml ps --format "table {{.Name}}\t{{.Status}}"' 2>/dev/null || echo "服务未启动")
+VPS_STATUS=$(ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/local.compose.yml ps --format "table {{.Name}}\t{{.Status}}"' 2>/dev/null || echo "服务未启动")
 
 if echo "$VPS_STATUS" | grep -q "Up"; then
     echo "✅ VPS服务正在运行"
     echo "$VPS_STATUS"
 else
     echo "⚠️  VPS服务未运行，尝试启动..."
-    ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/docker-compose.yml up -d'
+    ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/local.compose.yml up -d'
     sleep 5
     echo "✅ 服务启动完成"
 fi
