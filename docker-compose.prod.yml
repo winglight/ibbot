@@ -1,0 +1,37 @@
+services:
+  redis:
+    volumes:
+      - ${IBBOT_REDIS_DATA:-/var/lib/ibbot/redis}:/data
+  influxdb:
+    volumes:
+      - ${IBBOT_INFLUX_DATA:-/var/lib/ibbot/influxdb}:/var/lib/influxdb2
+      - ${IBBOT_INFLUX_CONFIG:-/var/lib/ibbot/influxdb-config}:/etc/influxdb2
+  ib-gateway:
+    environment:
+      TRADING_MODE: ${TRADING_MODE:-live}
+    volumes:
+      - ${IBBOT_GATEWAY_DATA:-/var/lib/ibbot/ibgateway}:/config:rw
+    ports:
+      - "${IB_GATEWAY_API_PORT1:-4001}:4003"
+      - "${IB_GATEWAY_API_PORT2:-4002}:4004"
+      - "${IB_GATEWAY_WEB_PORT:-5800}:5800"
+      - "${IB_GATEWAY_VNC_PORT:-5900}:5900"
+  ibbot:
+    environment:
+      AUTO_CONNECT: ${AUTO_CONNECT:-true}
+      IBKR_PAPER_TRADING: ${IBKR_PAPER_TRADING:-False}
+    ports:
+      - "${IBBOT_WEB_PORT:-8000}:8000"
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+      - ${IBBOT_STRATEGY_DIR:-/var/lib/ibbot/strategies}:/app/src/strategies
+  optimizer:
+    volumes:
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+      - ${IBBOT_STRATEGY_DIR:-/var/lib/ibbot/strategies}:/app/src/strategies
+  optimizer-ui:
+    ports:
+      - "${OPTIMIZER_UI_PORT:-4173}:80"
+  cloudflared:
+    profiles: null

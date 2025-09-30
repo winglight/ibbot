@@ -1,0 +1,183 @@
+name: ibbot-stack
+
+x-app-env: &app-environment
+  env_file:
+    - ./.env
+  environment:
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    REDIS_URL: redis://redis:6379/0
+    DATA_LAYER_REDIS_URL: redis://redis:6379/0
+    INFLUX_URL: http://influxdb:8086
+    DATA_LAYER_INFLUX_URL: http://influxdb:8086
+    INFLUX_BUCKET: ${INFLUX_BUCKET:-ibbot}
+    INFLUX_ORG: ${INFLUX_ORG:-ibbot}
+    INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    container_name: ibbot-redis
+    command: ["redis-server", "--save", "", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - ibbot-network
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: ibbot-influx
+    ports:
+      - "8086:8086"
+    volumes:
+      - ./data/influxdb:/var/lib/influxdb2
+      - ./data/influxdb-config:/etc/influxdb2
+    env_file:
+      - ./.env
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: ${INFLUX_INIT_MODE:-setup}
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_INIT_USERNAME:-ibbot}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_INIT_PASSWORD:-ibbot-influx}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_INIT_ORG:-ibbot}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_INIT_BUCKET:-ibbot}
+      DOCKER_INFLUXDB_INIT_RETENTION: ${INFLUX_INIT_RETENTION:-0}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    networks:
+      - ibbot-network
+
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:10.39.1h
+    container_name: ib-gateway
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      TWS_USERID: ${TWS_USERID_PAPER}
+      TWS_PASSWORD: ${TWS_PASSWORD_PAPER}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      TZ: ${TIME_ZONE:-Etc/UTC}
+      TIME_ZONE: ${TIME_ZONE:-Etc/UTC}
+    ports:
+      - "4001:4003"
+      - "4002:4004"
+      - "5800:5800"
+      - "5900:5900"
+    volumes:
+      - ./data/ibgateway:/config:rw
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_started
+    networks:
+      - ibbot-network
+
+  ibbot:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    container_name: ibbot
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+      - ./src/strategies:/app/src/strategies
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      ib-gateway:
+        condition: service_started
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://ibbot:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  optimizer:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${OPTIMIZER_IMAGE:-ibbot/optimizer-local}
+    command: ["python", "optimizer_main.py"]
+    container_name: ibbot-optimizer
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data
+      - ./src/strategies:/app/src/strategies
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      ibbot:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+
+  optimizer-ui:
+    image: nginx:1.25-alpine
+    container_name: ibbot-optimizer-ui
+    ports:
+      - "4173:80"
+    volumes:
+      - ./optimizer_ui:/usr/share/nginx/html:ro
+    depends_on:
+      ibbot:
+        condition: service_started
+    networks:
+      - ibbot-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--spider", "http://localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  cloudflared:
+    image: cloudflare/cloudflared:2024.6.0
+    container_name: ibbot-cloudflared
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      TUNNEL_TOKEN: ${CF_TUNNEL_TOKEN:-}
+    command: ["tunnel", "--no-autoupdate", "run"]
+    depends_on:
+      ibbot:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    profiles:
+      - tunnel
+
+networks:
+  ibbot-network:
+    driver: bridge
