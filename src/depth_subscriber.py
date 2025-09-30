@@ -2,6 +2,9 @@ from __future__ import annotations
 
 """DepthSubscriber module for IBKR DOM data streaming."""
 
+import atexit
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
@@ -38,6 +41,32 @@ class DepthSubscriber:
         self._lock = Lock()
         self._last_error: Optional[str] = None
         self._last_error_status: int = 200
+        workers = max(2, min(4, (os.cpu_count() or 2))) if callable(getattr(os, "cpu_count", None)) else 4
+        self._callback_executor = ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="depth-subscriber-cb",
+        )
+        atexit.register(self._shutdown_executor)
+
+    def _shutdown_executor(self) -> None:
+        executor = getattr(self, "_callback_executor", None)
+        if not executor:
+            return
+        try:
+            executor.shutdown(wait=False)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            try:
+                _depth_logger.debug(f"Depth callback executor shutdown failed: {exc}")
+            except Exception:
+                pass
+        finally:
+            self._callback_executor = None
+
+    def _invoke_callback(self, symbol: str, callback: Callable[[Dict[str, Any]], None], data: Dict[str, Any]) -> None:
+        try:
+            callback(data)
+        except Exception as e:  # pragma: no cover - runtime safety
+            _depth_logger.warning(f"Callback error for {symbol}: {e}")
 
     def _set_last_error(self, message: Optional[str], status: int = 200) -> None:
         self._last_error = message
@@ -181,19 +210,31 @@ class DepthSubscriber:
             # _depth_logger.warning(f"*** _on_update CALLED for {symbol} ***")
             # _depth_logger.warning(f"Ticker domBids: {getattr(ticker, 'domBids', 'None')}")
             # _depth_logger.warning(f"Ticker domAsks: {getattr(ticker, 'domAsks', 'None')}")
+            bids = [(d.price, d.size) for d in getattr(ticker, "domBids", [])]
+            asks = [(d.price, d.size) for d in getattr(ticker, "domAsks", [])]
             data = {
-                "bids": [(d.price, d.size) for d in getattr(ticker, "domBids", [])],
-                "asks": [(d.price, d.size) for d in getattr(ticker, "domAsks", [])],
+                "bids": bids,
+                "asks": asks,
                 "timestamp": now_local(),
             }
             streams = self._streams.get(symbol)
             if not streams:
                 return
-            for cb in list(streams.callbacks):
-                try:
-                    cb(data)
-                except Exception as e:
-                    _depth_logger.warning(f"Callback error for {symbol}: {e}")
+            callbacks = list(streams.callbacks)
+            executor = getattr(self, "_callback_executor", None)
+            for cb in callbacks:
+                payload = {
+                    "bids": list(bids),
+                    "asks": list(asks),
+                    "timestamp": data["timestamp"],
+                }
+                if executor:
+                    try:
+                        executor.submit(self._invoke_callback, symbol, cb, payload)
+                        continue
+                    except RuntimeError:
+                        executor = None
+                self._invoke_callback(symbol, cb, payload)
 
         # _depth_logger.warning(f"Before binding updateEvent for {symbol}, ticker: {ticker}")
         # _depth_logger.warning(f"Ticker updateEvent before binding: {ticker.updateEvent}")
