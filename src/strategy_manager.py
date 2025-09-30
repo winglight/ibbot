@@ -2367,33 +2367,68 @@ class StrategyManager:
         """Get a strategy by name"""
         if name in self.strategies:
             strategy = self.strategies[name]
-            strategy_dict = asdict(strategy)
             cache_stats = self._get_cached_stats((strategy.name,)).get(strategy.name)
-            if cache_stats and not cache_stats.get("stale"):
-                strategy_dict['trigger_count'] = int(cache_stats.get('filled_count', 0) or 0)
-                last_created_at = cache_stats.get('last_trigger_ts')
-                if last_created_at:
-                    parsed_time = parse_local_datetime(last_created_at)
-                    strategy_dict['last_triggered'] = parsed_time or last_created_at
+
+            cache_flag_stale = False
+            trigger_count = int(strategy.trigger_count or 0)
+            last_triggered_dt: Optional[datetime] = strategy.last_triggered
+            last_trigger_payload: Optional[str] = None
+
+            if isinstance(last_triggered_dt, str):
+                parsed_existing = parse_local_datetime(last_triggered_dt)
+                if parsed_existing:
+                    last_triggered_dt = parsed_existing
                 else:
-                    strategy_dict['last_triggered'] = None
+                    last_trigger_payload = last_triggered_dt
+                    last_triggered_dt = None
+
+            if cache_stats:
+                filled = cache_stats.get('filled_count')
+                if filled is not None:
+                    try:
+                        trigger_count = int(filled or 0)
+                    except (TypeError, ValueError):
+                        trigger_count = int(strategy.trigger_count or 0)
+
+                last_trigger_raw = cache_stats.get('last_trigger_ts')
+                if last_trigger_raw:
+                    parsed_time = parse_local_datetime(last_trigger_raw)
+                    if parsed_time:
+                        last_triggered_dt = parsed_time
+                        last_trigger_payload = None
+                    else:
+                        last_trigger_payload = last_trigger_raw
+
+                cache_flag_stale = bool(cache_stats.get('stale'))
             else:
-                order_stats = self.db_manager.get_strategy_order_stats([strategy.name], 'strategy')
-                stats = order_stats.get(strategy.name, {})
-                strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
-                last_created_at = stats.get('last_created_at')
-                if last_created_at:
-                    parsed_time = parse_local_datetime(last_created_at)
-                    strategy_dict['last_triggered'] = parsed_time or last_created_at
-                else:
-                    strategy_dict['last_triggered'] = None
-                if cache_stats and cache_stats.get("stale"):
-                    strategy_dict['cache_stale'] = True
-            # Convert datetime objects to strings for JSON serialization
+                cache_flag_stale = True
+
+            strategy.trigger_count = trigger_count
+            if isinstance(last_triggered_dt, datetime):
+                strategy.last_triggered = last_triggered_dt
+            elif last_trigger_payload:
+                strategy.last_triggered = parse_local_datetime(last_trigger_payload)
+            else:
+                strategy.last_triggered = None
+
+            if cache_flag_stale:
+                self.rebuild_strategy_cache([strategy.name])
+
+            strategy_dict = asdict(strategy)
+
+            strategy_dict['trigger_count'] = trigger_count
+            if isinstance(strategy.last_triggered, datetime):
+                strategy_dict['last_triggered'] = to_local_iso(strategy.last_triggered)
+            elif last_trigger_payload:
+                strategy_dict['last_triggered'] = last_trigger_payload
+            else:
+                strategy_dict['last_triggered'] = None
+
             if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
                 strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
-            if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
-                strategy_dict['last_triggered'] = to_local_iso(strategy_dict['last_triggered'])
+
+            if cache_flag_stale:
+                strategy_dict['cache_stale'] = True
             # 合并SL/TP设置
             try:
                 settings = self.db_manager.load_strategy_config()
@@ -3655,52 +3690,76 @@ if __name__ == "__main__":
                 return deepcopy(cache["data"])
 
         cached_stats = self._get_cached_stats(strategy_names)
-        missing_for_db = [
+        missing_for_cache = [
             name
             for name in strategy_names
             if name not in cached_stats or cached_stats[name].get("stale")
         ]
 
-        if missing_for_db:
-            try:
-                order_stats = self.db_manager.get_strategy_order_stats(
-                    missing_for_db, order_source='strategy'
-                )
-            except Exception as exc:
-                strategy_logger.warning(
-                    f"Failed to load strategy order stats: {exc}"
-                )
-                order_stats = {}
-        else:
-            order_stats = {}
+        if missing_for_cache:
+            self.rebuild_strategy_cache(missing_for_cache)
 
         result: List[Dict[str, Any]] = []
         for strategy in self.strategies.values():
-            strategy_dict = asdict(strategy)
             cache_snapshot = cached_stats.get(strategy.name)
-            if cache_snapshot and not cache_snapshot.get("stale"):
-                strategy_dict['trigger_count'] = int(cache_snapshot.get('filled_count', 0) or 0)
+
+            trigger_count = int(strategy.trigger_count or 0)
+            last_triggered_dt: Optional[datetime] = strategy.last_triggered
+            last_trigger_payload: Optional[str] = None
+            cache_stale = False
+
+            if isinstance(last_triggered_dt, str):
+                parsed_existing = parse_local_datetime(last_triggered_dt)
+                if parsed_existing:
+                    last_triggered_dt = parsed_existing
+                else:
+                    last_trigger_payload = last_triggered_dt
+                    last_triggered_dt = None
+
+            if cache_snapshot:
+                filled = cache_snapshot.get('filled_count')
+                if filled is not None:
+                    try:
+                        trigger_count = int(filled or 0)
+                    except (TypeError, ValueError):
+                        trigger_count = int(strategy.trigger_count or 0)
+
                 last_created_at = cache_snapshot.get('last_trigger_ts')
                 if last_created_at:
                     parsed_time = parse_local_datetime(last_created_at)
-                    strategy_dict['last_triggered'] = parsed_time or last_created_at
-                else:
-                    strategy_dict['last_triggered'] = None
+                    if parsed_time:
+                        last_triggered_dt = parsed_time
+                    else:
+                        last_trigger_payload = last_created_at
+
+                cache_stale = bool(cache_snapshot.get('stale'))
             else:
-                stats = order_stats.get(strategy.name, {})
-                strategy_dict['trigger_count'] = int(stats.get('order_count', 0) or 0)
-                last_created_at = stats.get('last_created_at')
-                if last_created_at:
-                    parsed_time = parse_local_datetime(last_created_at)
-                    strategy_dict['last_triggered'] = parsed_time or last_created_at
-                else:
-                    strategy_dict['last_triggered'] = None
-                if cache_snapshot and cache_snapshot.get("stale"):
-                    strategy_dict['cache_stale'] = True
-            if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
-                strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
-            if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
-                strategy_dict['last_triggered'] = to_local_iso(strategy_dict['last_triggered'])
+                cache_stale = True
+
+            strategy.trigger_count = trigger_count
+            if isinstance(last_triggered_dt, datetime):
+                strategy.last_triggered = last_triggered_dt
+            elif isinstance(last_trigger_payload, str):
+                strategy.last_triggered = parse_local_datetime(last_trigger_payload)
+            else:
+                strategy.last_triggered = None if last_triggered_dt is None else last_triggered_dt
+
+            strategy_dict = asdict(strategy)
+            strategy_dict['trigger_count'] = trigger_count
+
+            created_at_value = strategy_dict.get('created_at')
+            if isinstance(created_at_value, datetime):
+                strategy_dict['created_at'] = to_local_iso(created_at_value)
+
+            if isinstance(strategy.last_triggered, datetime):
+                strategy_dict['last_triggered'] = to_local_iso(strategy.last_triggered)
+            elif last_trigger_payload:
+                strategy_dict['last_triggered'] = last_trigger_payload
+            else:
+                strategy_dict['last_triggered'] = None
+
+            if cache_stale:
+                strategy_dict['cache_stale'] = True
 
             data_push_state = self.data_push_state.get(strategy.name, {}) or {}
             awaiting_data = bool(data_push_state.get('awaiting_data'))
