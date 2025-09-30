@@ -1141,7 +1141,7 @@ class RiskManager:
                         )
                         self.auto_orders[str(trade.order.orderId)] = auto_order
                         # 保存到数据库，保证持久化
-                        self.save_auto_order_to_db(auto_order)
+                        await asyncio.to_thread(self.save_auto_order_to_db, auto_order)
                         
                         risk_logger.info(f"✅ Market order placed for take profit: {symbol} at market price ${current_price:.2f}")
                         risk_logger.info(f"Take profit market order successfully placed for {symbol}, rule remains active")
@@ -1310,7 +1310,7 @@ class RiskManager:
                             order_source="sl",
                         )
                         self.auto_orders[str(trade.order.orderId)] = auto_order
-                        self.save_auto_order_to_db(auto_order)
+                        await asyncio.to_thread(self.save_auto_order_to_db, auto_order)
 
                         # 同步到订单管理器，保持前端订单列表与数据库一致
                         if self.order_manager:
@@ -1657,7 +1657,7 @@ class RiskManager:
                 )
                 
                 self.auto_orders[str(order_id)] = auto_order
-                self.save_auto_order_to_db(auto_order)
+                await asyncio.to_thread(self.save_auto_order_to_db, auto_order)
                 
                 # 同步到订单管理器
                 if self.order_manager:
