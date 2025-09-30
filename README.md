@@ -107,6 +107,43 @@ uvicorn main:app --reload
 
 默认不会自动连接 IBKR，可通过前端连接面板或 `/api/connect` 进行连接。
 
+### 3.1 直接运行后台服务（可选）
+
+`scripts/run_service.py` 与 `scripts/run_all.py` 提供了“开箱即用”的服务启动封装，会在执行前自动加载 `.env.local`（若缺失则回退到 `.env`）。
+
+```bash
+# 检查某个服务是否可以直接启动（不会连接外部依赖）
+python scripts/run_service.py ib_feed --dry-run
+
+# 实际运行单个服务（等同于 python -m services.ib_feed.main）
+python scripts/run_service.py ib_feed
+
+# 批量启动核心服务，默认包含 ib_command/ib_feed/strategy/risk/notification
+python scripts/run_all.py
+
+# 仅做导入与环境自检，可自定义服务组合
+python scripts/run_all.py ib_feed strategy --dry-run
+```
+
+常见服务的外部依赖如下表所示：
+
+| 服务模块 | 启动命令 | 主要依赖 | 说明 |
+| --- | --- | --- | --- |
+| `ib_command` | `python scripts/run_service.py ib_command` | Redis（任务队列） | 可选对接 IB Gateway/TWS，使用 `--dry-run` 可跳过连接。 |
+| `ib_feed` | `python scripts/run_service.py ib_feed` | Redis（行情缓存） | 连接 IBKR 抓取实时/历史行情。 |
+| `strategy` | `python scripts/run_service.py strategy` | Redis（策略调度） | 负责策略生命周期与任务入队。 |
+| `risk` | `python scripts/run_service.py risk` | Redis（风险配置） | 拉取风险规则并监听指标。 |
+| `notification` | `python scripts/run_service.py notification` | Redis（事件队列） | 推送通知到浏览器/Telegram。 |
+| `optimizer` | `python scripts/run_service.py optimizer` | Redis、InfluxDB | 需要历史数据（InfluxDB）与事件流（Redis）。 |
+
+若本地尚未安装 Redis/InfluxDB，可使用最小化的 docker compose 组合快速拉起：
+
+```bash
+docker compose up redis influxdb
+```
+
+完成后，服务脚本会自动复用 `.env.local` 中的连接配置。
+
 ### 4. 基本操作
 
 1. 调用 `/api/login` 获取 JWT，前端也提供登录面板。

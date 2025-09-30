@@ -66,3 +66,28 @@ Mode: dry-run (no external calls were executed)
 ```
 
 若任一步骤失败，脚本会打印具体的异常信息，便于确认网络、凭证或权限问题。
+
+## 直接运行服务
+
+`scripts/run_service.py` 与 `scripts/run_all.py` 会在启动前自动加载 `.env.local`（若不存在则回退到 `.env`），并封装 `python -m services.<module>.main` 的调用流程：
+
+```bash
+# 自检导入（不会访问 Redis/InfluxDB）
+python scripts/run_service.py ib_feed --dry-run
+
+# 启动单个服务
+python scripts/run_service.py risk
+
+# 批量启动多个服务
+python scripts/run_all.py ib_command ib_feed strategy
+```
+
+当某个模块缺失或依赖无法导入时，`--dry-run` 模式会提前给出友好的错误提示，便于在没有 Docker 的机器上调试依赖问题。
+
+如需临时提供 Redis、InfluxDB，可在项目根目录执行：
+
+```bash
+docker compose up redis influxdb
+```
+
+上述命令会只拉起最小必需的两个容器，其余服务可以在本地环境中直接运行。
