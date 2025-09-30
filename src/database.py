@@ -189,6 +189,12 @@ class DatabaseManager:
             )
             cursor.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_orders_source_state_strategy_created
+                ON orders(order_source, is_deleted, strategy_name, created_at DESC)
+                """
+            )
+            cursor.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_orders_strategy_activity
                 ON orders(strategy_name, is_deleted, executed_at, created_at)
                 """
@@ -769,7 +775,7 @@ class DatabaseManager:
         with self._cursor() as cursor:
             query = (
                 "SELECT strategy_name, COUNT(*) AS order_count, MAX(created_at) AS last_created_at "
-                "FROM orders WHERE order_source = ?"
+                "FROM orders WHERE order_source = ? AND is_deleted = 0"
             )
             params: List[Any] = [order_source]
 
