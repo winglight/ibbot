@@ -18,7 +18,7 @@ COMPOSE_BIN=${COMPOSE_CMD:-"docker compose"}
 DEFAULT_ENVIRONMENT="local"
 COMPOSE_BASE_FILE="${ROOT_DIR}/docker-compose.yml"
 COMPOSE_PROD_FILE="${ROOT_DIR}/docker-compose.prod.yml"
-START_SEQUENCE=(redis influxdb ib-gateway ibbot optimizer optimizer-ui cloudflared)
+START_SEQUENCE=(redis influxdb ib-gateway ibbot ib-command ib-feed market-data risk strategy notification queue-monitor optimizer optimizer-ui cloudflared)
 STARTED_SERVICES=()
 
 usage() {
