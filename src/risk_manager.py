@@ -212,6 +212,10 @@ class RiskManager:
         self._load_from_database()
         self._load_position_limits_from_db()
 
+    def _persist_risk_rule_sync(self, db_rule: DatabaseRiskRule) -> None:
+        """在后台线程中持久化风险规则，避免阻塞事件循环。"""
+        self.db_manager.save_risk_rule(db_rule)
+
     def _resolve_rule_type(
         self, rule_type: Optional[str], auto_trailing: Optional[bool]
     ) -> Tuple[str, bool]:
@@ -950,7 +954,7 @@ class RiskManager:
                         atr_params=rule.atr_params,
                         rule_type=rule.rule_type,
                     )
-                    self.db_manager.save_risk_rule(db_rule)
+                    await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
                     self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Risk rule for {symbol} has been deactivated due to zero position")
             
@@ -1071,7 +1075,7 @@ class RiskManager:
                 atr_params=rule.atr_params,
                 rule_type=rule.rule_type,
             )
-            self.db_manager.save_risk_rule(db_rule)
+            await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
             self._sync_rule_trailing_state(rule)
             return
         
@@ -1169,7 +1173,7 @@ class RiskManager:
                             atr_params=rule.atr_params,
                             rule_type=rule.rule_type,
                         )
-                        self.db_manager.save_risk_rule(db_rule)
+                        await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Take profit rule disabled after market order for {symbol}")
                         return
@@ -1189,7 +1193,7 @@ class RiskManager:
                             atr_params=rule.atr_params,
                             rule_type=rule.rule_type,
                         )
-                        self.db_manager.save_risk_rule(db_rule)
+                        await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Take profit rule disabled due to order failure for {symbol}")
                 except Exception as e:
@@ -1208,7 +1212,7 @@ class RiskManager:
                         atr_params=rule.atr_params,
                         rule_type=rule.rule_type,
                     )
-                    self.db_manager.save_risk_rule(db_rule)
+                    await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
                     self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Take profit rule disabled due to exception for {symbol}")
             
@@ -1250,7 +1254,7 @@ class RiskManager:
                     atr_params=rule.atr_params,
                     rule_type=rule.rule_type,
                 )
-                self.db_manager.save_risk_rule(db_rule)
+                await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
                 self._sync_rule_trailing_state(rule)
                 risk_logger.info(f"Take profit order queued for {symbol} at ${current_price:.2f}, rule disabled")
                 return  # 当触发止盈市价单时立即返回，不再检查止损
@@ -1365,7 +1369,7 @@ class RiskManager:
                             atr_params=rule.atr_params,
                             rule_type=rule.rule_type,
                         )
-                        self.db_manager.save_risk_rule(db_rule)
+                        await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.warning(f"🔒 Stop loss rule disabled for {symbol} after triggering at ${current_price:.2f}")
 
@@ -1386,7 +1390,7 @@ class RiskManager:
                             atr_params=rule.atr_params,
                             rule_type=rule.rule_type,
                         )
-                        self.db_manager.save_risk_rule(db_rule)
+                        await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Stop loss rule disabled due to order failure for {symbol}")
                 except Exception as e:
@@ -1405,7 +1409,7 @@ class RiskManager:
                         atr_params=rule.atr_params,
                         rule_type=rule.rule_type,
                     )
-                    self.db_manager.save_risk_rule(db_rule)
+                    await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
                     self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Stop loss rule disabled due to exception for {symbol}")
             
@@ -1447,7 +1451,7 @@ class RiskManager:
                     atr_params=rule.atr_params,
                     rule_type=rule.rule_type,
                 )
-                self.db_manager.save_risk_rule(db_rule)
+                await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
                 self._sync_rule_trailing_state(rule)
                 risk_logger.info(f"Stop loss order queued for {symbol} at ${current_price:.2f}, rule disabled")
                 return  # 触发市价单后立即返回，不再检查止盈
