@@ -77,7 +77,7 @@
                     <i class="fas fa-sliders-h"></i>
                 </button>
             </div>
-            <div class="d-flex align-items-center ms-auto gap-2">
+            <div class="d-flex align-items-center ms-auto gap-2 flex-wrap justify-content-end">
                 <button class="btn btn-outline-light btn-sm" id="connectionSettingsBtn">
                     <i class="fas fa-cog"></i> IBKR
                 </button>
@@ -91,6 +91,25 @@
                     <span id="connectionStatus" class="status-indicator status-disconnected"></span>
                     <span id="connectionText">Disconnected</span>
                 </span>
+                <div class="d-flex align-items-center gap-2 flex-wrap service-restart-controls">
+                    <select class="form-select form-select-sm bg-dark text-light border-secondary"
+                            id="serviceRestartSelect"
+                            aria-label="选择需要重启的服务">
+                        <option value="" selected disabled>选择服务</option>
+                        <option value="ib-gateway" data-label="IB Gateway">IB Gateway</option>
+                        <option value="ibbot" data-label="主应用">主应用 (ibbot)</option>
+                        <option value="optimizer" data-label="优化器">优化器</option>
+                        <option value="cloudflared" data-label="Cloudflare 隧道">Cloudflare 隧道</option>
+                    </select>
+                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-1"
+                            id="serviceRestartBtn" type="button">
+                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                        <i class="fas fa-rotate-right"></i>
+                        <span class="d-none d-xl-inline">重启</span>
+                    </button>
+                    <span id="serviceRestartStatus" class="small text-muted"
+                          data-state="idle" aria-live="polite">选择服务后执行重启。</span>
+                </div>
                 <button class="btn btn-outline-light btn-sm" id="openNotificationsBtn" title="Notifications">
                     <i class="fas fa-bell"></i>
                 </button>
@@ -3196,6 +3215,7 @@
 <script src="/static/js/monitoring/dashboard.js" defer></script>
 <script src="/static/js/monitoring/manager.js" defer></script>
 <script src="/static/js/ui/controller.js" defer></script>
+<script src="/static/js/service_restart.js" defer></script>
 <script src="/static/js/app.js" defer></script>
 </body>
 </html>
