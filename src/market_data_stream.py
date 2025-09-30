@@ -35,7 +35,7 @@ class RealTimeBar:
 class _Subscription:
     callbacks: Set[CallbackType]
     queue: "asyncio.Queue[RealTimeBar]"
-    task: asyncio.Task
+    task: Optional[asyncio.Task] = None
     downsample: int = 1
     counter: int = 0
 
@@ -54,9 +54,45 @@ class PriceVolumeStream:
         loop: Optional[asyncio.AbstractEventLoop] = None,
         default_interval_seconds: int = 5,
     ) -> None:
-        self._loop = loop or asyncio.get_event_loop()
+        self._loop: Optional[asyncio.AbstractEventLoop] = loop
         self._default_interval_seconds = max(1, default_interval_seconds)
         self._subscriptions: Dict[str, _Subscription] = {}
+
+    def _resolve_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        """Ensure dispatch tasks run on an active event loop."""
+
+        loop = self._loop
+        if loop is not None:
+            if loop.is_closed():
+                loop = None
+            elif loop.is_running():
+                return loop
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return loop
+
+        if loop is not None and not loop.is_running():
+            for sub in self._subscriptions.values():
+                if sub.task is not None and not sub.task.done():
+                    sub.task.cancel()
+                sub.task = None
+
+        self._loop = running
+        return running
+
+    def _ensure_dispatch(self, symbol: str) -> None:
+        loop = self._resolve_loop()
+        if loop is None:
+            return
+
+        sub = self._subscriptions.get(symbol)
+        if sub is None:
+            return
+        if sub.task is not None and not sub.task.done():
+            return
+        sub.task = loop.create_task(self._dispatch(symbol))
 
     def subscribe(
         self,
@@ -79,13 +115,13 @@ class PriceVolumeStream:
         sub = self._subscriptions.get(symbol)
         if sub is None:
             queue: "asyncio.Queue[RealTimeBar]" = asyncio.Queue()
-            task = self._loop.create_task(self._dispatch(symbol))
-            sub = _Subscription(callbacks=set(), queue=queue, task=task, downsample=downsample)
+            sub = _Subscription(callbacks=set(), queue=queue, downsample=downsample)
             self._subscriptions[symbol] = sub
         else:
             sub.downsample = downsample
 
         sub.callbacks.add(callback)
+        self._ensure_dispatch(symbol)
 
     def unsubscribe(self, symbol: str, callback: CallbackType) -> None:
         """Remove *callback* from the subscription set for *symbol*."""
@@ -96,7 +132,8 @@ class PriceVolumeStream:
 
         sub.callbacks.discard(callback)
         if not sub.callbacks:
-            sub.task.cancel()
+            if sub.task is not None:
+                sub.task.cancel()
             self._subscriptions.pop(symbol, None)
 
     async def publish_bar(self, symbol: str, bar: RealTimeBar) -> None:
@@ -105,6 +142,7 @@ class PriceVolumeStream:
         sub = self._subscriptions.get(symbol)
         if not sub:
             return
+        self._ensure_dispatch(symbol)
         await sub.queue.put(bar)
 
     async def _dispatch(self, symbol: str) -> None:
