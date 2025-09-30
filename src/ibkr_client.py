@@ -185,6 +185,14 @@ class IBKRClient:
         self._gateway_restart_cmd = os.getenv('IBKR_GATEWAY_RESTART_CMD')
         self._gateway_service_name = os.getenv('IBKR_GATEWAY_SERVICE_NAME', 'ib-gateway')
 
+        self._data_farm_wakeup_lock = threading.Lock()
+        self._data_farm_wakeup_future: Optional[concurrent.futures.Future] = None
+        self._last_data_farm_wakeup: Optional[datetime] = None
+        self._data_farm_wakeup_min_interval = max(
+            15.0, self._parse_env_float('IBKR_DATA_FARM_WAKEUP_INTERVAL_SEC', 60.0)
+        )
+        self._data_farm_wakeup_symbol = os.getenv('IBKR_DATA_FARM_WAKEUP_SYMBOL', 'SPY')
+
         self._setup_async_components()
     
     def _sanitize_float(self, value):
@@ -291,6 +299,157 @@ class IBKRClient:
         except Exception as exc:  # pragma: no cover - defensive guard
             ibkr_logger.debug(
                 "Failed to finalize external connection restoration",
+                error=str(exc),
+            )
+
+    def handle_data_farm_status(self, code: int, message: str) -> None:
+        """Handle data farm status notifications by issuing a gentle wake-up request."""
+
+        ibkr_logger.info(
+            "IBKR data farm status update",
+            code=code,
+            message=message,
+        )
+        self._schedule_data_farm_wakeup(code=code, message=message)
+
+    def handle_gateway_broken(self, code: int, message: str) -> None:
+        """Schedule recovery when IB reports a broken data farm connection."""
+
+        loop = self._async_loop
+        if loop is None or loop.is_closed():
+            ibkr_logger.debug(
+                "Skipping gateway-broken handling; async loop unavailable",
+                code=code,
+            )
+            return
+
+        def _dispatch() -> None:
+            ibkr_logger.warning(
+                "IBKR gateway reported broken connection",
+                code=code,
+                message=message,
+            )
+            self._handle_disconnect_detected(f"ib-error-{code}")
+            asyncio.create_task(self._ensure_reconnect_task())
+
+        try:
+            loop.call_soon_threadsafe(_dispatch)
+        except RuntimeError:
+            if loop.is_running():
+                _dispatch()
+            else:
+                ibkr_logger.debug(
+                    "Async loop not running; cannot dispatch gateway-broken handler",
+                    code=code,
+                )
+
+    def _schedule_data_farm_wakeup(self, *, code: int, message: str) -> None:
+        loop = self._async_loop
+        if loop is None or loop.is_closed():
+            ibkr_logger.debug(
+                "Skipping data farm wake-up scheduling; async loop unavailable",
+                code=code,
+            )
+            return
+
+        now = now_local()
+        future: Optional[concurrent.futures.Future]
+        with self._data_farm_wakeup_lock:
+            if self._data_farm_wakeup_future and not self._data_farm_wakeup_future.done():
+                ibkr_logger.debug(
+                    "Skipping data farm wake-up; previous request still pending",
+                    code=code,
+                )
+                return
+
+            if self._last_data_farm_wakeup is not None:
+                elapsed = (now - self._last_data_farm_wakeup).total_seconds()
+                if elapsed < self._data_farm_wakeup_min_interval:
+                    ibkr_logger.debug(
+                        "Skipping data farm wake-up; throttled",
+                        code=code,
+                        elapsed_seconds=round(elapsed, 1),
+                    )
+                    return
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_data_farm_wakeup(code=code, message=message),
+                    loop,
+                )
+            except RuntimeError as exc:
+                ibkr_logger.debug(
+                    "Failed to submit data farm wake-up coroutine",
+                    code=code,
+                    error=str(exc),
+                )
+                return
+
+            self._data_farm_wakeup_future = future
+            self._last_data_farm_wakeup = now
+
+        def _finalise(fut: concurrent.futures.Future) -> None:
+            with self._data_farm_wakeup_lock:
+                if self._data_farm_wakeup_future is fut:
+                    self._data_farm_wakeup_future = None
+            try:
+                fut.result()
+            except Exception as exc:  # pragma: no cover - defensive logging
+                ibkr_logger.debug(
+                    "Data farm wake-up request completed with error",
+                    code=code,
+                    error=str(exc),
+                )
+
+        future.add_done_callback(_finalise)
+
+    async def _send_data_farm_wakeup(self, *, code: int, message: str) -> None:
+        ib = self.connection_manager.ib
+        if ib is None or not ib.isConnected():
+            ibkr_logger.debug(
+                "Skipping data farm wake-up; IB connection unavailable",
+                code=code,
+            )
+            return
+
+        symbol = (self._data_farm_wakeup_symbol or "SPY").strip() or "SPY"
+        symbol = symbol.upper()
+        contract = self.get_stock_contract(symbol, 'SMART')
+        qualified_contract = contract
+
+        try:
+            qualified = await ib.qualifyContractsAsync(contract)
+            if qualified:
+                qualified_contract = qualified[0]
+        except Exception as exc:
+            ibkr_logger.debug(
+                "Data farm wake-up contract qualification failed",
+                code=code,
+                symbol=symbol,
+                error=str(exc),
+            )
+
+        try:
+            await ib.reqHistoricalDataAsync(
+                contract=qualified_contract,
+                endDateTime='',
+                durationStr='60 S',
+                barSizeSetting='1 min',
+                whatToShow='MIDPOINT',
+                useRTH=False,
+                keepUpToDate=False,
+                formatDate=1,
+            )
+            ibkr_logger.debug(
+                "Submitted data farm wake-up historical request",
+                code=code,
+                symbol=symbol,
+            )
+        except Exception as exc:
+            ibkr_logger.debug(
+                "Data farm wake-up historical request failed",
+                code=code,
+                symbol=symbol,
                 error=str(exc),
             )
 
