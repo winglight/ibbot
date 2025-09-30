@@ -57,19 +57,6 @@ from src.models import (
     CurrentPriceRequest,
 )
 
-# Shared application services
-from core import (
-    telegram_notifier,
-    notification_manager,
-    risk_manager,
-    strategy_manager,
-    queue_manager,
-    websocket_manager,
-    order_manager,
-    account_snapshot_service,
-    get_dom_service,
-)
-
 # Authentication and routers
 from src.routes.auth import get_current_user, router as auth_router
 from src.routes.connection import router as connection_router
@@ -88,6 +75,10 @@ from src.data_layer import get_data_source_manager
 
 # Global variables
 load_project_env()
+
+
+def get_core_services() -> core.CoreContainer:
+    return core.require_container()
 
 
 def _get_interval_env(name: str, default: int) -> int:
@@ -279,11 +270,13 @@ async def _module_auto_connect(context: ModuleRuntimeContext) -> ModuleHandle:
             loop = asyncio.get_event_loop()
 
             def _connect_via_client() -> bool:
-                import core
-
-                if getattr(core, "ibkr_client", None) is None:
-                    core.ibkr_client = core.IBKRClient()
-                return core.ibkr_client.connect()
+                services = get_core_services()
+                if getattr(services, "ibkr_client", None) is None:
+                    services.ibkr_client = core.IBKRClient()
+                client = services.ibkr_client
+                if client is None:
+                    return False
+                return client.connect()
 
             success = await loop.run_in_executor(None, _connect_via_client)
             if not success:
@@ -316,7 +309,7 @@ async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHan
         context.logger.info("Data source manager initialised for subscriptions")
 
     try:
-        dom_service = get_dom_service()
+        dom_service = core.get_dom_service()
     except Exception as exc:
         context.logger.warning(f"DOM service unavailable for auto-start: {exc}")
         return handle
@@ -351,7 +344,8 @@ async def _module_risk_manager(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
 
     try:
-        risk_manager.start()
+        services = get_core_services()
+        services.risk_manager.start()
         context.logger.info("Risk manager started during application startup")
     except Exception as exc:
         context.logger.warning(f"Risk manager startup warning: {exc}")
@@ -359,8 +353,10 @@ async def _module_risk_manager(context: ModuleRuntimeContext) -> ModuleHandle:
 
     def _shutdown_risk_manager() -> None:
         try:
-            if getattr(risk_manager, 'scheduler', None) and risk_manager.scheduler.running:
-                risk_manager.scheduler.shutdown()
+            services = get_core_services()
+            manager = services.risk_manager
+            if getattr(manager, 'scheduler', None) and manager.scheduler.running:
+                manager.scheduler.shutdown()
                 context.logger.info("Risk manager scheduler shutdown")
         except Exception as exc:
             context.logger.warning(f"Risk manager shutdown warning: {exc}")
@@ -373,7 +369,8 @@ async def _module_account_snapshot(context: ModuleRuntimeContext) -> ModuleHandl
     handle = ModuleHandle(name=context.module_name)
 
     try:
-        account_snapshot_service.start()
+        services = get_core_services()
+        services.account_snapshot_service.start()
         context.logger.info("Account snapshot service started during application startup")
     except Exception as exc:
         context.logger.warning(
@@ -383,7 +380,8 @@ async def _module_account_snapshot(context: ModuleRuntimeContext) -> ModuleHandl
 
     async def _stop_account_snapshot() -> None:
         try:
-            await account_snapshot_service.stop()
+            services = get_core_services()
+            await services.account_snapshot_service.stop()
             context.logger.info("Account snapshot service stopped")
         except Exception as exc:
             context.logger.warning(
@@ -398,6 +396,8 @@ async def _module_strategy_manager(context: ModuleRuntimeContext) -> ModuleHandl
     handle = ModuleHandle(name=context.module_name)
 
     try:
+        services = get_core_services()
+        strategy_manager = services.strategy_manager
         strategy_manager.start()
         context.logger.info("Strategy manager initialized during application startup")
     except Exception as exc:
@@ -406,7 +406,8 @@ async def _module_strategy_manager(context: ModuleRuntimeContext) -> ModuleHandl
 
     async def _restore_data_push_states() -> None:
         try:
-            await strategy_manager.restore_data_push_states()
+            services = get_core_services()
+            await services.strategy_manager.restore_data_push_states()
             context.logger.info("Strategy data push states restored after startup")
         except asyncio.CancelledError:
             raise
@@ -424,7 +425,8 @@ async def _module_strategy_manager(context: ModuleRuntimeContext) -> ModuleHandl
 
     def _stop_strategy_manager() -> None:
         try:
-            strategy_manager.stop()
+            services = get_core_services()
+            services.strategy_manager.stop()
             context.logger.info("Strategy manager scheduler stopped")
         except Exception as exc:
             context.logger.warning(f"Strategy manager shutdown warning: {exc}")
@@ -435,20 +437,22 @@ async def _module_strategy_manager(context: ModuleRuntimeContext) -> ModuleHandl
 
 async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
-    if getattr(core, "ibkr_client", None) is None:
+    services = get_core_services()
+
+    if getattr(services, "ibkr_client", None) is None:
         try:
-            core.ibkr_client = core.IBKRClient()
+            services.ibkr_client = core.IBKRClient()
             context.logger.info("IBKRClient initialized for queue worker startup")
         except Exception as exc:
             context.logger.warning(f"IBKR client initialization warning: {exc}")
             return handle
 
-    if getattr(core, "ibkr_client", None) is None:
+    if getattr(services, "ibkr_client", None) is None:
         context.logger.warning("Queue worker not started because IBKR client is unavailable")
         return handle
 
     try:
-        await queue_manager.start_worker()
+        await services.queue_manager.start_worker()
         context.logger.info("Queue worker started during application startup")
     except Exception as exc:
         context.logger.warning(f"Queue worker startup warning: {exc}")
@@ -456,7 +460,8 @@ async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
 
     async def _stop_queue_worker() -> None:
         try:
-            await queue_manager.stop_worker()
+            services = get_core_services()
+            await services.queue_manager.stop_worker()
             context.logger.info("Queue worker stopped")
         except Exception as exc:
             context.logger.warning(f"Queue worker shutdown warning: {exc}")
@@ -517,6 +522,14 @@ async def lifespan(app: FastAPI):
     main_logger = get_module_logger("main")
     registry = _build_module_registry(main_logger)
 
+    services = await core.initialise()
+    app.state.core = services
+
+    try:
+        await services.run_health_checks()
+    except Exception as exc:
+        main_logger.warning("Startup health checks failed: {}", exc)
+
     enabled_raw = os.getenv("ENABLED_MODULES", "ALL")
     enabled_modules = registry.resolve_enabled(enabled_raw)
 
@@ -535,6 +548,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await registry.shutdown_modules()
+        app.state.core = None
+        await core.shutdown()
         main_logger.info("Application shutdown complete.")
 
 

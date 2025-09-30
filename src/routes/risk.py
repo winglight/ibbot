@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
 import core
-from core import connection_manager, risk_manager
+from src.connection_manager import connection_manager
 from .auth import get_current_user
 from src.models import (
     RiskRuleRequest,
@@ -41,19 +41,25 @@ _last_risk_config_attempt_at: float = 0.0
 _RISK_CONFIG_REFRESH_INTERVAL: float = 30.0
 
 
+def _get_risk_manager():
+    container = core.get_container()
+    return None if container is None else container.risk_manager
+
+
 async def _refresh_risk_config(timeout: float) -> Optional[Dict[str, Any]]:
     """Fetch the latest risk configuration without blocking the request path."""
 
     global _last_risk_config, _last_risk_config_updated_at, _last_risk_config_attempt_at
 
-    if 'risk_manager' not in globals() or risk_manager is None:
+    manager = _get_risk_manager()
+    if manager is None:
         return None
 
     async with _risk_config_lock:
         _last_risk_config_attempt_at = time.monotonic()
         try:
             config = await asyncio.wait_for(
-                asyncio.to_thread(risk_manager.get_config),
+                asyncio.to_thread(manager.get_config),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -70,9 +76,10 @@ async def _refresh_risk_config(timeout: float) -> Optional[Dict[str, Any]]:
 @router.post("/api/risk_rules")
 async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get_current_user)):
     """添加风险管理规则"""
-    if not risk_manager:
+    manager = _get_risk_manager()
+    if manager is None:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    
+
     try:
         logger.info(
             f"API add_risk_rule: symbol={rule.symbol}, SL={rule.stop_loss_price}, TP={rule.take_profit_price}, "
@@ -81,7 +88,7 @@ async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get
 
         async_task = asyncio.create_task(
             asyncio.to_thread(
-                risk_manager.add_risk_rule,
+                manager.add_risk_rule,
                 rule.symbol,
                 rule.stop_loss_price,
                 rule.take_profit_price,
@@ -127,19 +134,20 @@ async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get
 @router.get("/api/risk_rules")
 async def get_risk_rules(user: Optional[str] = Depends(get_current_user)):
     """获取风险管理规则"""
-    if not risk_manager:
+    manager = _get_risk_manager()
+    if manager is None:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    
+
     try:
         loop = asyncio.get_event_loop()
         try:
             rules = await asyncio.wait_for(
-                loop.run_in_executor(None, risk_manager.get_risk_rules),
+                loop.run_in_executor(None, manager.get_risk_rules),
                 timeout=5.0,
             )
         except asyncio.TimeoutError:
             logger.warning("get_risk_rules timed out; returning cached state")
-            rules = risk_manager.get_risk_rules()
+            rules = manager.get_risk_rules()
         # Convert to serializable format
         serializable_rules = {}
         for symbol, rule in rules.items():
@@ -165,12 +173,13 @@ async def get_risk_rules(user: Optional[str] = Depends(get_current_user)):
 @router.put("/api/risk_rules/{symbol}")
 async def update_risk_rule(symbol: str, enabled: bool, user: Optional[str] = Depends(get_current_user)):
     """更新风险管理规则状态"""
-    if not risk_manager:
+    manager = _get_risk_manager()
+    if manager is None:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    
+
     try:
         logger.info(f"API update_risk_rule: symbol={symbol}, enabled={enabled}")
-        success = risk_manager.update_risk_rule(symbol, enabled=enabled)
+        success = manager.update_risk_rule(symbol, enabled=enabled)
         if not success:
             # 让404错误向外传播
             raise HTTPException(status_code=404, detail=f"Risk rule for {symbol} not found")
@@ -187,12 +196,13 @@ async def update_risk_rule(symbol: str, enabled: bool, user: Optional[str] = Dep
 @router.delete("/api/risk_rules/{symbol}")
 async def remove_risk_rule(symbol: str, user: Optional[str] = Depends(get_current_user)):
     """移除风险管理规则"""
-    if not risk_manager:
+    manager = _get_risk_manager()
+    if manager is None:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    
+
     try:
         logger.info(f"API remove_risk_rule: symbol={symbol}")
-        risk_manager.remove_risk_rule(symbol)
+        manager.remove_risk_rule(symbol)
         return {"success": True, "message": "Risk rule removed successfully"}
         
     except Exception as e:
@@ -202,15 +212,16 @@ async def remove_risk_rule(symbol: str, user: Optional[str] = Depends(get_curren
 @router.get("/api/order_queue_status")
 async def get_order_queue_status(user: Optional[str] = Depends(get_current_user)):
     """获取订单队列状态"""
-    if not risk_manager:
+    manager = _get_risk_manager()
+    if manager is None:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    
+
     try:
-        queue_size = risk_manager.get_order_queue_size()
+        queue_size = manager.get_order_queue_size()
         return {
             "success": True,
             "queue_size": queue_size,
-            "processing": getattr(risk_manager, "processing_orders", False)
+            "processing": getattr(manager, "processing_orders", False)
         }
         
     except Exception as e:
@@ -226,8 +237,9 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
         
         leverage = {}
         try:
-            if 'risk_manager' in globals() and risk_manager is not None:
-                lev_map = getattr(risk_manager, 'leverage_map', None)
+            manager = _get_risk_manager()
+            if manager is not None:
+                lev_map = getattr(manager, 'leverage_map', None)
                 if isinstance(lev_map, dict):
                     leverage = {k: float(v) for k, v in lev_map.items()}
             if not leverage:
@@ -248,8 +260,9 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
                 if refreshed:
                     cached_snapshot = deepcopy(refreshed)
         else:
+            manager = _get_risk_manager()
             should_refresh = (
-                ('risk_manager' in globals() and risk_manager is not None)
+                (manager is not None)
                 and (now - _last_risk_config_updated_at > _RISK_CONFIG_REFRESH_INTERVAL)
                 and (now - _last_risk_config_attempt_at > 1.0)
                 and not _risk_config_lock.locked()
@@ -272,11 +285,12 @@ async def get_risk_config(user: Optional[str] = Depends(get_current_user)):
 # 新增：更新风控配置
 @router.put("/api/risk-config")
 async def update_risk_config(payload: RiskConfigUpdateRequest, user: Optional[str] = Depends(get_current_user)):
-    if 'risk_manager' not in globals() or risk_manager is None:
+    manager = _get_risk_manager()
+    if manager is None:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     try:
         updates = {k: v for k, v in payload.dict(exclude_none=True).items()}
-        new_cfg = risk_manager.update_config(updates)
+        new_cfg = manager.update_config(updates)
         global _last_risk_config, _last_risk_config_attempt_at, _last_risk_config_updated_at
         _last_risk_config = deepcopy(new_cfg)
         now = time.monotonic()
@@ -294,32 +308,34 @@ async def update_risk_config(payload: RiskConfigUpdateRequest, user: Optional[st
 @router.post("/api/position-sizing")
 async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str] = Depends(get_current_user)):
     """Position sizing calculation - optimized to only require symbol and stop_distance"""
-    if 'risk_manager' not in globals() or risk_manager is None:
+    manager = _get_risk_manager()
+    if manager is None:
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
-    
+
     try:
         # 获取实时账户信息
         account_info = {}
-        if connection_manager.is_connected():
+        services = core.get_container()
+        if connection_manager.is_connected() and services and services.ibkr_client is not None:
             try:
                 account_response = await asyncio.wait_for(
-                    core.ibkr_client.get_account_info(),
+                    services.ibkr_client.get_account_info(),
                     timeout=5.0
                 )
                 if account_response:
                     account_info = account_response
             except Exception as e:
                 logger.warning(f"Failed to get account info for position sizing: {e}")
-        
+
         # 更新风险管理器的账户状态
         if account_info:
-            risk_manager.update_equity_state(account_info)
+            manager.update_equity_state(account_info)
         
         # 使用异步执行器和超时来避免阻塞
         # 只传递必需的参数，其他参数使用默认值或让risk_manager自动估算
         loop = asyncio.get_event_loop()
         try:
-            res = await risk_manager.position_sizing(
+            res = await manager.position_sizing(
                 symbol=payload.symbol,
                 stop_distance=payload.stop_distance,
                 rv_current=None,  # 让risk_manager自动估算当前价格
