@@ -1,6 +1,18 @@
 # IBBot 部署与诊断指引
 
-本指南总结了使用 Docker Compose 与脚本工具部署 IBBot 的推荐流程，涵盖本地开发、生产环境切换以及部署后健康检查步骤。
+本指南总结了使用 Docker Compose 与脚本工具部署 IBBot 的推荐流程，涵盖本地开发、生产环境切换以及部署后健康检查步骤。文档同步了分阶段交付的能力矩阵，便于在不同阶段快速确认所需服务是否已经上线。
+
+## 阶段交付功能概览
+
+| 阶段 | 交付内容 | 关键目录/组件 |
+| --- | --- | --- |
+| 阶段 0：准备 | `.env` 模板、`data/logs` 结构、基础 README | 根目录 `.env.example`、`data/` |
+| 阶段 1：基础能力库 | Redis/Influx/日志/配置封装、诊断脚本 | `src/ibbot/{config,redis,influx,logging}`、`scripts/diagnose_foundation.py` |
+| 阶段 2：独立服务 | 指令执行、行情采集、行情聚合、风险、策略、通知、队列监控等后台服务 | `services/ib_command`、`services/ib_feed`、`services/market_data`、`services/risk`、`services/strategy`、`services/notification`、`services/queue_monitor` |
+| 阶段 3：主程序改造 | FastAPI 主应用整合新服务接口与监控视图 | `main.py`、`src/routes/monitoring.py`、`static/` |
+| 阶段 4：联调回归 | Docker Compose 全量联调、E2E/性能/故障注入测试 | `docker-compose*.yml`、`tests/{e2e,perf,failover}` |
+
+在部署前确认目标阶段所需目录或服务均存在，并参考下文的部署指引选择合适的启动组合。
 
 ## 1. 预备条件
 
@@ -17,9 +29,9 @@
 
 脚本会自动：
 
-1. 依次执行 `docker compose up -d <service>` 以确保依赖先行；
-2. 输出 `docker compose ps` 显示容器状态；
-3. 调用 `python scripts/diagnose_foundation.py` 检查 Redis、InfluxDB 与日志写入。
+1. 依次执行 `docker compose up -d <service>` 以确保依赖先行（顺序：Redis → InfluxDB → IB Gateway → 主服务 → 优化器 → UI → Cloudflare Tunnel）。
+2. 输出 `docker compose ps --format json` 并在 180 秒内等待所有已启动服务进入 `running/healthy` 状态。
+3. 调用 `python scripts/diagnose_foundation.py` 检查 Redis、InfluxDB 与日志写入（阶段 1 交付能力）。
 
 如需重启单个服务：
 
@@ -61,7 +73,14 @@
 ./scripts/deploy.sh diagnose
 ```
 
-`scripts/diagnose_foundation.py` 会基于 `ConfigProvider` 读取 Redis/Influx/日志配置，并给出详细的成功或失败原因。若 InfluxDB 使用全新凭据，请确保 `.env.local` 中的 `INFLUX_TOKEN`、`INFLUX_ORG`、`INFLUX_BUCKET` 与初始化参数一致。
+`scripts/diagnose_foundation.py` 会基于 `ConfigProvider` 读取 Redis/Influx/日志配置，并给出详细的成功或失败原因（若使用 `--no-diagnose` 可跳过）。
+
+阶段 2 及以后可进一步核对：
+
+- `services/queue_monitor` 写入的 Redis 快照 `hash:service:queue-monitor`（确认队列长度/滞留时间指标）。
+- 主服务 `/api/monitoring/influx/write-rate` 接口返回的 `service_metrics` 写入速率，用于验证 `services/ib_feed`、`services/market_data` 等服务上报是否正常。
+
+若 InfluxDB 使用全新凭据，请确保 `.env.local` 中的 `INFLUX_TOKEN`、`INFLUX_ORG`、`INFLUX_BUCKET` 与初始化参数一致。
 
 ## 5. CI 基本校验
 
@@ -78,3 +97,8 @@ GitHub Actions `ci.yml` 增加了 Docker Compose 冒烟测试步骤，会在拉�
 | Optimizer UI 无法访问 | 确认 `optimizer_ui/` 目录存在构建产物，并检查宿主机 `4173` 端口是否冲突。 |
 
 如需更深入的依赖说明，请参考 `docs/foundation_libs.md`。
+
+## 更多运维资料
+
+- 《服务阶段交付与运维概览》：`docs/service_delivery_overview.md`（阶段功能列表、各服务依赖矩阵）。
+- 《IBBot 运维手册与故障排查》：`docs/operations_manual.md`（操作步骤、指标、诊断流程）。
