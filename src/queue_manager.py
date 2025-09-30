@@ -233,14 +233,23 @@ class QueueManager:
         """停止队列工作器"""
         self.is_running = False
 
-        # 取消所有正在处理的任务
-        for task in self.processing_tasks.values():
+        # 取消所有正在处理的任务，并等待它们优雅退出
+        tasks_to_cancel = list(self.processing_tasks.values())
+        self.processing_tasks.clear()
+        for task in tasks_to_cancel:
             task.cancel()
-        
+
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
         # 等待工作器任务完成
-        if self._worker_task:
+        worker_task = self._worker_task
+        self._worker_task = None
+        if worker_task:
+            if not worker_task.done():
+                worker_task.cancel()
             try:
-                await self._worker_task
+                await worker_task
             except asyncio.CancelledError:
                 pass
 
@@ -252,55 +261,65 @@ class QueueManager:
 
     async def _worker_loop(self):
         """队列工作器主循环"""
-        while self.is_running:
-            try:
-                # 检查是否有待处理的任务且未达到并发限制
-                if (len(self.processing_tasks) < self.max_concurrent_tasks and 
-                    len(self.pending_queue) > 0):
-                    
-                    # 从队列头部取出任务
-                    task_id = self.pending_queue.pop(0)
-                    task = self.tasks.get(task_id)
-                    
-                    if task and task.status == "pending":
-                        # 当任务需要IBKR连接但当前未连接时，延后处理，避免无意义的失败与重试
-                        if task.task_type in ("strategy_order",) and not self._ib_connected():
-                            # 重新放回队列尾部，并短暂休眠以避免紧密轮询
-                            self.pending_queue.append(task_id)
-                            if self._should_log_deferral(task_id):
-                                queue_logger.debug(
-                                    f"Deferring task {task_id} due to IBKR not connected"
-                                )
-                            await asyncio.sleep(self._ib_disconnect_backoff)
-                            continue
-
-                        # 启动任务处理
-                        processing_task = asyncio.create_task(
-                            self._process_task(task)
-                        )
-                        self.processing_tasks[task_id] = processing_task
-                
-                # 清理已完成的任务
-                completed_task_ids = []
-                for task_id, processing_task in self.processing_tasks.items():
-                    if processing_task.done():
-                        completed_task_ids.append(task_id)
-
-                for task_id in completed_task_ids:
-                    del self.processing_tasks[task_id]
-                    self._last_deferral_notice.pop(task_id, None)
-
-                await self._monitor_queue_health()
-                # 短暂休眠避免CPU占用过高
-                await asyncio.sleep(0.1)
-
-            except Exception as e:
-                queue_logger.error(f"Worker loop error: {e}")
+        try:
+            while self.is_running:
                 try:
+                    # 检查是否有待处理的任务且未达到并发限制
+                    if (len(self.processing_tasks) < self.max_concurrent_tasks and
+                        len(self.pending_queue) > 0):
+
+                        # 从队列头部取出任务
+                        task_id = self.pending_queue.pop(0)
+                        task = self.tasks.get(task_id)
+
+                        if task and task.status == "pending":
+                            # 当任务需要IBKR连接但当前未连接时，延后处理，避免无意义的失败与重试
+                            if task.task_type in ("strategy_order",) and not self._ib_connected():
+                                # 重新放回队列尾部，并短暂休眠以避免紧密轮询
+                                self.pending_queue.append(task_id)
+                                if self._should_log_deferral(task_id):
+                                    queue_logger.debug(
+                                        f"Deferring task {task_id} due to IBKR not connected"
+                                    )
+                                await asyncio.sleep(self._ib_disconnect_backoff)
+                                continue
+
+                            # 启动任务处理
+                            processing_task = asyncio.create_task(
+                                self._process_task(task)
+                            )
+                            self.processing_tasks[task_id] = processing_task
+
+                    # 清理已完成的任务
+                    completed_task_ids = []
+                    for task_id, processing_task in self.processing_tasks.items():
+                        if processing_task.done():
+                            completed_task_ids.append(task_id)
+
+                    for task_id in completed_task_ids:
+                        del self.processing_tasks[task_id]
+                        self._last_deferral_notice.pop(task_id, None)
+
                     await self._monitor_queue_health()
-                except Exception:
-                    pass
-                await asyncio.sleep(1)
+                    # 短暂休眠避免CPU占用过高
+                    await asyncio.sleep(0.1)
+
+                except asyncio.CancelledError:
+                    queue_logger.info("Queue worker loop cancellation requested")
+                    raise
+                except Exception as e:
+                    queue_logger.error(f"Worker loop error: {e}")
+                    try:
+                        await self._monitor_queue_health()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            queue_logger.info("Queue worker loop cancelled")
+            raise
+        finally:
+            self.is_running = False
+            self._worker_task = None
 
     async def _process_task(self, task: QueueTask):
         """处理单个任务"""

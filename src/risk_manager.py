@@ -110,6 +110,14 @@ class RiskManager:
 
         # 监控状态
         self.monitoring_active = False
+
+        # 是否启用基于ATR的trail SL/TP逻辑
+        trailing_flag = os.getenv("ENABLE_TRAILING_SL_TP", "true").strip().lower()
+        self.trailing_sl_tp_enabled = trailing_flag not in {"0", "false", "off", "no"}
+        if not self.trailing_sl_tp_enabled:
+            risk_logger.warning(
+                "ATR trailing SL/TP disabled via configuration; falling back to fixed price rules"
+            )
         
         # 记录已警告的订单状态倒退，避免重复警告
         self.warned_order_downgrades = set()
@@ -204,11 +212,10 @@ class RiskManager:
         self._load_from_database()
         self._load_position_limits_from_db()
 
-    @staticmethod
     def _resolve_rule_type(
-        rule_type: Optional[str], auto_trailing: Optional[bool]
+        self, rule_type: Optional[str], auto_trailing: Optional[bool]
     ) -> Tuple[str, bool]:
-        """Normalise rule type and derive the trailing flag."""
+        """Normalise rule type and derive the trailing flag respecting runtime config."""
 
         candidate = (rule_type or "").strip().lower()
         if candidate in {"fixed", "trailing"}:
@@ -217,6 +224,11 @@ class RiskManager:
             resolved_type = "trailing" if auto_trailing else "fixed"
 
         resolved_auto = resolved_type == "trailing"
+
+        if not self.trailing_sl_tp_enabled and resolved_auto:
+            resolved_type = "fixed"
+            resolved_auto = False
+
         return resolved_type, resolved_auto
 
     def _sync_rule_trailing_state(self, rule: RiskRule) -> None:
