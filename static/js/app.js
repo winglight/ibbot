@@ -34,7 +34,7 @@ const {
 
 const fallbackNormalizeRuleStatus = (status) => {
     if (!status || typeof status !== 'object') {
-        return { passed: true, message: '正常' };
+        return { passed: true, message: 'Normal' };
     }
     const passed = status.passed !== undefined ? !!status.passed : true;
     let message = status.message;
@@ -52,7 +52,7 @@ const fallbackNormalizeRuleStatus = (status) => {
         }
     }
     if (!message) {
-        message = passed ? '正常' : '违规';
+        message = passed ? 'Normal' : 'Violation';
     }
     return { passed, message };
 };
@@ -1378,7 +1378,7 @@ class TradingApp {
         } catch (error) {
             clearTimeout(id);
             if (error.name === 'AbortError') {
-                throw new Error('请求超时，请稍后再试');
+                throw new Error('Request timed out, please try again later');
             }
             throw error;
         }
@@ -1407,7 +1407,7 @@ class TradingApp {
             if (!safeReadOnlyMethods.includes(normalizedMethod) && !readOnlyBypassEndpoints.includes(endpointPath)) {
                 const now = Date.now();
                 if (now - this.lastReadOnlyWarningAt > 1500) {
-                    this.showAlert('warning', '当前访客账号仅支持查看数据');
+                    this.showAlert('warning', 'The guest account can only view data');
                     this.lastReadOnlyWarningAt = now;
                 }
                 const readOnlyError = new Error('Read-only mode');
@@ -1825,7 +1825,7 @@ class TradingApp {
         try {
             // 验证订单ID
             if (!orderId || orderId.trim() === '') {
-                this.showAlert('warning', '订单ID不能为空');
+                this.showAlert('warning', 'Order ID cannot be empty');
                 return;
             }
             
@@ -1833,7 +1833,7 @@ class TradingApp {
             let result = await this.apiCall(`/orders/${orderId}`);
             
             if (!result || !result.order) {
-                this.showAlert('warning', `订单 ${orderId} 不存在或已被删除`);
+                this.showAlert('warning', `Order ${orderId} does not exist or has been deleted`);
                 return;
             }
             
@@ -1842,7 +1842,7 @@ class TradingApp {
             // 填充模态框内容
             const modalBody = document.getElementById('orderDetailsModalBody');
             if (!modalBody) {
-                this.showAlert('danger', '订单详情模态框未找到');
+                this.showAlert('danger', 'Order details modal not found');
                 return;
             }
             
@@ -1886,11 +1886,11 @@ class TradingApp {
                 if (!str) return '—';
                 switch (str) {
                     case 'strategy':
-                        return '策略';
+                        return 'Strategy';
                     case 'risk_rule':
-                        return '风控';
+                        return 'Risk Control';
                     case 'manual':
-                        return '手动';
+                        return 'Manual';
                     default:
                         return escapeText(str);
                 }
@@ -1915,50 +1915,50 @@ class TradingApp {
                 <div class="row g-3">
                     <div class="col-md-6">
                         <div class="card">
-                            <div class="card-header"><strong>基本信息</strong></div>
+                            <div class="card-header"><strong>Basic Information</strong></div>
                             <div class="card-body">
-                                <p><strong>订单ID:</strong> ${orderData.order_id}</p>
-                                <p><strong>股票代码:</strong> ${orderData.symbol}</p>
-                                <p><strong>操作:</strong> ${orderData.action}</p>
-                                <p><strong>数量:</strong> ${orderData.quantity}</p>
-                                <p><strong>订单类型:</strong> ${orderData.order_type}</p>
-                                <p><strong>状态:</strong> <span class="badge bg-${this.getStatusColor(orderData.status)}">${orderData.status}</span></p>
+                                <p><strong>Order ID:</strong> ${orderData.order_id}</p>
+                                <p><strong>Symbol:</strong> ${orderData.symbol}</p>
+                                <p><strong>Action:</strong> ${orderData.action}</p>
+                                <p><strong>Quantity:</strong> ${orderData.quantity}</p>
+                                <p><strong>Order Type:</strong> ${orderData.order_type}</p>
+                                <p><strong>Status:</strong> <span class="badge bg-${this.getStatusColor(orderData.status)}">${orderData.status}</span></p>
                             </div>
                         </div>
                     </div>
                     <div class="col-md-6">
                         <div class="card">
-                            <div class="card-header"><strong>价格信息</strong></div>
+                            <div class="card-header"><strong>Price Information</strong></div>
                             <div class="card-body">
-                                <p><strong>限价:</strong> ${formatPrice(orderData.limit_price)}</p>
-                                <p><strong>平均成交价:</strong> ${formatPrice(orderData.avg_fill_price)}</p>
-                                <p><strong>已成交:</strong> ${orderData.filled || 0}</p>
-                                <p><strong>剩余:</strong> ${orderData.remaining || 0}</p>
-                                <p><strong>佣金:</strong> ${formatPrice(orderData.commission)}</p>
+                                <p><strong>Limit Price:</strong> ${formatPrice(orderData.limit_price)}</p>
+                                <p><strong>Average Fill Price:</strong> ${formatPrice(orderData.avg_fill_price)}</p>
+                                <p><strong>Filled:</strong> ${orderData.filled || 0}</p>
+                                <p><strong>Remaining:</strong> ${orderData.remaining || 0}</p>
+                                <p><strong>Commission:</strong> ${formatPrice(orderData.commission)}</p>
                             </div>
                         </div>
                     </div>
                     <div class="col-12">
                         <div class="card">
-                            <div class="card-header"><strong>其他信息</strong></div>
+                            <div class="card-header"><strong>Additional Information</strong></div>
                             <div class="card-body">
                                 <div class="row row-cols-1 row-cols-md-2 g-2">
                                     <div class="col">
-                                        <p><strong>提交时间:</strong> ${formatDateTime(orderData.submit_time)}</p>
-                                        <p><strong>更新时间:</strong> ${formatDateTime(orderData.updated_at)}</p>
-                                        <p><strong>执行时间:</strong> ${formatDateTime(orderData.executed_at)}</p>
-                                        <p><strong>订单来源:</strong> ${sourceHtml}</p>
-                                        <p><strong>触发类型:</strong> ${formatTriggerType(orderData.trigger_type)}</p>
+                                        <p><strong>Submitted At:</strong> ${formatDateTime(orderData.submit_time)}</p>
+                                        <p><strong>Updated At:</strong> ${formatDateTime(orderData.updated_at)}</p>
+                                        <p><strong>Executed At:</strong> ${formatDateTime(orderData.executed_at)}</p>
+                                        <p><strong>Order Source:</strong> ${sourceHtml}</p>
+                                        <p><strong>Trigger Type:</strong> ${formatTriggerType(orderData.trigger_type)}</p>
                                     </div>
                                     <div class="col">
-                                        <p><strong>策略:</strong> ${strategyHtml}</p>
-                                        <p><strong>规则ID:</strong> ${formatText(orderData.rule_id)}</p>
-                                        <p><strong>父订单ID:</strong> ${formatText(orderData.parent_order_id)}</p>
-                                        <p><strong>交易所:</strong> ${formatText(orderData.exchange)}</p>
-                                        <p><strong>证券类型:</strong> ${formatText(orderData.sec_type)}</p>
+                                        <p><strong>Strategy:</strong> ${strategyHtml}</p>
+                                        <p><strong>Rule ID:</strong> ${formatText(orderData.rule_id)}</p>
+                                        <p><strong>Parent Order ID:</strong> ${formatText(orderData.parent_order_id)}</p>
+                                        <p><strong>Exchange:</strong> ${formatText(orderData.exchange)}</p>
+                                        <p><strong>Security Type:</strong> ${formatText(orderData.sec_type)}</p>
                                     </div>
                                 </div>
-                                <p class="mt-3"><strong>备注:</strong> ${notesHtml}</p>
+                                <p class="mt-3"><strong>Notes:</strong> ${notesHtml}</p>
                             </div>
                         </div>
                     </div>
@@ -1973,16 +1973,16 @@ class TradingApp {
             console.error('Failed to load order details:', error);
             
             // 根据错误类型提供更友好的错误信息
-            let errorMessage = '获取订单详情失败';
+            let errorMessage = 'Failed to get order details';
             if (error.message) {
                 if (error.message.includes('404') || error.message.includes('not found')) {
-                    errorMessage = `订单 ${orderId} 不存在`;
+                    errorMessage = `Order ${orderId} does not exist`;
                 } else if (error.message.includes('422') || error.message.includes('Unprocessable Entity')) {
-                    errorMessage = `订单ID格式无效: ${orderId}`;
+                    errorMessage = `Invalid order ID format: ${orderId}`;
                 } else if (error.message.includes('401') || error.message.includes('Authentication')) {
-                    errorMessage = '请先登录';
+                    errorMessage = 'Please log in first';
                 } else {
-                    errorMessage = `获取订单详情失败: ${error.message}`;
+                    errorMessage = `Failed to get order details: ${error.message}`;
                 }
             }
             
@@ -2199,20 +2199,20 @@ class TradingApp {
         if (!statusEl) return;
         statusEl.classList.remove('text-danger');
         if (state === 'loading') {
-            statusEl.textContent = '正在加载风控参数...';
+            statusEl.textContent = 'Loading risk parameters...';
         } else if (state === 'saving') {
-            statusEl.textContent = '正在保存风控设置...';
+            statusEl.textContent = 'Saving risk settings...';
         } else if (state === 'error') {
-            statusEl.textContent = message || '保存失败，请稍后重试。';
+            statusEl.textContent = message || 'Save failed, please try again later.';
             statusEl.classList.add('text-danger');
         } else if (state === 'reset') {
-            statusEl.textContent = '已恢复到最近保存的设置。';
+            statusEl.textContent = 'Reverted to the most recently saved settings.';
         } else if (state === 'loaded') {
-            statusEl.textContent = '风控设置已载入。';
+            statusEl.textContent = 'Risk settings loaded.';
         } else if (state === 'saved') {
-            statusEl.textContent = '风控设置已保存。';
+            statusEl.textContent = 'Risk settings saved.';
         } else {
-            statusEl.textContent = message || '风控设置';
+            statusEl.textContent = message || 'Risk settings';
         }
     }
 
@@ -2255,7 +2255,7 @@ class TradingApp {
             this.updateRiskSettingsStatus('loaded');
         } catch (error) {
             console.error('Failed to load strategy risk settings', error);
-            this.updateRiskSettingsStatus('error', '无法加载风控设置。');
+            this.updateRiskSettingsStatus('error', 'Unable to load risk settings.');
         }
     }
 
@@ -2277,7 +2277,7 @@ class TradingApp {
                 if (!Number.isNaN(parsed) && parsed >= 0) {
                     payload.max_positions = parsed;
                 } else {
-                    this.showAlert('danger', '持仓数量上限需为非负整数');
+                    this.showAlert('danger', 'Position limit must be a non-negative integer');
                     return;
                 }
             } else {
@@ -2292,7 +2292,7 @@ class TradingApp {
             if (raw) {
                 const parsed = Number.parseInt(raw, 10);
                 if (Number.isNaN(parsed) || parsed < 0) {
-                    this.showAlert('danger', '浮亏持续时间需为非负整数');
+                    this.showAlert('danger', 'Floating loss duration must be a non-negative integer');
                     return;
                 }
                 payload.loss_time_threshold = parsed;
@@ -2305,7 +2305,7 @@ class TradingApp {
             if (raw) {
                 const parsed = Number.parseFloat(raw);
                 if (Number.isNaN(parsed)) {
-                    this.showAlert('danger', '浮亏判定阈值格式不正确');
+                    this.showAlert('danger', 'Invalid format for floating loss threshold');
                     return;
                 }
                 payload.loss_pnl_threshold = parsed;
@@ -2330,11 +2330,11 @@ class TradingApp {
             this.currentRiskSettings = res.settings || payload;
             this.renderRiskSettingsForm(this.currentRiskSettings);
             this.updateRiskSettingsStatus('saved');
-            this.showAlert('success', '风控设置已保存');
+            this.showAlert('success', 'Risk settings saved');
         } catch (error) {
             console.error('Failed to save strategy risk settings', error);
             this.updateRiskSettingsStatus('error', error?.message);
-            this.showAlert('danger', '保存风控设置失败，请稍后重试。');
+            this.showAlert('danger', 'Failed to save risk settings, please try again later.');
         } finally {
             this.riskSettingsSaving = false;
         }
@@ -2707,7 +2707,7 @@ class TradingApp {
                 const chartState = this.getStrategyChartState();
                 if (!chartState.currentStrategy) return;
                 if (!chartState.symbol) {
-                    this.updateStrategyChartStatus('缺少标的');
+                    this.updateStrategyChartStatus('Missing underlying symbol');
                     return;
                 }
 
@@ -2716,13 +2716,13 @@ class TradingApp {
 
                 if (!tabLoaded) {
                     if (chartState.loading) {
-                        this.updateStrategyChartStatus('加载中...');
+                        this.updateStrategyChartStatus('Loading...');
                     }
                     return;
                 }
 
                 if (chartState.loading) {
-                    this.updateStrategyChartStatus('加载中...');
+                    this.updateStrategyChartStatus('Loading...');
                     return;
                 }
 
@@ -2794,7 +2794,7 @@ class TradingApp {
             this.destroyStrategyChart();
             const container = document.getElementById('strategyChartContainer');
             if (container) {
-                container.innerHTML = '<div class="text-center text-muted py-5">加载策略后将显示K线图。</div>';
+                container.innerHTML = '<div class="text-center text-muted py-5">The candlestick chart will appear after loading a strategy.</div>';
             }
         }
         this.updateStrategyChartSummary();
@@ -2950,8 +2950,8 @@ class TradingApp {
 
         if (!state.fullBars || !state.fullBars.length) {
             this.destroyStrategyChart();
-            container.innerHTML = '<div class="alert alert-warning mb-0">暂无K线数据</div>';
-            this.updateStrategyChartStatus(options.extraStatus || '暂无K线数据');
+            container.innerHTML = '<div class="alert alert-warning mb-0">No candlestick data available</div>';
+            this.updateStrategyChartStatus(options.extraStatus || 'No candlestick data available');
             return;
         }
 
@@ -3000,7 +3000,7 @@ class TradingApp {
         let volumeDatasetConfigForUpdate = { ...volumeDatasetForCreation };
         const extraParts = [];
         if (visibleOrders.length) {
-            extraParts.push(`成交 ${visibleOrders.length} 笔`);
+            extraParts.push(`Filled ${visibleOrders.length} orders`);
         }
         if (options.extraStatus) {
             extraParts.push(options.extraStatus);
@@ -3009,7 +3009,7 @@ class TradingApp {
         const useCandles = state.useCandlestick !== false && this.candlestickSupported;
         const desiredType = useCandles ? 'candlestick' : 'line';
         if (!useCandles) {
-            extraParts.push('折线展示');
+            extraParts.push('Line chart');
         }
         const lineSeries = ohlc.map((bar) => ({ x: bar.x, y: bar.c }));
         if (this.strategyChartInstance && this.strategyChartInstance.config?.type !== desiredType) {
@@ -3091,9 +3091,9 @@ class TradingApp {
                                         const raw = context.raw?.order;
                                         if (raw) {
                                             const when = new Date(raw.time).toLocaleString();
-                                            return `买入 ${raw.price.toFixed(2)} @ ${when}`;
+                                            return `Buy ${raw.price.toFixed(2)} @ ${when}`;
                                         }
-                                        return `买入 ${context.parsed.y}`;
+                                        return `Buy ${context.parsed.y}`;
                                     },
                                 },
                             },
@@ -3120,9 +3120,9 @@ class TradingApp {
                                         const raw = context.raw?.order;
                                         if (raw) {
                                             const when = new Date(raw.time).toLocaleString();
-                                            return `卖出 ${raw.price.toFixed(2)} @ ${when}`;
+                                            return `Sell ${raw.price.toFixed(2)} @ ${when}`;
                                         }
-                                        return `卖出 ${context.parsed.y}`;
+                                        return `Sell ${context.parsed.y}`;
                                     },
                                 },
                             },
@@ -3144,7 +3144,7 @@ class TradingApp {
                             hidden: !slLine.length,
                             tooltip: {
                                 callbacks: {
-                                    label: (context) => `止损 ${this.formatNumber(context.parsed.y)}`,
+                                    label: (context) => `Stop Loss ${this.formatNumber(context.parsed.y)}`,
                                 },
                             },
                         },
@@ -3165,7 +3165,7 @@ class TradingApp {
                             hidden: !tpLine.length,
                             tooltip: {
                                 callbacks: {
-                                    label: (context) => `止盈 ${this.formatNumber(context.parsed.y)}`,
+                                    label: (context) => `Take Profit ${this.formatNumber(context.parsed.y)}`,
                                 },
                             },
                         },
@@ -3289,7 +3289,7 @@ class TradingApp {
         if (state.symbol) parts.push(state.symbol);
         if (state.interval) parts.push(state.interval);
         if (state.duration) parts.push(state.duration);
-        summaryEl.textContent = parts.length ? parts.join(' · ') : '尚未加载图表';
+        summaryEl.textContent = parts.length ? parts.join(' · ') : 'Chart not loaded yet';
     }
 
     updateStrategyChartButtons() {
@@ -3299,7 +3299,7 @@ class TradingApp {
             const active = state.isRealtime;
             realtimeBtn.classList.toggle('btn-success', active);
             realtimeBtn.classList.toggle('btn-outline-success', !active);
-            realtimeBtn.innerHTML = active ? '<i class="fas fa-pause"></i> 停止' : '<i class="fas fa-play"></i> 实时';
+            realtimeBtn.innerHTML = active ? '<i class="fas fa-pause"></i> Stop' : '<i class="fas fa-play"></i> Live';
             realtimeBtn.disabled = !active && state.loading;
         }
         const replayBtn = document.getElementById('strategyChartReplayBtn');
@@ -3307,7 +3307,7 @@ class TradingApp {
             const playing = state.isReplaying;
             replayBtn.classList.toggle('btn-primary', playing);
             replayBtn.classList.toggle('btn-outline-secondary', !playing);
-            replayBtn.innerHTML = playing ? '<i class="fas fa-stop"></i> 停止回放' : '<i class="fas fa-history"></i> 回放';
+            replayBtn.innerHTML = playing ? '<i class="fas fa-stop"></i> Stop Replay' : '<i class="fas fa-history"></i> Replay';
             replayBtn.disabled = !playing && state.loading;
         }
     }
@@ -3317,7 +3317,7 @@ class TradingApp {
         if (!statusEl) return;
         const state = this.getStrategyChartState();
         if (state.loading) {
-            statusEl.textContent = '加载中...';
+            statusEl.textContent = 'Loading...';
             return;
         }
         if (!state.fullBars || !state.fullBars.length) {
@@ -3326,14 +3326,14 @@ class TradingApp {
         }
         const total = state.fullBars.length;
         const visible = Math.max(1, Math.min(state.visibleCount || total, total));
-        let text = `已显示 ${visible}/${total} 根K线`;
+        let text = `Showing ${visible}/${total} candlesticks`;
         if (extraText) {
             text += ` · ${extraText}`;
         }
         if (state.isRealtime) {
-            text = `实时更新 · ${text}`;
+            text = `Live update · ${text}`;
         } else if (state.isReplaying) {
-            text = `回放中 · ${text}`;
+            text = `Replaying · ${text}`;
         }
         statusEl.textContent = text;
     }
@@ -3367,12 +3367,12 @@ class TradingApp {
         const container = document.getElementById('strategyChartContainer');
         if (!state.symbol) {
             if (container) {
-                container.innerHTML = '<div class="alert alert-warning mb-0">策略未配置标的，无法加载K线图。</div>';
+                container.innerHTML = '<div class="alert alert-warning mb-0">Strategy has no symbol configured, unable to load chart.</div>';
             }
             state.fullBars = [];
             state.visibleCount = 0;
             this.updateStrategyChartButtons();
-            this.updateStrategyChartStatus('缺少标的');
+            this.updateStrategyChartStatus('Missing underlying symbol');
             return;
         }
 
@@ -3380,7 +3380,7 @@ class TradingApp {
         state.loadToken = loadToken;
         state.loading = true;
         this.updateStrategyChartButtons();
-        this.updateStrategyChartStatus('加载中...');
+        this.updateStrategyChartStatus('Loading...');
         console.log('[StrategyChart] 开始加载策略K线数据', {
             name,
             symbol: state.symbol,
@@ -3389,7 +3389,7 @@ class TradingApp {
             options
         });
         if (container && !this.strategyChartInstance) {
-            container.innerHTML = '<div class="text-center text-muted py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2">加载图表数据中...</p></div>';
+            container.innerHTML = '<div class="text-center text-muted py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2">Loading chart data...</p></div>';
         }
 
         const interval = state.interval || '5 mins';
@@ -3446,11 +3446,11 @@ class TradingApp {
             if (!response || !Array.isArray(response.data) || !response.data.length) {
                 this.destroyStrategyChart();
                 if (container) {
-                    container.innerHTML = '<div class="alert alert-warning mb-0">暂无K线数据</div>';
+                    container.innerHTML = '<div class="alert alert-warning mb-0">No candlestick data available</div>';
                 }
                 state.fullBars = [];
                 state.visibleCount = 0;
-                this.updateStrategyChartStatus('暂无K线数据');
+                this.updateStrategyChartStatus('No candlestick data available');
                 return;
             }
 
@@ -3491,11 +3491,11 @@ class TradingApp {
             if (!bars.length) {
                 this.destroyStrategyChart();
                 if (container) {
-                    container.innerHTML = '<div class="alert alert-warning mb-0">暂无有效K线数据</div>';
+                    container.innerHTML = '<div class="alert alert-warning mb-0">No valid candlestick data</div>';
                 }
                 state.fullBars = [];
                 state.visibleCount = 0;
-                this.updateStrategyChartStatus('暂无有效K线数据');
+                this.updateStrategyChartStatus('No valid candlestick data');
                 return;
             }
 
@@ -3514,12 +3514,12 @@ class TradingApp {
             }
             console.error('Failed to load strategy chart:', error);
             if (container) {
-                const message = error?.message || '加载策略图表失败';
+                const message = error?.message || 'Failed to load strategy chart';
                 container.innerHTML = `<div class="alert alert-danger mb-0">${message}</div>`;
             }
             state.fullBars = [];
             state.visibleCount = 0;
-            this.updateStrategyChartStatus('加载失败');
+            this.updateStrategyChartStatus('Load failed');
         } finally {
             if (state.loadToken === loadToken) {
                 state.loadToken = null;
@@ -3535,7 +3535,7 @@ class TradingApp {
     startStrategyChartRealtime() {
         const state = this.getStrategyChartState();
         if (!state.currentStrategy || !state.symbol) {
-            this.updateStrategyChartStatus('缺少标的，无法实时刷新');
+            this.updateStrategyChartStatus('Missing symbol, cannot refresh in real-time');
             return;
         }
         this.stopStrategyChartPlayback({ restoreFull: true, silent: true });
@@ -3585,14 +3585,14 @@ class TradingApp {
         const todayKey = this.getLocalDayKey(Date.now());
         const todaysOrders = state.orders.filter((order) => order.dayKey === todayKey);
         if (!todaysOrders.length) {
-            this.updateStrategyChartStatus('今日暂无成交记录');
+            this.updateStrategyChartStatus('No trades today');
             return;
         }
 
         const firstOrderTime = todaysOrders[0].time;
         const startIndex = state.fullBars.findIndex((bar) => bar.x >= firstOrderTime);
         if (startIndex === -1) {
-            this.updateStrategyChartStatus('当前区间无今日成交对应的K线');
+            this.updateStrategyChartStatus('No candlestick matches today's trades in the current range');
             return;
         }
 
@@ -3633,13 +3633,13 @@ class TradingApp {
             state.visibleCount = state.fullBars.length;
         }
         if (!silent && (wasReplaying || complete)) {
-            this.renderStrategyChart({ extraStatus: complete ? '回放完成' : '' });
+            this.renderStrategyChart({ extraStatus: complete ? 'Replay complete' : '' });
         } else if (!silent) {
-            this.updateStrategyChartStatus(complete ? '回放完成' : '');
+            this.updateStrategyChartStatus(complete ? 'Replay complete' : '');
         }
         this.updateStrategyChartButtons();
         if (complete && silent) {
-            this.updateStrategyChartStatus('回放完成');
+            this.updateStrategyChartStatus('Replay complete');
         }
     }
 
@@ -3885,7 +3885,7 @@ class TradingApp {
         // 检查连接状态，避免在连接不稳定时进行价格获取
         if (!this.connected) {
             priceDisplay.style.display = 'block';
-            priceValue.textContent = '连接中...';
+            priceValue.textContent = 'Connecting...';
             priceValue.className = 'fw-bold text-warning';
             return;
         }
@@ -3893,7 +3893,7 @@ class TradingApp {
         try {
             // 显示加载状态
             priceDisplay.style.display = 'block';
-            priceValue.textContent = '加载中...';
+            priceValue.textContent = 'Loading...';
             priceValue.className = 'fw-bold text-muted';
             
             // 使用缓存的当前价格接口
@@ -3904,7 +3904,7 @@ class TradingApp {
                 priceValue.className = 'fw-bold text-primary';
                 
                 // 显示数据源信息
-                priceValue.title = `数据源: 缓存`;
+                priceValue.title = `Data source: cache`;
                 
                 // 如果是市价单，自动填入价格输入框（即使是disabled状态）
                 const orderTypeSelect = document.getElementById('orderType');
@@ -3915,12 +3915,12 @@ class TradingApp {
                     orderPriceInput.dispatchEvent(new Event('input'));
                 }
             } else {
-                priceValue.textContent = '获取失败';
+                priceValue.textContent = 'Failed to fetch';
                 priceValue.className = 'fw-bold text-warning';
             }
         } catch (error) {
             console.error('获取当前价格失败:', error);
-            priceValue.textContent = '获取失败';
+            priceValue.textContent = 'Failed to fetch';
             priceValue.className = 'fw-bold text-danger';
         }
     }
@@ -4103,13 +4103,13 @@ class TradingApp {
         if (statusText) {
             statusText.classList.remove('text-success', 'text-warning', 'text-muted');
             if (pending) {
-                statusText.textContent = '保存中…';
+                statusText.textContent = 'Saving…';
                 statusText.classList.add('text-muted');
             } else if (effective) {
-                statusText.textContent = '当前状态：已启用，在美股节假日会自动暂停数据推送。';
+                statusText.textContent = 'Current status: Enabled. Data pushes pause automatically on US market holidays.';
                 statusText.classList.add('text-success');
             } else {
-                statusText.textContent = '当前状态：已关闭，节假日也会继续推送数据。';
+                statusText.textContent = 'Current status: Disabled. Data pushes continue during holidays.';
                 statusText.classList.add('text-warning');
             }
         }
@@ -4178,7 +4178,7 @@ class TradingApp {
             if (!this.isAuthenticated()) {
                 event.preventDefault();
                 this.setHolidayDataPushState(resolveState());
-                this.showAlert('warning', '请先登录后再修改节假日推送设置');
+                this.showAlert('warning', 'Please log in before changing holiday push settings');
                 return;
             }
 
@@ -4205,12 +4205,12 @@ class TradingApp {
                 this.showAlert(
                     'success',
                     desired
-                        ? '节假日暂停数据推送已启用'
-                        : '已关闭节假日暂停数据推送'
+                        ? 'Holiday data pause enabled'
+                        : 'Holiday data pause disabled'
                 );
             } catch (error) {
                 console.error('Failed to update holiday data push setting:', error);
-                this.showAlert('danger', '保存节假日推送设置失败');
+                this.showAlert('danger', 'Failed to save holiday push settings');
                 this.setHolidayDataPushState(previous);
             }
         });
@@ -4221,10 +4221,10 @@ class TradingApp {
             const quantityInput = document.getElementById('orderQuantity');
             if (quantityInput) {
                 quantityInput.value = this.lastSuggestedQuantity;
-                this.showAlert('success', '已应用建议数量');
+                this.showAlert('success', 'Suggested quantity applied');
             }
         } else {
-            this.showAlert('warning', '没有可用的建议数量');
+            this.showAlert('warning', 'No suggested quantity available');
         }
     }
 
