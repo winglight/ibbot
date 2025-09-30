@@ -6,9 +6,10 @@
 
 所有基础依赖均通过 `src.ibbot.config.ConfigProvider` 加载，优先级为：
 
-1. `.env` 中的默认值；
-2. `.env.local` 或其他运行环境变量的覆写；
-3. （可选）Redis `hash:config:<module>` 中的热更新配置，模块名默认为 `foundation`。
+1. `.env.local` 中的私有覆写（若存在）以及当前进程的环境变量；
+2. `.env` 中的共享默认值（通常由 `.env.example` 模板复制而来）；
+3. 当 `.env` 缺失时，自动回退到 `.env.example` 模板提供的默认值；
+4. （可选）Redis `hash:config:<module>` 中的热更新配置，模块名默认为 `foundation`。
 
 下表列出了与三项依赖相关的关键键值，均可写入 `.env` 或 Redis 配置散列：
 
