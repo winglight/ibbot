@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | 阶段 0：准备 | 初始化仓库后 | `.env.example` 模板、`data/logs` 目录、README 基础结构 | `README.md` 的“快速开始”、`data/.gitkeep` 保留目录结构 |
 | 阶段 1：基础能力库 | 基础依赖可被脚本消费 | 统一配置加载、Redis/Influx 封装、日志管理、诊断脚本 | `src/ibbot/{config,redis,influx,logging}`、`scripts/diagnose_foundation.py` 可独立运行 |
-| 阶段 2：独立服务 | 微服务容器可启动并协同 | 指令执行（`ib_command`）、行情采集（`ib_feed`）、行情聚合（`market_data`）、风险引擎、策略调度、通知下发、队列监控、优化器 | 对应 `services/*` 目录均包含 `main.py` 与运行时逻辑；`docker-compose.yml` 暴露各容器 |
+| 阶段 2：独立服务 | 微服务容器可启动并协同 | 指令执行（`ib_command`）、行情采集（`ib_feed`）、行情聚合（`market_data`）、风险引擎、策略调度、通知下发、队列监控、优化器 | 对应 `services/*` 目录均包含 `main.py` 与运行时逻辑；`docker/local.compose.yml` 暴露各容器 |
 | 阶段 3：主程序改造 | 主应用对接新增服务 | FastAPI 路由整合、监控仪表盘、Influx 查询接口、UI 更新 | `main.py`、`src/routes/monitoring.py`、`static/index.html` 中的监控面板 |
 | 阶段 4：联调与回归 | 交付前验收 | Docker Compose 全量联调、端到端/性能/故障注入测试覆盖、CI 冒烟 | `tests/{e2e,perf,failover}`、`scripts/perf/run_benchmark.py`、`.github/workflows/ci.yml`（如存在） |
 
@@ -31,7 +31,7 @@
 
 1. **阶段 1 → 阶段 2**：部署前确保 Redis/Influx 已通过 `scripts/diagnose_foundation.py` 验证；各服务的 `SERVICE_NAME` 需在配置中心写入订阅标的、队列键等参数。
 2. **阶段 2 → 阶段 3**：主服务需加载新增路由（如 `/api/monitoring/influx/write-rate`）并开放给前端；记得同步更新 `static/index.html` 的监控组件。
-3. **阶段 3 → 阶段 4**：在 `docker-compose.yml` 中加入所有服务，执行 `./scripts/deploy.sh up --env local --build` 进行联调，再按照测试清单运行单元/集成/E2E/性能/故障注入。
+3. **阶段 3 → 阶段 4**：在 `docker/local.compose.yml` 中加入所有服务，执行 `./scripts/deploy.sh up --env local --build` 进行联调，再按照测试清单运行单元/集成/E2E/性能/故障注入。
 4. **回滚策略**：若新阶段出现异常，可通过 `./scripts/deploy.sh restart <service>` 单独重启；必要时在配置中心将新服务标记为禁用（例如从 Redis `hash:config:<service>` 删除订阅）。
 
 ## 与其他文档的关系

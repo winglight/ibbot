@@ -126,7 +126,7 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 
 配置步骤：
 1. 在 `.env` 或部署环境中设置上述变量，Redis/Influx 任意一项缺失即保持内存/Noop 模式。
-2. 确保容器或主机已部署对应服务，`docker-compose.yml` 可参考 `redis` 与 `influxdb` 服务暴露的端口。
+2. 确保容器或主机已部署对应服务，可参考 `docker/local.compose.yml` 中 `redis` 与 `influxdb` 的端口映射。
 3. 重启应用后，日志会输出 `Using Redis cache backend...` 或 `Using InfluxDB persistence backend...`，确认接入成功。
 
 ## Compatibility Layer
@@ -142,7 +142,7 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 ### Phase 0 – Preparation & Baseline
 - 定义数据契约与 envelope（本文件所述），创建 JSON Schema。
 - 为现有 DOM 流、行情查询建立单元与集成基线测试，确保可回归。
-- 搭建 InfluxDB / Redis 本地 docker-compose 配置（可复用现有服务）。
+- 搭建 InfluxDB / Redis 本地 docker compose 配置（可复用现有服务，建议直接复用 `docker/local.compose.yml` 中的定义）。
 
 ### Phase 1 – Core Infrastructure
 - 实现 `EventBus`（in-process variant）及测试用假实现。

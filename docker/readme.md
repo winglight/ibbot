@@ -1,6 +1,6 @@
 # Docker 部署与使用指南
 
-本目录提供容器化部署 IBBot 所需的基础镜像与历史 Compose 示例。自本次更新后，**根目录的 `docker-compose.yml`/`docker-compose.prod.yml` 与 `scripts/deploy.sh`**
+本目录提供容器化部署 IBBot 所需的基础镜像与历史 Compose 示例。自本次更新后，**`docker/local.compose.yml`、`docker/prod.compose.yml` 与 `scripts/deploy.sh`**
 成为推荐入口，用于在本地或生产环境按依赖顺序拉起 Redis、InfluxDB、服务端以及前端 UI。
 
 ## 1. 前置条件
@@ -23,7 +23,7 @@
 ./scripts/deploy.sh down
 ```
 
-根目录 `docker-compose.yml` 包含以下组件：
+`docker/local.compose.yml` 包含以下组件：
 
 - **redis**：缓存与配置中心，默认对宿主机开放 `6379` 端口。
 - **influxdb**：行情写入与指标存储，默认开放 `8086`。
@@ -41,7 +41,7 @@
 
 ## 3. 生产环境覆盖层
 
-若需要部署到 VPS/服务器，可在同一命令基础上增加 `--env production`，脚本会额外加载 `docker-compose.prod.yml`：
+若需要部署到 VPS/服务器，可在同一命令基础上增加 `--env production`，脚本会额外加载 `docker/prod.compose.yml`：
 
 ```bash
 ./scripts/deploy.sh up --env production

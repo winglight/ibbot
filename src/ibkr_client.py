@@ -690,7 +690,7 @@ class IBKRClient:
             command = self._gateway_restart_cmd
             shell = True
         else:
-            compose_file = self.connection_manager._project_root / "docker" / "docker-compose.yml"
+            compose_file = self.connection_manager._project_root / "docker" / "local.compose.yml"
             if compose_file.exists():
                 command = [
                     "docker",
@@ -711,7 +711,7 @@ class IBKRClient:
         success = await asyncio.to_thread(self._run_restart_command, command, shell)
 
         if not success and not self._gateway_restart_cmd:
-            compose_file = self.connection_manager._project_root / "docker" / "docker-compose.yml"
+            compose_file = self.connection_manager._project_root / "docker" / "local.compose.yml"
             fallback_cmd = ["docker-compose"]
             if compose_file.exists():
                 fallback_cmd.extend(["-f", str(compose_file)])

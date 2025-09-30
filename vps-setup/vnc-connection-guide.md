@@ -53,7 +53,7 @@ lsof -i :5900
 
 #### 步骤2：检查VPS上的VNC服务
 ```bash
-ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gateway ps aux | grep vnc'
+ssh vps-ibbot 'docker compose -f ~/ibbot/docker/local.compose.yml exec ib-gateway ps aux | grep vnc'
 ```
 
 #### 步骤3：重启VNC服务
@@ -92,10 +92,10 @@ ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gatew
 
 ```bash
 # 停止现有VNC
-ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gateway pkill x11vnc'
+ssh vps-ibbot 'docker compose -f ~/ibbot/docker/local.compose.yml exec ib-gateway pkill x11vnc'
 
 # 启动带有不同参数的VNC
-ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gateway bash -c "
+ssh vps-ibbot 'docker compose -f ~/ibbot/docker/local.compose.yml exec ib-gateway bash -c "
 export DISPLAY=:1
 x11vnc -passwd t8Dgc9T6Y&uRI!O! \
     -forever \
@@ -117,7 +117,7 @@ x11vnc -passwd t8Dgc9T6Y&uRI!O! \
 
 #### 使用无密码模式（仅用于测试）
 ```bash
-ssh vps-ibbot 'docker compose -f ~/ibbot/docker/docker-compose.yml exec ib-gateway bash -c "
+ssh vps-ibbot 'docker compose -f ~/ibbot/docker/local.compose.yml exec ib-gateway bash -c "
 export DISPLAY=:1
 x11vnc -nopw -forever -display :1 -rfbport 5900 -shared -bg
 "'

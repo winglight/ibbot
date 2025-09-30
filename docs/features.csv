@@ -19,5 +19,5 @@ DOM分析,参数调优,集成优化器与自动化调度接口,已完成,中,sci
 数据层,数据库管理器,统一管理订单、风控、策略等SQLite存储并提供快照服务,已完成,高,SQLite + dataclasses,src/database.py; src/account_snapshot_service.py
 缓存,Redis可选缓存,在Redis可用时提供共享缓存与流水记录,部分可用,中,redis.asyncio,src/cache.py
 WebSocket,实时消息聚合,多频道推送账户、队列、DOM与策略事件,已完成,中,FastAPI + websockets,src/websocket_manager.py; src/routes/websocket.py
-部署,容器化部署,提供开发与生产docker-compose及Cloudflare隧道示例,已完成,中,Docker,docker/Dockerfile; docker/docker-compose.yml; docker/docker-compose.prod.yml
+部署,容器化部署,提供开发与生产docker-compose及Cloudflare隧道示例,已完成,中,Docker,docker/Dockerfile; docker/local.compose.yml; docker/prod.compose.yml
 运维,远程部署脚本,快速在VPS创建依赖、端口转发与上下文,已完成,中,Bash,vps-setup/*.sh; vps-setup/README.md
