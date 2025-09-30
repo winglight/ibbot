@@ -133,6 +133,11 @@ class ConnectionManager:
         self._pre_restart_attempted = False
         self._process_restart_enabled = _get_env_bool("IBKR_ENABLE_PROCESS_RESTART", False)
         self._restart_suppressed_logged = False
+        self._loop_timeout_warning_interval = max(
+            0.1, _get_env_float("IBKR_LOOP_TIMEOUT_WARNING_INTERVAL_SEC", 5.0)
+        )
+        self._last_loop_timeout_warning = 0.0
+        self._loop_timeout_warning_suppressed = 0
         
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
@@ -590,7 +595,9 @@ class ConnectionManager:
                 # 保存事件循环引用
                 self._loop = loop
                 self._connection_thread_alive = True
-                
+                self._loop_timeout_warning_suppressed = 0
+                self._last_loop_timeout_warning = 0.0
+
                 # 保持事件循环运行，直到明确要求断开连接
                 try:
                     while self._connection_thread_alive and self.ib.isConnected():
@@ -599,7 +606,25 @@ class ConnectionManager:
                             await asyncio.wait_for(asyncio.sleep(0.1), timeout=1.0)
                         except asyncio.TimeoutError:
                             # 如果连sleep都超时，说明事件循环可能有问题
-                            connection_logger.warning("Event loop sleep timeout, checking connection health")
+                            now = time.monotonic()
+                            if now - self._last_loop_timeout_warning >= self._loop_timeout_warning_interval:
+                                if self._loop_timeout_warning_suppressed:
+                                    connection_logger.warning(
+                                        "Event loop sleep timeout, checking connection health "
+                                        f"(suppressed {self._loop_timeout_warning_suppressed} duplicates)"
+                                    )
+                                    self._loop_timeout_warning_suppressed = 0
+                                else:
+                                    connection_logger.warning(
+                                        "Event loop sleep timeout, checking connection health"
+                                    )
+                                self._last_loop_timeout_warning = now
+                            else:
+                                self._loop_timeout_warning_suppressed += 1
+                                connection_logger.debug(
+                                    "Event loop sleep timeout detected but warning suppressed",
+                                    suppressed=self._loop_timeout_warning_suppressed,
+                                )
                             if not self.ib.isConnected():
                                 break
                         except RuntimeError as e:
