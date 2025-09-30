@@ -22,13 +22,39 @@ def load_project_env(extra_files: Iterable[Path | str] | None = None) -> None:
         canonical files and therefore override previous values.
     """
 
-    env_files: Sequence[tuple[Path, bool]] = (
-        (PROJECT_ROOT / ".env", False),
-        (PROJECT_ROOT / ".env.local", True),
+    env_local = PROJECT_ROOT / ".env.local"
+    env_file = PROJECT_ROOT / ".env"
+    template_files: Sequence[Path] = (
+        PROJECT_ROOT / ".env.example",
+        PROJECT_ROOT / "config" / "defaults.env",
     )
 
+    env_files: list[tuple[Path, bool]] = []
+
+    if env_local.exists():
+        env_files.append((env_local, True))
+
+    base_file: Path | None = None
+    if env_file.exists():
+        base_file = env_file
+    else:
+        for template in template_files:
+            if template.exists():
+                base_file = template
+                break
+
+        if base_file is None:
+            template_hint = " or ".join(f"`{path.name}`" for path in template_files)
+            raise FileNotFoundError(
+                "Missing `.env` file. Copy "
+                f"{template_hint or 'the provided template'} to `.env` or `.env.local` "
+                "and retry."
+            )
+
+    env_files.append((base_file, False))
+
     for file_path, override in env_files:
-        if file_path.exists():
+        if file_path:
             load_dotenv(dotenv_path=file_path, override=override)
 
     if extra_files:

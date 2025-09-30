@@ -47,7 +47,7 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 
 ```text
 .
-├── .env                     # Canonical defaults loaded by src.config.env
+├── .env.example             # Template defaults copied to `.env` / `.env.local`
 ├── data/
 │   ├── .gitkeep             # 保留目录结构，实际数据按需生成
 │   └── logs/                # 运行期日志输出位置
@@ -63,7 +63,7 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 ```
 
 - `data/` 下的内容在部署时自动生成，`data/logs/` 会被 Docker 与本地脚本复用。
-- `.env` 负责共享默认值，`.env.local` 可覆盖敏感凭据而无需提交。
+- `.env.example` 提供共享默认值模板；将其复制为 `.env`（团队共用）或 `.env.local`（私有覆写）。
 
 ## 🚀 快速开始
 
@@ -77,15 +77,16 @@ pip install -r requirements.txt
 
 ### 2. 配置环境变量
 
-根目录的 `.env` 已经整理出全部默认值并附带注释。`src.config.load_project_env` 会先加载 `.env`，如果存在 `.env.local` 则自动覆盖对应项，便于区分共享配置与私密凭据。
-
-可选的本地覆盖步骤：
+根目录提供 `.env.example` 模板，包含全部默认值及注释。首次启动前请执行以下步骤：
 
 ```bash
-cp .env .env.local  # 创建本地覆写文件
+cp .env.example .env        # （可选）创建共享默认配置
+cp .env.example .env.local  # 建议创建，仅保存本地覆写
 ```
 
-随后在 `.env.local` 中修改关键变量，例如：
+`src.config.load_project_env` 会优先加载 `.env.local`，随后回退到 `.env`。如果两者均不存在，则自动尝试读取模板并提示创建实际文件，以便对敏感凭据进行覆盖。
+
+在 `.env.local` 中修改关键变量，例如：
 
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `JWT_SECRET`：后台认证与安全。
 - `VISITOR_USERNAME` / `VISITOR_PASSWORD`：访客只读账号（可留空）。
