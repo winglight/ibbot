@@ -2,7 +2,8 @@ import asyncio
 import time
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Awaitable, Union
+from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import dataclass, asdict
 from loguru import logger
 import json
@@ -539,6 +540,48 @@ class QueueManager:
         except Exception:
             return None
 
+    def _schedule_notification_task(
+        self,
+        coro: Awaitable[Any],
+        *,
+        name: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """在后台调度通知发送任务，避免阻塞当前协程。"""
+
+        def _log_result(task: Union[asyncio.Future, ConcurrentFuture]) -> None:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                queue_logger.bind(event=name, **(context or {})).debug(
+                    "Notification task cancelled"
+                )
+            except Exception as exc:  # pragma: no cover - best effort logging
+                queue_logger.bind(event=name, **(context or {}), error=str(exc)).warning(
+                    "Notification task failed"
+                )
+
+        try:
+            task = asyncio.create_task(coro, name=name)
+        except RuntimeError:
+            if self._loop and self._loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+                future.add_done_callback(_log_result)
+                return
+            # 如果没有事件循环，只能同步执行以确保通知发送
+            queue_logger.bind(event=name, **(context or {})).debug(
+                "No running loop for notification task; executing synchronously"
+            )
+            try:
+                asyncio.run(coro)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                queue_logger.bind(event=name, **(context or {}), error=str(exc)).warning(
+                    "Synchronous notification execution failed"
+                )
+            return
+
+        task.add_done_callback(_log_result)
+
     async def _notify_queue_state(self, state: str) -> None:
         manager = self._resolve_notification_manager()
         if not manager:
@@ -552,13 +595,17 @@ class QueueManager:
             f"挂起: {status['pending_count']} | 处理中: {status['processing_count']} | 失败: {status['failed_count']}"
         )
 
-        await manager.send_notification(
-            message=f"{message}\n{detail_line}",
-            event_type=f"queue_{state}",
-            queue_state=state,
-            pending=status["pending_count"],
-            processing=status["processing_count"],
-            failed=status["failed_count"],
+        self._schedule_notification_task(
+            manager.send_notification(
+                message=f"{message}\n{detail_line}",
+                event_type=f"queue_{state}",
+                queue_state=state,
+                pending=status["pending_count"],
+                processing=status["processing_count"],
+                failed=status["failed_count"],
+            ),
+            name=f"queue-notify-{state}",
+            context={"state": state},
         )
 
     async def _send_queue_backlog_alert(
@@ -578,14 +625,18 @@ class QueueManager:
             f"最大重试次数: {max_retry}"
         )
 
-        await manager.send_notification(
-            message=message,
-            event_type="queue_warning",
-            pending=status["pending_count"],
-            processing=status["processing_count"],
-            oldest_task=oldest.get("task_id"),
-            oldest_wait_seconds=oldest.get("age_seconds"),
-            max_retry=max_retry,
+        self._schedule_notification_task(
+            manager.send_notification(
+                message=message,
+                event_type="queue_warning",
+                pending=status["pending_count"],
+                processing=status["processing_count"],
+                oldest_task=oldest.get("task_id"),
+                oldest_wait_seconds=oldest.get("age_seconds"),
+                max_retry=max_retry,
+            ),
+            name="queue-backlog-alert",
+            context={"pending": status["pending_count"], "oldest_task": oldest.get("task_id")},
         )
 
     async def _monitor_queue_health(self) -> None:

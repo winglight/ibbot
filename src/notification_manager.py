@@ -214,7 +214,37 @@ class NotificationManager:
 
         return settings
 
-    async def send_notification(self, message: str, event_type: str = "general", 
+    async def _save_notification_history(
+        self,
+        *,
+        channel: str,
+        event_type: str,
+        message: str,
+        status: str,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """在后台线程中保存通知历史，避免阻塞事件循环。"""
+
+        if not self.db_manager:
+            return
+
+        try:
+            await asyncio.to_thread(
+                self.db_manager.save_notification_history,
+                channel=channel,
+                event_type=event_type,
+                message=message,
+                status=status,
+                error_message=error_message,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            notification_logger.warning(
+                f"Failed to persist notification history: {exc}",
+                channel=channel,
+                event_type=event_type,
+            )
+
+    async def send_notification(self, message: str, event_type: str = "general",
                                channels: List[str] = None, **kwargs) -> Dict[str, bool]:
         """发送通知到指定渠道
 
@@ -276,31 +306,29 @@ class NotificationManager:
                 results['telegram'] = success
                 
                 # 保存到数据库（仅记录尝试发送的渠道）
-                if self.db_manager:
-                    status = 'sent' if success else 'failed'
-                    error_msg = None if success else 'Failed to send Telegram notification'
-                    self.db_manager.save_notification_history(
-                        channel='telegram',
-                        event_type=event_type,
-                        message=message,
-                        status=status,
-                        error_message=error_msg
-                    )
-                
+                status = 'sent' if success else 'failed'
+                error_msg = None if success else 'Failed to send Telegram notification'
+                await self._save_notification_history(
+                    channel='telegram',
+                    event_type=event_type,
+                    message=message,
+                    status=status,
+                    error_message=error_msg,
+                )
+
                 notification_logger.info(f"Telegram notification {'sent' if success else 'failed'}: {event_type}")
             except Exception as e:
                 results['telegram'] = False
                 notification_logger.error(f"Failed to send Telegram notification: {e}")
-                
+
                 # 保存错误到数据库
-                if self.db_manager:
-                    self.db_manager.save_notification_history(
-                        channel='telegram',
-                        event_type=event_type,
-                        message=message,
-                        status='failed',
-                        error_message=str(e)
-                    )
+                await self._save_notification_history(
+                    channel='telegram',
+                    event_type=event_type,
+                    message=message,
+                    status='failed',
+                    error_message=str(e),
+                )
         
         # 发送WebSocket通知（仅在启用时）
         if 'websocket' in allowed:
@@ -315,13 +343,12 @@ class NotificationManager:
                 results['websocket'] = True
                 
                 # 保存到数据库
-                if self.db_manager:
-                    self.db_manager.save_notification_history(
-                        channel='websocket',
-                        event_type=event_type,
-                        message=message,
-                        status='sent'
-                    )
+                await self._save_notification_history(
+                    channel='websocket',
+                    event_type=event_type,
+                    message=message,
+                    status='sent',
+                )
                 
                 notification_logger.info(f"WebSocket notification sent: {event_type}")
             except Exception as e:
@@ -329,15 +356,14 @@ class NotificationManager:
                 notification_logger.error(f"Failed to send WebSocket notification: {e}")
                 
                 # 保存错误到数据库
-                if self.db_manager:
-                    self.db_manager.save_notification_history(
-                        channel='websocket',
-                        event_type=event_type,
-                        message=message,
-                        status='failed',
-                        error_message=str(e)
-                    )
-        
+                await self._save_notification_history(
+                    channel='websocket',
+                    event_type=event_type,
+                    message=message,
+                    status='failed',
+                    error_message=str(e),
+                )
+
         return results
     
     async def send_order_notification(self, order_type: str, symbol: str, quantity: int,
