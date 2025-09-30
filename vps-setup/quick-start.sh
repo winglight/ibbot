@@ -66,13 +66,24 @@ for port in "${PORTS[@]}"; do
 done
 sleep 2
 
+BUSY_PORTS=()
 for port in "${PORTS[@]}"; do
     if lsof -i :$port >/dev/null 2>&1; then
         echo "⚠️  端口 $port 已被占用，尝试释放..."
         lsof -ti :$port | xargs kill -9 2>/dev/null || true
         sleep 1
+        if lsof -i :$port >/dev/null 2>&1; then
+            BUSY_PORTS+=("$port")
+        fi
     fi
 done
+
+if [ ${#BUSY_PORTS[@]} -ne 0 ]; then
+    echo "❌ 以下端口仍被占用，无法建立端口转发: ${BUSY_PORTS[*]}"
+    echo "👉 请手动关闭相关程序或调整脚本中的端口配置后重试"
+    exit 1
+fi
+
 echo "✅ 端口检查完成"
 
 # 启动端口转发
