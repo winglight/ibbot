@@ -25,7 +25,7 @@ from collections import deque
 
 from loguru import logger
 
-from src.dom_settings import get_logging_settings
+from src.dom_settings import get_logging_settings, is_parameter_tuner_enabled
 
 try:  # Python 3.9+
     from zoneinfo import ZoneInfo
@@ -127,6 +127,7 @@ class DOMParameterTuner:
             key: {sub: float(val) for sub, val in dict(value).items()}
             for key, value in (feature_thresholds or DEFAULT_FEATURE_THRESHOLDS).items()
         }
+        self.enabled = is_parameter_tuner_enabled()
         self.profiles: Dict[str, SessionProfile] = {
             "RTH": SessionProfile(RollingStats(stats_window), RollingStats(stats_window)),
             "ETH": SessionProfile(RollingStats(stats_window), RollingStats(stats_window)),
@@ -143,7 +144,28 @@ class DOMParameterTuner:
         else:
             self.session_tz = timezone.utc
         self._pending_sweeps: List[Dict[str, int]] = []
-        self.thresholds: Dict[str, Dict[str, float]] = self._compute_thresholds("RTH", self.profiles["RTH"])
+        if self.enabled:
+            self.thresholds = self._compute_thresholds("RTH", self.profiles["RTH"])
+        else:
+            self.thresholds = self._static_thresholds("RTH")
+            logger.info(
+                "DOM parameter tuner disabled via environment flag",
+                env_flag="DOM_DISABLE_PARAMETER_TUNER",
+            )
+
+    # ------------------------------------------------------------------
+    def _static_thresholds(self, session: str) -> Dict[str, Dict[str, float]]:
+        return {
+            "session": {"active": session},
+            "long": {key: float(value) for key, value in self.base_thresholds["long"].items()},
+            "short": {key: float(value) for key, value in self.base_thresholds["short"].items()},
+            "absorb": {key: float(value) for key, value in self.base_thresholds["absorb"].items()},
+            "sweep": {key: float(value) for key, value in self.base_thresholds["sweep"].items()},
+            "features": {
+                key: {sub: float(val) for sub, val in values.items()}
+                for key, values in self.feature_thresholds.items()
+            },
+        }
 
     # ------------------------------------------------------------------
     def _current_session(self, timestamp_ns: Optional[int]) -> str:
@@ -165,6 +187,8 @@ class DOMParameterTuner:
 
     # ------------------------------------------------------------------
     def _decay_penalties(self, profile: SessionProfile) -> None:
+        if not self.enabled:
+            return
         profile.long_penalty *= self.penalty_decay
         profile.short_penalty *= self.penalty_decay
         profile.ofi_long_penalty *= self.penalty_decay
@@ -172,6 +196,8 @@ class DOMParameterTuner:
 
     # ------------------------------------------------------------------
     def _register_false_long(self, profile: SessionProfile) -> None:
+        if not self.enabled:
+            return
         prev_long = profile.long_penalty
         prev_ofi = profile.ofi_long_penalty
         profile.long_penalty = min(profile.long_penalty + self.penalty_step, self.max_penalty)
@@ -186,6 +212,8 @@ class DOMParameterTuner:
 
     # ------------------------------------------------------------------
     def _register_false_short(self, profile: SessionProfile) -> None:
+        if not self.enabled:
+            return
         prev_short = profile.short_penalty
         prev_ofi = profile.ofi_short_penalty
         profile.short_penalty = min(profile.short_penalty + self.penalty_step, self.max_penalty)
@@ -202,6 +230,8 @@ class DOMParameterTuner:
     def _update_pending_sweeps(
         self, profile: SessionProfile, metrics: Dict[str, float], events: Iterable[str]
     ) -> None:
+        if not self.enabled:
+            return
         timestamp_ns = int(metrics.get("timestamp_ns", 0))
         # Register newly detected sweeps
         for event in events:
@@ -277,9 +307,13 @@ class DOMParameterTuner:
             Events detected with the previous thresholds.  Used to monitor
             false sweeps and adjust penalties accordingly.
         """
-
         timestamp_ns = metrics.get("timestamp_ns")
         session = self._current_session(timestamp_ns if isinstance(timestamp_ns, int) else None)
+
+        if not self.enabled:
+            self.thresholds = self._static_thresholds(session)
+            return self.thresholds
+
         profile = self.profiles[session]
         profile.last_timestamp_ns = int(timestamp_ns) if isinstance(timestamp_ns, int) else None
 
