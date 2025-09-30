@@ -1,0 +1,287 @@
+"""Core components for the IB command service."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Mapping, MutableMapping
+
+from src.ibbot.logging import get_logger
+from src.ibbot.redis import (
+    DEFAULT_COMMAND_QUEUE,
+    get_queue_length,
+)
+
+try:  # redis is optional in some test environments
+    from redis.asyncio import Redis
+except Exception:  # pragma: no cover - fallback when redis is unavailable
+    Redis = Any  # type: ignore[misc, assignment]
+
+
+class IBCommandError(Exception):
+    """Base exception for command execution errors."""
+
+
+class RetryableIBCommandError(IBCommandError):
+    """Exception raised when a command should be retried."""
+
+
+class IBCommandExecutionError(IBCommandError):
+    """Exception raised for fatal command execution errors."""
+
+
+@dataclass(slots=True)
+class ExecutionResult:
+    """Structured result returned by the executor."""
+
+    command_id: str
+    status: str
+    result: Any | None
+    attempts: int
+    error: str | None = None
+
+
+class IBCommandExecutor:
+    """Invoke methods on the injected IB client."""
+
+    def __init__(self, ib_client: Any, *, logger_name: str = "ibbot.services.ib_command.executor") -> None:
+        self._ib_client = ib_client
+        self._logger = get_logger(logger_name)
+
+    async def execute(self, command: Mapping[str, Any], *, attempts: int) -> ExecutionResult:
+        command_id = str(command.get("command_id") or "")
+        method_name = command.get("method") or command.get("action")
+        args = command.get("args") or []
+        kwargs = command.get("kwargs") or {}
+
+        if not method_name:
+            raise IBCommandExecutionError("command missing 'method' field")
+
+        if not hasattr(self._ib_client, method_name):
+            raise IBCommandExecutionError(f"IB client has no method '{method_name}'")
+
+        method = getattr(self._ib_client, method_name)
+        self._logger.info(
+            "Executing IB command",
+            extra={
+                "command_id": command_id,
+                "method": method_name,
+                "attempt": attempts,
+            },
+        )
+
+        try:
+            result = await self._invoke(method, *args, **kwargs)
+        except RetryableIBCommandError:
+            raise
+        except IBCommandError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive wrap
+            raise IBCommandExecutionError(str(exc)) from exc
+
+        return ExecutionResult(
+            command_id=command_id,
+            status="success",
+            result=result,
+            attempts=attempts,
+        )
+
+    async def _invoke(self, method: Any, *args: Any, **kwargs: Any) -> Any:
+        value = method(*args, **kwargs)
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+
+class ResultPublisher:
+    """Publish command execution results to Redis and log files."""
+
+    def __init__(
+        self,
+        redis: Redis,
+        *,
+        stream_key: str = "stream:ib:results",
+        hash_prefix: str = "hash:ib:result",
+        logger_name: str = "ibbot.services.ib_command.results",
+    ) -> None:
+        self._redis = redis
+        self._stream_key = stream_key
+        self._hash_prefix = hash_prefix.rstrip(":")
+        self._logger = get_logger(logger_name)
+
+    async def publish(self, payload: ExecutionResult) -> None:
+        message = self._to_message(payload)
+        await self._redis.xadd(self._stream_key, message)
+        await self._redis.hset(self._hash_key(payload.command_id), mapping=message)
+
+        if payload.status == "success":
+            self._logger.info(
+                "IB command succeeded",
+                extra={
+                    "command_id": payload.command_id,
+                    "attempts": payload.attempts,
+                },
+            )
+        else:
+            self._logger.error(
+                "IB command failed",
+                extra={
+                    "command_id": payload.command_id,
+                    "attempts": payload.attempts,
+                    "error": payload.error,
+                },
+            )
+
+    def _hash_key(self, command_id: str) -> str:
+        suffix = command_id or "unknown"
+        return f"{self._hash_prefix}:{suffix}"
+
+    def _to_message(self, payload: ExecutionResult) -> MutableMapping[str, str]:
+        message: dict[str, str] = {
+            "command_id": payload.command_id,
+            "status": payload.status,
+            "attempts": str(payload.attempts),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if payload.result is not None:
+            message["result"] = self._serialize(payload.result)
+        if payload.error:
+            message["error"] = payload.error
+        return message
+
+    def _serialize(self, value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except TypeError:
+            return json.dumps(str(value), ensure_ascii=False)
+
+
+class CommandConsumer:
+    """Consume IB commands from Redis and execute them sequentially."""
+
+    def __init__(
+        self,
+        redis: Redis,
+        executor: IBCommandExecutor,
+        publisher: ResultPublisher,
+        *,
+        queue_key: str = DEFAULT_COMMAND_QUEUE,
+        poll_timeout: float = 1.0,
+        default_max_retries: int = 3,
+        retry_delay: float = 1.0,
+        health_key: str = "hash:service:health:ib-command",
+        logger_name: str = "ibbot.services.ib_command.consumer",
+    ) -> None:
+        self._redis = redis
+        self._executor = executor
+        self._publisher = publisher
+        self._queue_key = queue_key
+        self._poll_timeout = poll_timeout
+        self._default_max_retries = max(0, int(default_max_retries))
+        self._retry_delay = max(0.0, float(retry_delay))
+        self._health_key = health_key
+        self._logger = get_logger(logger_name)
+        self._stopping = asyncio.Event()
+        self._last_error: str = ""
+
+    async def consume_forever(self) -> None:
+        self._stopping.clear()
+        while not self._stopping.is_set():
+            await self._tick()
+
+    def stop(self) -> None:
+        self._stopping.set()
+
+    async def _tick(self) -> None:
+        try:
+            item = await self._redis.blpop(self._queue_key, timeout=self._poll_timeout)
+        except Exception as exc:  # pragma: no cover - redis failure
+            await self._update_health(last_error=str(exc))
+            await asyncio.sleep(self._retry_delay)
+            return
+
+        if item is None:
+            await self._update_health()
+            return
+
+        _, raw_payload = item
+        try:
+            command = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            self._logger.error("Failed to decode command", extra={"error": str(exc), "payload": raw_payload})
+            await self._update_health(last_error=str(exc))
+            return
+
+        command_id = str(command.get("command_id") or "")
+        max_retries = int(command.get("max_retries", self._default_max_retries))
+        attempts = 0
+        last_error: str | None = None
+
+        while True:
+            attempts += 1
+            try:
+                result = await self._executor.execute(command, attempts=attempts)
+            except RetryableIBCommandError as exc:
+                last_error = str(exc)
+                if attempts > max_retries:
+                    await self._publish_failure(command_id, attempts, last_error)
+                    break
+                self._logger.warning(
+                    "Retryable IB command failure",
+                    extra={
+                        "command_id": command_id,
+                        "attempt": attempts,
+                        "max_retries": max_retries,
+                        "error": last_error,
+                    },
+                )
+                await asyncio.sleep(self._retry_delay)
+                continue
+            except IBCommandError as exc:
+                last_error = str(exc)
+                await self._publish_failure(command_id, attempts, last_error)
+                break
+            except Exception as exc:  # pragma: no cover - defensive guard
+                last_error = str(exc)
+                await self._publish_failure(command_id, attempts, last_error)
+                break
+            else:
+                await self._publisher.publish(result)
+                self._last_error = ""
+                await self._update_health()
+                return
+
+        await self._update_health(last_error=last_error)
+
+    async def _publish_failure(self, command_id: str, attempts: int, error: str | None) -> None:
+        payload = ExecutionResult(
+            command_id=command_id,
+            status="failed",
+            result=None,
+            attempts=attempts,
+            error=error,
+        )
+        await self._publisher.publish(payload)
+
+    async def _update_health(self, *, last_error: str | None = None) -> None:
+        queue_depth = await self._safe_queue_depth()
+        if last_error is not None:
+            self._last_error = last_error or ""
+        values = {
+            "last_seen": datetime.now(timezone.utc).isoformat(),
+            "queue_depth": str(queue_depth),
+            "last_error": self._last_error,
+        }
+        try:
+            await self._redis.hset(self._health_key, mapping=values)
+        except Exception:  # pragma: no cover - defensive guard
+            self._logger.warning("Failed to update health information", extra={"values": values})
+
+    async def _safe_queue_depth(self) -> int:
+        try:
+            return await get_queue_length(self._queue_key, redis=self._redis)
+        except Exception:  # pragma: no cover - redis failure path
+            return -1
