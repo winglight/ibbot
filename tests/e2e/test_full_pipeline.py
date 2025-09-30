@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import inspect
 import json
 from typing import Any, Mapping
@@ -10,6 +11,12 @@ from httpx import ASGITransport, AsyncClient
 from services.ib_command import CommandConsumer, IBCommandExecutor, ResultPublisher
 from services.ib_command.components import ExecutionResult
 from services.market_data.main import MarketDataRuntime
+from services.optimizer.main import (
+    EVENT_STREAM_KEY,
+    RESULT_KEY_TEMPLATE,
+    OptimizerService,
+    create_app as create_optimizer_app,
+)
 from services.risk import RiskRuntime
 from services.strategy import StrategyAdapter, StrategyTaskConsumer
 
@@ -633,3 +640,98 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
         await asyncio.wait_for(strategy_task, timeout=2.0)
         await risk_runtime.stop()
         await market_runtime.stop()
+
+
+def test_optimizer_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    asyncio.run(_run_optimizer_flow(monkeypatch))
+
+
+async def _run_optimizer_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis = InMemoryRedis()
+
+    async def fake_influx_query(_: str) -> list[dict[str, Any]]:
+        return [
+            {"timestamp": "2023-01-01T00:00:00Z", "value": 1.2},
+            {"timestamp": "2023-01-01T00:01:00Z", "value": 0.8},
+            {"timestamp": "2023-01-01T00:02:00Z", "value": 1.0},
+        ]
+
+    service = OptimizerService(redis_factory=lambda: redis, influx_query=fake_influx_query)
+
+    optimizer_module = importlib.import_module("services.optimizer.main")
+    monkeypatch.setattr(optimizer_module, "load_project_env", lambda: None)
+    monkeypatch.setattr(optimizer_module, "ensure_optimizer_ui_dir", lambda: None)
+
+    strategy_id = "demo-strategy"
+    await redis.hset(
+        f"hash:optimizer:strategy:{strategy_id}:config",
+        mapping={
+            "name": json.dumps("demo"),
+            "risk": json.dumps("medium"),
+            "features": json.dumps({"alpha": 0.2, "beta": 0.8}),
+        },
+    )
+    await redis.hset(
+        f"hash:optimizer:strategy:{strategy_id}:params",
+        mapping={
+            "lookback": json.dumps([60, 120, 240]),
+            "threshold": json.dumps([0.1, 0.15, 0.2]),
+        },
+    )
+    await redis.hset(
+        f"hash:optimizer:strategy:{strategy_id}:history",
+        mapping={
+            "sharpe": json.dumps(0.85),
+            "runs": json.dumps(12),
+        },
+    )
+
+    app = create_optimizer_app(service=service)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/optimizer/tasks",
+            json={
+                "task_id": "opt-task-1",
+                "strategy_id": strategy_id,
+                "training_query": "from(bucket:\"optimizer_signals\")",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"task_id": "opt-task-1", "status": "accepted"}
+
+        progress_entries = await redis.xrange(EVENT_STREAM_KEY)
+        assert [entry[1]["type"] for entry in progress_entries] == [
+            "task_submitted",
+            "task_progress",
+            "task_completed",
+        ]
+        assert [entry[1]["progress"] for entry in progress_entries] == ["0", "50", "100"]
+
+        stored_result = await redis.hgetall(RESULT_KEY_TEMPLATE.format(task_id="opt-task-1"))
+        assert stored_result["status"] == "completed"
+        assert json.loads(stored_result["best_params"]) == {
+            "lookback": 60,
+            "threshold": 0.1,
+        }
+        metrics = json.loads(stored_result["metrics"])
+        assert metrics["baseline_sharpe"] == pytest.approx(0.85)
+        assert metrics["score"] == pytest.approx(1.0)
+        assert metrics["config"]["risk"] == "medium"
+        assert stored_result["samples"] == "3"
+
+        result_response = await client.get("/api/optimizer/tasks/opt-task-1/result")
+        assert result_response.status_code == 200
+        result_payload = result_response.json()
+        assert result_payload["task_id"] == "opt-task-1"
+        assert result_payload["status"] == "completed"
+        assert result_payload["best_params"] == {
+            "lookback": 60,
+            "threshold": 0.1,
+        }
+        assert result_payload["metrics"]["score"] == pytest.approx(1.0)
+        assert result_payload["metrics"]["baseline_sharpe"] == pytest.approx(0.85)
+        assert result_payload["metrics"]["config"]["features"] == {"alpha": 0.2, "beta": 0.8}
+        assert result_payload["samples"] == 3
