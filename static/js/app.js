@@ -3592,7 +3592,7 @@ class TradingApp {
         const firstOrderTime = todaysOrders[0].time;
         const startIndex = state.fullBars.findIndex((bar) => bar.x >= firstOrderTime);
         if (startIndex === -1) {
-            this.updateStrategyChartStatus('No candlestick matches today's trades in the current range');
+            this.updateStrategyChartStatus("No candlestick matches today's trades in the current range");
             return;
         }
 
