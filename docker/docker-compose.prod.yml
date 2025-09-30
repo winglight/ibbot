@@ -46,7 +46,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ../logs:/app/logs
+      - ../data/logs:/app/logs
       - ../data:/app/data
       - ../strategy:/app/strategy
       - /etc/localtime:/etc/localtime:ro

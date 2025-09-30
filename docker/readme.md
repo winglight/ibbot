@@ -11,7 +11,7 @@
 
 - Docker Engine 20+ 与 docker compose 插件。
 - 宿主机开放端口：`8000`(Web)、`5800`(noVNC)、`5900`(VNC，可选)、`4001/4002`(IB API)。
-- 首次运行会自动创建持久化目录：`./logs`、`./data`、`./strategy`、`./data/ibgateway`。
+- 首次运行会自动创建持久化目录：`./data/logs`、`./data`、`./strategy`、`./data/ibgateway`。
 
 ## 2. 开发/测试环境 (`docker-compose.yml`)
 
@@ -39,7 +39,7 @@ docker compose -f docker/docker-compose.yml logs -f
 
 | 宿主机路径 | 容器路径 | 说明 |
 | --- | --- | --- |
-| `./logs` | `/app/logs` | 结构化日志 |
+| `./data/logs` | `/app/logs` | 结构化日志 |
 | `./data` | `/app/data` | SQLite、缓存文件等 |
 | `./strategy` | `/app/strategy` | 策略脚本 |
 | `./data/ibgateway` | `/config` | IB Gateway 配置缓存 |
@@ -104,6 +104,6 @@ docker push ghcr.io/<OWNER>/ibbot:<TAG>
 | ibbot 连接失败 | 确认 IB Gateway 已登录且 API 端口与 `IBKR_HOST/PORT` 一致 |
 | 5800/5900 暴露过宽 | 通过安全组或 compose 自定义网络限制访问来源 |
 | 访问日志接口提示 `Authentication required` | 先通过 `/api/login` 获取 JWT，并在请求头附带 `Authorization: Bearer <token>` |
-| 日志位置 | 宿主机 `./logs/trading_bot.log` |
+| 日志位置 | 宿主机 `./data/logs/trading_bot.log` |
 
 更多部署实践可参考根目录 README 及 `vps-setup/README.md`。

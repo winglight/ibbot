@@ -1,6 +1,16 @@
-.env
-data
-logs
+# Environment overrides
+.env.local
+
+# Data directories generated at runtime
+data/*
+!data/.gitkeep
+!data/logs/
+data/logs/*
+!data/logs/.gitkeep
+
+# Legacy paths kept for compatibility
+/logs
+
 __pycache__
 .DS_Store
 strategy

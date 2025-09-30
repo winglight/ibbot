@@ -3,14 +3,14 @@ from typing import Optional
 
 import httpx
 from loguru import logger
-from dotenv import load_dotenv
+from src.config import load_project_env
 
 from .utils import now_local
 
 # 为Telegram通知模块绑定日志记录器
 telegram_logger = logger.bind(module="telegram_notifier", request_id="-")
 
-load_dotenv()
+load_project_env()
 
 
 class TelegramNotifier:

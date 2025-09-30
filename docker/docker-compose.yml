@@ -58,7 +58,7 @@ services:
       - DOM_AUTOMATION_DEFAULT_LIMIT=500
 
     volumes:
-      - ../logs:/app/logs
+      - ../data/logs:/app/logs
       - ../data:/app/data
       - ../src/strategies:/app/src/strategies
     depends_on:

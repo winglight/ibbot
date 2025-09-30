@@ -41,6 +41,29 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 - **src/routes/** 按功能拆分的 REST/WebSocket 接口；`docs/api_doc.json` 自动从 OpenAPI 导出。
 - **src/dom_*** 深度行情分析、参数调优与自动化调度。
 - **src/optimizer_service/** 提供 DOM 优化任务编排与异步执行。
+- **src/config/** 统一加载 `.env` 与 `.env.local`，供 CLI 与服务端脚本复用。
+
+## 📁 基础目录结构
+
+```text
+.
+├── .env                     # Canonical defaults loaded by src.config.env
+├── data/
+│   ├── .gitkeep             # 保留目录结构，实际数据按需生成
+│   └── logs/                # 运行期日志输出位置
+├── docker/                  # Dockerfile 与 Compose 定义
+├── src/
+│   ├── config/              # 环境变量加载与配置辅助
+│   ├── routes/              # REST / WebSocket 路由
+│   ├── data_layer/          # 行情与持久化抽象
+│   └── utils/               # 公共工具、缓存、策略辅助
+├── static/                  # 前端静态资源
+├── optimizer_ui/            # 优化器 Web UI 构建产物
+└── vps-setup/               # VPS 部署与诊断脚本
+```
+
+- `data/` 下的内容在部署时自动生成，`data/logs/` 会被 Docker 与本地脚本复用。
+- `.env` 负责共享默认值，`.env.local` 可覆盖敏感凭据而无需提交。
 
 ## 🚀 快速开始
 
@@ -54,20 +77,22 @@ pip install -r requirements.txt
 
 ### 2. 配置环境变量
 
-复制模板后按需修改：
+根目录的 `.env` 已经整理出全部默认值并附带注释。`src.config.load_project_env` 会先加载 `.env`，如果存在 `.env.local` 则自动覆盖对应项，便于区分共享配置与私密凭据。
+
+可选的本地覆盖步骤：
 
 ```bash
-cp .env.example .env
+cp .env .env.local  # 创建本地覆写文件
 ```
 
-关键变量：
+随后在 `.env.local` 中修改关键变量，例如：
 
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `JWT_SECRET`：后台认证与安全。
-- `VISITOR_USERNAME` / `VISITOR_PASSWORD`：可选访客只读账号。
+- `VISITOR_USERNAME` / `VISITOR_PASSWORD`：访客只读账号（可留空）。
 - `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING`：IBKR 连接配置。
-- `AUTO_CONNECT=false`：开发阶段建议禁用自动连接。
-- `PNL_BROADCAST_INTERVAL_SEC`、`ACCOUNT_BROADCAST_INTERVAL_SEC`：WebSocket 广播节奏。
-- Redis 可选：`REDIS_URL` 或 `REDIS_HOST/PORT/DB`。
+- `AUTO_CONNECT` / `IBBOT_DISABLE_TRADING`：启动时自动连接与交易禁用开关。
+- `REDIS_URL` 或 `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB`：缓存与队列依赖。
+- `DATA_LAYER_*`、`TELEGRAM_*` 等按需启用的可选能力。
 
 ### 3. 启动服务
 
