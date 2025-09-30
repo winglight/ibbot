@@ -16,6 +16,39 @@ services:
       - "${IB_GATEWAY_API_PORT2:-4002}:4004"
       - "${IB_GATEWAY_WEB_PORT:-5800}:5800"
       - "${IB_GATEWAY_VNC_PORT:-5900}:5900"
+  ib-command:
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+  ib-feed:
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+  market-data:
+    ports:
+      - "${MARKET_DATA_PORT:-8010}:8010"
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+  risk:
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+  strategy:
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+      - ${IBBOT_STRATEGY_DIR:-/var/lib/ibbot/strategies}:/app/src/strategies
+  notification:
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+  queue-monitor:
+    ports:
+      - "${QUEUE_MONITOR_PORT:-8011}:8011"
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
   ibbot:
     environment:
       AUTO_CONNECT: ${AUTO_CONNECT:-true}

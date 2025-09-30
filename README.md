@@ -173,6 +173,34 @@ pytest
 - [docker/readme.md](docker/readme.md)：本地/生产 compose、镜像推送与 Cloudflare Tunnel。
 - [vps-setup/README.md](vps-setup/README.md)：在 VPS 上一键安装依赖、配置 SSH 隧道与 Docker 上下文。
 
+### Compose 服务矩阵与 Profiles
+
+| Compose 服务 | 后台启动命令 | Profile | 角色说明 |
+| --- | --- | --- | --- |
+| `ibbot` | `gunicorn main:app`（容器入口） | _默认_ | Web API 与前端静态资源。 |
+| `ib-command` | `python -m services.ib_command.main` | `ib-services` | 消费指令队列、执行 IBKR 命令、回写执行结果。 |
+| `ib-feed` | `python -m services.ib_feed.main` | `ib-services` | 订阅 IBKR 行情、发布价格/DOM、写入 Influx。 |
+| `market-data` | `python -m uvicorn services.market_data.main:app --host 0.0.0.0 --port 8010` | `market` | 聚合行情快照，暴露 REST/WebSocket（默认端口 8010）。 |
+| `risk` | `python -m services.risk.main` | `risk` | 消费行情/执行结果流，运行风险引擎并触发保护动作。 |
+| `strategy` | `python -m services.strategy.main` | `strategy` | 执行策略任务、写入事件流并下发 IB 指令。 |
+| `notification` | `python -m services.notification.main` | `notifications` | 订阅事件流并广播到浏览器/Telegram。 |
+| `queue-monitor` | `python -m uvicorn services.queue_monitor.main:create_app --host 0.0.0.0 --port 8011` | `monitoring` | 统计 Redis 队列/Stream 指标（默认端口 8011）。 |
+| `optimizer` | `python optimizer_main.py` | _默认_ | DOM 优化任务调度与进度跟踪。 |
+| `optimizer-ui` | `nginx` 静态服务 | _默认_ | 暴露优化器前端（默认端口 4173）。 |
+| `cloudflared` | `cloudflared tunnel run` | `tunnel` | 按需暴露公网隧道，需要 `CF_TUNNEL_TOKEN`。 |
+
+> 提示：所有后台服务默认挂载 `data/`、`data/logs/`，方便在主机查看运行日志或健康快照。
+
+在本地或生产环境选择性启用服务：
+
+- **快速全量启动**：`./scripts/deploy.sh up`（本地）或 `./scripts/deploy.sh up --env production`。
+- **通过 Profile 精简组合**：设置 `COMPOSE_PROFILES` 环境变量，例如：
+  - 仅联调行情链路：`COMPOSE_PROFILES="ib-services,market" ./scripts/deploy.sh up`。
+  - 生产环境禁用通知与监控：`COMPOSE_PROFILES="ib-services,market,risk,strategy" ./scripts/deploy.sh up --env production`。
+  - 使用原生命令：`COMPOSE_PROFILES=monitoring docker compose --profile monitoring up queue-monitor`。
+
+未在 `COMPOSE_PROFILES` 中声明的 Profile 将被跳过；手动指定服务名（例如 `docker compose up market-data`）仍可单独拉起对应容器。
+
 ## 📚 更多资料
 
 - DOM 服务与调优：`docs/dom_optimizer_guide.md`、`src/dom_service.py`。

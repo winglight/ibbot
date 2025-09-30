@@ -13,6 +13,8 @@ x-app-env: &app-environment
     INFLUX_BUCKET: ${INFLUX_BUCKET:-ibbot}
     INFLUX_ORG: ${INFLUX_ORG:-ibbot}
     INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
+    MARKET_DATA_SERVICE_URL: http://market-data:8010
+    MARKET_DATA_SERVICE_WS_URL: ws://market-data:8010/ws/market
 
 services:
   redis:
@@ -87,6 +89,165 @@ services:
         condition: service_started
     networks:
       - ibbot-network
+
+  ib-command:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command: ["python", "-m", "services.ib_command.main"]
+    container_name: ibbot-ib-command
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - ib-services
+
+  ib-feed:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command: ["python", "-m", "services.ib_feed.main"]
+    container_name: ibbot-ib-feed
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      ib-gateway:
+        condition: service_started
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - ib-services
+
+  market-data:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      ["python", "-m", "uvicorn", "services.market_data.main:app", "--host", "0.0.0.0", "--port", "8010"]
+    container_name: ibbot-market-data
+    ports:
+      - "8010:8010"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - market
+
+  risk:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command: ["python", "-m", "services.risk.main"]
+    container_name: ibbot-risk
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - risk
+
+  strategy:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command: ["python", "-m", "services.strategy.main"]
+    container_name: ibbot-strategy
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+      - ./src/strategies:/app/src/strategies
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - strategy
+
+  notification:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command: ["python", "-m", "services.notification.main"]
+    container_name: ibbot-notification
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - notifications
+
+  queue-monitor:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      ["python", "-m", "uvicorn", "services.queue_monitor.main:create_app", "--host", "0.0.0.0", "--port", "8011"]
+    container_name: ibbot-queue-monitor
+    ports:
+      - "8011:8011"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - monitoring
 
   ibbot:
     <<: *app-environment
