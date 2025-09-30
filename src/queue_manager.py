@@ -57,9 +57,6 @@ class QueueManager:
         self.data_dir.mkdir(exist_ok=True)
         self.queue_file = self.data_dir / "queue_tasks.json"
 
-        # 启动时加载持久化的任务
-        self._load_tasks()
-
         # 运行时监控指标
         self._last_queue_heartbeat: float = 0.0
         self._last_backlog_alert: float = 0.0
@@ -78,6 +75,9 @@ class QueueManager:
         self._task_processing_warning_threshold: float = 2.0
         self._io_warning_threshold: float = 0.5
         self._offthread_warning_threshold: float = 1.5
+
+        # 启动时加载持久化的任务（需要在性能阈值配置完成后调用）
+        self._load_tasks()
 
     def set_dependencies(self, risk_manager, strategy_manager, websocket_manager, order_manager=None, notification_manager=None):
         """设置依赖对象"""
