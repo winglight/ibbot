@@ -18,13 +18,13 @@ import threading
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dotenv import load_dotenv
+from src.config import load_project_env
 import types
 import subprocess
 from pathlib import Path
 
 
-load_dotenv()
+load_project_env()
 
 # Robust env int parser to tolerate inline comments and invalid values
 # Examples:

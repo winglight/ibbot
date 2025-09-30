@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import List, Optional, Dict, Any, Callable, Awaitable
 from loguru import logger
-from dotenv import load_dotenv
+from src.config import load_project_env
 from dataclasses import asdict, dataclass, field
 import uuid
 import contextvars
@@ -87,7 +87,7 @@ from src.data_layer import get_data_source_manager
 
 
 # Global variables
-load_dotenv()
+load_project_env()
 
 
 def _get_interval_env(name: str, default: int) -> int:

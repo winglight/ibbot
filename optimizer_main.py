@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from dotenv import load_dotenv
+from src.config import load_project_env
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -38,7 +38,7 @@ def ensure_optimizer_ui_dir() -> None:
 
 def build_app() -> FastAPI:
     """Instantiate the FastAPI app dedicated to the optimizer service."""
-    load_dotenv()
+    load_project_env()
     ensure_optimizer_ui_dir()
 
     app = FastAPI(title=OPTIMIZER_APP_TITLE, version=OPTIMIZER_APP_VERSION)

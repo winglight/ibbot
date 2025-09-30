@@ -8,7 +8,7 @@ import socket
 import sys
 import os
 from pathlib import Path
-from dotenv import load_dotenv
+from src.config import load_project_env
 from loguru import logger
 import asyncio
 
@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover - allow diagnostics in stub mode
     from test.ib_insync_stub import IB
 
 # 加载环境变量
-load_dotenv()
+load_project_env()
 
 def check_port_connectivity(host: str, port: int) -> bool:
     """检查端口连通性"""

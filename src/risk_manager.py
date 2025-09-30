@@ -14,14 +14,14 @@ from loguru import logger
 
 # 为risk_manager模块创建专用logger
 risk_logger = logger.bind(module="risk_manager", request_id="-")
-from dotenv import load_dotenv
+from src.config import load_project_env
 
 from .notification_manager import NotificationManager
 from .database import DatabaseManager, Order, get_db_manager
 from .database import RiskRule as DatabaseRiskRule
 from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
-load_dotenv()
+load_project_env()
 
 class OrderType(Enum):
     STOP_LOSS = "stop_loss"
