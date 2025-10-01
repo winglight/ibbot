@@ -19,12 +19,32 @@ class RecordingWriter:
         return len(batch)
 
 
+class _InMemoryPipeline:
+    def __init__(self, redis: "_InMemoryRedis") -> None:
+        self._redis = redis
+        self._operations: list[tuple[str, str, str]] = []
+
+    def set(self, key: str, value: str) -> "_InMemoryPipeline":
+        self._operations.append(("set", key, value))
+        return self
+
+    async def execute(self) -> list[bool]:
+        results: list[bool] = []
+        for op, key, value in self._operations:
+            if op == "set":
+                result = await self._redis.set(key, value)
+                results.append(bool(result))
+        self._operations.clear()
+        return results
+
+
 class _InMemoryRedis:
     def __init__(self) -> None:
         self._streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
         self._queues: dict[str, list[str]] = {}
         self._groups: dict[tuple[str, str], int] = {}
         self._counter = 0
+        self._kv: dict[str, str] = {}
 
     async def flushall(self) -> None:
         self._streams.clear()
@@ -92,6 +112,16 @@ class _InMemoryRedis:
                 return None
             await asyncio.sleep(0.01)
 
+    async def set(self, key: str, value: str, ex: int | None = None) -> bool:
+        self._kv[key] = value
+        return True
+
+    async def get(self, key: str) -> str | None:
+        return self._kv.get(key)
+
+    def pipeline(self) -> _InMemoryPipeline:
+        return _InMemoryPipeline(self)
+
 
 async def _wait_for(condition, *, timeout: float = 2.0, interval: float = 0.05):
     loop = asyncio.get_running_loop()
@@ -140,6 +170,27 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
         "command_queue": "queue:ib:commands",
     }
     await runtime.update_config(config)
+
+    config_cache = await redis.get(runtime.config_cache_key)
+    rules_cache = await redis.get(runtime.rules_cache_key)
+    assert config_cache is not None
+    assert rules_cache is not None
+
+    config_snapshot = json.loads(config_cache)
+    rules_snapshot = json.loads(rules_cache)
+    assert isinstance(config_snapshot, dict)
+    assert isinstance(rules_snapshot, dict)
+    assert config_snapshot.get("updated_at")
+    assert rules_snapshot.get("updated_at")
+    assert rules_snapshot.get("success") is True
+    assert rules_snapshot.get("rules")
+
+    assert any(
+        point.get("measurement") == runtime.config_measurement for point in writer.points
+    )
+    assert any(
+        point.get("measurement") == runtime.rules_measurement for point in writer.points
+    )
 
     await runtime.start()
     try:

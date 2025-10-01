@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
 
@@ -22,6 +23,8 @@ from src.models import (
     RiskRuleRequest,
 )
 
+from src.ibbot.redis import get_redis_client
+
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
     from src.risk_manager import RiskManager
 
@@ -31,6 +34,8 @@ _risk_service_url_env = os.getenv("RISK_SERVICE_URL", "").strip()
 RISK_SERVICE_URL = _risk_service_url_env.rstrip("/") if _risk_service_url_env else None
 DEFAULT_RISK_SERVICE_URL = "http://localhost:8030"
 RISK_SERVICE_TIMEOUT = float(os.getenv("RISK_SERVICE_TIMEOUT", "10.0"))
+RISK_RULES_CACHE_KEY = "json:risk:rules"
+RISK_CONFIG_CACHE_KEY = "json:risk:config"
 
 FallbackHandler = Callable[[], Awaitable[Any]]
 
@@ -94,6 +99,54 @@ async def _risk_service_request(
             "Risk service returned non-JSON payload", status=response.status_code
         )
         raise HTTPException(status_code=502, detail="Invalid response from risk service") from exc
+
+
+async def _load_cached_payload(key: str) -> Dict[str, Any] | None:
+    try:
+        redis = await get_redis_client()
+    except Exception as exc:
+        logger.warning("Redis unavailable for risk cache", error=str(exc))
+        return None
+
+    try:
+        raw = await redis.get(key)
+    except Exception as exc:
+        logger.warning("Failed to read risk cache", key=key, error=str(exc))
+        return None
+
+    if not raw:
+        return None
+
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        logger.warning("Invalid JSON in risk cache", key=key, error=str(exc))
+        return None
+
+    if not isinstance(payload, dict):
+        logger.warning("Unexpected payload type in risk cache", key=key, type=type(payload))
+        return None
+
+    return dict(payload)
+
+
+async def _cached_risk_rules() -> Dict[str, Any] | None:
+    payload = await _load_cached_payload(RISK_RULES_CACHE_KEY)
+    if payload is None:
+        return None
+
+    payload.setdefault("success", True)
+    payload.setdefault("source", payload.get("source", "redis"))
+    return payload
+
+
+async def _cached_risk_config() -> Dict[str, Any] | None:
+    payload = await _load_cached_payload(RISK_CONFIG_CACHE_KEY)
+    if payload is None:
+        return None
+
+    payload.setdefault("source", payload.get("source", "redis"))
+    return payload
 
 
 def _resolve_risk_manager(request: Request) -> "RiskManager":
@@ -191,6 +244,9 @@ async def add_risk_rule(
 
 @router.get("/api/risk_rules")
 async def get_risk_rules(user: Optional[str] = Depends(get_current_user)) -> Any:
+    cached = await _cached_risk_rules()
+    if cached is not None:
+        return cached
     return await _risk_service_request("GET", "/risk_rules")
 
 
@@ -254,6 +310,10 @@ async def get_order_queue_status(user: Optional[str] = Depends(get_current_user)
 async def get_risk_config(
     request: Request, user: Optional[str] = Depends(get_current_user)
 ) -> Any:
+    cached = await _cached_risk_config()
+    if cached is not None:
+        return cached
+
     async def _fallback() -> Any:
         return _embedded_risk_config(request)
 

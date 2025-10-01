@@ -54,6 +54,11 @@ class RiskRuntime:
     log_dir: str | os.PathLike[str] | None = None
     batch_size: int = 20
     reconnect_delay: float = 1.0
+    config_cache_key: str = "json:risk:config"
+    rules_cache_key: str = "json:risk:rules"
+    cache_source: str = "risk-service"
+    config_measurement: str = "risk_config_snapshot"
+    rules_measurement: str = "risk_rule_snapshot"
 
     _engine: RiskEngine = field(default_factory=RiskEngine, init=False, repr=False)
     _redis: Redis | None = field(default=None, init=False, repr=False)
@@ -71,6 +76,7 @@ class RiskRuntime:
     _last_exception_message: str = field(default="", init=False, repr=False)
 
     async def update_config(self, config: Mapping[str, Any]) -> None:
+        snapshot: tuple[dict[str, Any], dict[str, Any], str] | None = None
         async with self._config_lock:
             self._engine.load_config(config)
             self.command_queue = str(config.get("command_queue", self.command_queue))
@@ -90,7 +96,128 @@ class RiskRuntime:
                     self.batch_size = batch
             except (TypeError, ValueError):
                 pass
+            snapshot = self._build_snapshots(config)
             self._configured = True
+
+        if snapshot is not None:
+            await self._publish_snapshots(*snapshot)
+
+    def _build_snapshots(
+        self, config: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        timestamp = _utc_now().isoformat()
+        config_payload: dict[str, Any] = {}
+        for key, value in config.items():
+            if str(key) == "rules":
+                continue
+            config_payload[str(key)] = value
+        config_payload.setdefault("updated_at", timestamp)
+        rules_payload = self._engine.export_rules()
+        return config_payload, rules_payload, timestamp
+
+    async def _publish_snapshots(
+        self,
+        config_payload: Mapping[str, Any],
+        rules_payload: Mapping[str, Any],
+        timestamp: str,
+    ) -> None:
+        try:
+            await self._write_cache_snapshot(config_payload, rules_payload, timestamp)
+        except Exception:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning("Failed to update risk cache", exc_info=True)
+        try:
+            await self._write_influx_snapshot(config_payload, rules_payload, timestamp)
+        except Exception:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning("Failed to persist risk snapshot to InfluxDB", exc_info=True)
+
+    async def _get_cache_redis(self) -> Redis | None:
+        try:
+            if self._redis is not None:
+                return self._redis
+            return await self.redis_factory()
+        except Exception:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning("Failed to acquire Redis client for cache refresh", exc_info=True)
+            return None
+
+    async def _write_cache_snapshot(
+        self,
+        config_payload: Mapping[str, Any],
+        rules_payload: Mapping[str, Any],
+        timestamp: str,
+    ) -> None:
+        redis = await self._get_cache_redis()
+        if redis is None:
+            return
+
+        config_cache = dict(config_payload)
+        config_cache.setdefault("updated_at", timestamp)
+        rules_cache: dict[str, Any] = {
+            "success": True,
+            "rules": dict(rules_payload),
+            "updated_at": timestamp,
+            "source": self.cache_source,
+            "count": len(rules_payload),
+        }
+
+        try:
+            pipeline = redis.pipeline()
+        except Exception:
+            await redis.set(self.config_cache_key, self._dump_json(config_cache))
+            await redis.set(self.rules_cache_key, self._dump_json(rules_cache))
+            return
+
+        pipeline.set(self.config_cache_key, self._dump_json(config_cache))
+        pipeline.set(self.rules_cache_key, self._dump_json(rules_cache))
+        await pipeline.execute()
+
+    async def _write_influx_snapshot(
+        self,
+        config_payload: Mapping[str, Any],
+        rules_payload: Mapping[str, Any],
+        timestamp: str,
+    ) -> None:
+        points: list[Mapping[str, Any]] = []
+
+        config_fields: dict[str, Any] = {
+            "payload": self._dump_json(config_payload),
+            "updated_at": timestamp,
+            "rules_count": int(len(rules_payload)),
+        }
+        points.append(
+            {
+                "measurement": self.config_measurement,
+                "tags": {"service": self.service_name},
+                "fields": config_fields,
+            }
+        )
+
+        for symbol, rule_payload in rules_payload.items():
+            points.append(
+                {
+                    "measurement": self.rules_measurement,
+                    "tags": {"service": self.service_name, "symbol": str(symbol)},
+                    "fields": {
+                        "payload": self._dump_json(rule_payload),
+                        "updated_at": timestamp,
+                    },
+                }
+            )
+
+        await _maybe_await(self.write_fn(points))
+
+    @staticmethod
+    def _json_default(value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, set):
+            return list(value)
+        return value
+
+    def _dump_json(self, payload: Mapping[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, default=self._json_default)
 
     def _health_metrics(self, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
         metrics: dict[str, Any] = {
