@@ -926,17 +926,16 @@ async def websocket_endpoint(websocket: WebSocket):
                             cached_payload = dict(cached_payload)
                             cached_payload["context"] = context
                         cached_payload["cached"] = True
-                        await websocket.send_text(json.dumps(cached_payload))
+                        await _send_or_disconnect(websocket, cached_payload)
                     else:
-                        await websocket.send_text(
-                            json.dumps(
-                                {
-                                    "type": "sizing_history",
-                                    "success": False,
-                                    "error": "Rate limited",
-                                    "context": context,
-                                }
-                            )
+                        await _send_or_disconnect(
+                            websocket,
+                            {
+                                "type": "sizing_history",
+                                "success": False,
+                                "error": "Rate limited",
+                                "context": context,
+                            },
                         )
                     continue
 
@@ -961,18 +960,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     payload = dict(base_payload)
                     if context is not None:
                         payload["context"] = context
-                    await websocket.send_text(json.dumps(payload))
+                    await _send_or_disconnect(websocket, payload)
+                except WebSocketDisconnect:
+                    raise
                 except Exception as exc:
                     logger.warning(f"Failed to stream sizing history: {exc}")
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "type": "sizing_history",
-                                "success": False,
-                                "error": str(exc),
-                                "context": context,
-                            }
-                        )
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "sizing_history",
+                            "success": False,
+                            "error": str(exc),
+                            "context": context,
+                        },
                     )
             elif msg_type == "request_strategies":
                 if 'strategy_manager' not in globals() or strategy_manager is None:

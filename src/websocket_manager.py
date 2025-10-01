@@ -6,11 +6,17 @@ WebSocket连接管理器
 import asyncio
 import json
 from typing import Set, Dict, Any
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 from loguru import logger
 
 # 为websocket模块创建专用logger
 websocket_logger = logger.bind(module="websocket", request_id="-")
+
+
+CLOSE_RUNTIME_ERROR_MESSAGES = {
+    "WebSocket is not connected.",
+    'Cannot call "send" once a close message has been sent.',
+}
 
 
 class WebSocketManager:
@@ -49,8 +55,24 @@ class WebSocketManager:
         for connection in self.connections.copy():
             try:
                 await connection.send_text(message_str)
+            except WebSocketDisconnect:
+                disconnected.add(connection)
+                websocket_logger.debug("WebSocket连接在广播期间断开，已移除连接")
+            except RuntimeError as e:
+                if str(e) in CLOSE_RUNTIME_ERROR_MESSAGES:
+                    disconnected.add(connection)
+                    websocket_logger.debug(
+                        f"WebSocket连接已关闭（{e}），已从连接列表移除"
+                    )
+                else:
+                    websocket_logger.opt(exception=e).warning(
+                        "向WebSocket连接发送消息时遇到RuntimeError"
+                    )
+                    disconnected.add(connection)
             except Exception as e:
-                websocket_logger.warning(f"向WebSocket连接发送消息失败: {e}")
+                websocket_logger.opt(exception=e).warning(
+                    "向WebSocket连接发送消息失败"
+                )
                 disconnected.add(connection)
         
         # 清理断开的连接

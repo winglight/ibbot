@@ -122,7 +122,16 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
         assert container.websocket_manager is core.websocket_manager
         provider = container.config_provider
         assert provider is not None and getattr(provider, "_started", False)
-        assert not hasattr(container, "risk_manager")
+        assert container.telegram_notifier is not None
+        assert container.notification_manager is not None
+        assert container.order_manager is not None
+        assert container.risk_manager is not None and getattr(
+            container.risk_manager, "monitoring_active", False
+        )
+        assert container.strategy_manager is not None
+        assert container.strategy_risk_manager is not None
+        assert container.queue_manager is not None and container.queue_manager.is_running
+        assert container.account_snapshot_service is not None
 
     await core.shutdown()
 
