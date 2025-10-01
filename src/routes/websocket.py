@@ -9,13 +9,11 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 import core
-from core import (
-    connection_manager,
-    websocket_manager,
-    order_manager,
-    strategy_manager,
-    risk_manager,
-)
+from core import connection_manager, websocket_manager
+
+order_manager = getattr(core, "order_manager", None)
+risk_manager = getattr(core, "risk_manager", None)
+strategy_manager = getattr(core, "strategy_manager", None)
 from src.database import get_db_manager
 from src.dom_optimizer import get_dom_optimization_orchestrator
 from src.dom_service import get_dom_service

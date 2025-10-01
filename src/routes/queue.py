@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException
 
-from core import queue_manager
+import core
+
+queue_manager = getattr(core, "queue_manager", None)
 
 router = APIRouter()
 
