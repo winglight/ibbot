@@ -16,6 +16,8 @@ from src.configuration.provider import (
     get_provider,
 )
 
+from .subscriptions import PubSubListener
+
 
 class SupportsLifecycle(Protocol):
     """Simple protocol describing listener objects with start/stop hooks."""
@@ -59,6 +61,7 @@ class MarketDataRuntime:
         self.redis: Any = None
         self.listener: SupportsLifecycle | None = None
         self.metrics_task: asyncio.Task[Any] | None = None
+        self._snapshots: dict[str, dict[str, Any]] = {}
 
         self.service_name = service_name
         self.stream_key = stream_key
@@ -91,12 +94,20 @@ class MarketDataRuntime:
             self.redis = await self._redis_factory()
             self._shutdown_event.clear()
 
+            listener: SupportsLifecycle | None
             if self._listener_factory is not None:
                 listener_obj = self._listener_factory(config, self)
                 listener = await listener_obj if inspect.isawaitable(listener_obj) else listener_obj
-                if listener is not None:
-                    self.listener = listener
-                    await listener.start()
+            else:
+                assert provider is not None
+                listener = PubSubListener(
+                    config_provider=provider,
+                    redis_client=self.redis,
+                    runtime=self,
+                )
+            if listener is not None:
+                self.listener = listener
+                await listener.start()
 
             if self._metrics_factory is not None:
                 metrics_coro = self._metrics_factory(self)
