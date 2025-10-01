@@ -100,6 +100,14 @@ async def _market_service_get(path: str) -> httpx.Response:
         return await client.get(path)
 
 
+async def _market_service_post(path: str, payload: Dict[str, Any]) -> httpx.Response:
+    async with httpx.AsyncClient(
+        base_url=_market_service_base_url(),
+        timeout=MARKET_DATA_SERVICE_TIMEOUT,
+    ) as client:
+        return await client.post(path, json=payload)
+
+
 def _map_bar_size_to_interval(bar_size: str) -> Optional[str]:
     if not bar_size:
         return None
@@ -448,17 +456,6 @@ async def get_chart_data(
         mode = get_data_layer_mode()
         manager = None if is_legacy_mode(mode) else _get_data_layer_manager()
 
-        if manager is None and not connection_manager.is_connected():
-            reason = None
-            try:
-                reason = connection_manager.get_last_connect_error()
-            except Exception:
-                reason = None
-            detail = "Not connected to IBKR"
-            if reason:
-                detail = f"{detail}: {reason}"
-            raise HTTPException(status_code=400, detail=detail)
-
         # 统一使用与历史接口一致的缓存策略，使用前缀避免冲突
         _clean_expired_cache()
         now = now_local()
@@ -596,7 +593,91 @@ async def get_chart_data(
                 "bar_size": request.bar_size,
             }
 
+        service_error: Optional[Exception] = None
+        try:
+            service_payload = request.model_dump(exclude_none=True)
+            alias_payload = request.model_dump(by_alias=True, exclude_none=True)
+            service_payload.update(alias_payload)
+            response = await _market_service_post("/chart_data", service_payload)
+        except httpx.RequestError as exc:
+            service_error = exc
+            logger.error(
+                "Market data service request failed for {}: {}",
+                request.symbol,
+                exc,
+            )
+        else:
+            if response.status_code == 404:
+                logger.debug(
+                    "Market data service returned 404 for {}",
+                    request.symbol,
+                )
+            elif response.status_code >= 500:
+                logger.error(
+                    "Market data service error",
+                    status=response.status_code,
+                    body=response.text,
+                )
+                raise HTTPException(
+                    status_code=502, detail="Market data service error"
+                )
+            elif not response.is_success:
+                detail = response.text or "Failed to load chart data"
+                raise HTTPException(status_code=response.status_code, detail=detail)
+            else:
+                try:
+                    service_result = response.json()
+                except ValueError as exc:
+                    logger.error(
+                        "Invalid JSON from market data service",
+                        error=str(exc),
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Invalid response from market data service",
+                    ) from exc
+
+                if not isinstance(service_result, dict):
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Unexpected chart data format from market data service",
+                    )
+
+                chart_data = service_result.get("data")
+                if isinstance(chart_data, list) and chart_data and use_cache:
+                    expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
+                    historical_data_cache[cache_key] = {
+                        "data": chart_data,
+                        "timestamp": now,
+                        "expires_at": expires_at,
+                    }
+
+                service_result.setdefault("success", True)
+                service_result.setdefault("symbol", request.symbol)
+                service_result.setdefault("duration", request.duration)
+                service_result.setdefault("bar_size", request.bar_size)
+                return service_result
+
+        if manager is None and not connection_manager.is_connected():
+            if service_error is not None:
+                raise HTTPException(
+                    status_code=503, detail="Market data service unavailable"
+                )
+            reason = None
+            try:
+                reason = connection_manager.get_last_connect_error()
+            except Exception:
+                reason = None
+            detail = "Not connected to IBKR"
+            if reason:
+                detail = f"{detail}: {reason}"
+            raise HTTPException(status_code=400, detail=detail)
+
         if not connection_manager.is_connected():
+            if service_error is not None:
+                raise HTTPException(
+                    status_code=503, detail="Market data service unavailable"
+                )
             raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
         ib_client = getattr(core, "ibkr_client", None)
