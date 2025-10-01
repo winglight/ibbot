@@ -21,6 +21,8 @@ from src.account_snapshot_cache import mark_all_snapshots_stale
 from src.account_snapshot_service import AccountSnapshotServiceClient
 from src.utils import now_local
 
+from .commands import AccountCommandConsumer, AccountDataProvider, IBAccountDataProvider
+
 try:  # pragma: no cover - redis may be optional in tests
     from redis.asyncio import Redis
 except Exception:  # pragma: no cover
@@ -61,6 +63,7 @@ class AccountSnapshotRuntime:
         *,
         config: Optional[AccountSnapshotServiceConfig] = None,
         redis_settings: Optional[RedisSettings] = None,
+        provider: Optional[AccountDataProvider] = None,
     ) -> None:
         self.config = config or load_account_snapshot_config()
         self._redis_settings = redis_settings or RedisSettings(url=self.config.redis_url)
@@ -75,9 +78,15 @@ class AccountSnapshotRuntime:
         self._last_positions_refresh: Optional[datetime] = None
         self._last_fill: Optional[datetime] = None
 
+        self._provider = provider or IBAccountDataProvider()
         self._client = AccountSnapshotServiceClient(
             config=self.config,
             redis_factory=self._ensure_redis,
+        )
+        self._command_consumer = AccountCommandConsumer(
+            config=self.config,
+            provider=self._provider,
+            redis_settings=self._redis_settings,
         )
 
         self._logger = logger.bind(module="account_snapshot_runtime", request_id="-")
@@ -100,6 +109,7 @@ class AccountSnapshotRuntime:
                 raise RuntimeError("Redis connection unavailable for account snapshot runtime")
 
             self._stop_event.clear()
+            await self._command_consumer.start()
             self._refresh_task = asyncio.create_task(self._refresh_loop())
             self._control_task = asyncio.create_task(self._control_loop())
             self._started = True
@@ -126,6 +136,9 @@ class AccountSnapshotRuntime:
                     await task
             self._refresh_task = None
             self._control_task = None
+
+            with suppress(Exception):
+                await self._command_consumer.stop()
 
             if self._redis is not None:
                 await close_redis(self._redis)
