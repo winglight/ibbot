@@ -31,6 +31,8 @@ __all__ = [
     "command_wait_timeout",
 ]
 
+HEALTHY_STATUS_VALUES = {"ok", "healthy", "ready", "connected", "online", "idle"}
+
 
 @dataclass(slots=True)
 class IBCommandServiceConfig:
@@ -225,7 +227,7 @@ def evaluate_service_health(
     status = str(payload.get("status") or "").lower()
     connected = False
 
-    if status in {"ok", "healthy", "ready", "connected", "online"} and not last_error:
+    if status in HEALTHY_STATUS_VALUES and not last_error:
         connected = True
     elif age_seconds is not None and age_seconds <= stale_seconds and not last_error:
         connected = True
