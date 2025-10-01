@@ -38,6 +38,8 @@ router = APIRouter()
 core_container = get_core_container()
 connection_manager = core_container.connection_manager
 
+ACCOUNT_HEALTHY_STATUSES = {"ok", "healthy", "ready", "connected", "online", "idle"}
+
 
 def _compute_cache_age(updated_at: Optional[str]) -> Optional[float]:
     dt = parse_local_datetime(updated_at)
@@ -154,7 +156,7 @@ def _evaluate_service_health(
     status = str(payload.get("status") or "").lower()
     connected = False
 
-    if status in {"ok", "healthy", "ready", "connected", "online"} and not last_error:
+    if status in ACCOUNT_HEALTHY_STATUSES and not last_error:
         connected = True
     if not status and age_seconds is not None and age_seconds <= ACCOUNT_HEALTH_STALE_SECONDS:
         connected = not last_error

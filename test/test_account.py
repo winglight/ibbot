@@ -238,3 +238,16 @@ def test_refresh_endpoint_without_wait(client, admin_headers, account_test_env, 
     assert payload["status"] == "queued"
     assert payload["command_id"] == "cmd-999"
     assert payload["waited"] is False
+
+
+def test_account_health_idle_status_considered_connected():
+    from src.routes import account as account_module
+
+    now = account_module.now_local().isoformat()
+    connected, payload, error = account_module._evaluate_service_health(
+        {"status": "idle", "last_seen": now, "updated_at": now}
+    )
+
+    assert connected is True
+    assert error is None
+    assert payload["status"] == "idle"
