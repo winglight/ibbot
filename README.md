@@ -67,6 +67,7 @@ cp .env.example .env
 - `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING`：IBKR 连接配置。
 - `AUTO_CONNECT=false`：开发阶段建议禁用自动连接。
 - `PNL_BROADCAST_INTERVAL_SEC`、`ACCOUNT_BROADCAST_INTERVAL_SEC`：WebSocket 广播节奏。
+- `ENABLED_MODULES`：控制 FastAPI lifespan 启动的后台模块，默认 `ALL`（即 `auto_connect` 与 `data_subscriptions` 均启用）。
 - Redis 可选：`REDIS_URL` 或 `REDIS_HOST/PORT/DB`。
 
 ### 3. 启动服务
