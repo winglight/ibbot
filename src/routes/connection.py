@@ -5,15 +5,17 @@ from loguru import logger
 
 from core import (
     IBKRClient,
-    connection_manager,
+    get_core_container,
     get_ibkr_client,
     set_ibkr_client,
-    websocket_manager,
 )
 from src.connection_manager import ConnectionConfig
 from .auth import get_current_user
 
 router = APIRouter()
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
+websocket_manager = core_container.websocket_manager
 
 @router.get("/api/connection_config")
 async def get_connection_config():

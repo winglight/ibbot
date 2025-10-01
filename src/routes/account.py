@@ -21,11 +21,12 @@ from src.utils.account_pnl_cache import (
 )
 
 import core
-from core import connection_manager
-from src.database import get_db_manager
+from core import get_core_container
 from .auth import get_current_user
 
 router = APIRouter()
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
 
 
 def _compute_cache_age(updated_at: Optional[str]) -> Optional[float]:
@@ -380,7 +381,7 @@ async def get_account_daily_summary(
                     orders_count = 0
                 daily_stats[trade_day] = {"pnl": pnl_value, "orders": orders_count}
         else:
-            db = get_db_manager()
+            db = core_container.get_db_manager()
             orders = db.fetch_orders_for_pnl()
             for order in orders:
                 try:

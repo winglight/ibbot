@@ -10,8 +10,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from core import connection_manager
-from src.database import get_db_manager
+from core import get_core_container
 from .auth import get_current_user
 from src.models import (
     HistoricalDataRequest,
@@ -27,6 +26,8 @@ from src.data_layer import (
     is_legacy_mode,
 )
 
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
 router = APIRouter()
 
 # Cache controls
@@ -256,7 +257,7 @@ async def get_historical_data(
                     "source": "memory_cache",
                 }
 
-        db_manager = get_db_manager()
+        db_manager = core_container.get_db_manager()
         interval = db_manager._normalize_interval(request.bar_size)
         minutes = _parse_duration_to_minutes(request.duration)
         start_dt = now - timedelta(minutes=minutes)
@@ -453,7 +454,7 @@ async def get_chart_data(
                 }
 
         # 2) 数据库缓存（覆盖请求范围且不强制刷新时）
-        db_manager = get_db_manager()
+        db_manager = core_container.get_db_manager()
         interval = db_manager._normalize_interval(request.bar_size)
         minutes = _parse_duration_to_minutes(request.duration)
         start_dt = now - timedelta(minutes=minutes)

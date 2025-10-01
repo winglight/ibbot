@@ -26,7 +26,7 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
       │                          │
       ▼                          ▼
 ┌──────────────┐      ┌────────────────────┐
-│ core/* 单例 │      │ Queue / Risk / DOM │
+│ CoreContainer│      │ Queue / Risk / DOM │
 │ queue_manager│      │ Order / Strategy   │
 └──────┬───────┘      └─────────┬──────────┘
        │                        │
@@ -37,10 +37,11 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 └──────────────┘      └────────────────────┘
 ```
 
-- **core/** 初始化共享实例（通知、策略、风险、订单、队列、DOM、ATR 等）。
+- **core/** 提供 `CoreContainer` 单例，按需装配 Redis、配置提供者、WebSocket 管理器等 UI 依赖。
 - **src/routes/** 按功能拆分的 REST/WebSocket 接口；`docs/api_doc.json` 自动从 OpenAPI 导出。
 - **src/dom_*** 深度行情分析、参数调优与自动化调度。
 - **src/optimizer_service/** 提供 DOM 优化任务编排与异步执行。
+- FastAPI 主程序通过 `get_core_container()` 访问 Redis、Influx 持久化入口与配置提供者，替代旧的全局管理器引用。
 
 ## 🚀 快速开始
 
