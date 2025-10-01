@@ -55,6 +55,7 @@ from src.ib_command_health import (
     build_ib_connection_health_payload,
 )
 from src.ibbot.redis import get_redis_client
+from src.service_status import SERVICE_HEALTH_PROBES
 from src.queue_manager import QueueManager
 from src.risk_manager import RiskManager
 from src.models import (
@@ -108,33 +109,6 @@ module_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("module", defau
 # Timezone helpers
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 NY_TZ = ZoneInfo("America/New_York")
-
-SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
-    (
-        "risk_service_probe",
-        "risk-service",
-        os.getenv("RISK_SERVICE_HEALTH_KEY", "hash:service:health:risk-service"),
-    ),
-    (
-        "strategy_service_probe",
-        "strategy",
-        os.getenv("STRATEGY_SERVICE_HEALTH_KEY", "hash:service:health:strategy"),
-    ),
-    (
-        "account_snapshot_probe",
-        "account-snapshot",
-        os.getenv(
-            "ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY",
-            "hash:service:health:account-snapshot",
-        ),
-    ),
-    (
-        "queue_worker_probe",
-        "queue-monitor",
-        os.getenv("QUEUE_SERVICE_HEALTH_KEY", "hash:service:health:queue"),
-    ),
-)
-
 
 def _env_flag(name: str, default: bool = True) -> bool:
     """Return a boolean flag parsed from an environment variable."""
