@@ -136,6 +136,21 @@ SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _env_flag(name: str, default: bool = True) -> bool:
+    """Return a boolean flag parsed from an environment variable."""
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def embedded_risk_manager_enabled() -> bool:
+    """Return True when the in-process risk manager should be started."""
+
+    return _env_flag("ENABLE_EMBEDDED_RISK_MANAGER", True)
+
+
 def resolve_module(path: str) -> str:
     """Simple mapping from request path to module name."""
 
@@ -339,8 +354,14 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
     container.queue_manager = queue_manager
     container.account_snapshot_service = account_snapshot_service
 
-    risk_manager.start()
-    handle.finalizers.append(risk_manager.stop)
+    if embedded_risk_manager_enabled():
+        risk_manager.start()
+        handle.finalizers.append(risk_manager.stop)
+    else:
+        context.logger.info(
+            "Embedded risk manager disabled; skipping background start",
+            env_var="ENABLE_EMBEDDED_RISK_MANAGER",
+        )
 
     strategy_manager.start()
     handle.finalizers.append(strategy_manager.stop)
