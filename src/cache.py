@@ -79,6 +79,18 @@ def _parse_timeout_setting(*entries: tuple[str, float], default: Any = _UNSET):
     return default
 
 
+_URL_ENV_VARS = (
+    "REDIS_URL",
+    "IBBOT_REDIS_URL",
+    "ACCOUNT_CACHE_REDIS_URL",
+    "IB_COMMAND_REDIS_URL",
+    "IB_FEED_REDIS_URL",
+    "STRATEGY_REDIS_URL",
+    "NOTIFICATION_REDIS_URL",
+    "DATA_LAYER_REDIS_URL",
+)
+
+
 def _load_config() -> RedisConfig:
     connect_timeout = _parse_timeout_setting(
         ("REDIS_CONNECT_TIMEOUT", 1.0),
@@ -93,7 +105,12 @@ def _load_config() -> RedisConfig:
         base = connect_timeout if isinstance(connect_timeout, (int, float)) else None
         ping_timeout = max(base or 0, 3.0)
 
-    url = os.getenv("REDIS_URL", "").strip()
+    url = ""
+    for env_var in _URL_ENV_VARS:
+        value = os.getenv(env_var, "").strip()
+        if value:
+            url = value
+            break
     if url:
         return RedisConfig(
             url=url,
