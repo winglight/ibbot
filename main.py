@@ -50,6 +50,7 @@ from src.ib_command_health import (
     IB_COMMAND_HEALTH_STALE_AFTER_SEC,
     build_ib_connection_health_payload,
 )
+from src.ibbot.redis import get_redis_client
 from src.models import (
     HistoricalDataRequest,
     ChartDataRequest,
@@ -99,6 +100,31 @@ module_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("module", defau
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 NY_TZ = ZoneInfo("America/New_York")
 
+SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
+    (
+        "risk_service_probe",
+        "risk-service",
+        os.getenv("RISK_SERVICE_HEALTH_KEY", "hash:service:health:risk-service"),
+    ),
+    (
+        "strategy_service_probe",
+        "strategy",
+        os.getenv("STRATEGY_SERVICE_HEALTH_KEY", "hash:service:health:strategy"),
+    ),
+    (
+        "account_snapshot_probe",
+        "account-snapshot",
+        os.getenv(
+            "ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY",
+            "hash:service:health:account-snapshot",
+        ),
+    ),
+    (
+        "queue_worker_probe",
+        "queue-monitor",
+        os.getenv("QUEUE_SERVICE_HEALTH_KEY", "hash:service:health:queue"),
+    ),
+)
 
 
 def resolve_module(path: str) -> str:
@@ -284,124 +310,6 @@ async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHan
 
     return handle
 
-async def _module_risk_manager(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-
-    try:
-        services = get_core_services()
-        services.risk_manager.start()
-        context.logger.info("Risk manager started during application startup")
-    except Exception as exc:
-        context.logger.warning(f"Risk manager startup warning: {exc}")
-        return handle
-
-    def _shutdown_risk_manager() -> None:
-        try:
-            services = get_core_services()
-            manager = services.risk_manager
-            if getattr(manager, 'scheduler', None) and manager.scheduler.running:
-                manager.scheduler.shutdown()
-                context.logger.info("Risk manager scheduler shutdown")
-        except Exception as exc:
-            context.logger.warning(f"Risk manager shutdown warning: {exc}")
-
-    handle.finalizers.append(_shutdown_risk_manager)
-    return handle
-
-
-async def _module_account_snapshot(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-
-    try:
-        services = get_core_services()
-        services.account_snapshot_service.start()
-        context.logger.info("Account snapshot service started during application startup")
-    except Exception as exc:
-        context.logger.warning(
-            f"Account snapshot service startup warning: {exc}"
-        )
-        return handle
-
-    async def _stop_account_snapshot() -> None:
-        try:
-            services = get_core_services()
-            await services.account_snapshot_service.stop()
-            context.logger.info("Account snapshot service stopped")
-        except Exception as exc:
-            context.logger.warning(
-                f"Account snapshot service shutdown warning: {exc}"
-            )
-
-    handle.finalizers.append(_stop_account_snapshot)
-    return handle
-
-
-async def _module_strategy_manager(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-
-    try:
-        services = get_core_services()
-        strategy_manager = services.strategy_manager
-        strategy_manager.start()
-        context.logger.info("Strategy manager initialized during application startup")
-    except Exception as exc:
-        context.logger.warning(f"Strategy manager startup warning: {exc}")
-        return handle
-
-    async def _restore_data_push_states() -> None:
-        try:
-            services = get_core_services()
-            await services.strategy_manager.restore_data_push_states()
-            context.logger.info("Strategy data push states restored after startup")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            context.logger.warning(
-                f"Deferred data push restoration failed: {exc}"
-            )
-
-    handle.tasks.append(
-        asyncio.create_task(
-            _restore_data_push_states(),
-            name="module-strategy-restore",
-        )
-    )
-
-    def _stop_strategy_manager() -> None:
-        try:
-            services = get_core_services()
-            services.strategy_manager.stop()
-            context.logger.info("Strategy manager scheduler stopped")
-        except Exception as exc:
-            context.logger.warning(f"Strategy manager shutdown warning: {exc}")
-
-    handle.finalizers.append(_stop_strategy_manager)
-    return handle
-
-
-async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-    services = get_core_services()
-
-    try:
-        await services.queue_manager.start_worker()
-        context.logger.info("Queue worker started during application startup")
-    except Exception as exc:
-        context.logger.warning(f"Queue worker startup warning: {exc}")
-        return handle
-
-    async def _stop_queue_worker() -> None:
-        try:
-            services = get_core_services()
-            await services.queue_manager.stop_worker()
-            context.logger.info("Queue worker stopped")
-        except Exception as exc:
-            context.logger.warning(f"Queue worker shutdown warning: {exc}")
-
-    handle.finalizers.append(_stop_queue_worker)
-    return handle
-
-
 async def _fetch_ib_command_health_payload(
     *, stale_after: float, logger_: Any
 ) -> Dict[str, Any]:
@@ -413,6 +321,63 @@ async def _fetch_ib_command_health_payload(
     payload = build_ib_connection_health_payload(raw, stale_after=stale_after)
     payload["type"] = "connection_status"
     return payload
+
+
+async def _module_service_health_probe(
+    context: ModuleRuntimeContext,
+    *,
+    service_name: str,
+    redis_key: str,
+) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+
+    services = core.get_container()
+    redis_client = getattr(services, "redis_client", None) if services else None
+    close_client = False
+
+    if redis_client is None:
+        try:
+            redis_client = await get_redis_client()
+        except Exception as exc:  # pragma: no cover - redis optional in tests
+            context.logger.warning(
+                "Skipping %s health probe; Redis unavailable: %s",
+                service_name,
+                exc,
+            )
+            return handle
+        close_client = True
+
+    try:
+        values = await redis_client.hgetall(redis_key)
+    except Exception as exc:
+        context.logger.warning(
+            "Failed to read health key %s for %s: %s",
+            redis_key,
+            service_name,
+            exc,
+        )
+        return handle
+    finally:
+        if close_client and redis_client is not None:
+            try:
+                await redis_client.close()  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover - close semantics vary
+                pass
+
+    if not values:
+        context.logger.info(
+            "No health data available for {} (key={})",
+            service_name,
+            redis_key,
+        )
+        return handle
+
+    status = values.get("status") or values.get("state") or values.get("healthy")
+    checked_at = values.get("checked_at") or values.get("last_seen")
+    context.logger.info(
+        "Loaded {} health snapshot", service_name, status=status, checked_at=checked_at
+    )
+    return handle
 
 
 async def _module_service_health_monitor(
@@ -472,34 +437,18 @@ def _build_module_registry(main_logger) -> ModuleRegistry:
             description="Initialise unified data subscriptions and DOM auto-start.",
         )
     )
-    registry.register(
-        ModuleDefinition(
-            name="risk_manager",
-            start=_module_risk_manager,
-            description="Start the risk manager scheduler.",
+    for module_name, service_name, redis_key in SERVICE_HEALTH_PROBES:
+        registry.register(
+            ModuleDefinition(
+                name=module_name,
+                start=lambda ctx, s=service_name, k=redis_key: _module_service_health_probe(
+                    ctx,
+                    service_name=s,
+                    redis_key=k,
+                ),
+                description=f"Load {service_name} health snapshot from Redis.",
+            )
         )
-    )
-    registry.register(
-        ModuleDefinition(
-            name="account_snapshot",
-            start=_module_account_snapshot,
-            description="Run the periodic account snapshot service.",
-        )
-    )
-    registry.register(
-        ModuleDefinition(
-            name="strategy_manager",
-            start=_module_strategy_manager,
-            description="Boot the strategy manager and restore push states.",
-        )
-    )
-    registry.register(
-        ModuleDefinition(
-            name="queue_worker",
-            start=_module_queue_worker,
-            description="Start the background queue worker for internal orders.",
-        )
-    )
     registry.register(
         ModuleDefinition(
             name="service_health_monitor",
@@ -517,11 +466,6 @@ async def lifespan(app: FastAPI):
 
     services = await core.initialise()
     app.state.core = services
-
-    try:
-        await services.run_health_checks()
-    except Exception as exc:
-        main_logger.warning("Startup health checks failed: {}", exc)
 
     enabled_raw = os.getenv("ENABLED_MODULES", "ALL")
     enabled_modules = registry.resolve_enabled(enabled_raw)
@@ -547,7 +491,22 @@ async def lifespan(app: FastAPI):
 
 
 # 重新创建带有lifespan的FastAPI应用
-app = FastAPI(title="IBKR Trading Bot", version="1.0.0", lifespan=lifespan)
+
+
+class _AppWrapper:
+    def __init__(self) -> None:
+        self._app = FastAPI(title="IBKR Trading Bot", version="1.0.0", lifespan=lifespan)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._app, item)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if args and isinstance(args[0], dict):
+            return self._app(*args, **kwargs)
+        return self._app
+
+
+app = _AppWrapper()
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):

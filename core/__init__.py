@@ -7,34 +7,14 @@ from typing import Any
 from .container import CoreContainer, get_container, initialise, require_container, set_container, shutdown
 from src.connection_manager import connection_manager
 from src.database import get_db_manager
-from src.dom_service import get_dom_service
-from src.ibbot.influx import configure_influx
-from src.ibkr_client import IBKRClient
-from src.notification_manager import NotificationManager
-from src.order_manager import get_order_manager
-from src.queue_manager import queue_manager
-from src.risk_manager import RiskManager
-from src.strategy_manager import StrategyManager
-from src.strategy_risk import StrategyRiskManager
-from src.telegram_notifier import TelegramNotifier
 from src.websocket_manager import websocket_manager
 
 __all__ = [
     "CoreContainer",
-    "IBKRClient",
-    "NotificationManager",
-    "RiskManager",
-    "StrategyManager",
-    "StrategyRiskManager",
-    "TelegramNotifier",
-    "configure_influx",
     "connection_manager",
     "get_container",
     "get_db_manager",
-    "get_dom_service",
-    "get_order_manager",
     "initialise",
-    "queue_manager",
     "require_container",
     "set_container",
     "shutdown",
@@ -80,4 +60,3 @@ def __getattr__(name: str) -> Any:  # pragma: no cover - passthrough helper
         return getattr(container, name)
     except AttributeError as exc:
         raise AttributeError(name) from exc
-

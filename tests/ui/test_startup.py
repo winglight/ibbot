@@ -61,7 +61,6 @@ if "src.connection_manager" not in sys.modules:
     sys.modules["src.connection_manager"] = stub_module
 
 import core
-from core.container import HealthResult
 from src.ib_command_health import IB_COMMAND_HEALTH_KEY
 from main import app
 
@@ -101,41 +100,29 @@ class DummyProvider:
 
     async def get_module(self, module: str, *, use_cache: bool = True) -> Dict[str, str]:
         assert module == "services"
-        return {"health_endpoints": json.dumps({"notifications": "http://notification/health"})}
+        return {}
 
 
 @pytest.mark.anyio("asyncio")
-async def test_startup_initialises_core_and_records_health(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_redis = FakeRedis()
 
     async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
         return fake_redis
 
-    async def fake_probe_health(module: str, url: str) -> HealthResult:
-        assert module == "notifications"
-        assert url == "http://notification/health"
-        return HealthResult(
-            module=module,
-            healthy=True,
-            status_code=200,
-            latency_ms=12.5,
-            response={"healthy": True},
-        )
-
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
     monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
-    monkeypatch.setattr("core.container._probe_health", fake_probe_health)
 
-    # Ensure a clean slate before the test.
     await core.shutdown()
 
     async with app.router.lifespan_context(app):
         container = core.require_container()
         assert container.redis_client is fake_redis
-        result = await fake_redis.hgetall("hash:service:health:notifications")
-        assert result["status"] == "up"
-        assert json.loads(result["response"]) == {"healthy": True}
+        assert container.websocket_manager is core.websocket_manager
+        provider = container.config_provider
+        assert provider is not None and getattr(provider, "_started", False)
+        assert not hasattr(container, "risk_manager")
 
     await core.shutdown()
 
@@ -147,19 +134,9 @@ async def test_app_routes_available_without_ib(monkeypatch: pytest.MonkeyPatch) 
     async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
         return fake_redis
 
-    async def fake_probe_health(module: str, url: str) -> HealthResult:
-        return HealthResult(
-            module=module,
-            healthy=False,
-            status_code=503,
-            latency_ms=10.0,
-            response={"healthy": False},
-        )
-
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
     monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
-    monkeypatch.setattr("core.container._probe_health", fake_probe_health)
     await core.shutdown()
 
     transport = ASGITransport(app=app)
@@ -199,19 +176,9 @@ async def test_connection_status_prefers_redis_when_fresh(
     async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
         return fake_redis
 
-    async def fake_probe_health(module: str, url: str) -> HealthResult:
-        return HealthResult(
-            module=module,
-            healthy=True,
-            status_code=200,
-            latency_ms=5.0,
-            response={"healthy": True},
-        )
-
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
     monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
-    monkeypatch.setattr("core.container._probe_health", fake_probe_health)
     await core.shutdown()
 
     services = await core.initialise(force=True)
