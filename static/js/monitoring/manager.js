@@ -92,12 +92,16 @@
             this.chartDateAdapterUrl = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js';
             this.dateAdapterReady = false;
             this.dateAdapterLoader = null;
-            this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0/dist/chartjs-chart-financial.umd.min.js';
+            this.financialScriptVersion = '4.2.0';
+            this.financialScriptUrl = `https://cdn.jsdelivr.net/npm/chartjs-chart-financial@${this.financialScriptVersion}/dist/chartjs-chart-financial.umd.min.js`;
             this.financialScriptFallbackUrls = [
-                'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0/dist/chartjs-chart-financial.umd.js',
-                'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0/dist/chartjs-chart-financial.min.js',
-                'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0/dist/chartjs-chart-financial.js',
-                'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0'
+                `https://cdn.jsdelivr.net/npm/chartjs-chart-financial@${this.financialScriptVersion}/dist/chartjs-chart-financial.umd.js`,
+                `https://cdn.jsdelivr.net/npm/chartjs-chart-financial@${this.financialScriptVersion}/dist/chartjs-chart-financial.min.js`,
+                `https://cdn.jsdelivr.net/npm/chartjs-chart-financial@${this.financialScriptVersion}/dist/chartjs-chart-financial.js`,
+                `https://cdn.jsdelivr.net/npm/chartjs-chart-financial@${this.financialScriptVersion}`,
+                `https://unpkg.com/chartjs-chart-financial@${this.financialScriptVersion}/dist/chartjs-chart-financial.umd.min.js`,
+                `https://unpkg.com/chartjs-chart-financial@${this.financialScriptVersion}/dist/chartjs-chart-financial.umd.js`,
+                `https://unpkg.com/chartjs-chart-financial@${this.financialScriptVersion}/dist/chartjs-chart-financial.min.js`
             ];
             this.chartScriptableGuardApplied = false;
             this.strategyChartInstance = null;
@@ -819,6 +823,7 @@
                 'chartDateAdapterUrl',
                 'dateAdapterReady',
                 'dateAdapterLoader',
+                'financialScriptVersion',
                 'financialScriptUrl',
                 'financialScriptFallbackUrls',
                 'chartScriptableGuardApplied',
