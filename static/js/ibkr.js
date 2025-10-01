@@ -199,13 +199,13 @@ class IBKRConnectionManager {
         if (this.app && typeof this.app.setPanelLoading === 'function') {
             this.app.setPanelLoading('orders', true);
         }
-        const now = new Date();
-        const defaultStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
         const payload = {
             type: 'request_orders_snapshot',
             limit: Number.isFinite(options.limit) ? Number(options.limit) : 10,
-            start_date: options.startDate || defaultStart,
         };
+        if (options.startDate) {
+            payload.start_date = options.startDate;
+        }
         if (Number.isFinite(options.page)) {
             payload.page = Math.max(1, Number(options.page));
         }
@@ -219,6 +219,44 @@ class IBKRConnectionManager {
             this.app.setPanelLoading('orders', false);
         }
         return result;
+    }
+
+    requestLogsSnapshot(options = {}) {
+        const payload = { type: 'request_logs_snapshot' };
+        if (options.range) payload.range = options.range;
+        if (options.module) payload.module = options.module;
+        if (options.level) payload.level = options.level;
+        if (options.direction) payload.direction = options.direction;
+        if (Number.isFinite(options.page_size)) payload.page_size = Math.max(1, Number(options.page_size));
+        if (Number.isFinite(options.lines)) payload.lines = Math.max(1, Number(options.lines));
+        if (options.search) payload.search = options.search;
+        if (options.filter_request_id) payload.filter_request_id = options.filter_request_id;
+        if (options.requestId) payload.request_id = options.requestId;
+        if (options.force) payload.force = true;
+        if (options.cursor !== undefined && options.cursor !== null) {
+            payload.cursor = Number.isFinite(Number(options.cursor)) ? Number(options.cursor) : options.cursor;
+        }
+
+        const minInterval = Number.isFinite(options.minInterval) ? Math.max(0, Number(options.minInterval)) : 4000;
+        return this._sendThrottled('logs_snapshot', payload, {
+            force: Boolean(options.force),
+            minInterval,
+        });
+    }
+
+    requestInfluxWriteRate(options = {}) {
+        const payload = { type: 'request_influx_write_rate' };
+        if (options.window) payload.window = options.window;
+        if (options.service) payload.service = options.service;
+        if (options.metric) payload.metric = options.metric;
+        if (options.aggregate) payload.aggregate = options.aggregate;
+        if (options.requestId) payload.request_id = options.requestId;
+        if (options.force) payload.force = true;
+        const minInterval = Number.isFinite(options.minInterval) ? Math.max(0, Number(options.minInterval)) : 10000;
+        return this._sendThrottled('influx_write_rate', payload, {
+            force: Boolean(options.force),
+            minInterval,
+        });
     }
 
     requestDomAutomationStatus(options = {}) {

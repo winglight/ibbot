@@ -23,6 +23,8 @@
             this.influxTimer = null;
             this.influxChart = null;
             this.influxData = [];
+            this.influxPending = null;
+            this.influxWsUnsubscribe = null;
             this.state = {
                 queue: REFRESH_STATE.idle,
                 influx: REFRESH_STATE.idle,
@@ -41,6 +43,13 @@
                 queueRefreshBtn: document.getElementById('refreshQueueMetricsBtn'),
                 influxRefreshBtn: document.getElementById('refreshInfluxMetricsBtn'),
             };
+
+            if (this.app && typeof this.app.registerWebSocketHandler === 'function') {
+                this.influxWsUnsubscribe = this.app.registerWebSocketHandler(
+                    'influx_write_rate',
+                    (payload) => this.handleInfluxWriteRate(payload)
+                );
+            }
         }
 
         init() {
@@ -90,6 +99,24 @@
             });
         }
 
+        destroy() {
+            this.clearTimers();
+            if (typeof this.influxWsUnsubscribe === 'function') {
+                try {
+                    this.influxWsUnsubscribe();
+                } catch (error) {
+                    console.warn('Failed to unsubscribe influx websocket handler', error);
+                }
+                this.influxWsUnsubscribe = null;
+            }
+            this.influxPending = null;
+        }
+
+        shouldUseWebSocket() {
+            const ws = this.app?.ibkrManager?.ws;
+            return !!ws && ws.readyState === WebSocket.OPEN;
+        }
+
         clearTimers() {
             if (this.queueTimer) {
                 clearTimeout(this.queueTimer);
@@ -115,6 +142,62 @@
                 this.influxTimer = null;
                 this.refreshInfluxMetrics().catch(() => {});
             }, this.influxRefreshInterval);
+        }
+
+        handleInfluxError(message, { scheduleNext = true } = {}) {
+            const summary = this.elements.influxSummary;
+            if (summary) {
+                summary.textContent = message || '无法加载写入速率';
+            }
+            this.state.influx = REFRESH_STATE.error;
+            if (scheduleNext) {
+                this.scheduleInfluxRefresh();
+            }
+        }
+
+        handleInfluxWriteRate(payload) {
+            if (!payload || payload.type !== 'influx_write_rate') {
+                return false;
+            }
+
+            const context = this.influxPending && payload.request_id === this.influxPending.requestId
+                ? this.influxPending
+                : null;
+            if (context) {
+                if (context.timer) {
+                    clearTimeout(context.timer);
+                }
+                this.influxPending = null;
+            }
+
+            if (!payload.success) {
+                const message = payload?.error || '无法加载写入速率';
+                this.handleInfluxError(message, { scheduleNext: !context?.immediate });
+                if (context && typeof context.reject === 'function') {
+                    context.reject(new Error(message));
+                }
+                return true;
+            }
+
+            try {
+                this.renderInfluxMetrics(payload || {});
+                this.state.influx = REFRESH_STATE.idle;
+                if (context && typeof context.resolve === 'function') {
+                    context.resolve(payload);
+                }
+            } catch (error) {
+                const message = error?.message || '渲染写入速率失败';
+                this.handleInfluxError(message, { scheduleNext: !context?.immediate });
+                if (context && typeof context.reject === 'function') {
+                    context.reject(error);
+                }
+                return true;
+            }
+
+            if (!context?.immediate) {
+                this.scheduleInfluxRefresh();
+            }
+            return true;
         }
 
         async refreshQueueMetrics({ manual = false, immediate = false } = {}) {
@@ -268,32 +351,74 @@
                 this.elements.influxSummary.textContent = '加载中...';
             }
 
-            const params = new URLSearchParams();
             const windowValue = this.elements.influxWindow?.value || '1h';
-            params.set('window', windowValue);
             const serviceValue = this.elements.influxService?.value || '';
-            if (serviceValue) {
-                params.set('service', serviceValue);
-            }
             const metricValue = this.elements.influxMetric?.value?.trim();
-            if (metricValue) {
-                params.set('metric', metricValue);
+            const useWebSocket = this.shouldUseWebSocket() && this.app?.ibkrManager?.requestInfluxWriteRate;
+            if (useWebSocket) {
+                return new Promise((resolve, reject) => {
+                    if (this.influxPending && this.influxPending.timer) {
+                        clearTimeout(this.influxPending.timer);
+                        this.influxPending = null;
+                    }
+
+                    const requestId = `influx:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+                    const context = { requestId, resolve, reject, immediate };
+                    this.influxPending = context;
+                    context.timer = setTimeout(() => {
+                        if (this.influxPending === context) {
+                            this.influxPending = null;
+                            const error = new Error('写入速率请求超时');
+                            this.handleInfluxError(error.message, { scheduleNext: !immediate });
+                            reject(error);
+                        }
+                    }, manual ? 20000 : 25000);
+
+                    const result = this.app.ibkrManager.requestInfluxWriteRate({
+                        window: windowValue,
+                        service: serviceValue || undefined,
+                        metric: metricValue || undefined,
+                        aggregate: 'sum',
+                        requestId,
+                        force: manual,
+                        minInterval: manual ? 1000 : undefined,
+                    });
+
+                    if (result === 'failed') {
+                        if (context.timer) {
+                            clearTimeout(context.timer);
+                        }
+                        if (this.influxPending === context) {
+                            this.influxPending = null;
+                        }
+                        const error = new Error('写入速率请求发送失败');
+                        this.handleInfluxError(error.message, { scheduleNext: !immediate });
+                        reject(error);
+                    }
+                });
             }
 
             try {
+                const params = new URLSearchParams();
+                params.set('window', windowValue);
+                if (serviceValue) params.set('service', serviceValue);
+                if (metricValue) params.set('metric', metricValue);
                 const data = await this.app.apiCall(`/monitoring/influx/write-rate?${params.toString()}`, {
                     useCache: false,
                     cacheTime: 0,
                     timeout: manual ? 15000 : 20000,
                 });
+                if (data && data.success === false) {
+                    const message = data.error || '无法加载写入速率';
+                    this.handleInfluxError(message, { scheduleNext: !immediate });
+                    return data;
+                }
                 this.renderInfluxMetrics(data || {});
                 this.state.influx = REFRESH_STATE.idle;
             } catch (error) {
                 console.error('Failed to load Influx write metrics', error);
-                this.state.influx = REFRESH_STATE.error;
-                if (this.elements.influxSummary) {
-                    this.elements.influxSummary.textContent = error?.message || '无法加载写入速率';
-                }
+                this.handleInfluxError(error?.message || '无法加载写入速率', { scheduleNext: !immediate });
+                throw error;
             } finally {
                 if (!immediate) {
                     this.scheduleInfluxRefresh();
@@ -353,6 +478,12 @@
                 if (this.elements.influxSummary) {
                     this.elements.influxSummary.textContent = 'Chart.js 未加载，无法显示图表';
                 }
+                return;
+            }
+
+            if (data && data.success === false) {
+                const message = data.error || '无法加载写入速率';
+                this.handleInfluxError(message, { scheduleNext: true });
                 return;
             }
 

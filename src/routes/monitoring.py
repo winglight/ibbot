@@ -265,18 +265,27 @@ def _normalise_flux_table(result: Any) -> list[dict[str, Any]]:
     return records
 
 
-@router.get("/api/monitoring/influx/write-rate")
-async def get_influx_write_rate(
-    window: str = Query(default="1h"),
-    service: str | None = Query(default=None),
-    metric: str | None = Query(default=None),
-    aggregate: str = Query(default="sum"),
+def build_influx_write_rate_payload(
+    *, window: str, service: str | None, metric: str | None, aggregate: str
 ) -> Mapping[str, Any]:
-    """Query InfluxDB for service metric write rates."""
+    """Return the write rate payload used by both HTTP and websocket handlers."""
+
+    query_meta = {
+        "window": window,
+        "service": service,
+        "metric": metric,
+        "aggregate": aggregate,
+    }
 
     config = get_influx_config()
     if not config.bucket:
-        raise HTTPException(status_code=503, detail="InfluxDB bucket is not configured")
+        return {
+            "success": False,
+            "error": "InfluxDB bucket is not configured",
+            "series": [],
+            "summary": {},
+            "query": query_meta,
+        }
 
     flux = _prepare_flux_query(
         bucket=config.bucket,
@@ -307,18 +316,29 @@ async def get_influx_write_rate(
         stats["average"] = stats["sum"] / points
 
     return {
+        "success": True,
         "series": series,
         "summary": grouped,
-        "query": {
-            "window": window,
-            "service": service,
-            "metric": metric,
-            "aggregate": aggregate,
-        },
+        "query": query_meta,
     }
+
+
+@router.get("/api/monitoring/influx/write-rate")
+async def get_influx_write_rate(
+    window: str = Query(default="1h"),
+    service: str | None = Query(default=None),
+    metric: str | None = Query(default=None),
+    aggregate: str = Query(default="sum"),
+) -> Mapping[str, Any]:
+    """Query InfluxDB for service metric write rates."""
+
+    return build_influx_write_rate_payload(
+        window=window, service=service, metric=metric, aggregate=aggregate
+    )
 
 
 __all__ = [
     "router",
+    "build_influx_write_rate_payload",
 ]
 

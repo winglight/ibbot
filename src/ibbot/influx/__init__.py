@@ -29,6 +29,13 @@ DEFAULT_INFLUX_URL_ENV = "IBBOT_INFLUX_URL"
 DEFAULT_INFLUX_TOKEN_ENV = "IBBOT_INFLUX_TOKEN"
 DEFAULT_INFLUX_ORG_ENV = "IBBOT_INFLUX_ORG"
 DEFAULT_INFLUX_BUCKET_ENV = "IBBOT_INFLUX_BUCKET"
+# Secondary fallbacks used by the data layer bootstrap scripts. These allow the
+# UI application to seamlessly reuse the same configuration without requiring
+# duplicated environment variables.
+FALLBACK_INFLUX_URL_ENV = "DATA_LAYER_INFLUX_URL"
+FALLBACK_INFLUX_TOKEN_ENV = "DATA_LAYER_INFLUX_TOKEN"
+FALLBACK_INFLUX_ORG_ENV = "DATA_LAYER_INFLUX_ORG"
+FALLBACK_INFLUX_BUCKET_ENV = "DATA_LAYER_INFLUX_BUCKET"
 DEFAULT_INFLUX_URL = "http://localhost:8086"
 DEFAULT_TIMEOUT = 10_000
 
@@ -56,12 +63,32 @@ class InfluxConfig:
         org: str | None = None,
         bucket: str | None = None,
     ) -> "InfluxConfig":
-        return cls(
-            url or os.getenv(DEFAULT_INFLUX_URL_ENV, DEFAULT_INFLUX_URL),
-            token if token is not None else os.getenv(DEFAULT_INFLUX_TOKEN_ENV),
-            org if org is not None else os.getenv(DEFAULT_INFLUX_ORG_ENV),
-            bucket if bucket is not None else os.getenv(DEFAULT_INFLUX_BUCKET_ENV),
+        resolved_url = url or os.getenv(DEFAULT_INFLUX_URL_ENV)
+        if not resolved_url:
+            resolved_url = os.getenv(FALLBACK_INFLUX_URL_ENV, DEFAULT_INFLUX_URL)
+
+        resolved_token = (
+            token
+            if token is not None
+            else os.getenv(DEFAULT_INFLUX_TOKEN_ENV)
+            or os.getenv(FALLBACK_INFLUX_TOKEN_ENV)
         )
+
+        resolved_org = (
+            org
+            if org is not None
+            else os.getenv(DEFAULT_INFLUX_ORG_ENV)
+            or os.getenv(FALLBACK_INFLUX_ORG_ENV)
+        )
+
+        resolved_bucket = (
+            bucket
+            if bucket is not None
+            else os.getenv(DEFAULT_INFLUX_BUCKET_ENV)
+            or os.getenv(FALLBACK_INFLUX_BUCKET_ENV)
+        )
+
+        return cls(resolved_url, resolved_token, resolved_org, resolved_bucket)
 
 
 _config: InfluxConfig | None = None

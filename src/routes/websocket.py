@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 import core
@@ -19,7 +19,10 @@ from src.account_snapshot_cache import (
 from src.database import get_db_manager
 from src.dom_optimizer import get_dom_optimization_orchestrator
 from src.dom_service import get_dom_service
+from src.order_manager import get_order_manager as _get_order_manager_singleton
 from src.utils import now_local, parse_local_datetime, to_local_iso
+from src.routes.logs import load_logs_data
+from src.routes.monitoring import build_influx_write_rate_payload
 from src.utils.strategy_cache import (
     compute_performance_metrics as cache_compute_performance,
     get_strategy_stats as cache_get_strategy_stats,
@@ -118,8 +121,20 @@ def _websocket_manager():
 
 
 def _order_manager():
-    services = _services()
-    return getattr(services, "order_manager", None)
+    try:
+        services = _services()
+    except RuntimeError:
+        services = None
+
+    manager = getattr(services, "order_manager", None) if services is not None else None
+    if manager is not None:
+        return manager
+
+    try:
+        return _get_order_manager_singleton()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.debug("Order manager fallback initialisation failed: %s", exc)
+        return None
 
 
 def _strategy_manager():
@@ -130,6 +145,37 @@ def _strategy_manager():
 def _risk_manager():
     services = _services()
     return getattr(services, "risk_manager", None)
+
+
+def _load_risk_rules_snapshot() -> Optional[Dict[str, Dict[str, Any]]]:
+    db = get_db_manager()
+    try:
+        records = db.load_risk_rules()
+    except Exception as exc:  # pragma: no cover - database access issues
+        logger.warning("Failed to load risk rules from database: %s", exc)
+        return None
+
+    payload: Dict[str, Dict[str, Any]] = {}
+    for rule in records or []:
+        try:
+            symbol = getattr(rule, "symbol", None)
+            if not symbol:
+                continue
+            payload[symbol] = {
+                "symbol": symbol,
+                "stop_loss_price": getattr(rule, "stop_loss_price", None),
+                "take_profit_price": getattr(rule, "take_profit_price", None),
+                "max_loss_percent": getattr(rule, "max_loss_percent", None),
+                "enabled": bool(getattr(rule, "enabled", True)),
+                "max_time_span": getattr(rule, "max_time_span", None),
+                "created_at": getattr(rule, "timestamp", None),
+                "rule_type": getattr(rule, "rule_type", None),
+                "auto_trailing": bool(getattr(rule, "auto_trailing", False)),
+                "atr_params": getattr(rule, "atr_params", {}) or {},
+            }
+        except Exception:  # pragma: no cover - defensive guard
+            continue
+    return payload
 
 
 def _connection_manager():
@@ -414,9 +460,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 if isinstance(snapshot, dict):
                     info = snapshot.get("data")
             if info is not None:
+                payload_info = info
+                if isinstance(info, dict):
+                    payload_info = dict(info)
+                    payload_info.setdefault("connected", True)
                 await websocket.send_text(json.dumps({
                     "type": "account_update",
-                    "account_info": info,
+                    "account_info": payload_info,
                 }))
             else:
                 logger.warning("Initial account_info snapshot unavailable on websocket connect")
@@ -643,6 +693,129 @@ async def websocket_endpoint(websocket: WebSocket):
                         "success": False,
                         "error": str(exc),
                     }))
+            elif msg_type == "request_logs_snapshot":
+                range_value = (message.get("range") or "today").strip() or "today"
+                module_value = (message.get("module") or "all").strip() or "all"
+                level_value = (message.get("level") or "all").strip() or "all"
+                search_value = message.get("search")
+                raw_request_filter = message.get("filter_request_id") or message.get("request_id_filter")
+                request_filter = None
+                if isinstance(raw_request_filter, str):
+                    request_filter = raw_request_filter.strip() or None
+                request_token = message.get("request_id")
+
+                try:
+                    page_size = int(message.get("page_size", 200))
+                except (TypeError, ValueError):
+                    page_size = 200
+                try:
+                    cursor = message.get("cursor")
+                    cursor_value = int(cursor) if cursor is not None else None
+                except (TypeError, ValueError):
+                    cursor_value = None
+
+                direction_value = (message.get("direction") or "backward").strip() or "backward"
+                direction_value = direction_value if direction_value in {"backward", "forward"} else "backward"
+
+                try:
+                    lines_value = int(message.get("lines", 50))
+                except (TypeError, ValueError):
+                    lines_value = 50
+
+                key = (
+                    "logs_snapshot:" +
+                    ":".join(
+                        str(part)
+                        for part in (
+                            range_value,
+                            module_value,
+                            level_value,
+                            direction_value,
+                            cursor_value if cursor_value is not None else "",
+                            page_size,
+                            request_filter or "",
+                            search_value or "",
+                            lines_value,
+                        )
+                    )
+                )
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        if request_token is not None:
+                            cached_payload["request_id"] = request_token
+                        await _send_or_disconnect(websocket, cached_payload)
+                    else:
+                        await _send_or_disconnect(
+                            websocket,
+                            {
+                                "type": "logs_snapshot",
+                                "success": False,
+                                "error": "Rate limited",
+                                "query": {
+                                    "range": range_value,
+                                    "module": module_value,
+                                    "level": level_value,
+                                "direction": direction_value,
+                                "cursor": cursor_value,
+                                "page_size": page_size,
+                                "request_id": request_filter,
+                                "search": search_value,
+                                "lines": lines_value,
+                            },
+                        },
+                    )
+                    continue
+
+                try:
+                    result = await load_logs_data(
+                        lines=lines_value,
+                        level=level_value,
+                        module=module_value,
+                        range=range_value,
+                        cursor=cursor_value,
+                        page_size=page_size,
+                        direction=direction_value,
+                        request_id=request_filter,
+                        search=search_value,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to load logs snapshot: {exc}")
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "logs_snapshot",
+                            "success": False,
+                            "error": str(exc),
+                        },
+                    )
+                    continue
+
+                payload = {
+                    "type": "logs_snapshot",
+                    "success": bool(result.get("success", True)),
+                    "logs": result.get("logs") or [],
+                    "pagination": result.get("pagination") or {},
+                    "query": {
+                        "range": range_value,
+                        "module": module_value,
+                        "level": level_value,
+                        "direction": direction_value,
+                        "cursor": cursor_value,
+                        "page_size": page_size,
+                        "request_id": request_filter,
+                        "search": search_value,
+                        "lines": lines_value,
+                    },
+                    "source": "websocket",
+                }
+                if request_token is not None:
+                    payload["request_id"] = request_token
+                last_responses[key] = payload
+                await _send_or_disconnect(websocket, payload)
             elif msg_type == "request_positions_snapshot":
                 key = "positions_snapshot"
                 force = bool(message.get("force"))
@@ -831,19 +1004,93 @@ async def websocket_endpoint(websocket: WebSocket):
                         "symbol": symbol,
                         "error": str(exc),
                     }))
-            elif msg_type == "request_risk_rules":
-                if 'risk_manager' not in globals() or risk_manager is None:
-                    await websocket.send_text(
-                        json.dumps(
+            elif msg_type == "request_influx_write_rate":
+                window = (message.get("window") or "1h").strip() or "1h"
+                service_filter = message.get("service")
+                metric_filter = message.get("metric")
+                aggregate = (message.get("aggregate") or "sum").strip() or "sum"
+                request_token = message.get("request_id")
+
+                key = f"influx_write_rate:{window}:{service_filter or ''}:{metric_filter or ''}:{aggregate}"
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        if request_token is not None:
+                            cached_payload["request_id"] = request_token
+                        await _send_or_disconnect(websocket, cached_payload)
+                    else:
+                        await _send_or_disconnect(
+                            websocket,
                             {
-                                "type": "risk_rules",
+                                "type": "influx_write_rate",
                                 "success": False,
-                                "error": "Risk manager unavailable",
-                            }
+                                "error": "Rate limited",
+                                "query": {
+                                    "window": window,
+                                    "service": service_filter,
+                                    "metric": metric_filter,
+                                    "aggregate": aggregate,
+                                },
+                            },
                         )
+                    continue
+
+                try:
+                    data = build_influx_write_rate_payload(
+                        window=window,
+                        service=service_filter,
+                        metric=metric_filter,
+                        aggregate=aggregate,
+                    )
+                except HTTPException as exc:
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "influx_write_rate",
+                            "success": False,
+                            "error": getattr(exc, "detail", None) or str(exc),
+                            "query": {
+                                "window": window,
+                                "service": service_filter,
+                                "metric": metric_filter,
+                                "aggregate": aggregate,
+                            },
+                        },
+                    )
+                    continue
+                except Exception as exc:
+                    logger.warning(f"Failed to load influx metrics: {exc}")
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "influx_write_rate",
+                            "success": False,
+                            "error": str(exc),
+                            "query": {
+                                "window": window,
+                                "service": service_filter,
+                                "metric": metric_filter,
+                                "aggregate": aggregate,
+                            },
+                        },
                     )
                     continue
 
+                payload = {
+                    "type": "influx_write_rate",
+                    "success": True,
+                    "source": "websocket",
+                    **data,
+                }
+                if request_token is not None:
+                    payload["request_id"] = request_token
+                last_responses[key] = payload
+                await _send_or_disconnect(websocket, payload)
+            elif msg_type == "request_risk_rules":
+                manager = _risk_manager()
                 key = "risk_rules"
                 force = bool(message.get("force"))
                 if not _allow_request(request_tracker, key, force=force):
@@ -864,10 +1111,34 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
+                if manager is None:
+                    snapshot = _load_risk_rules_snapshot()
+                    if snapshot is None:
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "risk_rules",
+                                    "success": False,
+                                    "error": "Risk rules unavailable",
+                                }
+                            )
+                        )
+                        continue
+
+                    payload = {
+                        "type": "risk_rules",
+                        "success": True,
+                        "rules": snapshot,
+                        "source": "database",
+                    }
+                    last_responses[key] = payload
+                    await websocket.send_text(json.dumps(payload))
+                    continue
+
                 try:
                     loop = asyncio.get_event_loop()
                     rules = await asyncio.wait_for(
-                        loop.run_in_executor(None, risk_manager.get_risk_rules),
+                        loop.run_in_executor(None, manager.get_risk_rules),
                         timeout=5.0,
                     )
                     serialisable = {}
@@ -890,7 +1161,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "type": "risk_rules",
                         "success": True,
                         "rules": serialisable,
-                        "source": "websocket",
+                        "source": "manager",
                     }
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
@@ -975,7 +1246,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         },
                     )
             elif msg_type == "request_strategies":
-                if 'strategy_manager' not in globals() or strategy_manager is None:
+                manager = _strategy_manager()
+                if manager is None:
                     await _send_or_disconnect(
                         websocket,
                         {
@@ -1008,7 +1280,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     loop = asyncio.get_event_loop()
                     strategies = await asyncio.wait_for(
-                        loop.run_in_executor(None, strategy_manager.get_strategies),
+                        loop.run_in_executor(None, manager.get_strategies),
                         timeout=6.0,
                     )
                     payload = {
@@ -1032,7 +1304,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         },
                     )
             elif msg_type == "request_strategy_status":
-                if 'strategy_manager' not in globals() or strategy_manager is None:
+                manager = _strategy_manager()
+                if manager is None:
                     await _send_or_disconnect(
                         websocket,
                         {
@@ -1078,7 +1351,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     loop = asyncio.get_event_loop()
                     status = await asyncio.wait_for(
-                        loop.run_in_executor(None, strategy_manager.get_internal_strategy_status, name),
+                        loop.run_in_executor(None, manager.get_internal_strategy_status, name),
                         timeout=5.0,
                     )
                     if status is None:
@@ -1114,6 +1387,19 @@ async def websocket_endpoint(websocket: WebSocket):
                             "type": "strategy_performance",
                             "success": False,
                             "error": "Strategy name is required",
+                        },
+                    )
+                    continue
+
+                manager = _strategy_manager()
+                if manager is None:
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "strategy_performance",
+                            "success": False,
+                            "name": name,
+                            "error": "Strategy manager unavailable",
                         },
                     )
                     continue
@@ -1194,7 +1480,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     metrics = await asyncio.wait_for(
                         loop.run_in_executor(
                             None,
-                            lambda: strategy_manager.get_strategy_performance(
+                            lambda: manager.get_strategy_performance(
                                 name,
                                 start_date=start_date,
                                 end_date=end_date,
