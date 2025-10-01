@@ -69,7 +69,7 @@ class MarketDataFeedService:
 
         self._loop = asyncio.get_running_loop()
         if not self.subscriptions:
-            self._logger.warning(
+            self._logger.info(
                 "No market data subscriptions configured; IB feed service running idle",
             )
             return
@@ -128,7 +128,7 @@ class MarketDataFeedService:
         if self.subscriptions:
             self._logger.info("Subscribed to %s", ", ".join(self.subscriptions))
         else:
-            self._logger.warning("No market data subscriptions configured")
+            self._logger.info("No market data subscriptions configured")
 
     def _handle_price_event(self, symbol: str, update: Mapping[str, Any]) -> None:
         if not self._loop:
