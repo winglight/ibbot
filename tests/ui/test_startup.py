@@ -110,9 +110,15 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
     async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
         return fake_redis
 
+    monkeypatch.setenv("ENABLE_EMBEDDED_RISK_MANAGER", "1")
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "change_me")
+    monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
+    monkeypatch.setattr("src.routes.auth.ADMIN_PASSWORD", "change_me", raising=False)
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
     monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
+    monkeypatch.setattr("core.container.load_project_env", lambda: None)
 
     await core.shutdown()
 
@@ -154,9 +160,7 @@ async def test_startup_allows_disabling_embedded_risk_manager(
 
     async with app.router.lifespan_context(app):
         container = core.require_container()
-        risk_manager = container.risk_manager
-        assert risk_manager is not None
-        assert not getattr(risk_manager, "monitoring_active", False)
+        assert container.risk_manager is None
 
     await core.shutdown()
 
@@ -168,9 +172,14 @@ async def test_app_routes_available_without_ib(monkeypatch: pytest.MonkeyPatch) 
     async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
         return fake_redis
 
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "change_me")
+    monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
+    monkeypatch.setattr("src.routes.auth.ADMIN_PASSWORD", "change_me", raising=False)
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
     monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
+    monkeypatch.setattr("core.container.load_project_env", lambda: None)
     await core.shutdown()
 
     transport = ASGITransport(app=app)
@@ -210,9 +219,14 @@ async def test_connection_status_prefers_redis_when_fresh(
     async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
         return fake_redis
 
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "change_me")
+    monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
+    monkeypatch.setattr("src.routes.auth.ADMIN_PASSWORD", "change_me", raising=False)
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
     monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
+    monkeypatch.setattr("core.container.load_project_env", lambda: None)
     await core.shutdown()
 
     services = await core.initialise(force=True)

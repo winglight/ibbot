@@ -89,7 +89,14 @@ class QueueManager:
         # 启动时加载持久化的任务（需要在性能阈值配置完成后调用）
         self._load_tasks()
 
-    def set_dependencies(self, risk_manager, strategy_manager, websocket_manager, order_manager=None, notification_manager=None):
+    def set_dependencies(
+        self,
+        risk_manager=None,
+        strategy_manager=None,
+        websocket_manager=None,
+        order_manager=None,
+        notification_manager=None,
+    ):
         """设置依赖对象"""
         self.risk_manager = risk_manager
         self.strategy_manager = strategy_manager
@@ -708,7 +715,7 @@ class QueueManager:
         from datetime import datetime
 
         # 检查依赖对象是否已设置
-        if not all([self.risk_manager, self.strategy_manager, self.websocket_manager]):
+        if not all([self.strategy_manager, self.websocket_manager]):
             raise Exception("Dependencies not properly set")
         
         payload = task.payload
