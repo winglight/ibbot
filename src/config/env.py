@@ -11,6 +11,8 @@ from dotenv import load_dotenv, dotenv_values
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+_last_env_snapshot: dict[str, str] | None = None
+
 
 def _apply_overrides(
     file_path: Path,
@@ -35,6 +37,9 @@ def _apply_overrides(
 
 def load_project_env(extra_files: Iterable[Path | str] | None = None) -> None:
     """Public wrapper that normalises *extra_files* for caching."""
+
+    global _last_env_snapshot
+    _last_env_snapshot = dict(os.environ)
 
     normalized: tuple[Path | str, ...] | None = None
     if extra_files is not None:
@@ -91,3 +96,30 @@ def _load_project_env(extra_files: tuple[Path | str, ...] | None = None) -> None
             candidate = Path(file_path)
             if candidate.exists():
                 _apply_overrides(candidate, original_env)
+
+
+def _reset_load_project_env_cache() -> None:
+    """Clear cached dotenv state and restore environment variables."""
+
+    global _last_env_snapshot
+    _load_project_env.cache_clear()
+
+    if _last_env_snapshot is None:
+        return
+
+    original_keys = set(_last_env_snapshot)
+    current_keys = set(os.environ)
+
+    for key in current_keys - original_keys:
+        os.environ.pop(key, None)
+
+    for key, value in _last_env_snapshot.items():
+        os.environ[key] = value
+
+    _last_env_snapshot = None
+
+
+# ``load_project_env`` delegates to the cached implementation but tests expect the
+# public wrapper to expose ``cache_clear``.  Provide a wrapper that both clears the
+# cached dotenv state and restores environment variables for isolation in tests.
+load_project_env.cache_clear = _reset_load_project_env_cache  # type: ignore[attr-defined]
