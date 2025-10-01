@@ -397,7 +397,7 @@ async def _run_order_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     app.include_router(orders_module.router)
     app.dependency_overrides[orders_module.get_current_user] = allow_user
 
-    monkeypatch.setattr(orders_module, "enqueue_ib_command", fake_enqueue)
+    monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
     monkeypatch.setattr(orders_module, "websocket_manager", websocket_manager)
     monkeypatch.setattr(orders_module.uuid, "uuid4", lambda: _FakeUUID())
     monkeypatch.setattr(orders_module, "audit_log_success", noop)

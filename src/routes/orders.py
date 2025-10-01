@@ -1,8 +1,9 @@
 import asyncio
+import os
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional, Dict, Tuple, Any
+from typing import Optional, Dict, Tuple, Any, Mapping
 
 from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
@@ -24,13 +25,46 @@ from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
 )
-from src.ibbot.redis import enqueue_ib_command
+from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
 from src.models import OrderRequest
 from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
 router = APIRouter()
 
 NY_TZ = ZoneInfo("America/New_York")
+
+_COMMAND_QUEUE_OVERRIDE = os.getenv("IB_COMMAND_QUEUE_KEY", "").strip() or None
+
+
+async def _resolve_command_queue_key() -> str:
+    """Return the Redis list key used for IB command dispatching."""
+
+    if _COMMAND_QUEUE_OVERRIDE:
+        return _COMMAND_QUEUE_OVERRIDE
+
+    container = core.get_container()
+    provider = getattr(container, "config_provider", None) if container else None
+    if provider is None:
+        return DEFAULT_COMMAND_QUEUE
+
+    try:
+        queue_key = await provider.get(
+            "ib-command",
+            "queue_key",
+            default=DEFAULT_COMMAND_QUEUE,
+        )
+    except Exception:  # pragma: no cover - config lookup failure
+        return DEFAULT_COMMAND_QUEUE
+
+    queue_key_str = str(queue_key or "").strip()
+    return queue_key_str or DEFAULT_COMMAND_QUEUE
+
+
+async def _enqueue_command(payload: Mapping[str, Any]) -> None:
+    """Push the command payload onto the configured Redis queue."""
+
+    queue_key = await _resolve_command_queue_key()
+    await enqueue_ib_command(payload, queue_key=queue_key)
 
 
 async def _load_positions_snapshot() -> Tuple[list[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -141,7 +175,7 @@ async def place_order(
     }
 
     try:
-        await enqueue_ib_command(payload)
+        await _enqueue_command(payload)
     except Exception as exc:
         logger.error("Failed to enqueue IB command", exc_info=True)
         await audit_log_failure(
@@ -209,7 +243,7 @@ async def cancel_order(
     }
 
     try:
-        await enqueue_ib_command(payload)
+        await _enqueue_command(payload)
     except Exception as exc:
         logger.error("Failed to enqueue cancel order command", exc_info=True)
         await audit_log_failure(
@@ -350,7 +384,7 @@ async def close_position(
             },
         }
 
-        await enqueue_ib_command(payload)
+        await _enqueue_command(payload)
 
         try:
             await websocket_manager.broadcast(
@@ -745,7 +779,7 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
             },
         }
 
-        await enqueue_ib_command(payload)
+        await _enqueue_command(payload)
 
         try:
             await websocket_manager.broadcast({
@@ -796,7 +830,7 @@ async def cancel_all_orders(
     }
 
     try:
-        await enqueue_ib_command(payload)
+        await _enqueue_command(payload)
     except Exception as exc:
         logger.error("Failed to enqueue cancel all orders command", exc_info=True)
         await audit_log_failure(request, detail="failed to enqueue cancel all command", extra={"command_id": command_id})
@@ -1093,7 +1127,7 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
             },
         }
 
-        await enqueue_ib_command(payload)
+        await _enqueue_command(payload)
 
         return {"success": True, "status": "queued", "command_id": command_id}
 
@@ -1126,7 +1160,7 @@ async def sync_single_order(order_id: str, user: Optional[str] = Depends(get_cur
             },
         }
 
-        await enqueue_ib_command(payload)
+        await _enqueue_command(payload)
 
         return {
             "success": True,

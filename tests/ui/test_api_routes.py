@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -44,7 +45,7 @@ def test_place_order_enqueues_command_and_returns_id(orders_app: FastAPI, monkey
 
     dummy_manager = DummyWebSocketManager()
 
-    monkeypatch.setattr(orders_module, "enqueue_ib_command", fake_enqueue)
+    monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
     monkeypatch.setattr(orders_module, "websocket_manager", dummy_manager)
     monkeypatch.setattr(orders_module.uuid, "uuid4", lambda: FakeUUID())
 
@@ -73,7 +74,7 @@ def test_place_order_enqueue_failure_returns_service_unavailable(orders_app: Fas
     async def failing_enqueue(payload: dict[str, Any]) -> None:  # pragma: no cover - triggered in test
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(orders_module, "enqueue_ib_command", failing_enqueue)
+    monkeypatch.setattr(orders_module, "_enqueue_command", failing_enqueue)
     monkeypatch.setattr(orders_module, "websocket_manager", object())
 
     with TestClient(orders_app) as client:
@@ -91,6 +92,31 @@ def test_place_order_enqueue_failure_returns_service_unavailable(orders_app: Fas
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Failed to enqueue order command"
+
+
+def test_enqueue_command_uses_config_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: dict[str, Any] = {}
+
+    async def fake_enqueue(payload: dict[str, Any], *, queue_key: str) -> None:
+        recorded["payload"] = dict(payload)
+        recorded["queue_key"] = queue_key
+
+    class DummyProvider:
+        async def get(self, module: str, key: str, *, default: Any | None = None) -> str:
+            assert module == "ib-command"
+            assert key == "queue_key"
+            return "queue:test:configured"
+
+    class DummyContainer:
+        config_provider = DummyProvider()
+
+    monkeypatch.setattr(orders_module, "enqueue_ib_command", fake_enqueue)
+    monkeypatch.setattr(orders_module.core, "get_container", lambda: DummyContainer())
+
+    asyncio.run(orders_module._enqueue_command({"foo": "bar"}))
+
+    assert recorded["payload"] == {"foo": "bar"}
+    assert recorded["queue_key"] == "queue:test:configured"
 
 
 @pytest.fixture()
