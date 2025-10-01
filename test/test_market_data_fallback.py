@@ -1,6 +1,3 @@
-import core
-import pandas as pd
-
 from src.database import get_db_manager
 from src.routes import market_data as market_data_module
 
@@ -36,17 +33,27 @@ def test_chart_data_fallback_returns_db_cache(monkeypatch, client, admin_headers
             ),
         )
 
-    # Pretend we are connected to IB but the API returns no data
-    monkeypatch.setattr(core.connection_manager, "is_connected", lambda: True)
-    monkeypatch.setattr(core, "ibkr_client", object(), raising=False)
+    # Force unified manager and market service to be unavailable
+    monkeypatch.setattr(
+        market_data_module,
+        "_get_data_layer_manager",
+        lambda: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        market_data_module,
+        "get_data_layer_mode",
+        lambda: "legacy",
+        raising=False,
+    )
 
-    async def fake_fetch(*args, **kwargs):
-        return pd.DataFrame()
+    async def fake_fetch_history(*args, **kwargs):
+        return []
 
     monkeypatch.setattr(
         market_data_module,
-        "_fetch_ib_historical",
-        fake_fetch,
+        "_fetch_market_history",
+        fake_fetch_history,
         raising=False,
     )
 
