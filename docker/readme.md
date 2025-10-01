@@ -35,6 +35,8 @@ docker compose -f docker/docker-compose.yml logs -f
 - **ibbot**：FastAPI 主服务，暴露在 http://localhost:8000/。
 - **cloudflared** *(可选)*：若在 `docker/.env` 配置 `CF_TUNNEL_TOKEN`，可自动启动 Cloudflare Tunnel。
 
+> **提示**：Redis、Account Snapshot Service 以及 IB Command Worker 需单独部署。可以通过在 Compose 文件中新增服务（示例：使用 `python -m services.account_snapshot.main --mode worker`）或复用现有基础设施来完成。启动顺序建议为：Redis → IB Command Worker → Account Snapshot Service → Market Data Service → ibbot。所有服务的健康状态可通过 UI 的 `/api/service_health` 统一查看。
+
 常用卷映射：
 
 | 宿主机路径 | 容器路径 | 说明 |
@@ -63,6 +65,13 @@ docker compose -f docker/docker-compose.prod.yml up -d
 
 - Compose 环境变量 `IBKR_PORT=4001`
 - IB Gateway 内部的 API 端口配置
+
+若需要在生产环境中启用账户快照或命令服务，建议额外部署以下容器：
+
+- **account-snapshot-service**：镜像可直接复用 ibbot 基础镜像，命令 `python -m services.account_snapshot.main --mode worker`，暴露 `/health` 用于监控。
+- **ib-command-worker**：内部命令执行器，消费 `queue:ib:commands` 并写入 `hash:ib:result:*`。可按团队现有实现扩展。
+
+请确保上述服务能够访问相同的 Redis 实例，并在 `ibbot` 的环境变量中配置 `ACCOUNT_SNAPSHOT_API_URL`、`IB_COMMAND_QUEUE_KEY` 等参数。
 
 ## 4. Cloudflare Tunnel（可选）
 

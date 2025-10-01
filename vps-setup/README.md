@@ -62,6 +62,8 @@ docker compose -f docker/docker-compose.yml up -d
 - IB Gateway noVNC：http://localhost:5800
 - 若使用 autossh/quick-start 脚本，将会自动建立本地端口转发。
 
+> **提醒**：Redis、Account Snapshot Service 与 IB Command Worker 需要独立运行。可在 VPS 上新增 systemd 单元或扩展 Compose 文件以执行 `python -m services.account_snapshot.main --mode worker`。务必在 Redis → 命令 Worker → Snapshot Service → Market Data Service → ibbot 的顺序依次启动，并通过 `curl http://<host>:8082/health`、`curl http://<host>:8010/health` 以及 UI 的 `/api/service_health` 核查健康状态。
+
 ### 5. 本地辅助脚本
 
 在本地机器执行：

@@ -43,6 +43,38 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 - **src/optimizer_service/** 提供 DOM 优化任务编排与异步执行。
 - FastAPI 主程序通过 `get_core_container()` 访问 Redis、Influx 持久化入口与配置提供者，替代旧的全局管理器引用。
 
+## 🔌 Redis/REST 服务编排
+
+为了让 UI 与后端服务解耦，核心模块通过 Redis 队列与 REST/Stream 通道协作。推荐的启动顺序如下：
+
+1. **Redis**：提供命令队列、快照缓存与健康信息的集中存储。
+2. **IB Command Worker**（部署在 IB Gateway 附近的命令执行器）：消费 `queue:ib:commands` 并写入 `hash:ib:result:*`/`stream:ib:results`。
+3. **Account Snapshot Service**（`python -m services.account_snapshot.main --mode worker`）：定期刷新账户/持仓，写入 `account:info`、`account:positions` 与 `stream:account-snapshot`，同时更新 `hash:service:health:account-snapshot`。
+4. **Market Data Service**（`uvicorn services.market_data.app:create_app ...`）：聚合行情并输出 `hash:market:snapshot:{symbol}`、`stream:market-data`，健康信息写入 `hash:service:health:market-data`。
+5. **UI Gateway (本仓库)**：通过 `/api/account_*`、`/api/place_order`、`/ws` 等接口消费上述数据并广播给前端。
+
+### Redis 键与 Stream 约定
+
+| 键 / 前缀 | 生产者 | 用途 |
+| --- | --- | --- |
+| `queue:ib:commands` | UI Gateway / Snapshot Service | 向 IBKR 命令执行器派发指令 |
+| `hash:ib:result:{command_id}` | IB Command Worker | 回写命令执行结果，TTL 由 `ACCOUNT_SNAPSHOT_RESULT_TTL_SECONDS` 控制 |
+| `stream:ib:results` | IB Command Worker | 持续推送命令完成事件（可选消费者） |
+| `account:info` / `account:positions` | Account Snapshot Service | 最新账户/持仓快照，字段包含 `data`、`updated_at`、`stale` 等 |
+| `stream:account-snapshot` | Account Snapshot Service | 快照增量及 stale 标记 |
+| `hash:market:snapshot:{symbol}` | Market Data Service | 单标的行情快照，包含 `price/bid/ask/volume/stale` |
+| `stream:market-data` | Market Data Service | 统一行情事件 Stream，字段 `symbol`、`type`、`data`、`ts_ns` |
+| `hash:service:health:*` | 各服务 | 健康与指标信息，`/api/service_health` 会聚合输出 |
+
+### 健康检查
+
+- Account Snapshot Service：`GET http://<host>:8082/health`，返回最近刷新时间、队列深度与错误计数。
+- Market Data Service：`GET http://<host>:8010/health`，包含 Stream 写入状态、订阅延迟及账户快照合并结果。
+- IB Command Worker：通过 Redis `HGETALL hash:service:health:ib-command` 或 UI 的 `/api/service_health` 查看最新心跳、排队情况。
+- UI Gateway：`GET /api/service_health`（需认证）聚合所有 `hash:service:health:*` 键，便于运维面板展示。
+
+更多 Redis/REST 通道契约细节，请参阅 [docs/redis_rest_channels.md](docs/redis_rest_channels.md)。
+
 ## 🚀 快速开始
 
 ### 1. 安装依赖
@@ -127,5 +159,7 @@ pytest
 - DOM 服务与调优：`docs/dom_optimizer_guide.md`、`src/dom_service.py`。
 - 风险管理设计：`docs/策略级风控模块设计.docx`、`src/risk_manager.py`。
 - 手工测试指引：`docs/tests.md`。
+- Redis/REST 契约：`docs/redis_rest_channels.md`。
+- 迁移指南：`docs/migration_to_redis_rest.md`。
 
 如需扩展策略或接入外部系统，请参考 `src/strategies/readme.md` 与 `/api/strategy` 相关接口。
