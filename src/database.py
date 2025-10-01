@@ -948,6 +948,130 @@ class DatabaseManager:
                 cur.close()
             database_logger.debug(f"Historical data saved for {symbol}: {len(rows)} records (interval={interval})")
 
+    def save_historical_records(
+        self,
+        symbol: str,
+        records: Sequence[Dict[str, Any]],
+        *,
+        bar_size: str = "1 day",
+    ) -> None:
+        """Insert historical records provided as dictionaries without requiring pandas."""
+
+        if not records:
+            return
+
+        interval = self._normalize_interval(bar_size)
+
+        def _split_timestamp(value: Any) -> tuple[Optional[str], Optional[str]]:
+            if value is None:
+                return None, None
+            dt: Optional[datetime]
+            if isinstance(value, datetime):
+                dt = ensure_local_timezone(value)
+            else:
+                text = str(value)
+                try:
+                    dt = parse_local_datetime(text)
+                except Exception:
+                    try:
+                        dt = datetime.fromisoformat(text)
+                    except Exception:
+                        dt = None
+                if dt is not None:
+                    dt = ensure_local_timezone(dt)
+            if dt is None:
+                return None, None
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = dt.strftime("%H:%M:%S") if not interval.endswith("d") else None
+            return date_str, time_str
+
+        def _to_float(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _to_int(value: Any) -> int:
+            if value is None:
+                return 0
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return 0
+
+        prepared_rows = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            ts_value = record.get("timestamp") or record.get("date")
+            date_str, time_str = _split_timestamp(ts_value)
+            if date_str is None:
+                continue
+            open_price = _to_float(record.get("open"))
+            high_price = _to_float(record.get("high"))
+            low_price = _to_float(record.get("low"))
+            close_price = _to_float(record.get("close"))
+            volume = _to_int(record.get("volume"))
+            prepared_rows.append(
+                (
+                    symbol,
+                    date_str,
+                    time_str,
+                    open_price,
+                    high_price,
+                    low_price,
+                    close_price,
+                    volume,
+                    interval,
+                    close_price,
+                )
+            )
+
+        if not prepared_rows:
+            return
+
+        with self._connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute("PRAGMA table_info('historical_data')")
+                table_cols = [row[1] for row in cur.fetchall()]
+                required_columns = [
+                    "symbol",
+                    "date",
+                    "time",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "interval",
+                    "adj_close",
+                ]
+                missing = [c for c in required_columns if c not in table_cols]
+                for col in missing:
+                    coltype = "TEXT" if col in {"symbol", "date", "time", "interval"} else "REAL"
+                    if col == "volume":
+                        coltype = "INTEGER"
+                    cur.execute(f"ALTER TABLE historical_data ADD COLUMN {col} {coltype}")
+
+                insert_sql = (
+                    "INSERT OR IGNORE INTO historical_data "
+                    "(symbol, date, time, open, high, low, close, volume, interval, adj_close) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                cur.executemany(insert_sql, prepared_rows)
+            finally:
+                cur.close()
+
+        database_logger.debug(
+            "Historical records saved for {}: {} rows (interval={})",
+            symbol,
+            len(prepared_rows),
+            interval,
+        )
+
     def _normalize_interval(self, bar_size: str) -> str:
         bs = (bar_size or '').lower().strip()
         if 'day' in bs:
