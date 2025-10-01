@@ -118,15 +118,18 @@ def _websocket_manager():
 
 
 def _order_manager():
-    return _services().order_manager
+    services = _services()
+    return getattr(services, "order_manager", None)
 
 
 def _strategy_manager():
-    return _services().strategy_manager
+    services = _services()
+    return getattr(services, "strategy_manager", None)
 
 
 def _risk_manager():
-    return _services().risk_manager
+    services = _services()
+    return getattr(services, "risk_manager", None)
 
 
 def _connection_manager():
