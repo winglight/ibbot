@@ -2215,8 +2215,21 @@ class IBKRClient:
                 ibkr_logger.error(f"IBKR connection lost for get account info")
                 return self._return_cached_account_info()
 
-            # Use synchronous methods in async context
-            account_values = ib.accountValues()
+            # Use synchronous methods in async context without blocking the
+            # FastAPI event loop. ``ib.accountValues`` performs network I/O and
+            # waiting for it directly would stall every coroutine (including the
+            # HTTP server) which manifested as the web UI hanging after startup.
+            def _fetch_account_values():
+                return ib.accountValues()
+
+            account_values = await asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
+                _fetch_account_values,
+                timeout=10.0,
+            )
+            if account_values is None:
+                ibkr_logger.warning("IBKR accountValues() returned no data; using cached snapshot")
+                return self._return_cached_account_info()
 
             # Start from the last cached snapshot when available so that we don't
             # accidentally wipe fields to zero if IBKR returns a partial update.
