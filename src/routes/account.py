@@ -2,6 +2,9 @@ import asyncio
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, List, Any
 
+import os
+
+import httpx
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -10,8 +13,6 @@ from src.utils import now_local, parse_local_datetime, NY_TZ, ensure_local_timez
 from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
-    write_account_info_snapshot,
-    write_positions_snapshot,
 )
 from src.utils.account_pnl_cache import (
     load_all_daily_totals,
@@ -26,6 +27,9 @@ from src.database import get_db_manager
 from .auth import get_current_user
 
 router = APIRouter()
+
+ACCOUNT_SERVICE_URL = os.getenv("ACCOUNT_SERVICE_URL", "http://localhost:8020").rstrip("/")
+ACCOUNT_SERVICE_TIMEOUT = float(os.getenv("ACCOUNT_SERVICE_TIMEOUT", "10.0"))
 
 
 def _compute_cache_age(updated_at: Optional[str]) -> Optional[float]:
@@ -79,34 +83,79 @@ def _snapshot_response(
     return response
 
 
-def _get_active_ib_client():
-    """Return an initialized IBKR client if available, creating one on-demand."""
-    ib_client = getattr(core, "ibkr_client", None)
-    if ib_client is not None:
-        return ib_client
+def _account_service_base_url() -> str:
+    return ACCOUNT_SERVICE_URL or "http://localhost:8020"
 
-    factory = getattr(core, "IBKRClient", None)
-    if factory is None:
-        logger.error("IBKRClient factory is not available on core module")
+
+async def _account_service_get(
+    path: str, *, params: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    try:
+        async with httpx.AsyncClient(
+            base_url=_account_service_base_url(),
+            timeout=ACCOUNT_SERVICE_TIMEOUT,
+        ) as client:
+            response = await client.get(path, params=params)
+            response.raise_for_status()
+            if not response.content:
+                return {}
+            return response.json()
+    except Exception as exc:
+        logger.warning("Account service request {} failed: {}", path, exc)
         return None
 
-    try:
-        ib_client = factory()
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.error(f"Failed to initialize IBKR client: {exc}")
-        return None
 
-    core.ibkr_client = ib_client
+async def _fetch_account_info_from_service(
+    force_refresh: bool,
+) -> tuple[Optional[Dict[str, Any]], bool]:
+    payload = await _account_service_get(
+        "/account/info",
+        params={"force_refresh": str(force_refresh).lower()},
+    )
+    if not payload:
+        return None, False
+    if not isinstance(payload, dict):
+        return None, False
+    data: Optional[Dict[str, Any]] = None
+    if "account_info" in payload and isinstance(payload["account_info"], dict):
+        data = payload["account_info"]
+    elif "data" in payload and isinstance(payload["data"], dict):
+        data = payload["data"]
+    elif "result" in payload and isinstance(payload["result"], dict):
+        data = payload["result"]
+    elif all(key in {"success", "from_cache"} for key in payload.keys()):
+        data = {}
+    else:
+        data = {k: v for k, v in payload.items() if k not in {"success", "from_cache"}}
+        if not data:
+            data = None
+    from_cache = bool(payload.get("from_cache", False))
+    return data, from_cache
 
-    # Best effort to keep risk manager dependency in sync when available.
-    try:
-        risk_manager = getattr(core, "risk_manager", None)
-        if risk_manager is not None:
-            setattr(risk_manager, "ibkr_client", ib_client)
-    except Exception as dep_err:  # pragma: no cover - defensive guard
-        logger.debug(f"Failed to sync risk_manager IBKR client dependency: {dep_err}")
 
-    return ib_client
+async def _fetch_positions_from_service(
+    *, fast: bool, force_refresh: bool
+) -> tuple[Optional[List[Any]], bool]:
+    payload = await _account_service_get(
+        "/account/positions",
+        params={
+            "fast": str(fast).lower(),
+            "force_refresh": str(force_refresh).lower(),
+        },
+    )
+    if not payload:
+        return None, False
+    if not isinstance(payload, dict):
+        return None, False
+    data = payload.get("positions")
+    if data is None:
+        data = payload.get("data")
+    if data is None and isinstance(payload.get("result"), list):
+        data = payload.get("result")
+    from_cache = bool(payload.get("from_cache", False))
+    if isinstance(data, list):
+        return data, from_cache
+    return None, from_cache
 
 
 @router.post("/api/orders/backfill_commissions")
@@ -159,7 +208,7 @@ async def get_account_info(
     if not is_connected:
         if snapshot:
             logger.warning(
-                "Not connected to IBKR, returning cached account_info snapshot"
+                "Not connected to IBKR, returning cached account_info snapshot",
             )
             return _snapshot_response(
                 snapshot,
@@ -186,63 +235,31 @@ async def get_account_info(
             },
         )
 
-    ib_client = _get_active_ib_client()
-    if ib_client is None:
-        logger.error("IBKR client unavailable while connection manager reports connected")
-        raise HTTPException(status_code=503, detail="IBKR client unavailable")
-
-    service = getattr(core, "account_snapshot_service", None)
-    reason = "api_force" if force_refresh else "api_miss"
-
-    try:
-        if service:
-            info = await asyncio.wait_for(
-                service.refresh_account_info(reason=reason), timeout=10.0
-            )
-        else:
-            info = await asyncio.wait_for(
-                ib_client.get_account_info(), timeout=10.0
-            )
-            await write_account_info_snapshot(info or {}, reason)
-    except asyncio.TimeoutError:
-        logger.warning("Account info request timed out")
+    info, service_cache = await _fetch_account_info_from_service(force_refresh)
+    if info is None:
         if snapshot:
+            logger.warning(
+                "Account service unavailable, falling back to cached account_info",
+            )
             return _snapshot_response(
                 snapshot,
                 data_key="account_info",
                 connected=is_connected,
                 from_cache=True,
                 default={},
-                warning="Account info request timed out, showing cached data",
+                warning="Account service unavailable",
             )
-        return {
-            "success": False,
-            "connected": True,
-            "error": "Account info request timed out",
-        }
-    except Exception as e:
-        logger.error(f"Get account info error: {e}")
-        if snapshot:
-            return _snapshot_response(
-                snapshot,
-                data_key="account_info",
-                connected=is_connected,
-                from_cache=True,
-                default={},
-                warning="Account info request failed, showing cached data",
-            )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=503, detail="Account service unavailable")
 
     refreshed_snapshot = await read_account_info_snapshot()
     return _snapshot_response(
         refreshed_snapshot,
         data_key="account_info",
         connected=is_connected,
-        from_cache=False,
+        from_cache=service_cache,
         default={},
         data_override=info,
     )
-
 
 @router.get("/api/positions")
 async def get_positions(
@@ -269,7 +286,7 @@ async def get_positions(
     if not is_connected:
         if snapshot:
             logger.warning(
-                "Not connected to IBKR, returning cached positions snapshot"
+                "Not connected to IBKR, returning cached positions snapshot",
             )
             return _snapshot_response(
                 snapshot,
@@ -287,60 +304,34 @@ async def get_positions(
             "warning": "Not connected to IBKR",
         }
 
-    ib_client = _get_active_ib_client()
-    if ib_client is None:
-        logger.error("IBKR client unavailable while fetching positions")
-        raise HTTPException(status_code=503, detail="IBKR client unavailable")
-
-    service = getattr(core, "account_snapshot_service", None)
-    reason = "api_force" if force_refresh else "api_miss"
-
-    try:
-        if service:
-            positions = await asyncio.wait_for(
-                service.refresh_positions(reason=reason, fast=fast),
-                timeout=10.0,
-            )
-        else:
-            positions = await asyncio.wait_for(
-                ib_client.get_positions(fast=fast), timeout=10.0
-            )
-            await write_positions_snapshot(positions or [], reason)
-    except asyncio.TimeoutError:
-        logger.warning("Positions request timed out")
+    positions, service_cache = await _fetch_positions_from_service(
+        fast=fast,
+        force_refresh=force_refresh,
+    )
+    if positions is None:
         if snapshot:
+            logger.warning(
+                "Account service unavailable, falling back to cached positions",
+            )
             return _snapshot_response(
                 snapshot,
                 data_key="positions",
                 connected=is_connected,
                 from_cache=True,
                 default=[],
-                warning="Positions request timed out, showing cached data",
+                warning="Account service unavailable",
             )
-        return {"success": False, "error": "Positions request timed out"}
-    except Exception as e:
-        logger.error(f"Get positions error: {e}")
-        if snapshot:
-            return _snapshot_response(
-                snapshot,
-                data_key="positions",
-                connected=is_connected,
-                from_cache=True,
-                default=[],
-                warning="Positions request failed, showing cached data",
-            )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=503, detail="Account service unavailable")
 
     refreshed_snapshot = await read_positions_snapshot()
     return _snapshot_response(
         refreshed_snapshot,
         data_key="positions",
         connected=is_connected,
-        from_cache=False,
+        from_cache=service_cache,
         default=[],
         data_override=positions,
     )
-
 
 @router.get("/api/account/daily-summary")
 async def get_account_daily_summary(
@@ -436,13 +427,6 @@ async def get_account_daily_summary(
         surplus_source = "unknown"
         net_snapshot_written = False
 
-        ib_client = getattr(core, "ibkr_client", None)
-        cached_snapshot: Dict[str, Any] = {}
-        cached_snapshot_ts: Optional[datetime] = None
-        if ib_client is not None:
-            cached_snapshot = getattr(ib_client, "_cached_account_info", {}) or {}
-            cached_snapshot_ts = getattr(ib_client, "_cached_account_info_timestamp", None)
-
         def resolve_net(snapshot: Optional[Dict[str, Any]]) -> Optional[float]:
             if not isinstance(snapshot, dict):
                 return None
@@ -456,24 +440,23 @@ async def get_account_daily_summary(
             except (TypeError, ValueError):
                 return None
 
-        if connection_manager.is_connected() and ib_client is not None:
-            try:
-                account_info = await asyncio.wait_for(
-                    ib_client.get_account_info(), timeout=5.0
+        service_info, _ = await _fetch_account_info_from_service(False)
+        if net_liquidation is None and service_info is not None:
+            resolved = resolve_net(service_info)
+            if resolved is not None:
+                net_liquidation = resolved
+                net_liquidation_timestamp = now_local()
+                surplus_source = "account_service"
+                await write_net_liquidation_snapshot(
+                    resolved,
+                    source="account_service",
+                    timestamp=net_liquidation_timestamp,
                 )
-                resolved = resolve_net(account_info)
-                if resolved is not None:
-                    net_liquidation = resolved
-                    net_liquidation_timestamp = now_local()
-                    surplus_source = "ibkr"
-                    await write_net_liquidation_snapshot(
-                        resolved,
-                        source="ibkr",
-                        timestamp=net_liquidation_timestamp,
-                    )
-                    net_snapshot_written = True
-            except Exception as err:  # pragma: no cover - defensive logging
-                logger.debug(f"Failed to fetch net liquidation from IBKR: {err}")
+                net_snapshot_written = True
+
+        account_snapshot = await read_account_info_snapshot()
+        cached_snapshot = account_snapshot.get("data") if isinstance(account_snapshot, dict) else None
+        cached_snapshot_ts = parse_local_datetime(account_snapshot.get("updated_at")) if isinstance(account_snapshot, dict) else None
 
         if net_liquidation is None and cached_net_value is not None:
             net_liquidation = cached_net_value

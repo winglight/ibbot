@@ -1,14 +1,21 @@
 import asyncio
 import json
 import math
+import os
 import time
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 import core
+from src.account_snapshot_cache import (
+    read_account_info_snapshot,
+    read_positions_snapshot,
+)
 from src.database import get_db_manager
 from src.dom_optimizer import get_dom_optimization_orchestrator
 from src.dom_service import get_dom_service
@@ -21,6 +28,85 @@ from src.utils.strategy_cache import (
 router = APIRouter()
 
 RATE_LIMIT_SECONDS = 15.0
+
+MARKET_SERVICE_URL = os.getenv("MARKET_DATA_SERVICE_URL", "http://localhost:8010").rstrip("/")
+MARKET_SERVICE_TIMEOUT = float(os.getenv("MARKET_DATA_SERVICE_TIMEOUT", "5.0"))
+ACCOUNT_SERVICE_URL = os.getenv("ACCOUNT_SERVICE_URL", "http://localhost:8020").rstrip("/")
+ACCOUNT_SERVICE_TIMEOUT = float(os.getenv("ACCOUNT_SERVICE_TIMEOUT", "10.0"))
+
+
+def _market_service_base_url() -> str:
+    return MARKET_SERVICE_URL or "http://localhost:8010"
+
+
+def _account_service_base_url() -> str:
+    return ACCOUNT_SERVICE_URL or "http://localhost:8020"
+
+
+async def _service_get(
+    *, base_url: str, timeout: float, path: str, params: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    try:
+        async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
+            response = await client.get(path, params=params)
+            response.raise_for_status()
+            if not response.content:
+                return {}
+            return response.json()
+    except Exception as exc:
+        logger.debug("Service request %s%s failed: %s", base_url, path, exc)
+        return None
+
+
+async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
+    payload = await _service_get(
+        base_url=_market_service_base_url(),
+        timeout=MARKET_SERVICE_TIMEOUT,
+        path=f"/market/{symbol}",
+    )
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str, Any]]:
+    payload = await _service_get(
+        base_url=_account_service_base_url(),
+        timeout=ACCOUNT_SERVICE_TIMEOUT,
+        path="/account/info",
+        params={"force_refresh": str(force_refresh).lower()},
+    )
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("account_info"), dict):
+        return payload["account_info"]
+    if isinstance(payload.get("data"), dict):
+        return payload["data"]
+    if isinstance(payload.get("result"), dict):
+        return payload["result"]
+    extracted = {k: v for k, v in payload.items() if k not in {"success", "from_cache"}}
+    return extracted or None
+
+
+async def _fetch_positions(force_refresh: bool = False, fast: bool = True) -> Optional[List[Dict[str, Any]]]:
+    payload = await _service_get(
+        base_url=_account_service_base_url(),
+        timeout=ACCOUNT_SERVICE_TIMEOUT,
+        path="/account/positions",
+        params={
+            "force_refresh": str(force_refresh).lower(),
+            "fast": str(fast).lower(),
+        },
+    )
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("positions"), list):
+        return payload["positions"]
+    if isinstance(payload.get("data"), list):
+        return payload["data"]
+    if isinstance(payload.get("result"), list):
+        return payload["result"]
+    return None
 
 
 def _services():
@@ -272,21 +358,23 @@ async def _realtime_price_sender(
     interval: float = 2.0,
 ):
     try:
-        loop = asyncio.get_event_loop()
         while True:
             is_connected = getattr(conn_manager, "is_connected", None)
             if not callable(is_connected) or not is_connected():
                 await asyncio.sleep(interval)
                 continue
             try:
-                data = await core.ibkr_client.get_real_time_data(symbol, "SMART")
-                # 只有当数据有效时才发送
+                data = await _fetch_market_snapshot(symbol)
                 if data is not None:
-                    await ws.send_text(json.dumps({
-                        "type": "realtime_data",
-                        "symbol": symbol,
-                        "data": data
-                    }))
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "realtime_data",
+                                "symbol": symbol,
+                                "data": data,
+                            }
+                        )
+                    )
                 else:
                     logger.debug(f"Skipping null realtime data for {symbol}")
             except Exception as e:
@@ -317,18 +405,19 @@ async def websocket_endpoint(websocket: WebSocket):
     # 初次连接后，向该连接单播账户信息快照
     try:
         if conn_manager.is_connected():
-            try:
-                info = await asyncio.wait_for(core.ibkr_client.get_account_info(), timeout=8.0)
+            info = await _fetch_account_info()
+            if info is None:
+                snapshot = await read_account_info_snapshot()
+                if isinstance(snapshot, dict):
+                    info = snapshot.get("data")
+            if info is not None:
                 await websocket.send_text(json.dumps({
                     "type": "account_update",
-                    "account_info": info
+                    "account_info": info,
                 }))
-            except asyncio.TimeoutError:
-                logger.warning("Initial account_info snapshot timed out on websocket connect")
-            except Exception as e:
-                logger.warning(f"Failed to get/send initial account_info snapshot: {e}")
+            else:
+                logger.warning("Initial account_info snapshot unavailable on websocket connect")
         else:
-            # 未连接时也发送一个占位 account_update，便于前端立即渲染“未连接”状态
             last_err = None
             try:
                 last_err = conn_manager.get_last_connect_error()
@@ -371,16 +460,20 @@ async def websocket_endpoint(websocket: WebSocket):
     # 初次连接后，向该连接单播发送positions快照
     try:
         if conn_manager.is_connected():
-            try:
-                positions = await asyncio.wait_for(core.ibkr_client.get_positions(fast=True), timeout=8.0)
+            positions = await _fetch_positions(force_refresh=False, fast=True)
+            if positions is None:
+                snapshot = await read_positions_snapshot()
+                if isinstance(snapshot, dict):
+                    data = snapshot.get("data")
+                    if isinstance(data, list):
+                        positions = data
+            if positions is not None:
                 await websocket.send_text(json.dumps({
                     "type": "position_update",
-                    "positions": positions
+                    "positions": positions,
                 }))
-            except asyncio.TimeoutError:
-                logger.warning("Initial positions snapshot timed out on websocket connect")
-            except Exception as e:
-                logger.warning(f"Failed to get/send initial positions snapshot: {e}")
+            else:
+                logger.warning("Initial positions snapshot unavailable on websocket connect")
     except Exception as e:
         logger.debug(f"Failed to send initial positions snapshot: {e}")
     
@@ -590,21 +683,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 fast_flag = message.get("fast")
                 fast = bool(fast_flag) if fast_flag is not None else False
 
-                ib_client = getattr(core, "ibkr_client", None)
-                if ib_client is None:
-                    await websocket.send_text(json.dumps({
-                        "type": "position_update",
-                        "success": False,
-                        "error": "IBKR client unavailable",
-                        "source": "websocket",
-                    }))
-                    continue
-
                 try:
-                    positions = await asyncio.wait_for(
-                        ib_client.get_positions(fast=fast),
-                        timeout=6.0,
-                    )
+                    positions = await _fetch_positions(force_refresh=force, fast=fast)
+                    if positions is None:
+                        snapshot = await read_positions_snapshot()
+                        if isinstance(snapshot, dict):
+                            data = snapshot.get("data")
+                            if isinstance(data, list):
+                                positions = data
+                    if positions is None:
+                        raise RuntimeError("Positions unavailable")
                     payload = {
                         "type": "position_update",
                         "success": True,
@@ -614,21 +702,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     }
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
-                except asyncio.TimeoutError:
-                    logger.warning("Positions snapshot request timed out")
-                    cached = last_responses.get(key)
-                    if cached:
-                        cached_payload = dict(cached)
-                        cached_payload["cached"] = True
-                        cached_payload["timeout"] = True
-                        await websocket.send_text(json.dumps(cached_payload))
-                    else:
-                        await websocket.send_text(json.dumps({
-                            "type": "position_update",
-                            "success": False,
-                            "error": "Positions request timed out",
-                            "source": "websocket",
-                        }))
                 except Exception as exc:
                     logger.warning(f"Failed to stream positions snapshot: {exc}")
                     cached = last_responses.get(key)
