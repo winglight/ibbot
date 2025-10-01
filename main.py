@@ -15,7 +15,7 @@ import os
 import sys
 import json
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import List, Optional, Dict, Any, Callable, Awaitable
 from loguru import logger
@@ -42,7 +42,7 @@ from starlette.middleware.gzip import GZipMiddleware
 sys.path.append(str(Path(__file__).parent))
 
 import core
-from src.connection_manager import connection_manager, ConnectionConfig
+from src.cache import hgetall
 from src.database import get_db_manager
 from src.models import (
     HistoricalDataRequest,
@@ -98,11 +98,16 @@ def _get_interval_env(name: str, default: int) -> int:
     return max(0, value)
 
 
-# 优化：可配置的PnL广播间隔（秒），默认5秒
-PNL_BROADCAST_INTERVAL_SEC = _get_interval_env('PNL_BROADCAST_INTERVAL_SEC', 5)
-# 降低账户和持仓轮询频率，防止频繁命中IB限流
-ACCOUNT_BROADCAST_INTERVAL_SEC = _get_interval_env('ACCOUNT_BROADCAST_INTERVAL_SEC', 30)
-PORTFOLIO_BROADCAST_INTERVAL_SEC = _get_interval_env('PORTFOLIO_BROADCAST_INTERVAL_SEC', 15)
+# Redis health monitoring configuration for IB command service
+IB_COMMAND_HEALTH_KEY = "hash:service:health:ib-command"
+IB_COMMAND_HEALTH_POLL_INTERVAL_SEC = _get_interval_env(
+    "IB_COMMAND_HEALTH_POLL_INTERVAL_SEC",
+    5,
+)
+IB_COMMAND_HEALTH_STALE_AFTER_SEC = _get_interval_env(
+    "IB_COMMAND_HEALTH_STALE_AFTER_SEC",
+    15,
+)
 
 # Context variables for request-scoped logging
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
@@ -256,51 +261,6 @@ class ModuleRegistry:
         self._handles.clear()
 
 
-async def _module_auto_connect(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-    auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
-
-    if not auto_connect:
-        context.logger.info("AUTO_CONNECT disabled; module idle.")
-        return handle
-
-    context.logger.info(
-        "AUTO_CONNECT enabled; scheduling IBKR connection attempt..."
-    )
-
-    async def async_auto_connect() -> None:
-        try:
-            loop = asyncio.get_event_loop()
-
-            def _connect_via_client() -> bool:
-                services = get_core_services()
-                if getattr(services, "ibkr_client", None) is None:
-                    services.ibkr_client = core.IBKRClient()
-                client = services.ibkr_client
-                if client is None:
-                    return False
-                return client.connect()
-
-            success = await loop.run_in_executor(None, _connect_via_client)
-            if not success:
-                context.logger.warning(
-                    "IBKR auto-connection failed. Continuing without connection..."
-                )
-                context.logger.info("You can connect later through the web interface.")
-            else:
-                context.logger.info("IBKR auto-connection successful!")
-                context.logger.info("IBKRClient initialized after auto-connect")
-
-        except Exception as exc:
-            context.logger.warning(f"Auto-connection failed: {exc}")
-            context.logger.info("You can connect later through the web interface.")
-
-    handle.tasks.append(
-        asyncio.create_task(async_auto_connect(), name="module-auto-connect")
-    )
-    return handle
-
-
 async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
 
@@ -442,18 +402,6 @@ async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
     services = get_core_services()
 
-    if getattr(services, "ibkr_client", None) is None:
-        try:
-            services.ibkr_client = core.IBKRClient()
-            context.logger.info("IBKRClient initialized for queue worker startup")
-        except Exception as exc:
-            context.logger.warning(f"IBKR client initialization warning: {exc}")
-            return handle
-
-    if getattr(services, "ibkr_client", None) is None:
-        context.logger.warning("Queue worker not started because IBKR client is unavailable")
-        return handle
-
     try:
         await services.queue_manager.start_worker()
         context.logger.info("Queue worker started during application startup")
@@ -473,15 +421,136 @@ async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
     return handle
 
 
+def _resolve_ib_account_type() -> str:
+    """Resolve the account type label for IB command service health."""
+
+    override = os.getenv("IB_COMMAND_ACCOUNT_TYPE") or os.getenv("IB_ACCOUNT_TYPE")
+    if override:
+        cleaned = override.strip()
+        if cleaned:
+            return cleaned.title()
+
+    flag = os.getenv("IBKR_PAPER_TRADING", "true").strip().lower()
+    if flag in {"0", "false", "no", "live"}:
+        return "Live"
+    return "Paper"
+
+
+def _build_ib_command_health_payload(
+    raw: Dict[str, str], *, stale_after: float
+) -> Dict[str, Any]:
+    """Normalise Redis health fields for websocket broadcasting."""
+
+    now = datetime.now(timezone.utc)
+    last_seen_raw = raw.get("last_seen", "")
+    last_seen_dt: datetime | None = None
+    age_seconds: float | None = None
+
+    if last_seen_raw:
+        try:
+            last_seen_dt = datetime.fromisoformat(last_seen_raw)
+        except ValueError:
+            last_seen_dt = None
+        else:
+            delta = now - last_seen_dt
+            age_seconds = max(delta.total_seconds(), 0.0)
+
+    threshold = stale_after if stale_after > 0 else 30.0
+    stale = age_seconds is None or age_seconds > threshold
+
+    queue_depth_raw = raw.get("queue_depth")
+    queue_depth: int | None = None
+    if queue_depth_raw is not None:
+        try:
+            queue_depth = int(queue_depth_raw)
+        except (TypeError, ValueError):
+            queue_depth = None
+
+    last_error_raw = raw.get("last_error")
+    last_error = last_error_raw.strip() if last_error_raw else ""
+    if not last_error:
+        last_error = None
+
+    connected = (
+        not stale
+        and last_error is None
+        and queue_depth is not None
+        and queue_depth >= 0
+    )
+
+    return {
+        "type": "connection_status",
+        "connected": connected,
+        "account_type": _resolve_ib_account_type(),
+        "last_seen": last_seen_dt.isoformat() if last_seen_dt else None,
+        "queue_depth": queue_depth,
+        "last_error": last_error,
+        "stale": stale,
+        "source": "redis",
+    }
+
+
+async def _fetch_ib_command_health_payload(
+    *, stale_after: float, logger_: Any
+) -> Dict[str, Any]:
+    try:
+        raw = await hgetall(IB_COMMAND_HEALTH_KEY)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger_.debug("Failed to fetch IB command health from Redis: {}", exc)
+        raw = {}
+    return _build_ib_command_health_payload(raw, stale_after=stale_after)
+
+
+async def _module_service_health_monitor(
+    context: ModuleRuntimeContext,
+) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+
+    interval = IB_COMMAND_HEALTH_POLL_INTERVAL_SEC
+    if interval <= 0:
+        context.logger.info(
+            "IB command health monitor disabled (poll interval <= 0)."
+        )
+        return handle
+
+    stale_after = IB_COMMAND_HEALTH_STALE_AFTER_SEC
+    if stale_after <= 0:
+        stale_after = max(interval * 3, 30)
+
+    services = get_core_services()
+    ws_manager = services.websocket_manager
+
+    async def _run_monitor() -> None:
+        last_payload: Dict[str, Any] | None = None
+        try:
+            while True:
+                payload = await _fetch_ib_command_health_payload(
+                    stale_after=stale_after,
+                    logger_=context.logger,
+                )
+                if ws_manager.connections:
+                    if last_payload != payload:
+                        await ws_manager.broadcast(payload)
+                        last_payload = dict(payload)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            context.logger.debug("IB command health monitor cancelled")
+        except Exception as exc:
+            context.logger.warning(
+                "IB command health monitor encountered an error: {}",
+                exc,
+            )
+
+    task = asyncio.create_task(
+        _run_monitor(),
+        name="module-service-health-monitor",
+    )
+    handle.tasks.append(task)
+    return handle
+
+
 def _build_module_registry(main_logger) -> ModuleRegistry:
     registry = ModuleRegistry(main_logger)
-    registry.register(
-        ModuleDefinition(
-            name="auto_connect",
-            start=_module_auto_connect,
-            description="Attempt to connect to IBKR automatically using AUTO_CONNECT flag.",
-        )
-    )
     registry.register(
         ModuleDefinition(
             name="data_subscriptions",
@@ -515,6 +584,13 @@ def _build_module_registry(main_logger) -> ModuleRegistry:
             name="queue_worker",
             start=_module_queue_worker,
             description="Start the background queue worker for internal orders.",
+        )
+    )
+    registry.register(
+        ModuleDefinition(
+            name="service_health_monitor",
+            start=_module_service_health_monitor,
+            description="Broadcast IB command service health to connected clients.",
         )
     )
     return registry
@@ -908,77 +984,6 @@ def check_environment() -> bool:
         ok = False
 
     return ok
-
-# 添加：全局任务引用用于定期广播账户与持仓（实时PnL展示）
-pnl_broadcast_task = None
-
-
-# 添加：定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
-async def _pnl_broadcast_loop():
-    last_account_fetch = 0.0
-    last_positions_fetch = 0.0
-    try:
-        while True:
-            await asyncio.sleep(PNL_BROADCAST_INTERVAL_SEC)
-            # 若没有活跃的WebSocket连接，跳过数据拉取与广播，降低负载
-            if not websocket_manager.connections:
-                continue
-            try:
-                # 仅在已连接且 ibkr_client 可用时运行
-                if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
-                    continue
-
-                now_monotonic = time.monotonic()
-                account_info = None
-                positions = None
-
-                should_fetch_account = (
-                    ACCOUNT_BROADCAST_INTERVAL_SEC == 0
-                    or now_monotonic - last_account_fetch >= ACCOUNT_BROADCAST_INTERVAL_SEC
-                )
-                if should_fetch_account:
-                    try:
-                        account_info = await asyncio.wait_for(
-                            ibkr_client.get_account_info(),
-                            timeout=5.0
-                        )
-                    except Exception:
-                        account_info = None
-                    finally:
-                        last_account_fetch = now_monotonic
-
-                should_fetch_positions = (
-                    PORTFOLIO_BROADCAST_INTERVAL_SEC == 0
-                    or now_monotonic - last_positions_fetch >= PORTFOLIO_BROADCAST_INTERVAL_SEC
-                )
-                if should_fetch_positions:
-                    try:
-                        positions = await asyncio.wait_for(
-                            ibkr_client.get_positions(fast=True),
-                            timeout=5.0
-                        )
-                    except Exception:
-                        positions = None
-                    finally:
-                        last_positions_fetch = now_monotonic
-
-                if account_info is not None:
-                    await websocket_manager.broadcast({
-                        "type": "account_update",
-                        "account_info": account_info
-                    })
-                if positions is not None:
-                    await websocket_manager.broadcast({
-                        "type": "position_update",
-                        "positions": positions
-                    })
-            except Exception as be:
-                logger.debug(f"PnL broadcast iteration error: {be}")
-    except asyncio.CancelledError:
-        # 任务被取消时正常退出
-        pass
-    except Exception as e:
-        logger.warning(f"PnL broadcast loop error: {e}")
 
 def main():
     """Main application entry point"""
