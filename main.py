@@ -148,7 +148,7 @@ def _env_flag(name: str, default: bool = True) -> bool:
 def embedded_risk_manager_enabled() -> bool:
     """Return True when the in-process risk manager should be started."""
 
-    return _env_flag("ENABLE_EMBEDDED_RISK_MANAGER", True)
+    return _env_flag("ENABLE_EMBEDDED_RISK_MANAGER", False)
 
 
 def resolve_module(path: str) -> str:
@@ -306,7 +306,9 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
     )
 
     order_manager = get_order_manager()
-    risk_manager = RiskManager(notification_manager=notification_manager)
+    risk_manager: RiskManager | None = None
+    if embedded_risk_manager_enabled():
+        risk_manager = RiskManager(notification_manager=notification_manager)
     queue_manager = QueueManager()
     strategy_manager = StrategyManager()
     strategy_risk_manager = StrategyRiskManager(
@@ -320,7 +322,8 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
         websocket_manager=container.websocket_manager,
         db_manager=db_manager,
     )
-    risk_manager.set_dependencies(order_manager=order_manager)
+    if risk_manager is not None:
+        risk_manager.set_dependencies(order_manager=order_manager)
     order_manager.set_dependencies(
         websocket_manager=container.websocket_manager,
         notification_manager=notification_manager,
@@ -354,12 +357,12 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
     container.queue_manager = queue_manager
     container.account_snapshot_service = account_snapshot_service
 
-    if embedded_risk_manager_enabled():
+    if risk_manager is not None:
         risk_manager.start()
         handle.finalizers.append(risk_manager.stop)
     else:
         context.logger.info(
-            "Embedded risk manager disabled; skipping background start",
+            "Embedded risk manager disabled; skipping initialisation",
             env_var="ENABLE_EMBEDDED_RISK_MANAGER",
         )
 
@@ -521,18 +524,30 @@ def _has_meaningful_health_change(
     previous_seen = last_payload.get("last_seen")
     if new_seen == previous_seen:
         return False
-    if not new_seen or not previous_seen:
-        return True
+
+    if not new_seen:
+        # Timestamp disappeared while other fields stayed constant; treat as
+        # meaningful only when the connection transitioned to a stale state.
+        return bool(previous_seen) and new_payload.get("stale", False)
+
+    if not previous_seen:
+        # Timestamp became available again which typically means the
+        # connection recovered. The change will already be reflected via the
+        # `stale`/`connected` keys, so avoid an extra broadcast here.
+        return False
 
     try:
         new_dt = datetime.fromisoformat(str(new_seen))
         prev_dt = datetime.fromisoformat(str(previous_seen))
     except (TypeError, ValueError):
-        return True
+        return False
 
-    delta_seconds = abs((new_dt - prev_dt).total_seconds())
-    threshold = max(interval * 2, min(stale_after, 60.0))
-    return delta_seconds >= threshold
+    delta_seconds = (new_dt - prev_dt).total_seconds()
+    if delta_seconds <= 0:
+        return False
+
+    minimum_gap = max(interval * 4, stale_after, 60.0)
+    return delta_seconds >= minimum_gap
 
 
 async def _module_service_health_monitor(
