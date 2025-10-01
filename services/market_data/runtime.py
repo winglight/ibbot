@@ -8,7 +8,7 @@ import os
 import time
 from copy import deepcopy
 from contextlib import suppress
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from loguru import logger
 
@@ -73,6 +73,9 @@ class MarketDataRuntime:
         self.metrics_backend: PersistenceBackend | None = None
         self.stream_publisher: StreamPublisher | None = None
         self._snapshots: dict[str, dict[str, Any]] = {}
+        self._update_listeners: set[
+            Callable[[Mapping[str, Any]], Awaitable[None] | None]
+        ] = set()
 
         self.service_name = service_name
         self.stream_key = stream_key
@@ -178,7 +181,39 @@ class MarketDataRuntime:
             self.metrics_backend = None
             self.redis = None
             self._started = False
+            self._update_listeners.clear()
             logger.info("Market data runtime stopped", service=self.service_name)
+
+    def add_update_listener(
+        self, listener: Callable[[Mapping[str, Any]], Awaitable[None] | None]
+    ) -> None:
+        """Register a listener to receive update notifications."""
+
+        self._update_listeners.add(listener)
+
+    def remove_update_listener(
+        self, listener: Callable[[Mapping[str, Any]], Awaitable[None] | None]
+    ) -> None:
+        """Remove a previously registered update listener if present."""
+
+        self._update_listeners.discard(listener)
+
+    def _notify_update_listeners(self, event: Mapping[str, Any]) -> None:
+        """Notify registered listeners of a new update event."""
+
+        listeners = list(self._update_listeners)
+        if not listeners:
+            return
+
+        for listener in listeners:
+            try:
+                result = listener(event)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.warning("Update listener failed", error=str(exc))
+                continue
+
+            if inspect.isawaitable(result):
+                asyncio.create_task(result)
 
     async def publish_stream_event(
         self,
@@ -191,27 +226,29 @@ class MarketDataRuntime:
     ) -> None:
         """Publish a normalised event to the Redis stream if available."""
 
+        event = {"symbol": symbol, "type": event_type, "data": data}
+
         publisher = self.stream_publisher
-        if publisher is None:
-            return
+        if publisher is not None:
+            ts_ns = None
+            if message_timestamp is not None:
+                try:
+                    if hasattr(message_timestamp, "timestamp"):
+                        ts_ns = int(message_timestamp.timestamp() * 1_000_000_000)
+                    else:
+                        ts_ns = int(float(message_timestamp) * 1_000_000_000)
+                except (TypeError, ValueError, OverflowError):
+                    ts_ns = None
 
-        ts_ns = None
-        if message_timestamp is not None:
-            try:
-                if hasattr(message_timestamp, "timestamp"):
-                    ts_ns = int(message_timestamp.timestamp() * 1_000_000_000)
-                else:
-                    ts_ns = int(float(message_timestamp) * 1_000_000_000)
-            except (TypeError, ValueError, OverflowError):
-                ts_ns = None
+            await publisher.publish(
+                symbol=symbol,
+                event_type=event_type,
+                data=data,
+                ts_ns=ts_ns,
+                latency_ms=latency_ms,
+            )
 
-        await publisher.publish(
-            symbol=symbol,
-            event_type=event_type,
-            data=data,
-            ts_ns=ts_ns,
-            latency_ms=latency_ms,
-        )
+        self._notify_update_listeners(event)
 
     async def _default_metrics_loop(self) -> None:
         """Periodically emit service metrics."""
