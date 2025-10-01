@@ -44,8 +44,12 @@ class AccountSnapshotServiceConfig:
     command_queue_key: str
     command_result_prefix: str
     command_result_ttl_seconds: int
+    command_retry_attempts: int
     control_queue_key: str
     signal_fast_positions: bool
+    snapshot_stream_key: str
+    snapshot_stream_maxlen: int
+    health_hash_key: str
 
 
 def resolve_redis_url(prefix: Optional[str] = None) -> str:
@@ -102,6 +106,9 @@ def load_account_snapshot_config() -> AccountSnapshotServiceConfig:
     command_result_ttl = _int_env(
         "ACCOUNT_SNAPSHOT_RESULT_TTL_SECONDS", 300, minimum=10
     )
+    command_retry_attempts = _int_env(
+        "ACCOUNT_SNAPSHOT_COMMAND_RETRIES", 3, minimum=1
+    )
     control_queue_key = _str_env(
         "ACCOUNT_SNAPSHOT_CONTROL_QUEUE_KEY",
         "queue:account-snapshot:control",
@@ -109,6 +116,16 @@ def load_account_snapshot_config() -> AccountSnapshotServiceConfig:
     signal_fast_positions = _str_env(
         "ACCOUNT_SNAPSHOT_FAST_POSITIONS", "true"
     ).lower() in {"1", "true", "yes", "y", "on"}
+    snapshot_stream_key = _str_env(
+        "ACCOUNT_SNAPSHOT_STREAM_KEY", "stream:account-snapshot"
+    )
+    snapshot_stream_maxlen = _int_env(
+        "ACCOUNT_SNAPSHOT_STREAM_MAXLEN", 500, minimum=10
+    )
+    health_hash_key = _str_env(
+        "ACCOUNT_SNAPSHOT_HEALTH_KEY",
+        "hash:service:health:account-snapshot",
+    )
 
     return AccountSnapshotServiceConfig(
         redis_url=redis_url,
@@ -120,8 +137,12 @@ def load_account_snapshot_config() -> AccountSnapshotServiceConfig:
         command_queue_key=command_queue_key,
         command_result_prefix=command_result_prefix,
         command_result_ttl_seconds=command_result_ttl,
+        command_retry_attempts=command_retry_attempts,
         control_queue_key=control_queue_key,
         signal_fast_positions=signal_fast_positions,
+        snapshot_stream_key=snapshot_stream_key,
+        snapshot_stream_maxlen=snapshot_stream_maxlen,
+        health_hash_key=health_hash_key,
     )
 
 

@@ -18,8 +18,12 @@ application for operational tooling.
 | `ACCOUNT_SNAPSHOT_COMMAND_QUEUE_KEY` | Redis list storing IB commands. | `queue:ib:commands` |
 | `ACCOUNT_SNAPSHOT_COMMAND_RESULT_PREFIX` | Prefix for command result keys. | `hash:ib:result:` |
 | `ACCOUNT_SNAPSHOT_RESULT_TTL_SECONDS` | Expiry applied to command result keys. | `300` |
+| `ACCOUNT_SNAPSHOT_COMMAND_RETRIES` | Retry attempts when fetching account data times out. | `3` |
 | `ACCOUNT_SNAPSHOT_CONTROL_QUEUE_KEY` | Redis list used for control signals (fills, stale markers, manual refresh). | `queue:account-snapshot:control` |
 | `ACCOUNT_SNAPSHOT_FAST_POSITIONS` | Whether scheduled refreshes request fast position snapshots. | `true` |
+| `ACCOUNT_SNAPSHOT_STREAM_KEY` | Redis Stream receiving snapshot events. | `stream:account-snapshot` |
+| `ACCOUNT_SNAPSHOT_STREAM_MAXLEN` | Max length for the snapshot stream. | `500` |
+| `ACCOUNT_SNAPSHOT_HEALTH_KEY` | Redis hash storing service health metadata. | `hash:service:health:account-snapshot` |
 
 ## Running the worker
 
@@ -29,9 +33,12 @@ python -m services.account_snapshot.main --mode worker
 scripts/run_account_snapshot_service.py --mode worker
 ```
 
-The worker keeps a single Redis connection open, listens for control messages
-on `ACCOUNT_SNAPSHOT_CONTROL_QUEUE_KEY`, and periodically enqueues IB
-commands on `ACCOUNT_SNAPSHOT_COMMAND_QUEUE_KEY`.
+The worker keeps dedicated Redis connections for control/command loops. It
+listens for control messages on `ACCOUNT_SNAPSHOT_CONTROL_QUEUE_KEY`,
+periodically enqueues refresh commands onto `ACCOUNT_SNAPSHOT_COMMAND_QUEUE_KEY`,
+and consumes the same queue to execute account/position queries. Results are
+persisted to `hash:account:*`, mirrored to `ACCOUNT_SNAPSHOT_STREAM_KEY`, and
+health metrics are written to `ACCOUNT_SNAPSHOT_HEALTH_KEY`.
 
 ## Running the FastAPI application
 
