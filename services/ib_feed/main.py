@@ -59,6 +59,7 @@ class MarketDataFeedService:
     _price_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _dom_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _logger: Any = field(default=None, init=False, repr=False)
+    _active: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._logger = get_logger(self.logger_name)
@@ -67,8 +68,15 @@ class MarketDataFeedService:
         """Start the service by connecting and subscribing to symbols."""
 
         self._loop = asyncio.get_running_loop()
+        if not self.subscriptions:
+            self._logger.warning(
+                "No market data subscriptions configured; IB feed service running idle",
+            )
+            return
+
         self._bind_client_events()
         await self._connect_and_subscribe()
+        self._active = True
 
     async def stop(self) -> None:
         """Stop the service and cancel background tasks."""
@@ -78,9 +86,11 @@ class MarketDataFeedService:
             self._reconnect_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reconnect_task
-        disconnect = getattr(self.ib_client, "disconnect", None)
-        if disconnect is not None:
-            await _ensure_awaitable(disconnect())
+        if self._active:
+            disconnect = getattr(self.ib_client, "disconnect", None)
+            if disconnect is not None:
+                await _ensure_awaitable(disconnect())
+        self._active = False
 
     def _bind_client_events(self) -> None:
         price_handler = getattr(self.ib_client, "add_price_listener", None)
@@ -133,7 +143,7 @@ class MarketDataFeedService:
         self._schedule(coro)
 
     def _handle_disconnect_event(self) -> None:
-        if not self._loop or self._stopping.is_set():
+        if not self._loop or self._stopping.is_set() or not self._active:
             return
         if self._reconnect_task and not self._reconnect_task.done():
             return
