@@ -265,11 +265,17 @@ def _enrich_sizing_history_items(items: List[Dict[str, Any]]) -> List[Dict[str, 
 
     return items
 
-async def _realtime_price_sender(ws: WebSocket, symbol: str, interval: float = 2.0):
+async def _realtime_price_sender(
+    ws: WebSocket,
+    symbol: str,
+    conn_manager: Any,
+    interval: float = 2.0,
+):
     try:
         loop = asyncio.get_event_loop()
         while True:
-            if not connection_manager.is_connected():
+            is_connected = getattr(conn_manager, "is_connected", None)
+            if not callable(is_connected) or not is_connected():
                 await asyncio.sleep(interval)
                 continue
             try:
@@ -291,21 +297,26 @@ async def _realtime_price_sender(ws: WebSocket, symbol: str, interval: float = 2
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    conn_manager = _connection_manager()
+    if conn_manager is None:
+        await websocket.close(code=1011, reason="Connection manager unavailable")
+        return
+
     await _websocket_manager().connect(websocket)
 
     # 新连接建立后，立即向该客户端单播当前连接状态
     try:
         await websocket.send_text(json.dumps({
             "type": "connection_status",
-            "connected": connection_manager.is_connected(),
-            "account_type": "Paper" if connection_manager.config.paper_trading else "Live",
+            "connected": conn_manager.is_connected(),
+            "account_type": "Paper" if conn_manager.config.paper_trading else "Live",
         }))
     except Exception as e:
         logger.debug(f"Failed to send initial connection status: {e}")
 
     # 初次连接后，向该连接单播账户信息快照
     try:
-        if connection_manager.is_connected():
+        if conn_manager.is_connected():
             try:
                 info = await asyncio.wait_for(core.ibkr_client.get_account_info(), timeout=8.0)
                 await websocket.send_text(json.dumps({
@@ -320,7 +331,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # 未连接时也发送一个占位 account_update，便于前端立即渲染“未连接”状态
             last_err = None
             try:
-                last_err = connection_manager.get_last_connect_error()
+                last_err = conn_manager.get_last_connect_error()
             except Exception:
                 last_err = None
             await websocket.send_text(json.dumps({
@@ -359,7 +370,7 @@ async def websocket_endpoint(websocket: WebSocket):
     
     # 初次连接后，向该连接单播发送positions快照
     try:
-        if connection_manager.is_connected():
+        if conn_manager.is_connected():
             try:
                 positions = await asyncio.wait_for(core.ibkr_client.get_positions(fast=True), timeout=8.0)
                 await websocket.send_text(json.dumps({
@@ -406,21 +417,26 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
-                try:
-                    is_connected = await asyncio.wait_for(
-                        asyncio.to_thread(connection_manager.is_connected),
-                        timeout=1.0,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning("Connection status request timed out; using cached state")
-                    is_connected = getattr(connection_manager, "connected", False)
-                except Exception as exc:
-                    logger.warning(f"Connection status request failed: {exc}")
-                    is_connected = getattr(connection_manager, "connected", False)
+                is_connected = getattr(conn_manager, "connected", False)
+                check_connected = getattr(conn_manager, "is_connected", None)
+                if callable(check_connected):
+                    try:
+                        is_connected = await asyncio.wait_for(
+                            asyncio.to_thread(check_connected),
+                            timeout=1.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Connection status request timed out; using cached state"
+                        )
+                        is_connected = getattr(conn_manager, "connected", False)
+                    except Exception as exc:
+                        logger.warning(f"Connection status request failed: {exc}")
+                        is_connected = getattr(conn_manager, "connected", False)
 
                 account_type = "Paper"
                 try:
-                    if not connection_manager.config.paper_trading:
+                    if not conn_manager.config.paper_trading:
                         account_type = "Live"
                 except Exception:
                     account_type = "Paper"
@@ -434,7 +450,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 }
 
                 try:
-                    last_error = connection_manager.get_last_connect_error()
+                    last_error = conn_manager.get_last_connect_error()
                     if last_error:
                         payload["last_error"] = last_error
                 except Exception:
@@ -445,7 +461,9 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "subscribe_realtime":
                 symbol = message.get("symbol")
                 if symbol and symbol not in realtime_tasks:
-                    realtime_tasks[symbol] = asyncio.create_task(_realtime_price_sender(websocket, symbol))
+                    realtime_tasks[symbol] = asyncio.create_task(
+                        _realtime_price_sender(websocket, symbol, conn_manager)
+                    )
             elif msg_type == "unsubscribe_realtime":
                 symbol = message.get("symbol")
                 task = realtime_tasks.pop(symbol, None)
@@ -533,7 +551,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 key = "positions_snapshot"
                 force = bool(message.get("force"))
 
-                if not connection_manager or not connection_manager.is_connected():
+                if not conn_manager.is_connected():
                     payload = {
                         "type": "position_update",
                         "success": False,

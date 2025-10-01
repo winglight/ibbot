@@ -2,10 +2,12 @@ import asyncio
 import importlib
 import inspect
 import json
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 import pytest
 from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
 from services.ib_command import CommandConsumer, IBCommandExecutor, ResultPublisher
@@ -132,6 +134,56 @@ class DummyWebSocketManager:
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         self.messages.append(message)
+
+
+def test_websocket_handshake_with_mock_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.routes import websocket as websocket_module
+
+    app = FastAPI()
+    app.include_router(websocket_module.router)
+
+    class _DummyConnectionManager:
+        def __init__(self) -> None:
+            self.connected = False
+            self.config = SimpleNamespace(paper_trading=True)
+
+        def is_connected(self) -> bool:
+            return self.connected
+
+        def get_last_connect_error(self) -> str | None:
+            return None
+
+    class _DummyWebSocketManager:
+        async def connect(self, websocket):
+            await websocket.accept()
+
+        def disconnect(self, websocket) -> None:  # pragma: no cover - noop
+            return None
+
+    class _DummyIBClient:
+        async def get_account_info(self) -> dict[str, Any]:
+            return {"account": "test"}
+
+        async def get_positions(self, *, fast: bool = True) -> list[dict[str, Any]]:
+            return []
+
+    dummy_conn = _DummyConnectionManager()
+    dummy_ws_manager = _DummyWebSocketManager()
+
+    monkeypatch.setattr(websocket_module, "_connection_manager", lambda: dummy_conn)
+    monkeypatch.setattr(websocket_module, "_websocket_manager", lambda: dummy_ws_manager)
+    monkeypatch.setattr(websocket_module, "_order_manager", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_optimization_orchestrator", lambda: None)
+    monkeypatch.setattr(websocket_module.core, "ibkr_client", _DummyIBClient(), raising=False)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as websocket:
+            initial = websocket.receive_json()
+
+        assert initial["type"] == "connection_status"
+        assert initial["connected"] is False
+        assert initial["account_type"] == "Paper"
 
 
 class FakeInflux:
