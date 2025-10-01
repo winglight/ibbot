@@ -11,10 +11,23 @@ from typing import Any
 from services.ib_command import CommandConsumer, IBCommandExecutor, ResultPublisher
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
-from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, close_global_client, get_redis_client
+from src.ibbot.redis import (
+    DEFAULT_COMMAND_QUEUE,
+    DEFAULT_REDIS_URL,
+    close_global_client,
+    get_redis_client,
+)
 
 SERVICE_NAME = "ib-command"
 HEALTH_KEY = "hash:service:health:ib-command"
+
+
+def _resolve_redis_url(override_key: str) -> str:
+    for key in (override_key, "IBBOT_REDIS_URL"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return DEFAULT_REDIS_URL
 
 
 async def _create_ib_client() -> Any:
@@ -32,9 +45,10 @@ async def run_service() -> None:
     """Initialise dependencies and start the consumer loop."""
 
     logger = get_logger("ibbot.services.ib_command")
-    redis = await get_redis_client()
+    redis_url = _resolve_redis_url("IB_COMMAND_REDIS_URL")
+    redis = await get_redis_client(redis_url)
 
-    provider = ConfigProvider(redis_url=os.getenv("IBBOT_REDIS_URL"))
+    provider = ConfigProvider(redis_url=redis_url)
     await provider.start()
     config = await provider.get_module(SERVICE_NAME)
 

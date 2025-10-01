@@ -92,7 +92,8 @@ cp .env.example .env.local  # 建议创建，仅保存本地覆写
 - `VISITOR_USERNAME` / `VISITOR_PASSWORD`：访客只读账号（可留空）。
 - `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING`：IBKR 连接配置。
 - `AUTO_CONNECT` / `IBBOT_DISABLE_TRADING`：启动时自动连接与交易禁用开关。
-- `REDIS_URL` 或 `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB`：缓存与队列依赖。
+- `IBBOT_REDIS_URL`：缓存与队列的主连接串。`REDIS_URL`、`IB_COMMAND_REDIS_URL`、`IB_FEED_REDIS_URL`、`STRATEGY_REDIS_URL`、`NOTIFICATION_REDIS_URL`、`ACCOUNT_CACHE_REDIS_URL` 与 `DATA_LAYER_REDIS_URL` 在留空时会继承该值。
+- `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB`：当未提供连接串时自动拼接备用地址。
 - `DATA_LAYER_*`、`TELEGRAM_*` 等按需启用的可选能力。
 
 ### 3. 启动服务

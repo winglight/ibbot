@@ -50,16 +50,18 @@ def _get_redis_url() -> str:
     """Return the Redis connection URL from the environment."""
     # Dedicated override for the snapshot cache so environments can point the
     # cache at a different Redis instance when needed.
-    explicit_url = os.getenv("ACCOUNT_CACHE_REDIS_URL")
+    explicit_url = os.getenv("ACCOUNT_CACHE_REDIS_URL", "").strip()
     if explicit_url:
         return explicit_url
 
     # Reuse the shared REDIS_URL if defined; otherwise fall back to the data
-    # layer URL (which may already embed a password) and finally construct a
-    # URL from individual host/port/db/password variables.
-    shared_url = os.getenv("REDIS_URL") or os.getenv("DATA_LAYER_REDIS_URL")
-    if shared_url:
-        return shared_url
+    # layer URL (which may already embed a password), the canonical
+    # ``IBBOT_REDIS_URL``, and finally construct a URL from individual
+    # host/port/db/password variables.
+    for candidate in ("REDIS_URL", "DATA_LAYER_REDIS_URL", "IBBOT_REDIS_URL"):
+        shared_url = os.getenv(candidate, "").strip()
+        if shared_url:
+            return shared_url
 
     host = os.getenv("REDIS_HOST", "127.0.0.1")
     port = os.getenv("REDIS_PORT", "6379")

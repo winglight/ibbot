@@ -12,11 +12,24 @@ from typing import Any, Mapping
 from services.strategy import StrategyAdapter, StrategyTaskConsumer
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
-from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, close_global_client, get_redis_client
+from src.ibbot.redis import (
+    DEFAULT_COMMAND_QUEUE,
+    DEFAULT_REDIS_URL,
+    close_global_client,
+    get_redis_client,
+)
 
 SERVICE_NAME = "strategy"
 DEFAULT_STRATEGY_QUEUE = "list:queue:strategy"
 DEFAULT_EVENT_STREAM = "stream:strategy:events"
+
+
+def _resolve_redis_url(override_key: str) -> str:
+    for key in (override_key, "IBBOT_REDIS_URL"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return DEFAULT_REDIS_URL
 
 
 def _parse_strategies(config: Mapping[str, str]) -> Mapping[str, Any]:
@@ -37,9 +50,10 @@ async def run_service() -> None:
     """Initialise dependencies and start the consumer loop."""
 
     logger = get_logger("ibbot.services.strategy")
-    redis = await get_redis_client()
+    redis_url = _resolve_redis_url("STRATEGY_REDIS_URL")
+    redis = await get_redis_client(redis_url)
 
-    provider = ConfigProvider(redis_url=os.getenv("IBBOT_REDIS_URL"))
+    provider = ConfigProvider(redis_url=redis_url)
     await provider.start()
     config = await provider.get_module(SERVICE_NAME)
 
