@@ -14,13 +14,21 @@ from services.notification import NotificationChannel, NotificationService, Redi
 from src.ibbot.config import ConfigProvider
 from src.ibbot.influx import write_points
 from src.ibbot.logging import get_logger
-from src.ibbot.redis import close_global_client, get_redis_client
+from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
 
 SERVICE_NAME = "notification"
 DEFAULT_STREAMS = ["stream:ib:results", "stream:risk:events", "stream:strategy:events"]
 
 CleanupCallback = Callable[[], Awaitable[None] | None] | None
 ServiceFactory = Callable[[], Awaitable[tuple[NotificationService, CleanupCallback]]]
+
+
+def _resolve_redis_url(override_key: str) -> str:
+    for key in (override_key, "IBBOT_REDIS_URL"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return DEFAULT_REDIS_URL
 
 
 def _is_enabled(value: str | None) -> bool:
@@ -58,11 +66,12 @@ def build_channels(config: Any, logger_name: str) -> list[NotificationChannel]:
 
 async def _default_service_factory() -> tuple[NotificationService, CleanupCallback]:
     logger = get_logger("ibbot.services.notification")
-    provider = ConfigProvider(redis_url=os.getenv("IBBOT_REDIS_URL"))
+    redis_url = _resolve_redis_url("NOTIFICATION_REDIS_URL")
+    provider = ConfigProvider(redis_url=redis_url)
     await provider.start()
     config = await provider.get_module(SERVICE_NAME)
 
-    redis = await get_redis_client()
+    redis = await get_redis_client(redis_url)
 
     streams_config = config.get("streams")
     streams = DEFAULT_STREAMS

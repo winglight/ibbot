@@ -92,7 +92,7 @@ GitHub Actions `ci.yml` 增加了 Docker Compose 冒烟测试步骤，会在拉�
 | 现象 | 排查建议 |
 | --- | --- |
 | `deploy.sh` 提示缺少 compose 文件 | 确认 `docker/local.compose.yml`、`docker/prod.compose.yml` 位于仓库中，或检查 `--env` 参数是否拼写正确。 |
-| 诊断脚本 Redis 连接失败 | 核实宿主机 `6379` 端口是否被占用，或 `.env.local` 中的 `REDIS_URL` 是否覆盖为其他地址。 |
+| 诊断脚本 Redis 连接失败 | 核实宿主机 `6379` 端口是否被占用，或 `.env.local` 中的 `IBBOT_REDIS_URL`/`REDIS_URL` 是否覆盖为其他地址。 |
 | InfluxDB 健康检查失败 | 检查 `INFLUX_*` 初始化变量是否匹配容器首次启动时设置的值；必要时删除 `data/influxdb*` 重新初始化。 |
 | Optimizer UI 无法访问 | 确认 `optimizer_ui/` 目录存在构建产物，并检查宿主机 `4173` 端口是否冲突。 |
 

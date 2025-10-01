@@ -51,9 +51,10 @@ _client_lock = asyncio.Lock()
 
 
 def _load_config() -> RedisConfig:
-    url = os.getenv("REDIS_URL")
-    if url:
-        return RedisConfig(url=url)
+    for key in ("REDIS_URL", "IBBOT_REDIS_URL"):
+        url = os.getenv(key, "").strip()
+        if url:
+            return RedisConfig(url=url)
 
     host = os.getenv("REDIS_HOST", "localhost")
     port_raw = os.getenv("REDIS_PORT", "6379")

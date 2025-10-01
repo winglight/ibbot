@@ -60,8 +60,11 @@ def _get_cache_backend():
     if _cache_backend is not None:
         return _cache_backend
 
-    redis_url = os.getenv("DATA_LAYER_REDIS_URL")
-    if redis_url:
+    for key in ("DATA_LAYER_REDIS_URL", "IBBOT_REDIS_URL"):
+        redis_url = os.getenv(key, "").strip()
+        if not redis_url:
+            continue
+
         prefix = os.getenv("DATA_LAYER_REDIS_PREFIX", "market-data")
         ttl_raw = os.getenv("DATA_LAYER_REDIS_SNAPSHOT_TTL")
         ttl = None

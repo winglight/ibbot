@@ -17,7 +17,7 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 from src.ibbot.config import ConfigProvider
 from src.ibbot.influx import write_points
 from src.ibbot.logging import get_logger
-from src.ibbot.redis import close_global_client, get_redis_client
+from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
 
 SERVICE_NAME = "ib-feed"
 PRICE_MEASUREMENT = "market_price"
@@ -284,6 +284,14 @@ class MarketDataFeedService:
         return value
 
 
+def _resolve_redis_url(override_key: str) -> str:
+    for key in (override_key, "IBBOT_REDIS_URL"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return DEFAULT_REDIS_URL
+
+
 async def _create_ib_client() -> Any:
     try:
         from src.ibkr_client import IBKRClient  # type: ignore
@@ -301,9 +309,10 @@ async def _create_ib_client() -> Any:
 
 async def run_service() -> None:
     logger = get_logger("ibbot.services.ib_feed.main")
-    redis = await get_redis_client()
+    redis_url = _resolve_redis_url("IB_FEED_REDIS_URL")
+    redis = await get_redis_client(redis_url)
 
-    provider = ConfigProvider(redis_url=os.getenv("IBBOT_REDIS_URL"))
+    provider = ConfigProvider(redis_url=redis_url)
     await provider.start()
     config = await provider.get_module(SERVICE_NAME)
 

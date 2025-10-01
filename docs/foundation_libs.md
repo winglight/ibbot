@@ -15,8 +15,9 @@
 
 | 依赖 | 主要键 | 说明 |
 | --- | --- | --- |
-| Redis | `REDIS_URL` | 完整连接串（优先）。例如 `redis://localhost:6379/0`。 |
-|      | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | 当未提供 `REDIS_URL` 时使用主机配置。 |
+| Redis | `IBBOT_REDIS_URL` | 主连接串（优先）。例如 `redis://localhost:6379/0`。 |
+|      | `REDIS_URL` / `ACCOUNT_CACHE_REDIS_URL` / `IB_COMMAND_REDIS_URL` 等 | 留空时继承 `IBBOT_REDIS_URL`，也可单独覆写到不同实例。 |
+|      | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | 当未提供任何连接串时使用主机配置。 |
 |      | `REDIS_PASSWORD` / `REDIS_SSL` | 可选认证与 SSL 标记（`true`/`false`）。 |
 | InfluxDB | `INFLUX_URL` / `IBBOT_INFLUX_URL` / `DATA_LAYER_INFLUX_URL` | 客户端访问地址。脚本会按此顺序回退。 |
 |      | `INFLUX_TOKEN` / `IBBOT_INFLUX_TOKEN` / `DATA_LAYER_INFLUX_TOKEN` | 访问令牌，可为空以使用匿名模式。 |
