@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from typing import List, Optional, Dict, Any, Callable, Awaitable
+from typing import List, Optional, Dict, Any, Callable, Awaitable, Mapping
 from loguru import logger
 from src.config import load_project_env
 from dataclasses import asdict, dataclass, field
@@ -470,6 +470,49 @@ async def _module_service_health_probe(
     return handle
 
 
+def _has_meaningful_health_change(
+    new_payload: Mapping[str, Any],
+    last_payload: Mapping[str, Any] | None,
+    *,
+    interval: float,
+    stale_after: float,
+) -> bool:
+    """Return True if the websocket broadcast should be updated."""
+
+    if last_payload is None:
+        return True
+
+    keys_to_check = (
+        "connected",
+        "account_type",
+        "queue_depth",
+        "last_error",
+        "stale",
+        "source",
+        "type",
+    )
+    for key in keys_to_check:
+        if new_payload.get(key) != last_payload.get(key):
+            return True
+
+    new_seen = new_payload.get("last_seen")
+    previous_seen = last_payload.get("last_seen")
+    if new_seen == previous_seen:
+        return False
+    if not new_seen or not previous_seen:
+        return True
+
+    try:
+        new_dt = datetime.fromisoformat(str(new_seen))
+        prev_dt = datetime.fromisoformat(str(previous_seen))
+    except (TypeError, ValueError):
+        return True
+
+    delta_seconds = abs((new_dt - prev_dt).total_seconds())
+    threshold = max(interval * 2, min(stale_after, 60.0))
+    return delta_seconds >= threshold
+
+
 async def _module_service_health_monitor(
     context: ModuleRuntimeContext,
 ) -> ModuleHandle:
@@ -490,7 +533,7 @@ async def _module_service_health_monitor(
     ws_manager = services.websocket_manager
 
     async def _run_monitor() -> None:
-        last_payload: Dict[str, Any] | None = None
+        last_sent_payload: Dict[str, Any] | None = None
         try:
             while True:
                 payload = await _fetch_ib_command_health_payload(
@@ -498,9 +541,14 @@ async def _module_service_health_monitor(
                     logger_=context.logger,
                 )
                 if ws_manager.connections:
-                    if last_payload != payload:
+                    if _has_meaningful_health_change(
+                        payload,
+                        last_sent_payload,
+                        interval=interval,
+                        stale_after=stale_after,
+                    ):
                         await ws_manager.broadcast(payload)
-                        last_payload = dict(payload)
+                        last_sent_payload = dict(payload)
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             context.logger.debug("IB command health monitor cancelled")
