@@ -23,6 +23,7 @@ from src.order_manager import get_order_manager as _get_order_manager_singleton
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
 from src.routes.monitoring import build_influx_write_rate_payload, get_queue_metrics
+from src.service_status import build_service_status_payload
 from src.utils.strategy_cache import (
     compute_performance_metrics as cache_compute_performance,
     get_strategy_stats as cache_get_strategy_stats,
@@ -718,6 +719,58 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 last_responses[key] = payload
                 await websocket.send_text(json.dumps(payload))
+            elif msg_type == "request_service_statuses":
+                key = "service_statuses"
+                force = bool(message.get("force"))
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        await _send_or_disconnect(websocket, cached_payload)
+                    else:
+                        await _send_or_disconnect(
+                            websocket,
+                            {
+                                "type": "service_statuses",
+                                "success": False,
+                                "error": "Rate limited",
+                                "source": "websocket",
+                            },
+                        )
+                    continue
+
+                try:
+                    container = core.get_container()
+                except Exception:
+                    container = None
+
+                redis_client = None
+                if container is not None:
+                    redis_client = getattr(container, "redis_client", None)
+
+                try:
+                    raw_payload = await build_service_status_payload(redis=redis_client)
+                    payload = {
+                        "type": "service_statuses",
+                        "success": True,
+                        "source": "websocket",
+                    }
+                    if isinstance(raw_payload, Mapping):
+                        payload.update(dict(raw_payload))
+                    else:
+                        payload["data"] = raw_payload
+                except Exception as exc:
+                    logger.warning(f"Failed to build service status payload: {exc}")
+                    payload = {
+                        "type": "service_statuses",
+                        "success": False,
+                        "error": str(exc),
+                        "source": "websocket",
+                    }
+
+                last_responses[key] = payload
+                await _send_or_disconnect(websocket, payload)
             elif msg_type == "subscribe_realtime":
                 symbol = message.get("symbol")
                 if symbol and symbol not in realtime_tasks:

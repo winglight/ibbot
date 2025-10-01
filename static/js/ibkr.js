@@ -276,6 +276,18 @@ class IBKRConnectionManager {
         });
     }
 
+    requestServiceStatuses(options = {}) {
+        const payload = { type: 'request_service_statuses' };
+        if (options.force) payload.force = true;
+        const minInterval = Number.isFinite(options.minInterval)
+            ? Math.max(0, Number(options.minInterval))
+            : 15000;
+        return this._sendThrottled('service_statuses', payload, {
+            force: Boolean(options.force),
+            minInterval,
+        });
+    }
+
     requestDomAutomationStatus(options = {}) {
         const payload = { type: 'request_dom_automation_status' };
         if (options.force) payload.force = true;
@@ -911,6 +923,7 @@ class IBKRConnectionManager {
             this.requestConnectionStatus({ force: true });
             this.requestRiskRules({ force: true });
             this.requestStrategies({ force: true });
+            this.requestServiceStatuses({ force: true });
             if (this.app && this.app.currentStrategyDetails) {
                 this.requestStrategyStatus({ name: this.app.currentStrategyDetails, force: true });
             }
@@ -1015,6 +1028,11 @@ class IBKRConnectionManager {
                 if (data.message) {
                     const level = data.level || 'info';
                     this.app.showAlert(level, data.message);
+                }
+                break;
+            case 'service_statuses':
+                if (this.app && typeof this.app.handleWebSocketPayload === 'function') {
+                    this.app.handleWebSocketPayload(data);
                 }
                 break;
             case 'realtime_data':
