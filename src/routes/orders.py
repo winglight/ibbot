@@ -7,12 +7,10 @@ from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
 import core
-from core import (
-    connection_manager,
-    risk_manager,
-    order_manager,
-    websocket_manager,
-)
+from core import connection_manager, websocket_manager
+
+order_manager = getattr(core, "order_manager", None)
+risk_manager = getattr(core, "risk_manager", None)
 from .auth import get_current_user
 from src.models import OrderRequest
 from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso

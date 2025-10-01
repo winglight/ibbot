@@ -11,7 +11,9 @@ from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
 import core
-from core import connection_manager, risk_manager
+from core import connection_manager
+
+risk_manager = getattr(core, "risk_manager", None)
 from .auth import get_current_user
 from src.models import (
     RiskRuleRequest,

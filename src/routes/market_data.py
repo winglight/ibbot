@@ -10,8 +10,8 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-import core
-from core import connection_manager, get_db_manager
+from core import connection_manager
+from src.database import get_db_manager
 from .auth import get_current_user
 from src.models import (
     HistoricalDataRequest,

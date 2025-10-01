@@ -58,13 +58,7 @@ from src.models import (
 )
 
 # Shared application services
-from core import (
-    telegram_notifier,
-    notification_manager,
-    websocket_manager,
-    order_manager,
-    get_dom_service,
-)
+from core import get_dom_service, websocket_manager
 
 # Authentication and routers
 from src.routes.auth import get_current_user, router as auth_router
