@@ -3,18 +3,13 @@ import os
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional, Dict, Tuple, Any, Mapping
+from typing import Optional, Dict, Tuple, Any, Mapping, MutableMapping, Callable, Awaitable
 
 from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
 
 import core
-from core import (
-    connection_manager,
-    risk_manager,
-    order_manager,
-    websocket_manager,
-)
+from core import connection_manager
 from .auth import (
     audit_log_failure,
     audit_log_success,
@@ -25,15 +20,34 @@ from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
 )
-from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
+from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, read_hash
 from src.models import OrderRequest
 from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
+from src.ib_command_health import (
+    IB_COMMAND_HEALTH_KEY,
+    IB_COMMAND_HEALTH_STALE_AFTER_SEC,
+    build_ib_connection_health_payload,
+)
 
 router = APIRouter()
 
 NY_TZ = ZoneInfo("America/New_York")
 
 _COMMAND_QUEUE_OVERRIDE = os.getenv("IB_COMMAND_QUEUE_KEY", "").strip() or None
+_WEBSOCKET_BROADCAST_OVERRIDE: Optional[
+    Callable[[Mapping[str, Any]], Awaitable[None]]
+] = None
+
+
+def _get_order_manager():
+    container = core.get_container()
+    manager = getattr(container, "order_manager", None) if container else None
+    if manager is not None:
+        return manager
+    try:
+        return core.order_manager  # type: ignore[attr-defined]
+    except AttributeError:
+        return None
 
 
 async def _resolve_command_queue_key() -> str:
@@ -67,6 +81,46 @@ async def _enqueue_command(payload: Mapping[str, Any]) -> None:
     await enqueue_ib_command(payload, queue_key=queue_key)
 
 
+def set_websocket_broadcast_override(
+    broadcaster: Optional[Callable[[Mapping[str, Any]], Awaitable[None]]]
+) -> None:
+    """Configure a test-only websocket broadcast override."""
+
+    global _WEBSOCKET_BROADCAST_OVERRIDE
+    _WEBSOCKET_BROADCAST_OVERRIDE = broadcaster
+
+
+def _resolve_websocket_broadcaster() -> Optional[Callable[[Mapping[str, Any]], Awaitable[None]]]:
+    if _WEBSOCKET_BROADCAST_OVERRIDE is not None:
+        return _WEBSOCKET_BROADCAST_OVERRIDE
+
+    container = core.get_container()
+    manager = getattr(container, "websocket_manager", None) if container else None
+    broadcast = getattr(manager, "broadcast", None) if manager else None
+    if callable(broadcast):
+        return broadcast
+
+    try:
+        manager = core.websocket_manager  # type: ignore[attr-defined]
+    except AttributeError:
+        return None
+
+    broadcast = getattr(manager, "broadcast", None)
+    if callable(broadcast):
+        return broadcast
+    return None
+
+
+async def _broadcast_event(message: Mapping[str, Any]) -> None:
+    broadcaster = _resolve_websocket_broadcaster()
+    if broadcaster is None:
+        return
+    try:
+        await broadcaster(dict(message))
+    except Exception:
+        logger.debug("Failed to broadcast websocket event", exc_info=True)
+
+
 async def _load_positions_snapshot() -> Tuple[list[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Return cached positions and the raw snapshot wrapper when available."""
 
@@ -96,6 +150,28 @@ def _normalise_position_quantity(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+async def _ensure_ib_command_available() -> MutableMapping[str, Any]:
+    """Ensure ib-command health data indicates the queue is available."""
+
+    container = core.get_container()
+    redis_client = getattr(container, "redis_client", None) if container else None
+
+    try:
+        raw = await read_hash(IB_COMMAND_HEALTH_KEY, redis=redis_client)
+    except Exception as exc:
+        logger.debug("Failed to read ib-command health: {}", exc)
+        raw = {}
+
+    if not raw:
+        raise HTTPException(status_code=503, detail="ib-command service unavailable")
+
+    stale_after = IB_COMMAND_HEALTH_STALE_AFTER_SEC or 30
+    payload = build_ib_connection_health_payload(raw, stale_after=stale_after)
+    if not payload.get("connected"):
+        raise HTTPException(status_code=503, detail="ib-command service unavailable")
+    return payload
 
 
 def _extract_available_funds(account_info: Any) -> Optional[float]:
@@ -174,6 +250,7 @@ async def place_order(
         "metadata": metadata,
     }
 
+    await _ensure_ib_command_available()
     try:
         await _enqueue_command(payload)
     except Exception as exc:
@@ -185,18 +262,15 @@ async def place_order(
         )
         raise HTTPException(status_code=503, detail="Failed to enqueue order command") from exc
 
-    try:
-        await websocket_manager.broadcast(
-            {
-                "type": "order_command_enqueued",
-                "command_id": command_id,
-                "symbol": order.symbol,
-                "action": order.action,
-                "order_type": order_type,
-            }
-        )
-    except Exception:
-        logger.debug("Failed to broadcast order enqueued event", exc_info=True)
+    await _broadcast_event(
+        {
+            "type": "order_command_enqueued",
+            "command_id": command_id,
+            "symbol": order.symbol,
+            "action": order.action,
+            "order_type": order_type,
+        }
+    )
 
     await audit_log_success(
         request,
@@ -242,6 +316,7 @@ async def cancel_order(
         },
     }
 
+    await _ensure_ib_command_available()
     try:
         await _enqueue_command(payload)
     except Exception as exc:
@@ -253,24 +328,13 @@ async def cancel_order(
         )
         raise HTTPException(status_code=503, detail="Failed to enqueue cancel command") from exc
 
-    if 'order_manager' in globals() and order_manager:
-        try:
-            mark_cancel = getattr(order_manager, "mark_cancel_requested", None)
-            if callable(mark_cancel):
-                mark_cancel(str(order_id))
-        except Exception:
-            logger.debug("OrderManager cancel request update failed", exc_info=True)
-
-    try:
-        await websocket_manager.broadcast(
-            {
-                "type": "order_cancel_requested",
-                "order_id": order_id,
-                "command_id": command_id,
-            }
-        )
-    except Exception:
-        logger.debug("Failed to broadcast cancel request", exc_info=True)
+    await _broadcast_event(
+        {
+            "type": "order_cancel_requested",
+            "order_id": order_id,
+            "command_id": command_id,
+        }
+    )
 
     await audit_log_success(
         request,
@@ -384,20 +448,18 @@ async def close_position(
             },
         }
 
+        await _ensure_ib_command_available()
         await _enqueue_command(payload)
 
-        try:
-            await websocket_manager.broadcast(
-                {
-                    "type": "position_close_queued",
-                    "symbol": symbol_upper,
-                    "command_id": command_id,
-                    "action": action,
-                    "quantity": quantity,
-                }
-            )
-        except Exception:
-            logger.debug("Failed to broadcast close position request", exc_info=True)
+        await _broadcast_event(
+            {
+                "type": "position_close_queued",
+                "symbol": symbol_upper,
+                "command_id": command_id,
+                "action": action,
+                "quantity": quantity,
+            }
+        )
 
         await audit_log_success(
             http_request,
@@ -570,14 +632,8 @@ def _validate_g5_market_hours(symbol: str) -> dict:
 async def _validate_g4_risk_management(order: OrderRequest) -> dict:
     """G4: 风险管理验证"""
     errors = []
-    
+
     try:
-        # 检查是否有活跃的风险规则
-        if risk_manager:
-            # 这里可以添加具体的风险规则检查
-            # 例如：检查单笔订单金额限制、日内交易次数限制等
-            pass
-        
         # 检查订单金额是否超过限制（示例：单笔订单不超过 $100,000）
         if order.price and order.quantity:
             order_value = order.price * order.quantity
@@ -727,39 +783,6 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
         exchange = target_position.get('exchange') or "SMART"
         sec_type = target_position.get('secType') or target_position.get('sec_type') or "STK"
 
-        try:
-            if 'risk_manager' in globals() and risk_manager:
-                if symbol_upper in getattr(risk_manager, "risk_rules", {}):
-                    rule = risk_manager.risk_rules[symbol_upper]
-                    if getattr(rule, "enabled", False):
-                        rule.enabled = False
-
-                        from src.database import DatabaseRiskRule
-
-                        db_rule = DatabaseRiskRule(
-                            symbol=rule.symbol,
-                            stop_loss_price=rule.stop_loss_price,
-                            take_profit_price=rule.take_profit_price,
-                            max_loss_percent=rule.max_loss_percent,
-                            enabled=rule.enabled,
-                            max_time_span=rule.max_time_span,
-                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
-                            auto_trailing=rule.auto_trailing,
-                            atr_params=rule.atr_params,
-                            rule_type=rule.rule_type,
-                        )
-                        risk_manager.db_manager.save_risk_rule(db_rule)
-
-                        logger.info(f"🔒 反向下单前已停用风险规则: {symbol_upper}")
-
-                        await websocket_manager.broadcast({
-                            "type": "risk_rule_deactivated",
-                            "symbol": symbol_upper,
-                            "message": f"反向下单前已自动停用风险规则: {symbol_upper}",
-                        })
-        except Exception as e:
-            logger.warning(f"反向下单前停用风险规则失败: {e}")
-
         command_id = uuid.uuid4().hex
         payload = {
             "command_id": command_id,
@@ -779,19 +802,17 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
             },
         }
 
+        await _ensure_ib_command_available()
         await _enqueue_command(payload)
 
-        try:
-            await websocket_manager.broadcast({
-                "type": "position_reverse_queued",
-                "symbol": symbol_upper,
-                "command_id": command_id,
-                "action": action,
-                "quantity": quantity,
-                "original_position": position_qty,
-            })
-        except Exception:
-            logger.debug("Failed to broadcast reverse position request", exc_info=True)
+        await _broadcast_event({
+            "type": "position_reverse_queued",
+            "symbol": symbol_upper,
+            "command_id": command_id,
+            "action": action,
+            "quantity": quantity,
+            "original_position": position_qty,
+        })
 
         return {
             "success": True,
@@ -829,6 +850,7 @@ async def cancel_all_orders(
         },
     }
 
+    await _ensure_ib_command_available()
     try:
         await _enqueue_command(payload)
     except Exception as exc:
@@ -836,15 +858,12 @@ async def cancel_all_orders(
         await audit_log_failure(request, detail="failed to enqueue cancel all command", extra={"command_id": command_id})
         raise HTTPException(status_code=503, detail="Failed to enqueue cancel all command") from exc
 
-    try:
-        await websocket_manager.broadcast(
-            {
-                "type": "all_orders_cancel_requested",
-                "command_id": command_id,
-            }
-        )
-    except Exception:
-        logger.debug("Failed to broadcast cancel all request", exc_info=True)
+    await _broadcast_event(
+        {
+            "type": "all_orders_cancel_requested",
+            "command_id": command_id,
+        }
+    )
 
     await audit_log_success(
         request,
@@ -875,7 +894,8 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
     global orders_cache, orders_cache_timestamp
 
     try:
-        if 'order_manager' not in globals() or not order_manager:
+        order_manager = _get_order_manager()
+        if order_manager is None:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
 
         start_dt = None
@@ -1035,7 +1055,8 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
 async def get_order_detail(order_id: str, user: Optional[str] = Depends(get_current_user)):
     """获取单个订单详情"""
     try:
-        if 'order_manager' not in globals() or not order_manager:
+        order_manager = _get_order_manager()
+        if order_manager is None:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
 
         o = order_manager.get_order(str(order_id))
@@ -1112,7 +1133,8 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     try:
-        if 'order_manager' not in globals() or not order_manager:
+        order_manager = _get_order_manager()
+        if order_manager is None:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
 
         command_id = uuid.uuid4().hex
@@ -1142,7 +1164,8 @@ async def sync_single_order(order_id: str, user: Optional[str] = Depends(get_cur
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
 
     try:
-        if 'order_manager' not in globals() or not order_manager:
+        order_manager = _get_order_manager()
+        if order_manager is None:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
 
         if not order_manager.get_order(str(order_id)):
