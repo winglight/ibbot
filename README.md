@@ -97,6 +97,16 @@ uvicorn main:app --reload
 - `/ws/dom/{symbol}`：推送特定标的的 DOM 深度与指标。
 - Notification Center 支持浏览器与 Telegram 通道，配置接口为 `/api/notifications/settings`。
 
+## 📈 市场数据服务
+
+- **REST API**：默认部署在 `http://localhost:8010`，提供 `/market`（全部订阅快照）、`/market/{symbol}`（单标的快照）与 `/health`（运行状态）等接口。主程序可通过 `MARKET_DATA_SERVICE_URL` 指向容器内地址（示例：`http://market-data-service:8010`）。
+- **WebSocket**：`ws://localhost:8010/ws/market`，支持通过查询参数 `symbols=AAPL,MSFT`、`types=dom.metrics` 过滤；连接建立后也可发送 `{ "type": "subscribe", "symbols": ["MNQ"] }` 动态调整订阅。将 `MARKET_DATA_SERVICE_WS_URL` 指向 `ws://market-data-service:8010/ws/market` 后，前端即可复用原有实时面板。
+- **Redis Stream**：归一化行情事件写入 `MARKET_DATA_STREAM_KEY`（默认 `stream:market-data`），字段包含 `symbol`、`type`、`data`、`ts_ns` 与 `latency_ms`。可结合现有队列监控面板展示流速与滞留。
+- **依赖**：需 Redis（读取订阅配置、推送 Stream）与可选 InfluxDB（写入 `service_metrics` 指标）。对应环境变量如 `MARKET_DATA_STREAM_LENGTH`、`MARKET_DATA_METRICS_PERIOD`、`MARKET_DATA_METRICS_INFLUX_URL` 已加入 `.env.example`。
+- **运维**：健康检查 `GET /health` 返回最近一次推送时间、Redis/Influx 写入状态与账户快照合并情况；日志默认写入 `logs/market-data-service.log`（也会输出到 stdout），指标可在 Influx 中查看 `service.<service_name>` 主题。
+
+> 更多部署细节与 API 契约见 [docs/market_data_service.md](docs/market_data_service.md)。
+
 ## 🧪 测试
 
 更新后的测试用例覆盖 JWT 登录、连接状态、通知配置与 DOM 配置。运行方式：
