@@ -14,6 +14,12 @@
         '#2dd4bf', '#c084fc', '#f472b6', '#eab308', '#818cf8', '#ef4444', '#0ea5e9'
     ];
 
+    const DATA_FIELD_GROUPS = [
+        { key: 'configs', title: '配置 (hash:config:*)', emptyText: '暂无配置数据' },
+        { key: 'orders', title: '订单结果 (hash:ib:result:*)', emptyText: '暂无订单结果数据' },
+        { key: 'subscriptions', title: '订阅快照 (hash:market:snapshot:*)', emptyText: '暂无订阅数据' },
+    ];
+
     class MonitoringDashboard {
         constructor(app) {
             this.app = app;
@@ -38,6 +44,8 @@
                 queueError: document.getElementById('queueMetricsError'),
                 queueTableBody: document.querySelector('#queueMetricsTable tbody'),
                 streamTableBody: document.querySelector('#streamMetricsTable tbody'),
+                dataFieldsContainer: document.getElementById('queueDataFieldsContainer'),
+                dataFieldsStatus: document.getElementById('queueDataFieldsStatus'),
                 influxSummary: document.getElementById('influxSummaryText'),
                 influxWindow: document.getElementById('influxWindowSelect'),
                 influxService: document.getElementById('influxServiceSelect'),
@@ -225,6 +233,12 @@
             if (this.elements.queueError) {
                 this.elements.queueError.textContent = '';
             }
+            if (this.elements.dataFieldsContainer) {
+                this.elements.dataFieldsContainer.innerHTML = '<div class="text-muted">加载中...</div>';
+            }
+            if (this.elements.dataFieldsStatus) {
+                this.elements.dataFieldsStatus.textContent = '加载中...';
+            }
 
             const params = new URLSearchParams();
             // Allow custom queue targets via configuration in the future.
@@ -295,6 +309,7 @@
             if (this.elements.queueError) {
                 this.elements.queueError.textContent = message || '加载失败';
             }
+            this.renderDataFields(null, message || '加载失败');
             this.state.queue = REFRESH_STATE.error;
             if (scheduleNext) {
                 this.scheduleQueueRefresh();
@@ -439,6 +454,122 @@
                     }).join('');
                 }
             }
+
+            this.renderDataFields(data?.data_fields);
+        }
+
+        renderDataFields(dataFields, errorMessage) {
+            const container = this.elements.dataFieldsContainer;
+            if (!container) {
+                return;
+            }
+
+            const status = this.elements.dataFieldsStatus;
+
+            if (errorMessage) {
+                container.innerHTML = `<div class="text-danger small">${this.escapeHtml(errorMessage)}</div>`;
+                if (status) {
+                    status.textContent = '加载失败';
+                }
+                return;
+            }
+
+            const groups = Array.isArray(DATA_FIELD_GROUPS) ? DATA_FIELD_GROUPS : [];
+            if (!dataFields || typeof dataFields !== 'object') {
+                container.innerHTML = '<div class="text-muted small">暂无 Redis 数据概览</div>';
+                if (status) {
+                    status.textContent = '';
+                }
+                return;
+            }
+
+            const sections = [];
+            const statusParts = [];
+            groups.forEach((group) => {
+                const info = dataFields[group.key];
+                sections.push(this.renderDataFieldGroup(group, info));
+                if (info?.error) {
+                    statusParts.push(`${group.title.split(' ')[0]}异常`);
+                } else if (Array.isArray(info?.samples) && info.samples.length) {
+                    statusParts.push(`${group.title.split(' ')[0]}${info.samples.length}项`);
+                }
+            });
+
+            container.innerHTML = sections.join('') || '<div class="text-muted small">暂无 Redis 数据概览</div>';
+            if (status) {
+                status.textContent = statusParts.length ? statusParts.join(' · ') : '已刷新';
+            }
+        }
+
+        renderDataFieldGroup(group, info) {
+            const title = group?.title || group?.key || '';
+            const emptyText = group?.emptyText || '暂无数据';
+            const header = `
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-uppercase text-muted small">${this.escapeHtml(title)}</span>
+                    ${info?.has_more ? '<span class="badge bg-secondary">更多...</span>' : ''}
+                </div>
+            `;
+
+            if (!info) {
+                return `<div class="redis-data-group mb-3">${header}<div class="text-muted small">${this.escapeHtml(emptyText)}</div></div>`;
+            }
+
+            if (info.error) {
+                return `<div class="redis-data-group mb-3">${header}<div class="text-danger small">${this.escapeHtml(info.error)}</div></div>`;
+            }
+
+            const samples = Array.isArray(info.samples) ? info.samples : [];
+            if (!samples.length) {
+                return `<div class="redis-data-group mb-3">${header}<div class="text-muted small">${this.escapeHtml(emptyText)}</div></div>`;
+            }
+
+            const list = samples.map((sample) => this.renderDataFieldSample(sample)).join('');
+            return `<div class="redis-data-group mb-3">${header}<div class="d-flex flex-column gap-2">${list}</div></div>`;
+        }
+
+        renderDataFieldSample(sample) {
+            const label = sample?.label || sample?.key || '未命名';
+            const key = sample?.key ? `<code class="small text-muted">${this.escapeHtml(sample.key)}</code>` : '';
+            const fields = Array.isArray(sample?.fields) ? sample.fields : [];
+            let content = '';
+            if (sample?.error) {
+                content = `<span class="text-danger">${this.escapeHtml(sample.error)}</span>`;
+            } else if (fields.length) {
+                content = fields.map((field) => {
+                    const name = field?.field ? this.escapeHtml(field.field) : '';
+                    const value = field?.value ? this.escapeHtml(this.truncateValue(field.value, 60)) : '';
+                    const suffix = value ? `=${value}` : '';
+                    return `<code class="me-1">${name}${suffix}</code>`;
+                }).join('');
+                if (sample.has_more_fields) {
+                    content += '<span class="badge bg-secondary ms-1">更多...</span>';
+                }
+            } else {
+                content = '<span class="text-muted">暂无字段</span>';
+            }
+
+            return `
+                <div class="border rounded px-2 py-2">
+                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+                        <span class="fw-semibold">${this.escapeHtml(label)}</span>
+                        ${key}
+                    </div>
+                    <div class="small mt-2">${content}</div>
+                </div>
+            `;
+        }
+
+        truncateValue(value, maxLength = 60) {
+            if (value === null || value === undefined) {
+                return '';
+            }
+            const text = String(value);
+            if (text.length <= maxLength) {
+                return text;
+            }
+            const sliceEnd = Math.max(0, maxLength - 1);
+            return `${text.slice(0, sliceEnd)}…`;
         }
 
         escapeHtml(value) {

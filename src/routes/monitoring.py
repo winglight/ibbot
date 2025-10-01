@@ -6,7 +6,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 import json
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
+
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -88,6 +90,200 @@ def _normalise_stream_targets(raw: Sequence[str] | None) -> tuple[StreamTarget, 
         label = pieces[2] if len(pieces) > 2 else None
         result.append(StreamTarget(stream_key=stream_key, group=group, name=label))
     return tuple(result)
+
+
+def _to_str(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return value.decode("utf-8")
+        except Exception:  # pragma: no cover - decoding errors fall back to repr
+            return repr(value)
+    return str(value)
+
+
+def _truncate_value(value: str, max_length: int = 200) -> str:
+    if len(value) <= max_length:
+        return value
+    return value[: max_length - 1] + "…"
+
+
+async def _sample_hash_fields(redis, key: str, *, limit: int = 3) -> tuple[list[dict[str, str]], bool, str | None]:
+    entries: list[dict[str, str]] = []
+    has_more = False
+    error: str | None = None
+    hscan = getattr(redis, "hscan", None)
+    try:
+        if callable(hscan):
+            cursor: int | str = 0
+            while True:
+                cursor, data = await hscan(key, cursor=cursor, count=max(limit * 2, 10))
+                mapping: Mapping[Any, Any]
+                if isinstance(data, Mapping):
+                    mapping = data
+                else:
+                    mapping = {}
+                for field, value in mapping.items():
+                    entries.append(
+                        {
+                            "field": _to_str(field),
+                            "value": _truncate_value(_to_str(value)),
+                        }
+                    )
+                    if len(entries) >= limit:
+                        break
+                if (cursor in (0, "0")) or len(entries) >= limit:
+                    has_more = cursor not in (0, "0")
+                    break
+        else:
+            hgetall = getattr(redis, "hgetall", None)
+            if callable(hgetall):
+                data = await hgetall(key)
+                if isinstance(data, Mapping):
+                    items = list(data.items())
+                    has_more = len(items) > limit
+                    for field, value in items[:limit]:
+                        entries.append(
+                            {
+                                "field": _to_str(field),
+                                "value": _truncate_value(_to_str(value)),
+                            }
+                        )
+            else:
+                error = "Redis client does not support hash scanning"
+    except Exception as exc:  # pragma: no cover - depends on redis client implementation
+        error = str(exc)
+    return entries[:limit], has_more, error
+
+
+async def _collect_scan_keys(redis, *, pattern: str, limit: int = 5) -> tuple[list[str], bool, str | None]:
+    keys: list[str] = []
+    has_more = False
+    error: str | None = None
+    scan_iter = getattr(redis, "scan_iter", None)
+    try:
+        if callable(scan_iter):
+            async for raw in scan_iter(match=pattern, count=max(limit * 5, 20)):
+                key = _to_str(raw)
+                if key:
+                    keys.append(key)
+                if len(keys) >= limit + 1:
+                    has_more = True
+                    break
+        else:
+            scan = getattr(redis, "scan", None)
+            if callable(scan):
+                cursor: int | str = 0
+                while True:
+                    cursor, batch = await scan(cursor=cursor, match=pattern, count=max(limit * 5, 20))
+                    for raw in batch or []:
+                        key = _to_str(raw)
+                        if key:
+                            keys.append(key)
+                    if len(keys) >= limit + 1:
+                        has_more = True
+                        break
+                    if cursor in (0, "0"):
+                        break
+            else:
+                error = "Redis client does not support key scanning"
+    except Exception as exc:  # pragma: no cover - depends on redis client implementation
+        error = str(exc)
+    return keys[:limit], has_more, error
+
+
+async def _summarise_hash_category(
+    redis,
+    *,
+    pattern: str,
+    label_fn: Callable[[str], str],
+    key_limit: int = 5,
+    field_limit: int = 3,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "pattern": pattern,
+        "samples": [],
+        "has_more": False,
+        "count": 0,
+        "error": None,
+    }
+    if redis is None:
+        summary["error"] = "Redis unavailable"
+        return summary
+
+    keys, has_more, error = await _collect_scan_keys(redis, pattern=pattern, limit=key_limit)
+    if error:
+        summary["error"] = error
+        return summary
+
+    summary["has_more"] = has_more
+    samples: list[dict[str, Any]] = []
+    for key in keys:
+        entry: dict[str, Any] = {
+            "key": key,
+            "label": label_fn(key),
+            "fields": [],
+            "has_more_fields": False,
+            "error": None,
+        }
+        fields, field_more, field_error = await _sample_hash_fields(redis, key, limit=field_limit)
+        entry["fields"] = fields
+        entry["has_more_fields"] = field_more
+        if field_error:
+            entry["error"] = field_error
+        samples.append(entry)
+    summary["samples"] = samples
+    summary["count"] = len(samples)
+    return summary
+
+
+async def _collect_data_fields(redis) -> dict[str, Any]:
+    if redis is None:
+        return {
+            "configs": {"samples": [], "has_more": False, "count": 0, "error": "Redis unavailable"},
+            "orders": {"samples": [], "has_more": False, "count": 0, "error": "Redis unavailable"},
+            "subscriptions": {"samples": [], "has_more": False, "count": 0, "error": "Redis unavailable"},
+        }
+
+    def _config_label(key: str) -> str:
+        return key.split(":", 2)[-1] if ":" in key else key
+
+    def _order_label(key: str) -> str:
+        return key.split(":", 2)[-1] if ":" in key else key
+
+    def _subscription_label(key: str) -> str:
+        return key.split(":", 2)[-1] if ":" in key else key
+
+    configs_task = _summarise_hash_category(
+        redis,
+        pattern="hash:config:*",
+        label_fn=_config_label,
+    )
+    orders_task = _summarise_hash_category(
+        redis,
+        pattern="hash:ib:result:*",
+        label_fn=_order_label,
+    )
+    subscriptions_task = _summarise_hash_category(
+        redis,
+        pattern="hash:market:snapshot:*",
+        label_fn=_subscription_label,
+    )
+
+    results = await asyncio.gather(configs_task, orders_task, subscriptions_task, return_exceptions=True)
+
+    summary: dict[str, Any] = {
+        "configs": {"samples": [], "has_more": False, "count": 0, "error": None},
+        "orders": {"samples": [], "has_more": False, "count": 0, "error": None},
+        "subscriptions": {"samples": [], "has_more": False, "count": 0, "error": None},
+    }
+
+    keys = ("configs", "orders", "subscriptions")
+    for key, result in zip(keys, results):
+        if isinstance(result, Exception):  # pragma: no cover - defensive guard
+            summary[key]["error"] = str(result)
+            continue
+        summary[key] = result
+    return summary
 
 
 async def _load_snapshot_from_redis(redis) -> dict[str, Any] | None:
@@ -180,6 +376,7 @@ async def get_queue_metrics(
     redis = await get_redis_client()
 
     snapshot = await _load_snapshot_from_redis(redis)
+    data_fields = await _collect_data_fields(redis)
     queue_targets = _normalise_queue_targets(queues)
     stream_targets = _normalise_stream_targets(streams)
 
@@ -189,6 +386,7 @@ async def get_queue_metrics(
         payload["requested_streams"] = [
             {"stream_key": target.stream_key, "group": target.group} for target in stream_targets
         ]
+        payload["data_fields"] = data_fields
         return payload
 
     metrics_queues = await _build_queue_metrics(redis, queue_targets)
@@ -198,6 +396,7 @@ async def get_queue_metrics(
         "queues": metrics_queues,
         "streams": metrics_streams,
         "source": "live",
+        "data_fields": data_fields,
     }
 
 
