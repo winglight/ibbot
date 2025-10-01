@@ -41,6 +41,13 @@ def test_websocket_sends_initial_snapshot_and_updates() -> None:
             "stale": False,
         },
     }
+    runtime._update_account_snapshot(
+        account_info=None,
+        positions=None,
+        updated_at=None,
+        stale=False,
+        stale_reason=None,
+    )
 
     with _create_test_client(runtime) as client:
         manager = client.app.state.market_data_ws_manager
@@ -73,6 +80,13 @@ def test_websocket_filters_by_event_type() -> None:
         "latency_ms": None,
         "stale": False,
     }
+    runtime._update_account_snapshot(
+        account_info=None,
+        positions=None,
+        updated_at=None,
+        stale=False,
+        stale_reason=None,
+    )
 
     with _create_test_client(runtime) as client:
         manager = client.app.state.market_data_ws_manager
@@ -111,6 +125,13 @@ def test_websocket_disconnects_when_pong_missing() -> None:
         "latency_ms": None,
         "stale": False,
     }
+    runtime._update_account_snapshot(
+        account_info=None,
+        positions=None,
+        updated_at=None,
+        stale=False,
+        stale_reason=None,
+    )
 
     with _create_test_client(runtime) as client:
         manager = client.app.state.market_data_ws_manager

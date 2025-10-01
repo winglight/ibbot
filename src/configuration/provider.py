@@ -58,6 +58,18 @@ class MarketDataServiceConfig:
         default=60.0,
         metadata={"env": "MARKET_DATA_METRICS_PERIOD"},
     )
+    account_snapshot_refresh_interval: float = field(
+        default=5.0,
+        metadata={"env": "MARKET_DATA_ACCOUNT_SNAPSHOT_REFRESH_INTERVAL"},
+    )
+    account_snapshot_retry_interval: float = field(
+        default=30.0,
+        metadata={"env": "MARKET_DATA_ACCOUNT_SNAPSHOT_RETRY_INTERVAL"},
+    )
+    account_snapshot_required: bool = field(
+        default=False,
+        metadata={"env": "MARKET_DATA_ACCOUNT_SNAPSHOT_REQUIRED"},
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.symbols, Iterable) or isinstance(self.symbols, (str, bytes)):
@@ -83,6 +95,12 @@ class MarketDataServiceConfig:
             raise ValueError("stream_key must be a non-empty string")
         if not isinstance(self.metrics_period, (int, float)) or self.metrics_period <= 0:
             raise ValueError("metrics_period must be a positive number")
+        if not isinstance(self.account_snapshot_refresh_interval, (int, float)) or self.account_snapshot_refresh_interval < 0:
+            raise ValueError("account_snapshot_refresh_interval must be a non-negative number")
+        if not isinstance(self.account_snapshot_retry_interval, (int, float)) or self.account_snapshot_retry_interval <= 0:
+            raise ValueError("account_snapshot_retry_interval must be a positive number")
+        if not isinstance(self.account_snapshot_required, bool):
+            raise ValueError("account_snapshot_required must be a boolean")
 
 
 class ConfigProvider(Iterable[T]):
