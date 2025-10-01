@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Iterable, Sequence
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -18,6 +21,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Ensure the repository root is available for absolute imports like `services.*`
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from src.ibbot.redis import DEFAULT_REDIS_URL, DEFAULT_REDIS_URL_ENV
+
+
 DEFAULT_SERVICES: tuple[str, ...] = (
     "ib_command",
     "ib_feed",
@@ -25,6 +31,16 @@ DEFAULT_SERVICES: tuple[str, ...] = (
     "risk",
     "notification",
 )
+
+# Mapping of service name -> dedicated Redis URL override environment variable.
+# If a service is not listed here it falls back to ``IBBOT_REDIS_URL``.
+_SERVICE_REDIS_ENV: dict[str, str] = {
+    "ib_command": "IB_COMMAND_REDIS_URL",
+    "ib_feed": "IB_FEED_REDIS_URL",
+    "strategy": "STRATEGY_REDIS_URL",
+    "risk": "RISK_REDIS_URL",
+    "notification": "NOTIFICATION_REDIS_URL",
+}
 
 
 def _load_env() -> Path | None:
@@ -47,7 +63,51 @@ def _check_service_imports(services: Iterable[str]) -> list[str]:
     return missing
 
 
-def run_services(services: Sequence[str], dry_run: bool = False) -> int:
+def _iter_redis_urls(services: Sequence[str]) -> set[str]:
+    """Return the set of Redis URLs referenced by the given services."""
+
+    urls: set[str] = set()
+    default_url = os.getenv(DEFAULT_REDIS_URL_ENV, DEFAULT_REDIS_URL)
+    for service in services:
+        env_key = _SERVICE_REDIS_ENV.get(service)
+        url = os.getenv(env_key) if env_key else None
+        urls.add(url or default_url)
+    return urls
+
+
+def _probe_redis_url(url: str) -> tuple[bool, str | None]:
+    """Check whether we can establish a TCP connection to the Redis endpoint."""
+
+    parsed = urlparse(url)
+    if parsed.scheme == "unix":  # pragma: no cover - niche configuration
+        if os.path.exists(parsed.path):
+            return True, None
+        return False, f"unix socket {parsed.path} 不存在"
+
+    host = parsed.hostname or "localhost"
+    port = parsed.port or (6380 if parsed.scheme == "rediss" else 6379)
+    try:
+        with closing(socket.create_connection((host, port), timeout=1.5)):
+            return True, None
+    except OSError as exc:  # pragma: no cover - depends on environment
+        return False, f"无法连接 {host}:{port} - {exc.strerror or exc}"
+
+
+def _ensure_redis_available(services: Sequence[str]) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    for url in _iter_redis_urls(services):
+        ok, message = _probe_redis_url(url)
+        if not ok and message:
+            errors.append(f"{url} -> {message}")
+    return not errors, errors
+
+
+def run_services(
+    services: Sequence[str],
+    dry_run: bool = False,
+    *,
+    skip_redis_check: bool = False,
+) -> int:
     env_source = _load_env()
 
     missing = _check_service_imports(services)
@@ -58,6 +118,21 @@ def run_services(services: Sequence[str], dry_run: bool = False) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if not skip_redis_check:
+        ok, errors = _ensure_redis_available(services)
+        if not ok:
+            print(
+                "[ERROR] Redis 服务不可用。请先启动 redis-server 或在 .env 中指向可用实例。",
+                file=sys.stderr,
+            )
+            for error in errors:
+                print(f"        {error}", file=sys.stderr)
+            print(
+                "可以使用 --skip-redis-check 跳过此检查。",
+                file=sys.stderr,
+            )
+            return 3
 
     if dry_run:
         message = [
@@ -123,13 +198,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="仅检查模块导入与环境加载，不真正运行服务。",
     )
+    parser.add_argument(
+        "--skip-redis-check",
+        action="store_true",
+        help="跳过 Redis 可达性检查（例如使用云端 Redis 时）。",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return run_services(args.services, dry_run=args.dry_run)
+    return run_services(
+        args.services,
+        dry_run=args.dry_run,
+        skip_redis_check=args.skip_redis_check,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
