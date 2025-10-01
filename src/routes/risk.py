@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 
-from core.dependencies import get_core_container
 from .auth import (
     audit_log_failure,
     audit_log_success,
@@ -24,81 +21,55 @@ from src.models import (
 )
 
 from src.ibbot.redis import get_redis_client
-
-if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
-    from src.risk_manager import RiskManager
+from src.routes.service_clients import (
+    RiskServiceClient,
+    ServiceClientError,
+    ServiceResponseError,
+    ServiceUnavailableError,
+)
 
 router = APIRouter()
 
-_risk_service_url_env = os.getenv("RISK_SERVICE_URL", "").strip()
-RISK_SERVICE_URL = _risk_service_url_env.rstrip("/") if _risk_service_url_env else None
-DEFAULT_RISK_SERVICE_URL = "http://localhost:8030"
-RISK_SERVICE_TIMEOUT = float(os.getenv("RISK_SERVICE_TIMEOUT", "10.0"))
 RISK_RULES_CACHE_KEY = "json:risk:rules"
 RISK_CONFIG_CACHE_KEY = "json:risk:config"
 
-FallbackHandler = Callable[[], Awaitable[Any]]
+_RISK_SERVICE_CLIENT = RiskServiceClient()
 
 
-def _risk_service_base_url() -> str:
-    return RISK_SERVICE_URL or DEFAULT_RISK_SERVICE_URL
+def _get_risk_service_client() -> RiskServiceClient:
+    return _RISK_SERVICE_CLIENT
 
 
-def _api_path(path: str) -> str:
-    return path[4:] if path.startswith("/api") else path
-
-
-def _extract_error_detail(response: httpx.Response) -> Any:
-    try:
-        payload = response.json()
-    except ValueError:
-        text = response.text.strip()
-        return text or "Risk service error"
-    if isinstance(payload, dict):
-        for key in ("detail", "message", "error", "reason"):
-            value = payload.get(key)
-            if value:
-                return value
-    return payload
-
-
-async def _risk_service_request(
-    method: str,
-    path: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-    json: Optional[Dict[str, Any]] = None,
-    fallback: Optional[FallbackHandler] = None,
+async def _call_risk_service(
+    operation: str,
+    call: Callable[[RiskServiceClient], Awaitable[Any]],
 ) -> Any:
+    client = _get_risk_service_client()
     try:
-        async with httpx.AsyncClient(
-            base_url=_risk_service_base_url(),
-            timeout=RISK_SERVICE_TIMEOUT,
-        ) as client:
-            response = await client.request(method, _api_path(path), params=params, json=json)
-    except httpx.HTTPError as exc:
-        logger.error("Risk service request failed", method=method, path=path, error=str(exc))
-        if fallback is not None:
-            logger.warning(
-                "Risk service call failed; using embedded fallback",
-                path=path,
-            )
-            return await fallback()
-        raise HTTPException(status_code=503, detail="Risk service unavailable") from exc
-
-    if response.status_code >= 400:
-        detail = _extract_error_detail(response)
-        raise HTTPException(status_code=response.status_code, detail=detail)
-
-    if not response.content:
-        return {}
-    try:
-        return response.json()
-    except ValueError as exc:  # pragma: no cover - defensive guard
+        return await call(client)
+    except ServiceUnavailableError as exc:
         logger.error(
-            "Risk service returned non-JSON payload", status=response.status_code
+            "Risk service unavailable",
+            operation=operation,
+            error=str(exc),
         )
-        raise HTTPException(status_code=502, detail="Invalid response from risk service") from exc
+        raise HTTPException(status_code=503, detail="Risk service unavailable") from exc
+    except ServiceResponseError as exc:
+        detail = exc.detail or "Risk service error"
+        logger.error(
+            "Risk service responded with error",
+            operation=operation,
+            status=getattr(exc, "status_code", None),
+            detail=detail,
+        )
+        raise HTTPException(status_code=getattr(exc, "status_code", 502), detail=detail) from exc
+    except ServiceClientError as exc:
+        logger.error(
+            "Risk service request failed",
+            operation=operation,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=502, detail="Risk service request failed") from exc
 
 
 async def _load_cached_payload(key: str) -> Dict[str, Any] | None:
@@ -149,72 +120,6 @@ async def _cached_risk_config() -> Dict[str, Any] | None:
     return payload
 
 
-def _resolve_risk_manager(request: Request) -> "RiskManager":
-    try:
-        container = get_core_container(request)
-    except RuntimeError as exc:  # pragma: no cover - defensive guard
-        raise HTTPException(status_code=503, detail="Risk manager unavailable") from exc
-
-    manager = getattr(container, "risk_manager", None)
-    if manager is None:
-        raise HTTPException(status_code=503, detail="Risk manager unavailable")
-    return manager
-
-
-def _embedded_risk_config(request: Request) -> Dict[str, Any]:
-    manager = _resolve_risk_manager(request)
-    return manager.get_config()
-
-
-def _embedded_update_risk_config(
-    request: Request, payload: RiskConfigUpdateRequest
-) -> Dict[str, Any]:
-    manager = _resolve_risk_manager(request)
-    updates = payload.model_dump(exclude_unset=True)
-    return manager.update_config(updates)
-
-
-async def _embedded_position_sizing(
-    request: Request, payload: PositionSizingRequest
-) -> Dict[str, Any]:
-    manager = _resolve_risk_manager(request)
-    result = await manager.position_sizing(
-        symbol=payload.symbol,
-        stop_distance=payload.stop_distance,
-        rv_current=payload.rv_current,
-        signal_tier=(payload.signal_tier or "A"),
-        execution_metrics=payload.execution_metrics or {},
-        rv_ref=payload.rv_ref,
-    )
-
-    contracts = int(result.contracts)
-    stop_distance = float(result.stop_distance)
-    point_value = float(result.point_value)
-    risk_per_contract = stop_distance * point_value
-    max_risk = contracts * risk_per_contract
-    estimated_investment = contracts * point_value
-
-    return {
-        "success": True,
-        "N": contracts,
-        "contracts": contracts,
-        "scaleVol": float(result.scale_vol),
-        "scaleDd": float(result.scale_dd),
-        "scaleSig": float(result.scale_sig),
-        "scaleExec": float(result.scale_exec),
-        "scaleTotal": float(result.scale_total),
-        "stopDistance": stop_distance,
-        "pointValue": point_value,
-        "riskPerContract": risk_per_contract,
-        "estimatedInvestment": estimated_investment,
-        "maxRisk": max_risk,
-        "R": float(result.R),
-        "R_star": float(result.R_star),
-        "explain": result.explanation,
-        "explanation": result.explanation,
-    }
-
-
 @router.post("/api/risk_rules")
 async def add_risk_rule(
     rule: RiskRuleRequest,
@@ -222,10 +127,9 @@ async def add_risk_rule(
     user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.add_rule")),
 ) -> Any:
     try:
-        result = await _risk_service_request(
-            "POST",
-            "/risk_rules",
-            json=rule.model_dump(exclude_none=True),
+        result = await _call_risk_service(
+            "post_rule",
+            lambda client: client.post_rule(rule.model_dump(exclude_none=True)),
         )
     except HTTPException as exc:
         await audit_log_failure(
@@ -247,7 +151,7 @@ async def get_risk_rules(user: Optional[str] = Depends(get_current_user)) -> Any
     cached = await _cached_risk_rules()
     if cached is not None:
         return cached
-    return await _risk_service_request("GET", "/risk_rules")
+    return await _call_risk_service("fetch_rules", lambda client: client.fetch_rules())
 
 
 @router.put("/api/risk_rules/{symbol}")
@@ -258,10 +162,12 @@ async def update_risk_rule(
     user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.update_rule")),
 ) -> Any:
     try:
-        result = await _risk_service_request(
-            "PUT",
-            f"/risk_rules/{symbol}",
-            json=rule.model_dump(exclude_none=True),
+        result = await _call_risk_service(
+            "update_rule",
+            lambda client: client.update_rule(
+                symbol,
+                rule.model_dump(exclude_none=True),
+            ),
         )
     except HTTPException as exc:
         await audit_log_failure(
@@ -285,7 +191,9 @@ async def delete_risk_rule(
     user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.remove_rule")),
 ) -> Any:
     try:
-        result = await _risk_service_request("DELETE", f"/risk_rules/{symbol}")
+        result = await _call_risk_service(
+            "delete_rule", lambda client: client.delete_rule(symbol)
+        )
     except HTTPException as exc:
         await audit_log_failure(
             request,
@@ -303,21 +211,18 @@ async def delete_risk_rule(
 
 @router.get("/api/order_queue_status")
 async def get_order_queue_status(user: Optional[str] = Depends(get_current_user)) -> Any:
-    return await _risk_service_request("GET", "/order_queue_status")
+    return await _call_risk_service(
+        "fetch_order_queue_status", lambda client: client.fetch_order_queue_status()
+    )
 
 
 @router.get("/api/risk-config")
-async def get_risk_config(
-    request: Request, user: Optional[str] = Depends(get_current_user)
-) -> Any:
+async def get_risk_config(user: Optional[str] = Depends(get_current_user)) -> Any:
     cached = await _cached_risk_config()
     if cached is not None:
         return cached
 
-    async def _fallback() -> Any:
-        return _embedded_risk_config(request)
-
-    return await _risk_service_request("GET", "/risk-config", fallback=_fallback)
+    return await _call_risk_service("fetch_config", lambda client: client.fetch_config())
 
 
 @router.put("/api/risk-config")
@@ -328,15 +233,9 @@ async def update_risk_config(
 ) -> Any:
     updates = payload.model_dump(exclude_unset=True)
 
-    async def _fallback() -> Any:
-        return _embedded_update_risk_config(request, payload)
-
     try:
-        result = await _risk_service_request(
-            "PUT",
-            "/risk-config",
-            json=updates,
-            fallback=_fallback,
+        result = await _call_risk_service(
+            "update_config", lambda client: client.update_config(updates)
         )
     except HTTPException as exc:
         await audit_log_failure(
@@ -351,19 +250,12 @@ async def update_risk_config(
 @router.post("/api/position-sizing")
 async def api_position_sizing(
     payload: PositionSizingRequest,
-    request: Request,
     user: Optional[str] = Depends(get_current_user),
 ) -> Any:
     payload_data = payload.model_dump(exclude_none=True)
 
-    async def _fallback() -> Any:
-        return await _embedded_position_sizing(request, payload)
-
-    return await _risk_service_request(
-        "POST",
-        "/position-sizing",
-        json=payload_data,
-        fallback=_fallback,
+    return await _call_risk_service(
+        "position_sizing", lambda client: client.position_sizing(payload_data)
     )
 
 
@@ -379,12 +271,16 @@ async def get_sizing_history(
         params["symbol"] = symbol
     if since:
         params["since"] = since
-    return await _risk_service_request("GET", "/sizing/history", params=params)
+    return await _call_risk_service(
+        "fetch_sizing_history", lambda client: client.fetch_sizing_history(params)
+    )
 
 
 @router.get("/api/config/rules")
 async def get_config_rules(user: Optional[str] = Depends(get_current_user)) -> Any:
-    return await _risk_service_request("GET", "/config/rules")
+    return await _call_risk_service(
+        "fetch_config_rules", lambda client: client.fetch_config_rules()
+    )
 
 
 @router.put("/api/config/rules")
@@ -394,7 +290,10 @@ async def update_config_rules(
     user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.update_rules")),
 ) -> Any:
     try:
-        result = await _risk_service_request("PUT", "/config/rules", json=dict(payload))
+        result = await _call_risk_service(
+            "update_config_rules",
+            lambda client: client.update_config_rules(dict(payload)),
+        )
     except HTTPException as exc:
         await audit_log_failure(
             request,

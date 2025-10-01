@@ -268,6 +268,21 @@ class RiskServiceClient(ServiceClient):
     async def update_config(self, payload: Mapping[str, Any]) -> Any:
         return await self.request("PUT", "/risk-config", json=dict(payload))
 
+    async def fetch_order_queue_status(self) -> Any:
+        return await self.request("GET", "/order_queue_status")
+
+    async def position_sizing(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request("POST", "/position-sizing", json=dict(payload))
+
+    async def fetch_sizing_history(self, params: Mapping[str, Any]) -> Any:
+        return await self.request("GET", "/sizing/history", params=dict(params))
+
+    async def fetch_config_rules(self) -> Any:
+        return await self.request("GET", "/config/rules")
+
+    async def update_config_rules(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request("PUT", "/config/rules", json=dict(payload))
+
 
 class StrategyServiceClient(ServiceClient):
     service_name = "strategy"
