@@ -21,6 +21,7 @@ from src.models import (
     RiskConfigUpdateRequest,
     RiskRuleRequest,
 )
+from src.utils import to_local_iso
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
     from src.risk_manager import RiskManager
@@ -82,6 +83,13 @@ async def _risk_service_request(
         raise HTTPException(status_code=503, detail="Risk service unavailable") from exc
 
     if response.status_code >= 400:
+        if fallback is not None and response.status_code >= 500:
+            logger.warning(
+                "Risk service returned error; using embedded fallback",
+                path=path,
+                status=response.status_code,
+            )
+            return await fallback()
         detail = _extract_error_detail(response)
         raise HTTPException(status_code=response.status_code, detail=detail)
 
@@ -106,6 +114,117 @@ def _resolve_risk_manager(request: Request) -> "RiskManager":
     if manager is None:
         raise HTTPException(status_code=503, detail="Risk manager unavailable")
     return manager
+
+
+def _normalize_symbol(symbol: Optional[str]) -> str:
+    return (symbol or "").strip().upper()
+
+
+def _serialize_risk_rule(rule: Any) -> Dict[str, Any]:
+    atr_params = rule.atr_params if isinstance(rule.atr_params, dict) else dict(rule.atr_params or {})
+    return {
+        "symbol": _normalize_symbol(getattr(rule, "symbol", "")),
+        "stop_loss_price": getattr(rule, "stop_loss_price", None),
+        "take_profit_price": getattr(rule, "take_profit_price", None),
+        "max_loss_percent": getattr(rule, "max_loss_percent", None),
+        "enabled": bool(getattr(rule, "enabled", True)),
+        "max_time_span": getattr(rule, "max_time_span", None),
+        "created_at": to_local_iso(getattr(rule, "created_at", None)),
+        "auto_trailing": bool(getattr(rule, "auto_trailing", False)),
+        "atr_params": atr_params,
+        "rule_type": getattr(rule, "rule_type", "fixed"),
+    }
+
+
+async def _embedded_get_risk_rules(request: Request) -> Dict[str, Any]:
+    manager = _resolve_risk_manager(request)
+    rules = {
+        _normalize_symbol(symbol): _serialize_risk_rule(rule)
+        for symbol, rule in manager.get_risk_rules().items()
+    }
+    return {"success": True, "rules": rules}
+
+
+async def _embedded_add_risk_rule(
+    request: Request, payload: RiskRuleRequest
+) -> Dict[str, Any]:
+    manager = _resolve_risk_manager(request)
+    symbol = _normalize_symbol(payload.symbol)
+    if not symbol:
+        raise HTTPException(status_code=422, detail="symbol is required")
+
+    if payload.symbol != symbol:
+        payload.symbol = symbol
+
+    success = manager.add_risk_rule(
+        symbol=symbol,
+        stop_loss_price=payload.stop_loss_price,
+        take_profit_price=payload.take_profit_price,
+        max_loss_percent=payload.max_loss_percent,
+        max_time_span=payload.max_time_span,
+        auto_trailing=payload.rule_type == "trailing",
+        atr_params=payload.atr_params or {},
+        rule_type=payload.rule_type,
+    )
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to add risk rule")
+
+    rule = manager.get_risk_rules().get(symbol)
+    response: Dict[str, Any] = {"success": True, "detail": "risk rule added"}
+    if rule is not None:
+        response["rule"] = _serialize_risk_rule(rule)
+    return response
+
+
+async def _embedded_update_risk_rule(
+    request: Request, symbol: str, payload: RiskRuleRequest
+) -> Dict[str, Any]:
+    manager = _resolve_risk_manager(request)
+    normalized_symbol = _normalize_symbol(symbol or payload.symbol)
+    if not normalized_symbol:
+        raise HTTPException(status_code=422, detail="symbol is required")
+
+    if payload.symbol != normalized_symbol:
+        payload.symbol = normalized_symbol
+
+    success = manager.update_risk_rule(
+        normalized_symbol,
+        stop_loss_price=payload.stop_loss_price,
+        take_profit_price=payload.take_profit_price,
+        max_time_span=payload.max_time_span,
+        auto_trailing=payload.rule_type == "trailing",
+        atr_params=payload.atr_params or {},
+        rule_type=payload.rule_type,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=404, detail=f"Risk rule for {normalized_symbol} not found"
+        )
+
+    rule = manager.get_risk_rules().get(normalized_symbol)
+    response: Dict[str, Any] = {"success": True, "detail": "risk rule updated"}
+    if rule is not None:
+        response["rule"] = _serialize_risk_rule(rule)
+    return response
+
+
+async def _embedded_delete_risk_rule(request: Request, symbol: str) -> Dict[str, Any]:
+    manager = _resolve_risk_manager(request)
+    normalized_symbol = _normalize_symbol(symbol)
+    if not normalized_symbol:
+        raise HTTPException(status_code=422, detail="symbol is required")
+
+    success = manager.remove_risk_rule(normalized_symbol)
+    if not success:
+        raise HTTPException(
+            status_code=404, detail=f"Risk rule for {normalized_symbol} not found"
+        )
+
+    return {
+        "success": True,
+        "detail": "risk rule removed",
+        "symbol": normalized_symbol,
+    }
 
 
 def _embedded_risk_config(request: Request) -> Dict[str, Any]:
@@ -168,11 +287,15 @@ async def add_risk_rule(
     request: Request,
     user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.add_rule")),
 ) -> Any:
+    async def _fallback() -> Any:
+        return await _embedded_add_risk_rule(request, rule)
+
     try:
         result = await _risk_service_request(
             "POST",
             "/risk_rules",
             json=rule.model_dump(exclude_none=True),
+            fallback=_fallback,
         )
     except HTTPException as exc:
         await audit_log_failure(
@@ -190,8 +313,13 @@ async def add_risk_rule(
 
 
 @router.get("/api/risk_rules")
-async def get_risk_rules(user: Optional[str] = Depends(get_current_user)) -> Any:
-    return await _risk_service_request("GET", "/risk_rules")
+async def get_risk_rules(
+    request: Request, user: Optional[str] = Depends(get_current_user)
+) -> Any:
+    async def _fallback() -> Any:
+        return await _embedded_get_risk_rules(request)
+
+    return await _risk_service_request("GET", "/risk_rules", fallback=_fallback)
 
 
 @router.put("/api/risk_rules/{symbol}")
@@ -201,11 +329,15 @@ async def update_risk_rule(
     request: Request,
     user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.update_rule")),
 ) -> Any:
+    async def _fallback() -> Any:
+        return await _embedded_update_risk_rule(request, symbol, rule)
+
     try:
         result = await _risk_service_request(
             "PUT",
             f"/risk_rules/{symbol}",
             json=rule.model_dump(exclude_none=True),
+            fallback=_fallback,
         )
     except HTTPException as exc:
         await audit_log_failure(
@@ -228,8 +360,13 @@ async def delete_risk_rule(
     request: Request,
     user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.remove_rule")),
 ) -> Any:
+    async def _fallback() -> Any:
+        return await _embedded_delete_risk_rule(request, symbol)
+
     try:
-        result = await _risk_service_request("DELETE", f"/risk_rules/{symbol}")
+        result = await _risk_service_request(
+            "DELETE", f"/risk_rules/{symbol}", fallback=_fallback
+        )
     except HTTPException as exc:
         await audit_log_failure(
             request,
