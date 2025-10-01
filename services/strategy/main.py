@@ -64,28 +64,32 @@ async def run_service() -> None:
     poll_timeout = float(config.get("poll_timeout", 1.0))
 
     strategies = _parse_strategies(config)
-    if not strategies:
-        raise RuntimeError("no strategies defined in configuration")
+    consumer: StrategyTaskConsumer | None = None
+    consumer_task: asyncio.Task[None] | None = None
 
-    adapter = StrategyAdapter(
-        redis,
-        strategies=strategies,
-        command_queue=command_queue,
-        event_stream=event_stream,
-        snapshot_prefix=snapshot_prefix,
-    )
-    consumer = StrategyTaskConsumer(
-        redis,
-        adapter,
-        queue_key=queue_key,
-        poll_timeout=poll_timeout,
-    )
+    if not strategies:
+        logger.warning("No strategies configured; strategy service will idle until shutdown")
+    else:
+        adapter = StrategyAdapter(
+            redis,
+            strategies=strategies,
+            command_queue=command_queue,
+            event_stream=event_stream,
+            snapshot_prefix=snapshot_prefix,
+        )
+        consumer = StrategyTaskConsumer(
+            redis,
+            adapter,
+            queue_key=queue_key,
+            poll_timeout=poll_timeout,
+        )
 
     stop_event = asyncio.Event()
 
     def _handle_stop(*_: Any) -> None:
         logger.info("Received stop signal; shutting down strategy consumer")
-        consumer.stop()
+        if consumer is not None:
+            consumer.stop()
         stop_event.set()
 
     loop = asyncio.get_running_loop()
@@ -98,10 +102,12 @@ async def run_service() -> None:
     async with AsyncExitStack() as stack:
         stack.push_async_callback(provider.close)
         stack.push_async_callback(close_global_client)
-        consumer_task = asyncio.create_task(consumer.run_forever())
-        stack.callback(consumer_task.cancel)
+        if consumer is not None:
+            consumer_task = asyncio.create_task(consumer.run_forever())
+            stack.callback(consumer_task.cancel)
         await stop_event.wait()
-        await consumer_task
+        if consumer_task is not None:
+            await consumer_task
 
 
 def main() -> None:
