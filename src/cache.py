@@ -44,17 +44,63 @@ class RedisConfig:
     db: int = 0
     password: Optional[str] = None
     ssl: bool = False
+    connect_timeout: Optional[float] = None
+    ping_timeout: Optional[float] = None
 
 
 _client: Optional[Redis] = None
 _client_lock = asyncio.Lock()
 
+_UNSET = object()
+
+
+def _read_timeout_setting(env_name: str, *, multiplier: float = 1.0):
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return _UNSET
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid {} value {!r}; ignoring", env_name, raw)
+        return _UNSET
+    value *= multiplier
+    if value <= 0:
+        logger.warning("{} must be positive; disabling timeout", env_name)
+        return None
+    return value
+
+
+def _parse_timeout_setting(*entries: tuple[str, float], default: Any = _UNSET):
+    for env_name, multiplier in entries:
+        value = _read_timeout_setting(env_name, multiplier=multiplier)
+        if value is _UNSET:
+            continue
+        return value
+    return default
+
 
 def _load_config() -> RedisConfig:
+    connect_timeout = _parse_timeout_setting(
+        ("REDIS_CONNECT_TIMEOUT", 1.0),
+        ("REDIS_CONNECT_TIMEOUT_MS", 0.001),
+        default=1.0,
+    )
+    ping_timeout = _parse_timeout_setting(
+        ("REDIS_PING_TIMEOUT", 1.0),
+        ("REDIS_PING_TIMEOUT_MS", 0.001),
+    )
+    if ping_timeout is _UNSET:
+        base = connect_timeout if isinstance(connect_timeout, (int, float)) else None
+        ping_timeout = max(base or 0, 3.0)
+
     for key in ("REDIS_URL", "IBBOT_REDIS_URL"):
         url = os.getenv(key, "").strip()
         if url:
-            return RedisConfig(url=url)
+            return RedisConfig(
+                url=url,
+                connect_timeout=connect_timeout if isinstance(connect_timeout, (int, float)) else None,
+                ping_timeout=ping_timeout if isinstance(ping_timeout, (int, float)) else None,
+            )
 
     host = os.getenv("REDIS_HOST", "localhost")
     port_raw = os.getenv("REDIS_PORT", "6379")
@@ -78,6 +124,8 @@ def _load_config() -> RedisConfig:
         db=db,
         password=password,
         ssl=ssl_enabled,
+        connect_timeout=connect_timeout if isinstance(connect_timeout, (int, float)) else None,
+        ping_timeout=ping_timeout if isinstance(ping_timeout, (int, float)) else None,
     )
 
 
@@ -97,12 +145,19 @@ async def init_redis(force: bool = False) -> Optional[Redis]:
             return _client
 
         config = _load_config()
+        client = None
         try:
+            common_kwargs: Dict[str, Any] = {
+                "encoding": "utf-8",
+                "decode_responses": True,
+            }
+            if isinstance(config.connect_timeout, (int, float)):
+                common_kwargs["socket_connect_timeout"] = config.connect_timeout
+
             if config.url:
                 client = Redis.from_url(
                     config.url,
-                    encoding="utf-8",
-                    decode_responses=True,
+                    **common_kwargs,
                 )
             else:
                 client = Redis(
@@ -111,21 +166,54 @@ async def init_redis(force: bool = False) -> Optional[Redis]:
                     db=config.db,
                     password=config.password,
                     ssl=config.ssl,
-                    encoding="utf-8",
-                    decode_responses=True,
+                    **common_kwargs,
                 )
 
-            await client.ping()
+            ping_timeout = config.ping_timeout
+            if isinstance(ping_timeout, (int, float)):
+                await asyncio.wait_for(client.ping(), timeout=ping_timeout)
+            else:
+                await client.ping()
+        except asyncio.TimeoutError:
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+            timeout = config.ping_timeout if isinstance(config.ping_timeout, (int, float)) else None
+            if timeout is not None:
+                logger.warning(
+                    "Redis initialisation failed: ping timed out after {:.2f}s",
+                    timeout,
+                )
+            else:
+                logger.warning("Redis initialisation failed: ping timed out")
+            return None
         except Exception as exc:
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
             logger.warning(f"Redis initialisation failed: {exc}")
             return None
 
         _client = client
+        log_context: Dict[str, Any] = {
+            "connect_timeout": config.connect_timeout,
+            "ping_timeout": config.ping_timeout,
+        }
+        if config.url:
+            log_context["url"] = config.url
+        else:
+            log_context.update({
+                "host": config.host,
+                "port": config.port,
+                "db": config.db,
+            })
         logger.info(
             "Redis client initialised",
-            host=config.host,
-            port=config.port,
-            db=config.db,
+            **{k: v for k, v in log_context.items() if v is not None},
         )
         return _client
 
