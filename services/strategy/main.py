@@ -6,10 +6,11 @@ import asyncio
 import json
 import os
 import signal
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from typing import Any, Mapping
 
 from services.strategy import StrategyAdapter, StrategyTaskConsumer
+from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
@@ -66,6 +67,7 @@ async def run_service() -> None:
     strategies = _parse_strategies(config)
     consumer: StrategyTaskConsumer | None = None
     consumer_task: asyncio.Task[None] | None = None
+    idle_health_task: asyncio.Task[None] | None = None
 
     if not strategies:
         logger.info("No strategies configured; strategy service will idle until shutdown")
@@ -99,15 +101,58 @@ async def run_service() -> None:
         except NotImplementedError:  # pragma: no cover - platform dependent
             signal.signal(signame, lambda *_: asyncio.create_task(stop_event.set()))
 
+    async def _publish_idle_health() -> None:
+        assert redis is not None
+        interval = poll_timeout if poll_timeout > 0 else 1.0
+        while True:
+            try:
+                await update_service_health(
+                    redis,
+                    SERVICE_NAME,
+                    healthy=True,
+                    metrics={"state": "idle", "queue": queue_key},
+                    logger=logger,
+                )
+            except asyncio.CancelledError:  # pragma: no cover - cancellation path
+                raise
+            except Exception:  # pragma: no cover - defensive guard
+                logger.warning("Failed to publish idle strategy health", exc_info=True)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                break
+            except asyncio.TimeoutError:
+                continue
+
+    await update_service_health(
+        redis,
+        SERVICE_NAME,
+        healthy=True,
+        metrics={"state": "starting", "queue": queue_key},
+        logger=logger,
+    )
+
     async with AsyncExitStack() as stack:
         stack.push_async_callback(provider.close)
         stack.push_async_callback(close_global_client)
+        if consumer is None:
+            idle_health_task = asyncio.create_task(_publish_idle_health())
+            stack.callback(idle_health_task.cancel)
         if consumer is not None:
             consumer_task = asyncio.create_task(consumer.run_forever())
             stack.callback(consumer_task.cancel)
         await stop_event.wait()
         if consumer_task is not None:
             await consumer_task
+        if idle_health_task is not None:
+            with suppress(asyncio.CancelledError):
+                await idle_health_task
+        await update_service_health(
+            redis,
+            SERVICE_NAME,
+            healthy=False,
+            metrics={"state": "stopped", "queue": queue_key},
+            logger=logger,
+        )
 
 
 def main() -> None:

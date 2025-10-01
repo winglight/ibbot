@@ -182,6 +182,11 @@ class QueueMonitorRuntime:
         self._loop = asyncio.get_running_loop()
         self._redis = await self.redis_factory()
         self._stop_event.clear()
+        try:
+            await self.collect_once()
+        except Exception:
+            if self._logger:
+                self._logger.warning("Initial queue metrics collection failed", exc_info=True)
         self._task = asyncio.create_task(self._metrics_loop(), name="queue-monitor-metrics")
 
     async def stop(self) -> None:
