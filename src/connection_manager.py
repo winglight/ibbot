@@ -323,8 +323,21 @@ class ConnectionManager:
                         raise Exception(self._last_connect_error)
                     except Exception as conn_error:
                         error_msg = str(conn_error)
-                        if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():
+                        lower_error = error_msg.lower()
+                        client_id_in_use_signals = (
+                            "already connected",
+                            "duplicate",
+                            "client id is already in use",
+                            "clientid already in use",
+                            "peer closed connection",
+                            "error 326",
+                        )
+                        if any(signal in lower_error for signal in client_id_in_use_signals):
                             connection_logger.warning(f"客户端ID {try_client_id} 已被使用，尝试下一个ID")
+                            try:
+                                self.ib.disconnect()
+                            except Exception:
+                                pass
                             continue
                         elif "TimeoutError" in error_msg or "timeout" in error_msg.lower():
                             self._last_connect_error = f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
