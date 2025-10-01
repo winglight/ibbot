@@ -192,6 +192,7 @@ class TradingApp {
         this.registerWebSocketHandler('strategies_snapshot', (payload) => this.handleStrategiesSnapshot(payload));
         this.registerWebSocketHandler('strategy_status', (payload) => this.handleStrategyStatusMessage(payload));
         this.registerWebSocketHandler('sizing_history', (payload) => this.handleSizingHistorySnapshot(payload));
+        this.registerWebSocketHandler('service_statuses', (payload) => this.handleServiceStatusesMessage(payload));
 
         this.sidePanelManagerInitialized = false;
         this.panelLoadingStates = new Map();
@@ -960,9 +961,14 @@ class TradingApp {
                     if (this.isReadOnly && typeof controller.setReadOnly === 'function') {
                         controller.setReadOnly(true);
                     }
-                    this.loadServiceStatuses({ silent: true }).catch((error) => {
-                        console.warn('Failed to load initial service statuses', error);
-                    });
+                    const wsResult = this.ibkrManager?.requestServiceStatuses
+                        ? this.ibkrManager.requestServiceStatuses({ force: true })
+                        : 'failed';
+                    if (wsResult === 'failed') {
+                        this.loadServiceStatuses({ silent: true, preferSocket: false }).catch((error) => {
+                            console.warn('Failed to load initial service statuses', error);
+                        });
+                    }
                 }
             }
         }
@@ -970,9 +976,14 @@ class TradingApp {
         const refreshButton = document.getElementById('btn-refresh');
         if (refreshButton) {
             refreshButton.addEventListener('click', () => {
-                this.loadServiceStatuses().catch((error) => {
-                    console.warn('Failed to refresh service statuses', error);
-                });
+                const wsResult = this.ibkrManager?.requestServiceStatuses
+                    ? this.ibkrManager.requestServiceStatuses({ force: true })
+                    : 'failed';
+                if (wsResult === 'failed') {
+                    this.loadServiceStatuses().catch((error) => {
+                        console.warn('Failed to refresh service statuses', error);
+                    });
+                }
             });
         }
 
@@ -1780,22 +1791,10 @@ class TradingApp {
         }
     }
 
-    async loadServiceStatuses(options = {}) {
+    applyServiceStatusesPayload(payload, options = {}) {
         const controller = this.serviceRestartController;
         if (!controller || !controller.items) {
-            return;
-        }
-
-        const { silent = false } = options || {};
-        let payload;
-        try {
-            payload = await this.apiCall('/services/status', { method: 'GET', useCache: false });
-        } catch (error) {
-            if (!silent) {
-                const message = error?.message || '无法加载服务状态';
-                this.showAlert('danger', message);
-            }
-            throw error;
+            return false;
         }
 
         const statusMap = {
@@ -1803,10 +1802,16 @@ class TradingApp {
             offline: { state: 'idle', fallback: '服务已下线' },
             unhealthy: { state: 'error', fallback: '服务状态异常' },
         };
-        const entries = Array.isArray(payload?.services) ? payload.services : [];
-        const seen = new Set();
 
-        entries.forEach((entry) => {
+        const services = Array.isArray(payload?.services) ? payload.services : [];
+        const seen = new Set();
+        const metaDefaults = {
+            skipStateUpdate: true,
+            source: options.source || payload?.source || 'websocket',
+        };
+        const effectiveSilent = options.silent !== false;
+
+        services.forEach((entry) => {
             if (!entry || typeof entry !== 'object') {
                 return;
             }
@@ -1816,14 +1821,14 @@ class TradingApp {
             }
             const rawStatus = String(entry.status || 'running').toLowerCase();
             const statusInfo = statusMap[rawStatus] || statusMap.running;
-            const message = entry.detail || statusInfo.fallback;
+            const message = entry.detail || entry.message || statusInfo.fallback;
             seen.add(serviceName);
             controller.updateStatus(
                 serviceName,
                 statusInfo.state,
                 message,
                 entry,
-                { silent: true, skipStateUpdate: true }
+                { ...metaDefaults, silent: effectiveSilent }
             );
         });
 
@@ -1838,10 +1843,62 @@ class TradingApp {
                     'success',
                     '运行中',
                     null,
-                    { silent: true, skipStateUpdate: true }
+                    { ...metaDefaults, silent: effectiveSilent }
                 );
             }
         });
+
+        return true;
+    }
+
+    handleServiceStatusesMessage(payload) {
+        const applied = this.applyServiceStatusesPayload(payload, {
+            source: payload?.source || 'websocket',
+            silent: payload?.cached ? true : undefined,
+        });
+        if (payload?.success === false && payload?.error && !payload?.cached) {
+            console.warn('Service status request failed via websocket:', payload.error);
+        }
+        return applied;
+    }
+
+    async loadServiceStatuses(options = {}) {
+        const controller = this.serviceRestartController;
+        if (!controller || !controller.items) {
+            return null;
+        }
+
+        const { silent = false, force = false, preferSocket = true, minInterval } = options || {};
+        const socketAvailable = preferSocket !== false
+            && typeof this.ibkrManager?.requestServiceStatuses === 'function';
+        let attemptedSocket = false;
+        if (socketAvailable) {
+            const result = this.ibkrManager.requestServiceStatuses({ force, minInterval });
+            if (result !== 'failed') {
+                return result;
+            }
+            attemptedSocket = true;
+        }
+
+        let payload;
+        try {
+            payload = await this.apiCall('/services/status', { method: 'GET', useCache: false });
+        } catch (error) {
+            if (!silent) {
+                const message = error?.message || '无法加载服务状态';
+                this.showAlert('danger', message);
+            }
+            throw error;
+        }
+
+        const enrichedPayload = {
+            type: 'service_statuses',
+            success: true,
+            source: attemptedSocket ? 'http-fallback' : 'http',
+            ...(payload && typeof payload === 'object' ? payload : {}),
+        };
+        this.applyServiceStatusesPayload(enrichedPayload, { source: enrichedPayload.source });
+        return enrichedPayload;
     }
 
     // Connection methods moved to IBKRConnectionManager
