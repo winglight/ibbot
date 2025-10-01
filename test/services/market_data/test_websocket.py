@@ -145,3 +145,35 @@ def test_websocket_disconnects_when_pong_missing() -> None:
                 assert ping["type"] == "ping"
                 # Do not respond with pong; expect disconnect on next receive
                 websocket.receive_json()
+
+
+def test_websocket_closes_with_bad_gateway_on_connection_error() -> None:
+    runtime = MarketDataRuntime()
+
+    def failing_get_snapshots(*args, **kwargs):  # noqa: ARG001
+        raise ConnectionError("redis unavailable")
+
+    runtime.get_snapshots = failing_get_snapshots  # type: ignore[assignment]
+
+    with _create_test_client(runtime) as client:
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/ws/market") as websocket:
+                websocket.receive_json()
+
+    assert excinfo.value.code == 1014
+
+
+def test_websocket_closes_with_service_unavailable_on_runtime_error() -> None:
+    runtime = MarketDataRuntime()
+
+    def failing_get_snapshots(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("service restarting")
+
+    runtime.get_snapshots = failing_get_snapshots  # type: ignore[assignment]
+
+    with _create_test_client(runtime) as client:
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/ws/market") as websocket:
+                websocket.receive_json()
+
+    assert excinfo.value.code == 1013

@@ -157,3 +157,29 @@ def test_legacy_endpoint_aliases_market_snapshot() -> None:
 
     assert legacy.status_code == modern.status_code == 200
     assert legacy.json() == modern.json()
+
+
+def test_market_snapshot_connection_error_returns_502() -> None:
+    runtime = MarketDataRuntime()
+    runtime.get_snapshot = lambda symbol: (_ for _ in ()).throw(ConnectionError("redis down"))  # type: ignore[assignment]
+
+    with _create_test_app(runtime) as client:
+        response = client.get("/market/BTCUSDT")
+
+    assert response.status_code == 502
+    assert "redis down" in response.json()["detail"]
+
+
+def test_health_endpoint_runtime_error_returns_503() -> None:
+    runtime = MarketDataRuntime()
+
+    async def failing_health() -> Any:
+        raise RuntimeError("service unavailable")
+
+    runtime.get_health_snapshot = failing_health  # type: ignore[assignment]
+
+    with _create_test_app(runtime) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    assert "service unavailable" in response.json()["detail"]

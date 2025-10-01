@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket
+from loguru import logger
 
 from .runtime import MarketDataRuntime
 from .websocket import MarketDataWebSocketManager
@@ -58,9 +59,21 @@ def create_app(runtime: MarketDataRuntime | None = None) -> FastAPI:
         symbols = _parse_filter_param(symbols_param)
         event_types = _parse_filter_param(types_param)
 
-        await manager.handle_connection(
-            websocket, symbols=symbols, event_types=event_types
-        )
+        try:
+            await manager.handle_connection(
+                websocket, symbols=symbols, event_types=event_types
+            )
+        except ConnectionError as exc:
+            logger.warning(
+                "WebSocket upstream unavailable", error=str(exc)
+            )
+            await websocket.close(code=1014, reason="upstream_unavailable")
+        except RuntimeError as exc:
+            logger.warning("WebSocket service unavailable", error=str(exc))
+            await websocket.close(code=1013, reason="service_unavailable")
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("WebSocket connection failed", error=str(exc))
+            await websocket.close(code=1011, reason="internal_error")
 
     return app
 
