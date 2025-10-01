@@ -960,8 +960,20 @@ class TradingApp {
                     if (this.isReadOnly && typeof controller.setReadOnly === 'function') {
                         controller.setReadOnly(true);
                     }
+                    this.loadServiceStatuses({ silent: true }).catch((error) => {
+                        console.warn('Failed to load initial service statuses', error);
+                    });
                 }
             }
+        }
+
+        const refreshButton = document.getElementById('btn-refresh');
+        if (refreshButton) {
+            refreshButton.addEventListener('click', () => {
+                this.loadServiceStatuses().catch((error) => {
+                    console.warn('Failed to refresh service statuses', error);
+                });
+            });
         }
 
         const summaryRange = document.getElementById('dailySummaryRange');
@@ -1766,6 +1778,70 @@ class TradingApp {
                     : !!holidayToggle.checked;
             this.setHolidayDataPushState(currentState);
         }
+    }
+
+    async loadServiceStatuses(options = {}) {
+        const controller = this.serviceRestartController;
+        if (!controller || !controller.items) {
+            return;
+        }
+
+        const { silent = false } = options || {};
+        let payload;
+        try {
+            payload = await this.apiCall('/services/status', { method: 'GET', useCache: false });
+        } catch (error) {
+            if (!silent) {
+                const message = error?.message || '无法加载服务状态';
+                this.showAlert('danger', message);
+            }
+            throw error;
+        }
+
+        const statusMap = {
+            running: { state: 'success', fallback: '运行中' },
+            offline: { state: 'idle', fallback: '服务已下线' },
+            unhealthy: { state: 'error', fallback: '服务状态异常' },
+        };
+        const entries = Array.isArray(payload?.services) ? payload.services : [];
+        const seen = new Set();
+
+        entries.forEach((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return;
+            }
+            const serviceName = entry.service;
+            if (!serviceName || !controller.items[serviceName]) {
+                return;
+            }
+            const rawStatus = String(entry.status || 'running').toLowerCase();
+            const statusInfo = statusMap[rawStatus] || statusMap.running;
+            const message = entry.detail || statusInfo.fallback;
+            seen.add(serviceName);
+            controller.updateStatus(
+                serviceName,
+                statusInfo.state,
+                message,
+                entry,
+                { silent: true, skipStateUpdate: true }
+            );
+        });
+
+        Object.entries(controller.items).forEach(([serviceName, item]) => {
+            if (seen.has(serviceName)) {
+                return;
+            }
+            const currentMessage = item?.status?.textContent?.trim() || '';
+            if (!currentMessage || currentMessage === item?.defaultIdleMessage) {
+                controller.updateStatus(
+                    serviceName,
+                    'success',
+                    '运行中',
+                    null,
+                    { silent: true, skipStateUpdate: true }
+                );
+            }
+        });
     }
 
     // Connection methods moved to IBKRConnectionManager

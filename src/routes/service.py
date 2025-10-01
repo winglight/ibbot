@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 from pydantic import BaseModel, Field
+from src.service_status import build_service_status_payload
 
 from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
 from src.service_restart import (
@@ -16,6 +17,14 @@ from src.service_restart import (
 
 
 router = APIRouter()
+
+
+@router.get("/api/services/status")
+async def get_service_status() -> dict[str, object]:
+    """Return the latest known status for core and auxiliary services."""
+
+    payload = await build_service_status_payload()
+    return dict(payload)
 
 
 class ServiceRestartPayload(BaseModel):
