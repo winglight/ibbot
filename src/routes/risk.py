@@ -20,6 +20,10 @@ from src.models import (
     RiskConfigUpdateRequest,
     PositionSizingRequest,
 )
+from src.ib_command_service import (
+    get_ib_command_service_status,
+    load_ib_command_config,
+)
 core_container = get_core_container()
 connection_manager = core_container.connection_manager
 
@@ -34,6 +38,8 @@ from .orders import (
 )
 
 router = APIRouter()
+
+_IB_COMMAND_CONFIG = load_ib_command_config()
 
 # Cache the most recent successful risk configuration so that the endpoint can
 # respond immediately even if the underlying manager becomes unresponsive.
@@ -302,12 +308,21 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
     
     try:
         # 获取实时账户信息
-        account_info = {}
-        if connection_manager.is_connected():
+        account_info: Dict[str, Any] = {}
+        try:
+            command_status = await get_ib_command_service_status(
+                config=_IB_COMMAND_CONFIG
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug(f"Failed to fetch command service status for risk sizing: {exc}")
+            command_status = None
+
+        ib_client = getattr(core, "ibkr_client", None)
+        if command_status and command_status.connected and ib_client is not None:
             try:
                 account_response = await asyncio.wait_for(
-                    core.ibkr_client.get_account_info(),
-                    timeout=5.0
+                    ib_client.get_account_info(),
+                    timeout=5.0,
                 )
                 if account_response:
                     account_info = account_response
@@ -351,7 +366,7 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
             g7_result = _validate_g7_basic_params(mock_order)
             g_rules_checked.append(g7_result)
             
-            g6_result = _validate_g6_connection()
+            g6_result = await _validate_g6_connection()
             g_rules_checked.append(g6_result)
             
             g5_result = _validate_g5_market_hours(payload.symbol)
