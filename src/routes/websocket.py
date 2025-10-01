@@ -22,7 +22,7 @@ from src.dom_service import get_dom_service
 from src.order_manager import get_order_manager as _get_order_manager_singleton
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
-from src.routes.monitoring import build_influx_write_rate_payload
+from src.routes.monitoring import build_influx_write_rate_payload, get_queue_metrics
 from src.utils.strategy_cache import (
     compute_performance_metrics as cache_compute_performance,
     get_strategy_stats as cache_get_strategy_stats,
@@ -1004,6 +1004,101 @@ async def websocket_endpoint(websocket: WebSocket):
                         "symbol": symbol,
                         "error": str(exc),
                     }))
+            elif msg_type == "request_monitoring_queues":
+                raw_queues = message.get("queues")
+                if raw_queues is None:
+                    raw_queues = message.get("queue")
+                raw_streams = message.get("streams")
+                if raw_streams is None:
+                    raw_streams = message.get("stream")
+
+                def _normalize_sequence(value: Any) -> list[str]:
+                    if value is None:
+                        return []
+                    if isinstance(value, list):
+                        return [str(item) for item in value if item not in (None, "")]
+                    if isinstance(value, (tuple, set)):
+                        return [str(item) for item in value if item not in (None, "")]
+                    if isinstance(value, str):
+                        token = value.strip()
+                        return [token] if token else []
+                    return [str(value)]
+
+                queue_tokens = _normalize_sequence(raw_queues)
+                stream_tokens = _normalize_sequence(raw_streams)
+                key = "monitoring_queues:" + "|".join(
+                    [";".join(queue_tokens) or "default", ";".join(stream_tokens) or "default"]
+                )
+                force = bool(message.get("force"))
+                request_token = message.get("request_id")
+
+                if not _allow_request(request_tracker, key, force=force):
+                    cached = last_responses.get(key)
+                    if cached:
+                        cached_payload = dict(cached)
+                        cached_payload["cached"] = True
+                        if request_token is not None:
+                            cached_payload["request_id"] = request_token
+                        await _send_or_disconnect(websocket, cached_payload)
+                    else:
+                        await _send_or_disconnect(
+                            websocket,
+                            {
+                                "type": "monitoring_queues",
+                                "success": False,
+                                "error": "Rate limited",
+                                "query": {
+                                    "queues": queue_tokens,
+                                    "streams": stream_tokens,
+                                },
+                            },
+                        )
+                    continue
+
+                try:
+                    data = await get_queue_metrics(
+                        queues=queue_tokens or None,
+                        streams=stream_tokens or None,
+                    )
+                except HTTPException as exc:
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "monitoring_queues",
+                            "success": False,
+                            "error": getattr(exc, "detail", None) or str(exc),
+                            "query": {
+                                "queues": queue_tokens,
+                                "streams": stream_tokens,
+                            },
+                        },
+                    )
+                    continue
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(f"Failed to load monitoring queues: {exc}")
+                    await _send_or_disconnect(
+                        websocket,
+                        {
+                            "type": "monitoring_queues",
+                            "success": False,
+                            "error": str(exc),
+                            "query": {
+                                "queues": queue_tokens,
+                                "streams": stream_tokens,
+                            },
+                        },
+                    )
+                    continue
+
+                payload = {
+                    "type": "monitoring_queues",
+                    "success": True,
+                    **data,
+                }
+                if request_token is not None:
+                    payload["request_id"] = request_token
+                last_responses[key] = payload
+                await _send_or_disconnect(websocket, payload)
             elif msg_type == "request_influx_write_rate":
                 window = (message.get("window") or "1h").strip() or "1h"
                 service_filter = message.get("service")

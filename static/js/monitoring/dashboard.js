@@ -24,7 +24,9 @@
             this.influxChart = null;
             this.influxData = [];
             this.influxPending = null;
+            this.queuePending = null;
             this.influxWsUnsubscribe = null;
+            this.queueWsUnsubscribe = null;
             this.state = {
                 queue: REFRESH_STATE.idle,
                 influx: REFRESH_STATE.idle,
@@ -48,6 +50,10 @@
                 this.influxWsUnsubscribe = this.app.registerWebSocketHandler(
                     'influx_write_rate',
                     (payload) => this.handleInfluxWriteRate(payload)
+                );
+                this.queueWsUnsubscribe = this.app.registerWebSocketHandler(
+                    'monitoring_queues',
+                    (payload) => this.handleQueueMetrics(payload)
                 );
             }
         }
@@ -109,7 +115,16 @@
                 }
                 this.influxWsUnsubscribe = null;
             }
+            if (typeof this.queueWsUnsubscribe === 'function') {
+                try {
+                    this.queueWsUnsubscribe();
+                } catch (error) {
+                    console.warn('Failed to unsubscribe queue websocket handler', error);
+                }
+                this.queueWsUnsubscribe = null;
+            }
             this.influxPending = null;
+            this.queuePending = null;
         }
 
         shouldUseWebSocket() {
@@ -214,6 +229,50 @@
             const params = new URLSearchParams();
             // Allow custom queue targets via configuration in the future.
 
+            const useWebSocket = this.shouldUseWebSocket() && this.app?.ibkrManager?.requestMonitoringQueues;
+            if (useWebSocket) {
+                return new Promise((resolve, reject) => {
+                    if (this.queuePending && this.queuePending.timer) {
+                        clearTimeout(this.queuePending.timer);
+                        this.queuePending = null;
+                    }
+
+                    const requestId = `queues:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+                    const context = { requestId, resolve, reject, immediate };
+                    this.queuePending = context;
+                    context.timer = setTimeout(() => {
+                        if (this.queuePending === context) {
+                            this.queuePending = null;
+                            const error = new Error('队列指标请求超时');
+                            this.handleQueueError(error.message, { scheduleNext: !immediate });
+                            reject(error);
+                        }
+                    }, manual ? 15000 : 20000);
+
+                    const result = this.app.ibkrManager.requestMonitoringQueues({
+                        requestId,
+                        force: manual,
+                        minInterval: manual ? 1000 : undefined,
+                    });
+
+                    if (result === 'failed') {
+                        if (context.timer) {
+                            clearTimeout(context.timer);
+                        }
+                        if (this.queuePending === context) {
+                            this.queuePending = null;
+                        }
+                        const error = new Error('队列指标请求发送失败');
+                        this.handleQueueError(error.message, { scheduleNext: !immediate });
+                        reject(error);
+                    }
+                }).finally(() => {
+                    if (!immediate) {
+                        this.scheduleQueueRefresh();
+                    }
+                });
+            }
+
             try {
                 const data = await this.app.apiCall(`/monitoring/queues?${params.toString()}`, {
                     useCache: false,
@@ -224,15 +283,67 @@
                 this.state.queue = REFRESH_STATE.idle;
             } catch (error) {
                 console.error('Failed to load queue metrics', error);
-                this.state.queue = REFRESH_STATE.error;
-                if (this.elements.queueError) {
-                    this.elements.queueError.textContent = error?.message || '加载失败';
-                }
+                this.handleQueueError(error?.message || '加载失败');
             } finally {
                 if (!immediate) {
                     this.scheduleQueueRefresh();
                 }
             }
+        }
+
+        handleQueueError(message, { scheduleNext = true } = {}) {
+            if (this.elements.queueError) {
+                this.elements.queueError.textContent = message || '加载失败';
+            }
+            this.state.queue = REFRESH_STATE.error;
+            if (scheduleNext) {
+                this.scheduleQueueRefresh();
+            }
+        }
+
+        handleQueueMetrics(payload) {
+            if (!payload || payload.type !== 'monitoring_queues') {
+                return false;
+            }
+
+            const context = this.queuePending && payload.request_id === this.queuePending.requestId
+                ? this.queuePending
+                : null;
+            if (context) {
+                if (context.timer) {
+                    clearTimeout(context.timer);
+                }
+                this.queuePending = null;
+            }
+
+            if (payload.success === false) {
+                const message = payload?.error || '加载失败';
+                this.handleQueueError(message, { scheduleNext: !context?.immediate });
+                if (context && typeof context.reject === 'function') {
+                    context.reject(new Error(message));
+                }
+                return true;
+            }
+
+            try {
+                this.renderQueueMetrics(payload || {});
+                this.state.queue = REFRESH_STATE.idle;
+                if (context && typeof context.resolve === 'function') {
+                    context.resolve(payload);
+                }
+            } catch (error) {
+                const message = error?.message || '渲染队列指标失败';
+                this.handleQueueError(message, { scheduleNext: !context?.immediate });
+                if (context && typeof context.reject === 'function') {
+                    context.reject(error);
+                }
+                return true;
+            }
+
+            if (!context?.immediate) {
+                this.scheduleQueueRefresh();
+            }
+            return true;
         }
 
         formatNumber(value, options = {}) {

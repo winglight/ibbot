@@ -259,6 +259,23 @@ class IBKRConnectionManager {
         });
     }
 
+    requestMonitoringQueues(options = {}) {
+        const payload = { type: 'request_monitoring_queues' };
+        if (Array.isArray(options.queues) && options.queues.length) {
+            payload.queues = options.queues.map((value) => String(value));
+        }
+        if (Array.isArray(options.streams) && options.streams.length) {
+            payload.streams = options.streams.map((value) => String(value));
+        }
+        if (options.requestId) payload.request_id = options.requestId;
+        if (options.force) payload.force = true;
+        const minInterval = Number.isFinite(options.minInterval) ? Math.max(0, Number(options.minInterval)) : 10000;
+        return this._sendThrottled('monitoring_queues', payload, {
+            force: Boolean(options.force),
+            minInterval,
+        });
+    }
+
     requestDomAutomationStatus(options = {}) {
         const payload = { type: 'request_dom_automation_status' };
         if (options.force) payload.force = true;
