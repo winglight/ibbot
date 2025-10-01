@@ -30,7 +30,7 @@ from .auth import get_current_user
 
 router = APIRouter()
 
-ACCOUNT_SERVICE_URL = os.getenv("ACCOUNT_SERVICE_URL", "http://localhost:8020").rstrip("/")
+ACCOUNT_SERVICE_URL = os.getenv("ACCOUNT_SERVICE_URL", "").strip().rstrip("/")
 ACCOUNT_SERVICE_TIMEOUT = float(os.getenv("ACCOUNT_SERVICE_TIMEOUT", "10.0"))
 
 
@@ -86,12 +86,20 @@ def _snapshot_response(
 
 
 def _account_service_base_url() -> str:
-    return ACCOUNT_SERVICE_URL or "http://localhost:8020"
+    if not ACCOUNT_SERVICE_URL:
+        raise RuntimeError("ACCOUNT_SERVICE_URL is not configured")
+    return ACCOUNT_SERVICE_URL
+
+
+def _account_service_enabled() -> bool:
+    return bool(ACCOUNT_SERVICE_URL)
 
 
 async def _account_service_get(
     path: str, *, params: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
+    if not _account_service_enabled():
+        raise RuntimeError("Account service is not configured")
     try:
         async with httpx.AsyncClient(
             base_url=_account_service_base_url(),
@@ -102,6 +110,8 @@ async def _account_service_get(
             if not response.content:
                 return {}
             return response.json()
+    except RuntimeError:
+        raise
     except Exception as exc:
         logger.warning("Account service request {} failed: {}", path, exc)
         return None
@@ -110,10 +120,13 @@ async def _account_service_get(
 async def _fetch_account_info_from_service(
     force_refresh: bool,
 ) -> tuple[Optional[Dict[str, Any]], bool]:
-    payload = await _account_service_get(
-        "/account/info",
-        params={"force_refresh": str(force_refresh).lower()},
-    )
+    try:
+        payload = await _account_service_get(
+            "/account/info",
+            params={"force_refresh": str(force_refresh).lower()},
+        )
+    except RuntimeError:
+        return None, False
     if not payload:
         return None, False
     if not isinstance(payload, dict):
@@ -138,13 +151,16 @@ async def _fetch_account_info_from_service(
 async def _fetch_positions_from_service(
     *, fast: bool, force_refresh: bool
 ) -> tuple[Optional[List[Any]], bool]:
-    payload = await _account_service_get(
-        "/account/positions",
-        params={
-            "fast": str(fast).lower(),
-            "force_refresh": str(force_refresh).lower(),
-        },
-    )
+    try:
+        payload = await _account_service_get(
+            "/account/positions",
+            params={
+                "fast": str(fast).lower(),
+                "force_refresh": str(force_refresh).lower(),
+            },
+        )
+    except RuntimeError:
+        return None, False
     if not payload:
         return None, False
     if not isinstance(payload, dict):
@@ -237,6 +253,22 @@ async def get_account_info(
             },
         )
 
+    if not _account_service_enabled():
+        warning = "Account service is disabled; set ACCOUNT_SERVICE_URL to enable live refresh"
+        if snapshot:
+            response = _snapshot_response(
+                snapshot,
+                data_key="account_info",
+                connected=is_connected,
+                from_cache=True,
+                default={},
+                warning=warning,
+            )
+            response["error"] = warning
+            response["service_enabled"] = False
+            return response
+        raise HTTPException(status_code=503, detail=warning)
+
     info, service_cache = await _fetch_account_info_from_service(force_refresh)
     if info is None:
         if snapshot:
@@ -305,6 +337,22 @@ async def get_positions(
             "from_cache": False,
             "warning": "Not connected to IBKR",
         }
+
+    if not _account_service_enabled():
+        warning = "Account service is disabled; set ACCOUNT_SERVICE_URL to enable live refresh"
+        if snapshot:
+            response = _snapshot_response(
+                snapshot,
+                data_key="positions",
+                connected=is_connected,
+                from_cache=True,
+                default=[],
+                warning=warning,
+            )
+            response["error"] = warning
+            response["service_enabled"] = False
+            return response
+        raise HTTPException(status_code=503, detail=warning)
 
     positions, service_cache = await _fetch_positions_from_service(
         fast=fast,

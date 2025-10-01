@@ -30,6 +30,15 @@ services:
     volumes:
       - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
       - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+  account-service:
+    ports:
+      - "${ACCOUNT_SERVICE_PORT:-8020}:8020"
+    environment:
+      ACCOUNT_SERVICE_HOST: 0.0.0.0
+      ACCOUNT_SERVICE_PORT: 8020
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
   risk:
     volumes:
       - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
@@ -53,6 +62,7 @@ services:
     environment:
       AUTO_CONNECT: ${AUTO_CONNECT:-true}
       IBKR_PAPER_TRADING: ${IBKR_PAPER_TRADING:-False}
+      ACCOUNT_SERVICE_URL: ${ACCOUNT_SERVICE_URL:-http://account-service:8020}
     ports:
       - "${IBBOT_WEB_PORT:-8000}:8000"
     volumes:

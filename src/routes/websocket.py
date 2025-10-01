@@ -40,7 +40,7 @@ RATE_LIMIT_SECONDS = 15.0
 
 MARKET_SERVICE_URL = os.getenv("MARKET_DATA_SERVICE_URL", "http://localhost:8010").rstrip("/")
 MARKET_SERVICE_TIMEOUT = float(os.getenv("MARKET_DATA_SERVICE_TIMEOUT", "5.0"))
-ACCOUNT_SERVICE_URL = os.getenv("ACCOUNT_SERVICE_URL", "http://localhost:8020").rstrip("/")
+ACCOUNT_SERVICE_URL = os.getenv("ACCOUNT_SERVICE_URL", "").strip().rstrip("/")
 ACCOUNT_SERVICE_TIMEOUT = float(os.getenv("ACCOUNT_SERVICE_TIMEOUT", "10.0"))
 
 
@@ -49,7 +49,13 @@ def _market_service_base_url() -> str:
 
 
 def _account_service_base_url() -> str:
-    return ACCOUNT_SERVICE_URL or "http://localhost:8020"
+    if not ACCOUNT_SERVICE_URL:
+        raise RuntimeError("ACCOUNT_SERVICE_URL is not configured")
+    return ACCOUNT_SERVICE_URL
+
+
+def _account_service_enabled() -> bool:
+    return bool(ACCOUNT_SERVICE_URL)
 
 
 async def _service_get(
@@ -79,6 +85,8 @@ async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
 
 
 async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str, Any]]:
+    if not _account_service_enabled():
+        return None
     payload = await _service_get(
         base_url=_account_service_base_url(),
         timeout=ACCOUNT_SERVICE_TIMEOUT,
@@ -98,6 +106,8 @@ async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str,
 
 
 async def _fetch_positions(force_refresh: bool = False, fast: bool = True) -> Optional[List[Dict[str, Any]]]:
+    if not _account_service_enabled():
+        return None
     payload = await _service_get(
         base_url=_account_service_base_url(),
         timeout=ACCOUNT_SERVICE_TIMEOUT,

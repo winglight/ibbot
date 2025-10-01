@@ -93,6 +93,7 @@ cp .env.example .env.local  # 建议创建，仅保存本地覆写
 - `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING`：IBKR 连接配置。
 - `AUTO_CONNECT` / `IBBOT_DISABLE_TRADING`：启动时自动连接与交易禁用开关。
 - `IBBOT_REDIS_URL`：缓存与队列的主连接串。`REDIS_URL`、`IB_COMMAND_REDIS_URL`、`IB_FEED_REDIS_URL`、`STRATEGY_REDIS_URL`、`NOTIFICATION_REDIS_URL`、`ACCOUNT_CACHE_REDIS_URL` 与 `DATA_LAYER_REDIS_URL` 在留空时会继承该值。
+- `ACCOUNT_SERVICE_URL` / `ACCOUNT_SERVICE_TIMEOUT`：主应用调用 `services/account` 微服务的地址与超时；留空表示禁用实时刷新。
 - `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB`：当未提供连接串时自动拼接备用地址。
 - `DATA_LAYER_*`、`TELEGRAM_*` 等按需启用的可选能力。
 
@@ -137,6 +138,7 @@ python scripts/run_all.py --dry-run ib_command
 | --- | --- | --- | --- |
 | `ib_command` | `python scripts/run_service.py ib_command` | Redis（任务队列） | 可选对接 IB Gateway/TWS，使用 `--dry-run` 可跳过连接。 |
 | `ib_feed` | `python scripts/run_service.py ib_feed` | Redis（行情缓存） | 连接 IBKR 抓取实时/历史行情。 |
+| `account` | `python scripts/run_service.py account` | Redis、IB Command 队列 | FastAPI/FastAPI-Workers 服务，提供账户信息与仓位刷新。 |
 | `strategy` | `python scripts/run_service.py strategy` | Redis（策略调度） | 负责策略生命周期与任务入队。 |
 | `risk` | `python scripts/run_service.py risk` | Redis（风险配置） | 拉取风险规则并监听指标。 |
 | `notification` | `python scripts/run_service.py notification` | Redis（事件队列） | 推送通知到浏览器/Telegram。 |
@@ -187,6 +189,7 @@ pytest
 | `ib-command` | `python -m services.ib_command.main` | `ib-services` | 消费指令队列、执行 IBKR 命令、回写执行结果。 |
 | `ib-feed` | `python -m services.ib_feed.main` | `ib-services` | 订阅 IBKR 行情、发布价格/DOM、写入 Influx。 |
 | `market-data` | `python -m uvicorn services.market_data.main:app --host 0.0.0.0 --port 8010` | `market` | 聚合行情快照，暴露 REST/WebSocket（默认端口 8010）。 |
+| `account-service` | `python -m uvicorn services.account.main:create_app --host 0.0.0.0 --port 8020` | `ib-services` | FastAPI + FastAPI-Workers 驱动的账户/持仓微服务，复用 Redis 快照并触发实时刷新。 |
 | `risk` | `python -m services.risk.main` | `risk` | 消费行情/执行结果流，运行风险引擎并触发保护动作。 |
 | `strategy` | `python -m services.strategy.main` | `strategy` | 执行策略任务、写入事件流并下发 IB 指令。 |
 | `notification` | `python -m services.notification.main` | `notifications` | 订阅事件流并广播到浏览器/Telegram。 |

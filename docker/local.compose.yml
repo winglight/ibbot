@@ -15,6 +15,8 @@ x-app-env: &app-environment
     INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
     MARKET_DATA_SERVICE_URL: http://market-data:8010
     MARKET_DATA_SERVICE_WS_URL: ws://market-data:8010/ws/market
+    ACCOUNT_SERVICE_URL: http://account-service:8020
+    ACCOUNT_SERVICE_TIMEOUT: 10.0
 
 services:
   redis:
@@ -158,6 +160,31 @@ services:
     restart: unless-stopped
     profiles:
       - market
+
+  account-service:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      ["python", "-m", "uvicorn", "services.account.main:create_app", "--host", "0.0.0.0", "--port", "8020"]
+    container_name: ibbot-account-service
+    ports:
+      - "8020:8020"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      ib-command:
+        condition: service_started
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - ib-services
 
   risk:
     <<: *app-environment

@@ -27,6 +27,7 @@ from src.ibbot.redis import DEFAULT_REDIS_URL, DEFAULT_REDIS_URL_ENV
 DEFAULT_SERVICES: tuple[str, ...] = (
     "ib_command",
     "ib_feed",
+    "account",
     "strategy",
     "risk",
     "notification",
@@ -37,6 +38,7 @@ DEFAULT_SERVICES: tuple[str, ...] = (
 _SERVICE_REDIS_ENV: dict[str, str] = {
     "ib_command": "IB_COMMAND_REDIS_URL",
     "ib_feed": "IB_FEED_REDIS_URL",
+    "account": "ACCOUNT_SERVICE_REDIS_URL",
     "strategy": "STRATEGY_REDIS_URL",
     "risk": "RISK_REDIS_URL",
     "notification": "NOTIFICATION_REDIS_URL",

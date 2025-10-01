@@ -29,6 +29,7 @@
 - **influxdb**：行情写入与指标存储，默认开放 `8086`。
 - **ib-gateway**：集成 noVNC 的 IB Gateway，`http://localhost:5800/` 可进行登录与授权。
 - **ibbot / optimizer**：主服务与策略优化器，端口分别为 `8000/8001`。
+- **account-service**：基于 FastAPI/FastAPI-Workers 的账户快照服务，默认端口 `8020`。
 - **optimizer-ui**：静态部署的优化器前端，默认映射 `4173`。
 - **cloudflared**：可选的 Cloudflare Tunnel，仅在 `CF_TUNNEL_TOKEN` 存在时自动加入启动序列。
 

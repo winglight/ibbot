@@ -38,6 +38,8 @@ services:
       # Restart after repeated IBKR connection retries
       - IBKR_MAX_CONNECT_RETRIES=5
       - IBKR_RESTART_DELAY_SEC=1.0
+      - ACCOUNT_SERVICE_URL=http://account-service:8020
+      - ACCOUNT_SERVICE_TIMEOUT=10.0
       # Risk Management
       - LOSS_THRESHOLD_1=0.05
       - LOSS_THRESHOLD_2=0.10
@@ -62,6 +64,7 @@ services:
       - ../data:/app/data
       - ../src/strategies:/app/src/strategies
     depends_on:
+      - account-service
       - ib-gateway
     networks:
       - ibbot-network
@@ -73,6 +76,37 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  account-service:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-account
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "services.account.main:create_app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8020",
+      ]
+    ports:
+      - "8020:8020"
+    env_file:
+      - ./.env
+    environment:
+      - ACCOUNT_SERVICE_HOST=0.0.0.0
+      - ACCOUNT_SERVICE_PORT=8020
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
 
   # Optimizer service running optimizer_main.py
   optimizer:
