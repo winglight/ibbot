@@ -191,6 +191,15 @@ class PubSubListener:
         latency = self._coerce_float(data.get("latency_ms"))
         snapshot["latency_ms"] = latency
 
+        stale_value = data.get("stale")
+        stale_flag = self._coerce_bool(stale_value)
+        if stale_flag is not None:
+            snapshot["stale"] = stale_flag
+
+        account_value = data.get("account") or data.get("account_info")
+        if account_value is not None:
+            snapshot["account"] = account_value
+
         self._runtime._snapshots[symbol] = snapshot
 
     async def _handle_message(self, message: Mapping[str, Any]) -> None:
@@ -278,6 +287,7 @@ class PubSubListener:
         else:
             latency = None
         snapshot["latency_ms"] = latency
+        snapshot["stale"] = False
         self._runtime._snapshots[symbol] = snapshot
         return latency
 
@@ -288,8 +298,10 @@ class PubSubListener:
                 "symbol": symbol,
                 "price": None,
                 "dom": None,
+                "account": None,
                 "updated_at": None,
                 "latency_ms": None,
+                "stale": False,
             }
             self._runtime._snapshots[symbol] = snapshot
         return snapshot
@@ -332,6 +344,23 @@ class PubSubListener:
                 return float(value)
             except ValueError:
                 return None
+        return None
+
+    def _coerce_bool(self, value: Any) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalised = value.strip().lower()
+            if not normalised:
+                return None
+            if normalised in {"1", "true", "yes", "y"}:
+                return True
+            if normalised in {"0", "false", "no", "n"}:
+                return False
         return None
 
     def _extract_timestamp(self, payload: Mapping[str, Any]) -> datetime | None:

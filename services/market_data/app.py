@@ -35,6 +35,10 @@ def create_app(runtime: MarketDataRuntime | None = None) -> FastAPI:
                 delattr(app.state, "market_data_runtime")
 
     app = FastAPI(lifespan=lifespan)
+
+    from .routes.http import router as http_router
+
+    app.include_router(http_router)
     return app
 
 
