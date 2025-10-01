@@ -1,4 +1,6 @@
 import asyncio
+from typing import Any
+
 import pytest
 
 pytestmark = pytest.mark.anyio("asyncio")
@@ -18,6 +20,7 @@ class StubProvider:
         self._config = config
         self.started = False
         self.stopped = False
+        self._callbacks: list[Any] = []
 
     async def start(self) -> None:
         self.started = True
@@ -27,6 +30,13 @@ class StubProvider:
 
     async def get_config(self) -> MarketDataServiceConfig:
         return self._config
+
+    def register_callback(self, callback: Any) -> None:  # pragma: no cover - simple stub
+        self._callbacks.append(callback)
+
+    def unregister_callback(self, callback: Any) -> None:  # pragma: no cover - simple stub
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
 
 
 class StubListener:

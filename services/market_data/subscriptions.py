@@ -220,7 +220,18 @@ class PubSubListener:
             return
 
         timestamp = self._extract_timestamp(payload)
-        self._update_snapshot(symbol, price=price_value, message_timestamp=timestamp)
+        latency = self._update_snapshot(
+            symbol,
+            price=price_value,
+            message_timestamp=timestamp,
+        )
+        await self._runtime.publish_stream_event(
+            symbol=symbol,
+            event_type="price",
+            data=payload,
+            message_timestamp=timestamp,
+            latency_ms=latency,
+        )
 
     async def _handle_dom(self, symbol: str, payload: Mapping[str, Any]) -> None:
         dom_value = payload.get("dom")
@@ -233,7 +244,18 @@ class PubSubListener:
                 pass
 
         timestamp = self._extract_timestamp(payload)
-        self._update_snapshot(symbol, dom=dom_value, message_timestamp=timestamp)
+        latency = self._update_snapshot(
+            symbol,
+            dom=dom_value,
+            message_timestamp=timestamp,
+        )
+        await self._runtime.publish_stream_event(
+            symbol=symbol,
+            event_type="dom",
+            data=payload,
+            message_timestamp=timestamp,
+            latency_ms=latency,
+        )
 
     def _update_snapshot(
         self,
@@ -242,7 +264,7 @@ class PubSubListener:
         price: float | None = None,
         dom: Any | None = None,
         message_timestamp: datetime | None,
-    ) -> None:
+    ) -> float | None:
         snapshot = self._ensure_snapshot(symbol)
         if price is not None:
             snapshot["price"] = price
@@ -257,6 +279,7 @@ class PubSubListener:
             latency = None
         snapshot["latency_ms"] = latency
         self._runtime._snapshots[symbol] = snapshot
+        return latency
 
     def _ensure_snapshot(self, symbol: str) -> dict[str, Any]:
         snapshot = self._runtime._snapshots.get(symbol)
