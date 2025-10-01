@@ -16,6 +16,7 @@ from src.routes import market_data as market_data_module
 def orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     app = FastAPI()
     app.include_router(orders_module.router)
+    orders_module.set_websocket_broadcast_override(None)
 
     async def allow_user(request: Request) -> str:
         request.state.is_read_only = False
@@ -46,7 +47,7 @@ def test_place_order_enqueues_command_and_returns_id(orders_app: FastAPI, monkey
     dummy_manager = DummyWebSocketManager()
 
     monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
-    monkeypatch.setattr(orders_module, "websocket_manager", dummy_manager)
+    orders_module.set_websocket_broadcast_override(dummy_manager.broadcast)
     monkeypatch.setattr(orders_module.uuid, "uuid4", lambda: FakeUUID())
 
     with TestClient(orders_app) as client:
@@ -75,7 +76,7 @@ def test_place_order_enqueue_failure_returns_service_unavailable(orders_app: Fas
         raise RuntimeError("boom")
 
     monkeypatch.setattr(orders_module, "_enqueue_command", failing_enqueue)
-    monkeypatch.setattr(orders_module, "websocket_manager", object())
+    orders_module.set_websocket_broadcast_override(lambda message: None)
 
     with TestClient(orders_app) as client:
         response = client.post(
