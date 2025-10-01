@@ -80,6 +80,23 @@ class RiskRule:
             metadata=metadata,
         )
 
+    def to_payload(self) -> dict[str, Any]:
+        """Return a serialisable representation of the rule."""
+
+        payload: dict[str, Any] = {
+            "symbol": self.symbol,
+            "enabled": self.enabled,
+            "stop_loss": self.stop_loss,
+            "stop_loss_price": self.stop_loss,
+            "take_profit": self.take_profit,
+            "take_profit_price": self.take_profit,
+        }
+        if self.max_position is not None:
+            payload["max_position"] = self.max_position
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
+
 
 @dataclass(slots=True)
 class RiskEvent:
@@ -175,6 +192,11 @@ class RiskEngine:
                     continue
                 rules.append(rule)
         return rules
+
+    def export_rules(self) -> dict[str, dict[str, Any]]:
+        """Return the currently active rules as serialisable payloads."""
+
+        return {symbol: rule.to_payload() for symbol, rule in self._rules.items()}
 
     # ------------------------------------------------------------------
     # evaluation
