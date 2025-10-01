@@ -77,10 +77,7 @@ class OrderManager {
         try {
             console.log('🔄 _loadOrders executing');
 
-            // 只获取当天订单，减少数据传输量
-            const today = new Date();
-            const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
-            console.log('🌐 Requesting today\'s orders snapshot via WebSocket');
+            console.log('🌐 Requesting orders snapshot via WebSocket');
             const pageSize = Number.isFinite(options.limit) ? Number(options.limit) : (this.pagination?.pageSize || 10);
             const requestedPage = Number.isFinite(options.page) ? Number(options.page) : (this.pagination?.page || 1);
             const safePage = Math.max(1, requestedPage);
@@ -93,7 +90,6 @@ class OrderManager {
             if (this.app && this.app.ibkrManager && typeof this.app.ibkrManager.requestOrdersSnapshot === 'function') {
                 this.app.ibkrManager.requestOrdersSnapshot({
                     limit: pageSize,
-                    startDate: startOfDay,
                     force: Boolean(options.force),
                     page: safePage,
                 });
@@ -137,18 +133,6 @@ class OrderManager {
             const now = Date.now();
             const cachedData = this.ordersCache[cacheKey];
 
-            const isSameDay = (dateValue) => {
-                if (this.app && typeof this.app.isSameDay === 'function') {
-                    return this.app.isSameDay(dateValue);
-                }
-                const value = dateValue ? new Date(dateValue) : null;
-                if (!(value instanceof Date) || Number.isNaN(value.getTime())) return false;
-                const today = new Date();
-                return value.getFullYear() === today.getFullYear()
-                    && value.getMonth() === today.getMonth()
-                    && value.getDate() === today.getDate();
-            };
-
             let result;
             if (cachedData && (now - cachedData.timestamp) < 10 * 1000) {
                 console.log(`Using cached orders data for ${symbol} (${status})`);
@@ -168,7 +152,6 @@ class OrderManager {
             }
 
             let orders = Array.isArray(result?.orders) ? result.orders : [];
-            orders = orders.filter(order => isSameDay(order?.submit_time || order?.created_at));
 
             const filteredOrders = orders.filter(order => {
                 if (!order) return false;

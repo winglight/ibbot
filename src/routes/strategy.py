@@ -94,7 +94,7 @@ async def _strategy_service_request(
         raise HTTPException(status_code=503, detail="Strategy service unavailable") from exc
 
     if response.status_code >= 400:
-        if fallback is not None and response.status_code >= 500:
+        if fallback is not None:
             logger.warning(
                 "Strategy service responded with error; using local manager fallback",
                 path=path,

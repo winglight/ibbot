@@ -3,7 +3,8 @@
  * 负责日志的加载、显示、统计等功能
  */
 class LogsManager {
-    constructor(apiCall, showAlert, formatNumber) {
+    constructor(app, apiCall, showAlert, formatNumber) {
+        this.app = app || null;
         this.apiCall = apiCall;
         this.showAlert = showAlert;
         this.formatNumber = formatNumber;
@@ -20,6 +21,110 @@ class LogsManager {
         this.nextBtn = document.getElementById('logsNextPageBtn');
         this.tailToggle = document.getElementById('logsTailToggle');
         this.contentEl = document.getElementById('logsContent');
+        this.pendingRequests = new Map();
+        this.requestCounter = 0;
+        this.wsUnsubscribe = null;
+
+        if (this.app && typeof this.app.registerWebSocketHandler === 'function') {
+            this.wsUnsubscribe = this.app.registerWebSocketHandler('logs_snapshot', (payload) => this.handleLogsSnapshot(payload));
+        }
+    }
+
+    destroy() {
+        if (typeof this.wsUnsubscribe === 'function') {
+            try {
+                this.wsUnsubscribe();
+            } catch (error) {
+                console.warn('Failed to unsubscribe logs websocket handler', error);
+            }
+            this.wsUnsubscribe = null;
+        }
+        this.stopTail();
+        this.pendingRequests.clear();
+    }
+
+    shouldUseWebSocket() {
+        const ws = this.app?.ibkrManager?.ws;
+        return !!ws && ws.readyState === WebSocket.OPEN;
+    }
+
+    handleLogsSnapshot(payload) {
+        if (!payload || payload.type !== 'logs_snapshot') {
+            return false;
+        }
+
+        const requestId = payload.request_id || payload.requestId;
+        const context = requestId ? this.pendingRequests.get(requestId) : null;
+        if (context) {
+            this.pendingRequests.delete(requestId);
+            if (context.timer) {
+                clearTimeout(context.timer);
+            }
+        }
+
+        const direction = context?.direction || payload?.query?.direction || 'backward';
+        const append = context ? context.append : (payload?.query?.direction === 'forward');
+
+        if (!payload.success) {
+            const errorMessage = payload?.error || payload?.detail || '加载日志失败';
+            this.handleLogsError(new Error(errorMessage));
+            if (context && typeof context.reject === 'function') {
+                context.reject(new Error(errorMessage));
+            }
+            this.isLoading = false;
+            if (this.autoTail) {
+                this.scheduleTail();
+            }
+            return true;
+        }
+
+        this.processLogsResponse(payload, { append, direction });
+        if (context && typeof context.resolve === 'function') {
+            context.resolve(payload);
+        }
+        this.isLoading = false;
+        if (this.autoTail) {
+            this.scheduleTail();
+        }
+        return true;
+    }
+
+    processLogsResponse(res, { append = false, direction = 'backward' } = {}) {
+        if (!res || res.success === false) {
+            const message = res?.error || res?.detail || '加载日志失败';
+            this.setStatus(message, true);
+            if (typeof this.showAlert === 'function') {
+                this.showAlert('danger', '加载日志失败');
+            }
+            return false;
+        }
+
+        const logs = Array.isArray(res.logs) ? res.logs : [];
+        if (append) {
+            this.appendLogs(logs);
+        } else {
+            this.setLogs(logs);
+        }
+
+        if (res.pagination) {
+            this.applyPagination(res.pagination, direction);
+        } else if (!logs.length) {
+            this.applyPagination({ total: 0, page_size: this.pageSize, direction }, direction);
+        }
+
+        if (!res.pagination && this.statusEl) {
+            this.statusEl.textContent = logs.length ? '已更新日志' : '暂无日志';
+        }
+        return true;
+    }
+
+    handleLogsError(error) {
+        console.error('Load logs error:', error);
+        const message = error?.message || '加载失败';
+        this.setStatus(message, true);
+        if (typeof this.showAlert === 'function') {
+            this.showAlert('danger', '加载日志失败');
+        }
     }
 
     /**
@@ -85,58 +190,101 @@ class LogsManager {
         }
 
         const reset = options.reset === true;
-        const direction = options.direction || (reset ? 'backward' : (options.direction || 'backward'));
-
+        let direction = options.direction || 'backward';
         if (reset) {
+            direction = 'backward';
             this.cursor = null;
             this.forwardCursor = null;
         }
 
-        try {
-            this.isLoading = true;
-            const module = document.getElementById('logModule')?.value || 'all';
-            const range = document.getElementById('logRange')?.value || 'today';
-            const level = document.getElementById('logLevel')?.value || 'all';
-            const requestId = document.getElementById('logRequestId')?.value.trim();
-            const searchText = document.getElementById('logSearchText')?.value.trim();
+        const module = document.getElementById('logModule')?.value || 'all';
+        const range = document.getElementById('logRange')?.value || 'today';
+        const level = document.getElementById('logLevel')?.value || 'all';
+        const filterRequestId = document.getElementById('logRequestId')?.value?.trim() || '';
+        const searchText = document.getElementById('logSearchText')?.value?.trim() || '';
 
+        let cursor = options.cursor;
+        if (cursor === undefined || cursor === null) {
+            cursor = direction === 'forward' ? this.forwardCursor : this.cursor;
+        }
+
+        const append = direction === 'forward' && !reset && options.append !== false;
+
+        this.isLoading = true;
+        this.setStatus('加载中…');
+
+        const useWebSocket = this.shouldUseWebSocket() && this.app?.ibkrManager?.requestLogsSnapshot;
+        if (useWebSocket) {
+            return new Promise((resolve, reject) => {
+                const requestId = `logs:${Date.now()}:${(++this.requestCounter % 1_000_000)}`;
+                const context = {
+                    requestId,
+                    append,
+                    direction,
+                    resolve,
+                    reject,
+                };
+                this.pendingRequests.set(requestId, context);
+                context.timer = setTimeout(() => {
+                    this.pendingRequests.delete(requestId);
+                    this.isLoading = false;
+                    const error = new Error('日志请求超时');
+                    this.handleLogsError(error);
+                    reject(error);
+                    if (this.autoTail) {
+                        this.scheduleTail();
+                    }
+                }, Math.max(5000, options.timeout || 12000));
+
+                const requestOptions = {
+                    range,
+                    direction,
+                    page_size: this.pageSize,
+                    lines: this.pageSize,
+                    requestId,
+                    force: Boolean(options.force),
+                };
+                if (module !== 'all') requestOptions.module = module;
+                if (level !== 'all') requestOptions.level = level;
+                if (filterRequestId) requestOptions.filter_request_id = filterRequestId;
+                if (searchText) requestOptions.search = searchText;
+                if (cursor !== undefined && cursor !== null) requestOptions.cursor = cursor;
+
+                const result = this.app.ibkrManager.requestLogsSnapshot(requestOptions);
+                if (result === 'failed') {
+                    if (context.timer) {
+                        clearTimeout(context.timer);
+                    }
+                    this.pendingRequests.delete(requestId);
+                    this.isLoading = false;
+                    const error = new Error('日志请求发送失败');
+                    this.handleLogsError(error);
+                    reject(error);
+                    if (this.autoTail) {
+                        this.scheduleTail();
+                    }
+                }
+            });
+        }
+
+        try {
             const params = new URLSearchParams();
             params.set('range', range);
             params.set('page_size', String(this.pageSize));
             params.set('direction', direction);
-            params.set('lines', String(this.pageSize)); // backward compatibility
+            params.set('lines', String(this.pageSize));
             if (level !== 'all') params.set('level', level);
             if (module !== 'all') params.set('module', module);
-            if (requestId) params.set('request_id', requestId);
+            if (filterRequestId) params.set('request_id', filterRequestId);
             if (searchText) params.set('search', searchText);
+            if (cursor !== undefined && cursor !== null) params.set('cursor', String(cursor));
 
-            let cursor = options.cursor;
-            if (cursor === undefined || cursor === null) {
-                cursor = direction === 'forward' ? this.forwardCursor : this.cursor;
-            }
-            if (cursor !== undefined && cursor !== null) {
-                params.set('cursor', String(cursor));
-            }
-
-            this.setStatus('加载中…');
             const res = await this.apiCall(`/logs?${params.toString()}`, { useCache: false, cacheTime: 0 });
-            if (res?.logs) {
-                if (direction === 'forward' && !reset && options.append !== false) {
-                    this.appendLogs(res.logs);
-                } else {
-                    this.setLogs(res.logs);
-                }
-            }
-            if (res?.pagination) {
-                this.applyPagination(res.pagination, direction);
-            } else if (reset) {
-                this.cursor = null;
-                this.forwardCursor = null;
-            }
-        } catch (e) {
-            console.error('Load logs error:', e);
-            this.showAlert('danger', '加载日志失败');
-            this.setStatus(e?.message || '加载失败', true);
+            this.processLogsResponse(res, { append, direction });
+            return res;
+        } catch (error) {
+            this.handleLogsError(error);
+            throw error;
         } finally {
             this.isLoading = false;
             if (this.autoTail) {

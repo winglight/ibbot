@@ -200,6 +200,7 @@ class TradingApp {
             : new OrderManager(this);
         this.portfolioManager = new PortfolioManager(this);
         this.logsManager = new LogsManager(
+            this,
             this.apiCall.bind(this),
             this.showAlert.bind(this),
             this.formatNumber.bind(this)
