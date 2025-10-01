@@ -87,6 +87,25 @@ class SignalOutcomeTracker:
         signal_id = self._generate_signal_id(symbol, signal_type, timestamp_ms)
         target_timestamp = timestamp_ms + self.evaluation_delay_ms
 
+        for pending in self._pending.values():
+            if (
+                pending.symbol == symbol
+                and pending.signal_type == signal_type
+                and abs(pending.timestamp_ms - timestamp_ms) < 1e-6
+            ):
+                logger.trace(
+                    "DOM signal already pending",
+                    signal_id=pending.signal_id,
+                    symbol=symbol,
+                    signal_type=signal_type,
+                )
+                return {
+                    "signal_id": pending.signal_id,
+                    "signal_type": pending.signal_type,
+                    "signal_price": pending.reference_price,
+                    "outcome": None,
+                }
+
         self._pending[signal_id] = PendingSignal(
             signal_id=signal_id,
             symbol=symbol,
@@ -96,7 +115,7 @@ class SignalOutcomeTracker:
             target_timestamp_ms=target_timestamp,
         )
 
-        logger.debug(
+        logger.trace(
             "Registered DOM signal",
             signal_id=signal_id,
             symbol=symbol,
