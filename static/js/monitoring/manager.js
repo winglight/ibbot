@@ -92,7 +92,13 @@
             this.chartDateAdapterUrl = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js';
             this.dateAdapterReady = false;
             this.dateAdapterLoader = null;
-            this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4/dist/chartjs-chart-financial.min.js';
+            this.financialScriptUrl = 'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0/dist/chartjs-chart-financial.umd.min.js';
+            this.financialScriptFallbackUrls = [
+                'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0/dist/chartjs-chart-financial.umd.js',
+                'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0/dist/chartjs-chart-financial.min.js',
+                'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0/dist/chartjs-chart-financial.js',
+                'https://cdn.jsdelivr.net/npm/chartjs-chart-financial@4.3.0'
+            ];
             this.chartScriptableGuardApplied = false;
             this.strategyChartInstance = null;
             this.strategyChartFallbackNotified = false;
@@ -308,8 +314,12 @@
 
         loadExternalScript(url) {
             return new Promise((resolve, reject) => {
-                const normalizedUrl = (url || '').trim();
-                if (!normalizedUrl) {
+                const urls = Array.isArray(url) ? url : [url];
+                const normalizedUrls = urls
+                    .map((candidate) => (candidate || '').trim())
+                    .filter(Boolean);
+
+                if (normalizedUrls.length === 0) {
                     resolve(true);
                     return;
                 }
@@ -352,7 +362,10 @@
                         console.log('[Chart] Existing candlestick script load event triggered');
                         markLoaded();
                     }, { once: true });
-                    existing.addEventListener('error', (err) => reject(err || new Error(`Failed to load ${normalizedUrl}`)), { once: true });
+                    existing.addEventListener('error', (err) => {
+                        const existingSrc = existing.src || 'chartjs-chart-financial';
+                        reject(err || new Error(`Failed to load ${existingSrc}`));
+                    }, { once: true });
 
                     setTimeout(() => {
                         if (checkReady()) {
@@ -363,20 +376,44 @@
                     return;
                 }
 
-                const script = document.createElement('script');
-                script.src = normalizedUrl;
-                script.async = true;
-                script.defer = true;
-                script.crossOrigin = 'anonymous';
-                script.dataset.dynamic = 'chartjs-financial';
-                script.addEventListener('load', () => {
-                    script.dataset.loaded = 'true';
-                    resolve(true);
-                }, { once: true });
-                script.addEventListener('error', (err) => {
-                    reject(err || new Error(`Failed to load ${normalizedUrl}`));
-                }, { once: true });
-                document.head.appendChild(script);
+                const tryLoad = (index = 0) => {
+                    if (index >= normalizedUrls.length) {
+                        reject(new Error(`Failed to load chartjs-chart-financial from ${normalizedUrls.join(', ')}`));
+                        return;
+                    }
+
+                    const candidateUrl = normalizedUrls[index];
+                    const script = document.createElement('script');
+                    script.src = candidateUrl;
+                    script.async = true;
+                    script.defer = true;
+                    script.crossOrigin = 'anonymous';
+                    script.dataset.dynamic = 'chartjs-financial';
+
+                    const cleanup = () => {
+                        script.removeEventListener('load', onLoad);
+                        script.removeEventListener('error', onError);
+                    };
+
+                    const onLoad = () => {
+                        cleanup();
+                        script.dataset.loaded = 'true';
+                        resolve(true);
+                    };
+
+                    const onError = (err) => {
+                        cleanup();
+                        script.remove();
+                        console.warn(`[Chart] Failed to load candlestick plugin from ${candidateUrl}, trying next candidate...`, err);
+                        tryLoad(index + 1);
+                    };
+
+                    script.addEventListener('load', onLoad, { once: true });
+                    script.addEventListener('error', onError, { once: true });
+                    document.head.appendChild(script);
+                };
+
+                tryLoad();
             });
         }
 
@@ -391,7 +428,12 @@
                 return this.candlestickLoader;
             }
 
-            this.candlestickLoader = this.loadExternalScript(this.financialScriptUrl)
+            const financialScriptCandidates = [
+                this.financialScriptUrl,
+                ...(Array.isArray(this.financialScriptFallbackUrls) ? this.financialScriptFallbackUrls : [])
+            ];
+
+            this.candlestickLoader = this.loadExternalScript(financialScriptCandidates)
                 .then(() => {
                     const registered = this.registerCandlestickControllers();
                     if (!registered) {
@@ -778,6 +820,7 @@
                 'dateAdapterReady',
                 'dateAdapterLoader',
                 'financialScriptUrl',
+                'financialScriptFallbackUrls',
                 'chartScriptableGuardApplied',
                 'strategyChartInstance',
                 'strategyChartFallbackNotified',
