@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import inspect
 from typing import Any, Iterable, Mapping
+from zoneinfo import ZoneInfo
+
 from fastapi.testclient import TestClient
 
 from services.market_data import MarketDataRuntime, create_app
+from src.utils import to_local_iso
 
 
 class FakeRedis:
     def __init__(self) -> None:
         self.stream_entries: list[dict[str, Any]] = []
+        self.series: dict[str, list[str]] = {}
+        self.fail_lrange = False
 
     async def xadd(
         self,
@@ -32,6 +37,36 @@ class FakeRedis:
         }
         self.stream_entries.append(entry)
         return "1-0"
+
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        if self.fail_lrange:
+            raise RuntimeError("lrange failure")
+        series = self.series.get(key, [])
+        length = len(series)
+        if length == 0:
+            return []
+
+        def _resolve(index: int) -> int:
+            if index < 0:
+                index += length
+            return max(index, 0)
+
+        if end < 0:
+            end += length
+        start_idx = _resolve(start)
+        end_idx = min(max(end, -1), length - 1)
+        if end_idx < start_idx:
+            return []
+        return series[start_idx : end_idx + 1]
+
+    def set_series(self, key: str, values: Iterable[Mapping[str, Any]]) -> None:
+        payloads: list[str] = []
+        for value in values:
+            if isinstance(value, str):
+                payloads.append(value)
+            else:
+                payloads.append(json.dumps(value))
+        self.series[key] = payloads
 
 
 class RecordingWriter:
@@ -162,3 +197,107 @@ def test_unknown_symbol_returns_404() -> None:
         response = client.get("/market/NQ")
         assert response.status_code == 404
         assert response.json()["detail"] == "Symbol not found"
+
+
+def test_chart_data_returns_cached_series() -> None:
+    redis = FakeRedis()
+    writer = RecordingWriter()
+    runtime = _build_runtime(redis, writer, symbols=["ES"])
+
+    interval = "1m"
+    symbol = "ES"
+    cache_key = f"market-data:series:market.candle.{interval}:{symbol}"
+    ny_tz = ZoneInfo("America/New_York")
+    now_ny = datetime.now(ny_tz)
+    base_time = now_ny - timedelta(hours=1)
+    recent_ns = int(base_time.timestamp() * 1_000_000_000)
+    old_ns = int((now_ny - timedelta(days=2)).timestamp() * 1_000_000_000)
+    redis.set_series(
+        cache_key,
+        [
+            {
+                "interval_end_ns": old_ns,
+                "open": 100,
+                "high": 110,
+                "low": 90,
+                "close": 95,
+                "volume": 500,
+            },
+            {
+                "interval_end_ns": recent_ns,
+                "open": "200",
+                "high": 210,
+                "low": 195,
+                "close": 205,
+                "volume": 1234.5,
+            },
+        ],
+    )
+
+    expected_time = to_local_iso(base_time)
+
+    with _start_client(runtime) as client:
+        response = client.post(
+            "/chart_data",
+            json={
+                "symbol": symbol,
+                "duration": "1 D",
+                "bar_size": "1 min",
+                "exchange": "CME",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["symbol"] == symbol
+        assert payload["duration"] == "1 D"
+        assert payload["bar_size"] == "1 min"
+        data = payload["data"]
+        assert len(data) == 1
+        bar = data[0]
+        assert bar["time"] == expected_time
+        assert bar["open"] == 200.0
+        assert bar["high"] == 210.0
+        assert bar["low"] == 195.0
+        assert bar["close"] == 205.0
+        assert bar["volume"] == 1234
+
+
+def test_chart_data_returns_404_when_series_missing() -> None:
+    redis = FakeRedis()
+    writer = RecordingWriter()
+    runtime = _build_runtime(redis, writer, symbols=["ES"])
+
+    with _start_client(runtime) as client:
+        response = client.post(
+            "/chart_data",
+            json={
+                "symbol": "ES",
+                "duration": "1 D",
+                "bar_size": "1 min",
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "No chart data available"
+
+
+def test_chart_data_returns_503_on_backend_error() -> None:
+    redis = FakeRedis()
+    writer = RecordingWriter()
+    runtime = _build_runtime(redis, writer, symbols=["ES"])
+    redis.fail_lrange = True
+
+    with _start_client(runtime) as client:
+        response = client.post(
+            "/chart_data",
+            json={
+                "symbol": "ES",
+                "duration": "1 D",
+                "bar_size": "1 min",
+            },
+        )
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Market data cache unavailable"

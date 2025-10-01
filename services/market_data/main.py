@@ -6,23 +6,170 @@ import asyncio
 import contextlib
 import inspect
 import json
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
 
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.ibbot.influx import build_service_metric_point, write_points
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import PubSubListener, get_redis_client
+from src.utils import NY_TZ, now_local, to_local_iso
 
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
 DOM_CHANNEL_TEMPLATE = "pubsub:ib:dom:{symbol}"
 STREAM_KEY = "stream:market-service"
+CACHE_PREFIX_ENV = "DATA_LAYER_REDIS_PREFIX"
+DEFAULT_CACHE_PREFIX = "market-data"
+
+_BAR_SIZE_TO_INTERVAL = {
+    "1 sec": "1s",
+    "1 secs": "1s",
+    "1 second": "1s",
+    "1 seconds": "1s",
+    "5 sec": "5s",
+    "5 secs": "5s",
+    "5 second": "5s",
+    "5 seconds": "5s",
+    "1 min": "1m",
+    "1 mins": "1m",
+    "1 minute": "1m",
+    "1 minutes": "1m",
+    "5 min": "5m",
+    "5 mins": "5m",
+    "5 minute": "5m",
+    "5 minutes": "5m",
+}
+
+_INTERVAL_TO_SECONDS = {
+    "1s": 1,
+    "5s": 5,
+    "1m": 60,
+    "5m": 300,
+}
+
+
+class ChartDataQuery(BaseModel):
+    """Request payload accepted by the chart data endpoint."""
+
+    symbol: str = Field(..., description="Ticker symbol")
+    duration: str = Field(..., description="Duration string, e.g. 1 D")
+    bar_size: str = Field(..., alias="barSize", description="Bar size, e.g. 1 min")
+    exchange: str = Field("SMART", description="Exchange identifier")
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    @field_validator("symbol")
+    @classmethod
+    def _normalise_symbol(cls, value: str) -> str:
+        result = value.strip().upper()
+        if not result:
+            raise ValueError("symbol must not be empty")
+        return result
+
+    @field_validator("duration", "bar_size", "exchange")
+    @classmethod
+    def _strip_value(cls, value: str) -> str:
+        result = value.strip()
+        if not result:
+            raise ValueError("value must not be empty")
+        return result
+
+
+def _parse_duration_to_minutes(duration: str) -> int:
+    if not duration:
+        return 0
+    text = str(duration).strip().lower()
+    if not text:
+        return 0
+    parts = text.split()
+    try:
+        number = float(parts[0])
+    except Exception:
+        import re as _re
+
+        match = _re.match(r"(\d+(?:\.\d+)?)([a-zA-Z]+)", text)
+        if not match:
+            return 0
+        number = float(match.group(1))
+        unit = match.group(2)
+    else:
+        unit = parts[1] if len(parts) > 1 else "min"
+    unit = unit.strip().lower()
+    if unit in {"d", "day", "days"}:
+        return int(number * 24 * 60)
+    if unit in {"h", "hour", "hours"}:
+        return int(number * 60)
+    if unit in {"w", "week", "weeks"}:
+        return int(number * 7 * 24 * 60)
+    if unit in {"m", "min", "mins", "minute", "minutes"}:
+        return int(number)
+    return int(number)
+
+
+def _filter_candles_by_duration(candles: list[dict[str, Any]], duration_minutes: int) -> list[dict[str, Any]]:
+    if duration_minutes <= 0:
+        return list(candles)
+    cutoff = now_local() - timedelta(minutes=duration_minutes)
+    filtered: list[dict[str, Any]] = []
+    for candle in candles:
+        ts_ns = candle.get("interval_end_ns") or candle.get("interval_start_ns")
+        if ts_ns is None:
+            filtered.append(candle)
+            continue
+        try:
+            ts = datetime.fromtimestamp(int(ts_ns) / 1_000_000_000, tz=NY_TZ)
+        except Exception:
+            filtered.append(candle)
+            continue
+        if ts >= cutoff:
+            filtered.append(candle)
+    return filtered
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return 0
+
+
+def _format_candles_for_response(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    formatted: list[dict[str, Any]] = []
+    for candle in candles:
+        ts_ns = candle.get("interval_end_ns") or candle.get("interval_start_ns")
+        timestamp = None
+        if ts_ns is not None:
+            try:
+                timestamp = datetime.fromtimestamp(int(ts_ns) / 1_000_000_000, tz=NY_TZ)
+            except Exception:
+                timestamp = None
+        time_value = to_local_iso(timestamp) if timestamp else to_local_iso(now_local())
+        formatted.append(
+            {
+                "time": time_value or now_local().isoformat(),
+                "open": _safe_float(candle.get("open")),
+                "high": _safe_float(candle.get("high")),
+                "low": _safe_float(candle.get("low")),
+                "close": _safe_float(candle.get("close")),
+                "volume": _safe_int(candle.get("volume")),
+            }
+        )
+    return formatted
 
 
 def _now() -> datetime:
@@ -314,6 +461,15 @@ class MarketDataRuntime:
 def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
     runtime = runtime or MarketDataRuntime()
 
+    cache_prefix = os.getenv(CACHE_PREFIX_ENV, DEFAULT_CACHE_PREFIX).strip() or DEFAULT_CACHE_PREFIX
+    cache_prefix = cache_prefix.rstrip(":")
+
+    def _series_key(symbol: str, interval: str) -> str:
+        return f"{cache_prefix}:series:market.candle.{interval}:{symbol}"
+
+    def _get_logger() -> Any:
+        return runtime._logger or get_logger(runtime.logger_name)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await runtime.start()
@@ -345,6 +501,82 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             pass
         finally:
             await runtime._ws_manager.disconnect(websocket)
+
+    @app.post("/chart_data")
+    async def chart_data(query: ChartDataQuery) -> JSONResponse:
+        logger = _get_logger()
+        bar_key = query.bar_size.strip().lower()
+        interval = _BAR_SIZE_TO_INTERVAL.get(bar_key)
+        if not interval:
+            logger.warning("Unsupported bar size for chart data: %s", query.bar_size)
+            raise HTTPException(status_code=400, detail="Unsupported bar_size")
+
+        duration_minutes = _parse_duration_to_minutes(query.duration)
+
+        redis_client = runtime._redis
+        if redis_client is None:
+            try:
+                redis_client = await runtime.redis_factory()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.exception("Failed to acquire Redis client for chart data", exc_info=True)
+                raise HTTPException(status_code=503, detail="Market data cache unavailable") from exc
+            runtime._redis = redis_client
+
+        limit: int | None = None
+        if duration_minutes > 0:
+            seconds = _INTERVAL_TO_SECONDS.get(interval)
+            if seconds:
+                estimated = int((duration_minutes * 60) / seconds) + 5
+                if estimated > 0:
+                    limit = min(max(estimated, 1), 10_000)
+
+        key = _series_key(query.symbol, interval)
+        try:
+            if limit:
+                raw_entries = await redis_client.lrange(key, -limit, -1)
+            else:
+                raw_entries = await redis_client.lrange(key, 0, -1)
+        except Exception as exc:
+            logger.exception(
+                "Failed to query chart data from Redis for %s interval=%s",
+                query.symbol,
+                interval,
+                exc_info=True,
+            )
+            raise HTTPException(status_code=503, detail="Market data cache unavailable") from exc
+
+        candles: list[dict[str, Any]] = []
+        for entry in raw_entries or []:
+            if not entry:
+                continue
+            try:
+                decoded = json.loads(entry)
+            except (TypeError, ValueError):
+                logger.warning("Skipping invalid candle payload: %s", entry)
+                continue
+            if isinstance(decoded, dict):
+                candles.append(decoded)
+
+        candles = _filter_candles_by_duration(candles, duration_minutes)
+        if not candles:
+            logger.info(
+                "Chart data not found for %s interval=%s duration=%s", query.symbol, interval, duration_minutes
+            )
+            raise HTTPException(status_code=404, detail="No chart data available")
+
+        payload = _format_candles_for_response(candles)
+        if not payload:
+            logger.warning("No valid candles after formatting for %s interval=%s", query.symbol, interval)
+            raise HTTPException(status_code=404, detail="No chart data available")
+
+        response_payload = {
+            "success": True,
+            "data": payload,
+            "symbol": query.symbol,
+            "duration": query.duration,
+            "bar_size": query.bar_size,
+        }
+        return JSONResponse(response_payload)
 
     return app
 
