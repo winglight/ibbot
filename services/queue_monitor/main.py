@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from src.ibbot import update_service_health
 from src.ibbot.influx import build_service_metric_point, write_points
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
@@ -229,7 +230,29 @@ class QueueMonitorRuntime:
         await self._write_service_metrics(queue_metrics, stream_metrics)
         await self._publish_update(snapshot)
         await self._ws_manager.broadcast({"type": "metrics", "data": snapshot})
+        await self._publish_health(queue_metrics, stream_metrics)
         return snapshot
+
+    async def _publish_health(
+        self,
+        queue_metrics: Iterable[Mapping[str, Any]],
+        stream_metrics: Iterable[Mapping[str, Any]],
+    ) -> None:
+        if self._redis is None:
+            return
+        total_queue_length = sum(int(entry.get("length", 0) or 0) for entry in queue_metrics)
+        total_stream_pending = sum(int(entry.get("pending", 0) or 0) for entry in stream_metrics)
+        metrics = {
+            "total_queue_length": total_queue_length,
+            "total_stream_pending": total_stream_pending,
+        }
+        await update_service_health(
+            self._redis,
+            "queue",
+            healthy=True,
+            metrics=metrics,
+            logger=self._logger,
+        )
 
     async def _collect_queue_metrics(self, now: datetime) -> list[Dict[str, Any]]:
         metrics: list[Dict[str, Any]] = []

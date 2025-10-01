@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from loguru import logger
 
@@ -15,6 +15,8 @@ from .account_snapshot_cache import (
     write_positions_snapshot,
 )
 from .utils import now_local, to_local_iso
+from src.ibbot import update_service_health
+from src.ibbot.redis import get_redis_client
 
 
 def _read_interval_env(name: str, default: int) -> int:
@@ -50,6 +52,53 @@ class AccountSnapshotService:
         self._last_fill: Optional[datetime] = None
         self._last_account_refresh: Optional[datetime] = None
         self._last_positions_refresh: Optional[datetime] = None
+        self._health_redis: Any = None
+        self._health_last_error: str = ""
+
+    async def _ensure_health_client(self) -> Any | None:
+        if self._health_redis is not None:
+            return self._health_redis
+        try:
+            self._health_redis = await get_redis_client()
+        except Exception as exc:
+            snapshot_service_logger.warning(
+                "Failed to acquire Redis client for health updates: {}", exc
+            )
+            self._health_redis = None
+        return self._health_redis
+
+    def _build_health_metrics(self, extra: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+        metrics: Dict[str, Any] = {
+            "last_account_refresh": to_local_iso(self._last_account_refresh) or "",
+            "last_positions_refresh": to_local_iso(self._last_positions_refresh) or "",
+        }
+        if extra:
+            metrics.update(extra)
+        return metrics
+
+    async def _update_health(
+        self,
+        *,
+        healthy: bool,
+        last_error: str | None = None,
+        extra_metrics: Mapping[str, Any] | None = None,
+    ) -> None:
+        client = await self._ensure_health_client()
+        if client is None:
+            return
+        if healthy:
+            self._health_last_error = ""
+        elif last_error is not None:
+            self._health_last_error = last_error
+        metrics = self._build_health_metrics(extra_metrics)
+        await update_service_health(
+            client,
+            "account-snapshot",
+            healthy=healthy,
+            last_error=self._health_last_error,
+            metrics=metrics,
+            logger=snapshot_service_logger,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle management
@@ -118,9 +167,19 @@ class AccountSnapshotService:
                 await mark_all_snapshots_stale(reason)
                 self._last_account_refresh = None
                 self._last_positions_refresh = None
+                await self._update_health(
+                    healthy=False,
+                    last_error=reason,
+                    extra_metrics={"state": "stale", "stale_reason": reason},
+                )
             except Exception as exc:  # pragma: no cover - defensive guard
                 snapshot_service_logger.warning(
                     f"Failed to mark snapshots stale: {exc}"
+                )
+                await self._update_health(
+                    healthy=False,
+                    last_error=str(exc),
+                    extra_metrics={"state": "error", "stale_reason": reason},
                 )
 
         asyncio.run_coroutine_threadsafe(_mark(), loop)
@@ -145,15 +204,46 @@ class AccountSnapshotService:
 
         ib_client = _get_ib_client()
         if ib_client is None:
+            await self._update_health(
+                healthy=False,
+                last_error="IB client unavailable",
+                extra_metrics={"reason": reason},
+            )
             return None
 
-        info = await ib_client.get_account_info()
-        if info is not None:
-            await write_account_info_snapshot(info, reason)
+        try:
+            info = await ib_client.get_account_info()
+        except Exception as exc:
+            await self._update_health(
+                healthy=False,
+                last_error=str(exc),
+                extra_metrics={"reason": reason},
+            )
+            raise
+        if info is None:
+            await self._update_health(
+                healthy=False,
+                last_error="Account info unavailable",
+                extra_metrics={"reason": reason, "scope": "account_info"},
+            )
+            return None
+
+        persisted = await write_account_info_snapshot(info, reason)
+        if persisted:
             refreshed_at = now_local()
             self._last_account_refresh = refreshed_at
             self._log_snapshot_update(
                 "account_info", reason=reason, refreshed_at=refreshed_at
+            )
+            await self._update_health(
+                healthy=True,
+                extra_metrics={"reason": reason, "scope": "account_info"},
+            )
+        else:
+            await self._update_health(
+                healthy=False,
+                last_error="Failed to persist account snapshot",
+                extra_metrics={"reason": reason, "scope": "account_info"},
             )
         return info
 
@@ -164,15 +254,39 @@ class AccountSnapshotService:
 
         ib_client = _get_ib_client()
         if ib_client is None:
+            await self._update_health(
+                healthy=False,
+                last_error="IB client unavailable",
+                extra_metrics={"reason": reason, "scope": "positions"},
+            )
             return None
 
-        positions = await ib_client.get_positions(fast=fast)
-        await write_positions_snapshot(positions, reason)
-        refreshed_at = now_local()
-        self._last_positions_refresh = refreshed_at
-        self._log_snapshot_update(
-            "positions", reason=reason, refreshed_at=refreshed_at
-        )
+        try:
+            positions = await ib_client.get_positions(fast=fast)
+        except Exception as exc:
+            await self._update_health(
+                healthy=False,
+                last_error=str(exc),
+                extra_metrics={"reason": reason, "scope": "positions"},
+            )
+            raise
+        persisted = await write_positions_snapshot(positions, reason)
+        if persisted:
+            refreshed_at = now_local()
+            self._last_positions_refresh = refreshed_at
+            self._log_snapshot_update(
+                "positions", reason=reason, refreshed_at=refreshed_at
+            )
+            await self._update_health(
+                healthy=True,
+                extra_metrics={"reason": reason, "scope": "positions"},
+            )
+        else:
+            await self._update_health(
+                healthy=False,
+                last_error="Failed to persist positions snapshot",
+                extra_metrics={"reason": reason, "scope": "positions"},
+            )
         return positions
 
     async def refresh_both(
@@ -182,19 +296,52 @@ class AccountSnapshotService:
 
         ib_client = _get_ib_client()
         if ib_client is None:
+            await self._update_health(
+                healthy=False,
+                last_error="IB client unavailable",
+                extra_metrics={"reason": reason, "scope": "both"},
+            )
             return {"account_info": None, "positions": None}
 
-        info = await ib_client.get_account_info()
-        positions = await ib_client.get_positions(fast=fast_positions)
+        try:
+            info = await ib_client.get_account_info()
+            positions = await ib_client.get_positions(fast=fast_positions)
+        except Exception as exc:
+            await self._update_health(
+                healthy=False,
+                last_error=str(exc),
+                extra_metrics={"reason": reason, "scope": "both"},
+            )
+            raise
 
-        await write_account_info_snapshot(info, reason)
-        await write_positions_snapshot(positions, reason)
+        info_persisted = await write_account_info_snapshot(info, reason)
+        positions_persisted = await write_positions_snapshot(positions, reason)
 
         now = now_local()
-        self._last_account_refresh = now
-        self._last_positions_refresh = now
-        self._log_snapshot_update("account_info", reason=reason, refreshed_at=now)
-        self._log_snapshot_update("positions", reason=reason, refreshed_at=now)
+        if info_persisted:
+            self._last_account_refresh = now
+            self._log_snapshot_update("account_info", reason=reason, refreshed_at=now)
+        if positions_persisted:
+            self._last_positions_refresh = now
+            self._log_snapshot_update("positions", reason=reason, refreshed_at=now)
+
+        if info_persisted and positions_persisted:
+            await self._update_health(
+                healthy=True,
+                extra_metrics={"reason": reason, "scope": "both"},
+            )
+        else:
+            failure_parts = []
+            if not info_persisted:
+                failure_parts.append("account info")
+            if not positions_persisted:
+                failure_parts.append("positions")
+            description = ", ".join(failure_parts) + " snapshot persistence failed"
+            await self._update_health(
+                healthy=False,
+                last_error=description,
+                extra_metrics={"reason": reason, "scope": "both"},
+            )
         return {"account_info": info, "positions": positions}
 
     # ------------------------------------------------------------------
@@ -220,6 +367,10 @@ class AccountSnapshotService:
                 pass
 
             if not self._should_refresh():
+                await self._update_health(
+                    healthy=True,
+                    extra_metrics={"reason": "scheduled", "state": "idle"},
+                )
                 continue
 
             try:
@@ -231,9 +382,19 @@ class AccountSnapshotService:
                 snapshot_service_logger.warning(
                     "Scheduled account snapshot refresh timed out"
                 )
+                await self._update_health(
+                    healthy=False,
+                    last_error="Scheduled refresh timed out",
+                    extra_metrics={"reason": "scheduled", "state": "timeout"},
+                )
             except Exception as exc:
                 snapshot_service_logger.warning(
                     f"Scheduled account snapshot refresh failed: {exc}"
+                )
+                await self._update_health(
+                    healthy=False,
+                    last_error=str(exc),
+                    extra_metrics={"reason": "scheduled", "state": "error"},
                 )
 
     def _should_refresh(self) -> bool:

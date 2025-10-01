@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
+from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import enqueue_ib_command
 
@@ -290,11 +291,42 @@ class StrategyTaskConsumer:
         self._poll_timeout = poll_timeout
         self._stopped = asyncio.Event()
         self._logger = get_logger(logger_name)
+        self._health_last_error: str = ""
+        self._service_name = "strategy"
 
     def stop(self) -> None:
         """Signal the consumer loop to stop."""
 
         self._stopped.set()
+
+    async def _update_health(
+        self,
+        *,
+        healthy: bool,
+        state: str,
+        last_error: str | None = None,
+        task: Mapping[str, Any] | None = None,
+    ) -> None:
+        if healthy:
+            self._health_last_error = ""
+        elif last_error is not None:
+            self._health_last_error = last_error
+        metrics: dict[str, Any] = {"state": state, "queue": self._queue_key}
+        if task is not None:
+            task_id = task.get("task_id")
+            strategy = task.get("strategy")
+            if task_id is not None:
+                metrics["task_id"] = str(task_id)
+            if strategy is not None:
+                metrics["strategy"] = str(strategy)
+        await update_service_health(
+            self._redis,
+            self._service_name,
+            healthy=healthy,
+            last_error=self._health_last_error,
+            metrics=metrics,
+            logger=self._logger,
+        )
 
     async def run_forever(self) -> None:
         """Continuously consume tasks until stopped."""
@@ -304,10 +336,16 @@ class StrategyTaskConsumer:
                 item = await self._redis.blpop(self._queue_key, timeout=self._poll_timeout)
             except Exception as exc:  # pragma: no cover - network/redis failure
                 self._logger.warning("Failed to fetch strategy task", exc_info=exc)
+                await self._update_health(
+                    healthy=False,
+                    state="redis_error",
+                    last_error=str(exc),
+                )
                 await asyncio.sleep(self._poll_timeout)
                 continue
 
             if item is None:
+                await self._update_health(healthy=True, state="idle")
                 continue
 
             _, raw_payload = item
@@ -315,13 +353,33 @@ class StrategyTaskConsumer:
                 task = json.loads(raw_payload)
             except json.JSONDecodeError as exc:
                 self._logger.error("Failed to decode strategy task", error=str(exc))
+                await self._update_health(
+                    healthy=False,
+                    state="decode_error",
+                    last_error=str(exc),
+                )
                 continue
 
             try:
                 await self._adapter.execute_task(task)
             except StrategyNotFoundError as exc:
                 self._logger.error("Strategy not found", error=str(exc), task=task)
+                await self._update_health(
+                    healthy=False,
+                    state="strategy_not_found",
+                    last_error=str(exc),
+                    task=task,
+                )
             except StrategyExecutionError as exc:
                 self._logger.error("Strategy execution error", error=str(exc), task=task)
+                await self._update_health(
+                    healthy=False,
+                    state="execution_error",
+                    last_error=str(exc),
+                    task=task,
+                )
+            else:
+                await self._update_health(healthy=True, state="processed", task=task)
 
+        await self._update_health(healthy=False, state="stopped")
         self._logger.info("Strategy consumer stopped")
