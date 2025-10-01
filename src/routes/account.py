@@ -1,10 +1,9 @@
-import asyncio
 from datetime import date, datetime, timedelta
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Mapping
 
 import os
+import uuid
 
-import httpx
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -13,25 +12,31 @@ from src.utils import now_local, parse_local_datetime, NY_TZ, ensure_local_timez
 from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
-    write_account_info_snapshot,
-    write_positions_snapshot,
 )
 from src.utils.account_pnl_cache import (
     load_all_daily_totals,
     read_net_liquidation_snapshot,
-    rebuild_account_daily_cache,
     write_net_liquidation_snapshot,
 )
 
 import core
-from core import connection_manager
-from src.database import get_db_manager
+from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
+from src.routes.service_clients import (
+    AccountServiceClient,
+    ServiceClientError,
+    ServiceResponseError,
+    ServiceUnavailableError,
+)
 from .auth import get_current_user
 
 router = APIRouter()
 
 ACCOUNT_SERVICE_URL = os.getenv("ACCOUNT_SERVICE_URL", "http://localhost:8020").rstrip("/")
 ACCOUNT_SERVICE_TIMEOUT = float(os.getenv("ACCOUNT_SERVICE_TIMEOUT", "10.0"))
+
+_ACCOUNT_SERVICE_CLIENT = AccountServiceClient()
+
+_COMMAND_QUEUE_OVERRIDE = os.getenv("IB_COMMAND_QUEUE_KEY", "").strip() or None
 
 
 def _compute_cache_age(updated_at: Optional[str]) -> Optional[float]:
@@ -85,107 +90,144 @@ def _snapshot_response(
     return response
 
 
-def _account_service_base_url() -> str:
-    return ACCOUNT_SERVICE_URL or "http://localhost:8020"
+def _get_account_service_client() -> AccountServiceClient:
+    return _ACCOUNT_SERVICE_CLIENT
 
 
-async def _account_service_get(
-    path: str, *, params: Optional[Dict[str, Any]] = None
-) -> Optional[Dict[str, Any]]:
+def _extract_connection_flag(payload: Any) -> Optional[bool]:
+    if isinstance(payload, Mapping):
+        for key in (
+            "connected",
+            "is_connected",
+            "ibkr_connected",
+            "connection",
+            "connected_state",
+        ):
+            if key in payload:
+                value = payload.get(key)
+                if isinstance(value, bool):
+                    return value
+                if value is None:
+                    continue
+                if isinstance(value, (int, float)):
+                    return bool(value)
+                if isinstance(value, str):
+                    lowered = value.strip().lower()
+                    if lowered in {"true", "1", "yes", "connected", "online"}:
+                        return True
+                    if lowered in {"false", "0", "no", "disconnected", "offline"}:
+                        return False
+        for nested_key in (
+            "account_info",
+            "data",
+            "result",
+            "account_summary",
+            "accountSummary",
+            "summary",
+        ):
+            nested = payload.get(nested_key)
+            if nested is not None and nested is not payload:
+                nested_flag = _extract_connection_flag(nested)
+                if nested_flag is not None:
+                    return nested_flag
+    return None
+
+
+def _determine_connection_state(*payloads: Any) -> bool:
+    for payload in payloads:
+        flag = _extract_connection_flag(payload)
+        if flag is not None:
+            return flag
+    for payload in payloads:
+        if payload is not None:
+            return True
+    return False
+
+
+async def _resolve_command_queue_key() -> str:
+    if _COMMAND_QUEUE_OVERRIDE:
+        return _COMMAND_QUEUE_OVERRIDE
+
+    container = core.get_container()
+    provider = getattr(container, "config_provider", None) if container else None
+    if provider is None:
+        return DEFAULT_COMMAND_QUEUE
+
     try:
-        async with httpx.AsyncClient(
-            base_url=_account_service_base_url(),
-            timeout=ACCOUNT_SERVICE_TIMEOUT,
-        ) as client:
-            response = await client.get(path, params=params)
-            response.raise_for_status()
-            if not response.content:
-                return {}
-            return response.json()
-    except Exception as exc:
-        logger.warning("Account service request {} failed: {}", path, exc)
-        return None
+        queue_key = await provider.get(
+            "ib-command",
+            "queue_key",
+            default=DEFAULT_COMMAND_QUEUE,
+        )
+    except Exception:  # pragma: no cover - config lookup failure
+        return DEFAULT_COMMAND_QUEUE
+
+    queue_key_str = str(queue_key or "").strip()
+    return queue_key_str or DEFAULT_COMMAND_QUEUE
 
 
-async def _fetch_account_info_from_service(
-    force_refresh: bool,
-) -> tuple[Optional[Dict[str, Any]], bool]:
-    payload = await _account_service_get(
-        "/account/info",
-        params={"force_refresh": str(force_refresh).lower()},
+def _service_unavailable_response(
+    snapshot: Optional[Dict[str, Any]],
+    *,
+    data_key: str,
+    default: Any,
+    message: str,
+) -> JSONResponse:
+    if not snapshot:
+        raise HTTPException(status_code=503, detail=message)
+
+    connected = _determine_connection_state(snapshot.get("data"), snapshot)
+    payload = _snapshot_response(
+        snapshot,
+        data_key=data_key,
+        connected=connected,
+        from_cache=True,
+        default=default,
+        warning=message,
     )
-    if not payload:
-        return None, False
-    if not isinstance(payload, dict):
-        return None, False
-    data: Optional[Dict[str, Any]] = None
-    if "account_info" in payload and isinstance(payload["account_info"], dict):
-        data = payload["account_info"]
-    elif "data" in payload and isinstance(payload["data"], dict):
-        data = payload["data"]
-    elif "result" in payload and isinstance(payload["result"], dict):
-        data = payload["result"]
-    elif all(key in {"success", "from_cache"} for key in payload.keys()):
-        data = {}
-    else:
-        data = {k: v for k, v in payload.items() if k not in {"success", "from_cache"}}
-        if not data:
-            data = None
-    from_cache = bool(payload.get("from_cache", False))
-    return data, from_cache
-
-
-async def _fetch_positions_from_service(
-    *, fast: bool, force_refresh: bool
-) -> tuple[Optional[List[Any]], bool]:
-    payload = await _account_service_get(
-        "/account/positions",
-        params={
-            "fast": str(fast).lower(),
-            "force_refresh": str(force_refresh).lower(),
+    payload["success"] = False
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": message,
+            "snapshot": payload,
         },
     )
-    if not payload:
-        return None, False
-    if not isinstance(payload, dict):
-        return None, False
-    data = payload.get("positions")
-    if data is None:
-        data = payload.get("data")
-    if data is None and isinstance(payload.get("result"), list):
-        data = payload.get("result")
-    from_cache = bool(payload.get("from_cache", False))
-    if isinstance(data, list):
-        return data, from_cache
-    return None, from_cache
 
 
 @router.post("/api/orders/backfill_commissions")
 async def backfill_commissions(
     days: int = 7, user: Optional[str] = Depends(get_current_user)
 ):
-    """Backfill commissions and PnL for recent orders."""
-    if not connection_manager or not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    """Queue a commission backfill command for asynchronous execution."""
+
+    command_id = uuid.uuid4().hex
+    payload = {
+        "command_id": command_id,
+        "method": "backfill_commissions",
+        "args": [],
+        "kwargs": {"days": days},
+        "metadata": {
+            "source": "api.backfill_commissions",
+            "submitted_by": user or "anonymous",
+        },
+    }
+
     try:
-        loop = asyncio.get_event_loop()
-        updates = await asyncio.wait_for(
-            loop.run_in_executor(
-                None, lambda: connection_manager.backfill_commissions(days)
-            ),
-            timeout=30.0,
-        )
-        updates = int(updates or 0)
-        logger.info(
-            f"Backfill commissions completed: updates={updates}, days={days}"
-        )
-        return {"success": True, "updates": updates, "days": days}
-    except asyncio.TimeoutError:
-        logger.warning("Backfill commissions request timed out")
-        raise HTTPException(status_code=408, detail="Backfill request timed out")
-    except Exception as e:
-        logger.error(f"Backfill commissions error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        queue_key = await _resolve_command_queue_key()
+        await enqueue_ib_command(payload, queue_key=queue_key)
+    except Exception as exc:
+        logger.error("Failed to enqueue backfill commissions command", exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Failed to enqueue backfill commissions command"
+        ) from exc
+
+    logger.info(
+        "Enqueued backfill_commissions command {} for {} days",
+        command_id,
+        days,
+    )
+    return {"success": True, "command_id": command_id, "days": days}
 
 
 @router.get("/api/account_info")
@@ -196,69 +238,60 @@ async def get_account_info(
     """Retrieve IBKR account information, preferring cached snapshots."""
 
     snapshot = await read_account_info_snapshot()
-    is_connected = bool(connection_manager and connection_manager.is_connected())
+    snapshot_data = snapshot.get("data") if isinstance(snapshot, dict) else None
+    connected_snapshot = _determine_connection_state(snapshot_data, snapshot)
 
     if snapshot and not force_refresh:
         return _snapshot_response(
             snapshot,
             data_key="account_info",
-            connected=is_connected,
+            connected=connected_snapshot,
             from_cache=True,
             default={},
         )
 
-    if not is_connected:
-        if snapshot:
-            logger.warning(
-                "Not connected to IBKR, returning cached account_info snapshot",
-            )
-            return _snapshot_response(
-                snapshot,
-                data_key="account_info",
-                connected=False,
-                from_cache=True,
-                default={},
-                warning="Not connected to IBKR",
-            )
-
-        last_err = None
-        try:
-            last_err = connection_manager.get_last_connect_error()
-        except Exception:
-            last_err = None
-        logger.warning("Not connected to IBKR and no cache available for account_info")
-        return JSONResponse(
-            status_code=400,
-            content={
-                "success": False,
-                "connected": False,
-                "error": "Not connected to IBKR",
-                "last_error": last_err,
-            },
+    client = _get_account_service_client()
+    try:
+        info = await client.fetch_info(force_refresh=force_refresh)
+    except ServiceUnavailableError as exc:
+        logger.warning("Account service unavailable for account_info: {}", exc)
+        return _service_unavailable_response(
+            snapshot,
+            data_key="account_info",
+            default={},
+            message="Account service unavailable",
+        )
+    except ServiceResponseError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc.detail)) from exc
+    except ServiceClientError as exc:
+        logger.error("Account service error while fetching account info", exc_info=True)
+        return _service_unavailable_response(
+            snapshot,
+            data_key="account_info",
+            default={},
+            message="Account service unavailable",
         )
 
-    info, service_cache = await _fetch_account_info_from_service(force_refresh)
     if info is None:
-        if snapshot:
-            logger.warning(
-                "Account service unavailable, falling back to cached account_info",
-            )
-            return _snapshot_response(
-                snapshot,
-                data_key="account_info",
-                connected=is_connected,
-                from_cache=True,
-                default={},
-                warning="Account service unavailable",
-            )
-        raise HTTPException(status_code=503, detail="Account service unavailable")
+        logger.warning("Account service returned no account_info payload")
+        return _service_unavailable_response(
+            snapshot,
+            data_key="account_info",
+            default={},
+            message="Account service unavailable",
+        )
 
     refreshed_snapshot = await read_account_info_snapshot()
+    refreshed_data = (
+        refreshed_snapshot.get("data") if isinstance(refreshed_snapshot, dict) else None
+    )
+    connected = _determine_connection_state(info, refreshed_data, refreshed_snapshot)
+
     return _snapshot_response(
         refreshed_snapshot,
         data_key="account_info",
-        connected=is_connected,
-        from_cache=service_cache,
+        connected=connected,
+        from_cache=False,
         default={},
         data_override=info,
     )
@@ -273,64 +306,64 @@ async def get_positions(
     """Retrieve current positions, preferring Redis snapshots."""
 
     snapshot = await read_positions_snapshot()
-    is_connected = bool(connection_manager and connection_manager.is_connected())
+    snapshot_data = snapshot.get("data") if isinstance(snapshot, dict) else None
+    connected_snapshot = _determine_connection_state(snapshot_data, snapshot)
     force_refresh = force_refresh or not use_cache
 
     if snapshot and not force_refresh:
         return _snapshot_response(
             snapshot,
             data_key="positions",
-            connected=is_connected,
+            connected=connected_snapshot,
             from_cache=True,
             default=[],
         )
 
-    if not is_connected:
-        if snapshot:
-            logger.warning(
-                "Not connected to IBKR, returning cached positions snapshot",
-            )
-            return _snapshot_response(
-                snapshot,
-                data_key="positions",
-                connected=False,
-                from_cache=True,
-                default=[],
-                warning="Not connected to IBKR",
-            )
-        logger.warning("Not connected to IBKR and no cached positions available")
-        return {
-            "success": True,
-            "positions": [],
-            "from_cache": False,
-            "warning": "Not connected to IBKR",
-        }
+    client = _get_account_service_client()
+    try:
+        positions = await client.fetch_positions(
+            fast=fast,
+            force_refresh=force_refresh,
+        )
+    except ServiceUnavailableError as exc:
+        logger.warning("Account service unavailable for positions: {}", exc)
+        return _service_unavailable_response(
+            snapshot,
+            data_key="positions",
+            default=[],
+            message="Account service unavailable",
+        )
+    except ServiceResponseError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc.detail)) from exc
+    except ServiceClientError:
+        logger.error("Account service error while fetching positions", exc_info=True)
+        return _service_unavailable_response(
+            snapshot,
+            data_key="positions",
+            default=[],
+            message="Account service unavailable",
+        )
 
-    positions, service_cache = await _fetch_positions_from_service(
-        fast=fast,
-        force_refresh=force_refresh,
-    )
     if positions is None:
-        if snapshot:
-            logger.warning(
-                "Account service unavailable, falling back to cached positions",
-            )
-            return _snapshot_response(
-                snapshot,
-                data_key="positions",
-                connected=is_connected,
-                from_cache=True,
-                default=[],
-                warning="Account service unavailable",
-            )
-        raise HTTPException(status_code=503, detail="Account service unavailable")
+        logger.warning("Account service returned no positions payload")
+        return _service_unavailable_response(
+            snapshot,
+            data_key="positions",
+            default=[],
+            message="Account service unavailable",
+        )
 
     refreshed_snapshot = await read_positions_snapshot()
+    refreshed_data = (
+        refreshed_snapshot.get("data") if isinstance(refreshed_snapshot, dict) else None
+    )
+    connected = _determine_connection_state(refreshed_data, refreshed_snapshot, positions)
+
     return _snapshot_response(
         refreshed_snapshot,
         data_key="positions",
-        connected=is_connected,
-        from_cache=service_cache,
+        connected=connected,
+        from_cache=False,
         default=[],
         data_override=positions,
     )
@@ -350,54 +383,44 @@ async def get_account_daily_summary(
         start_date = end_date - timedelta(days=days - 1)
 
         cache_data = await load_all_daily_totals()
-        daily_stats: Dict[date, Dict[str, float]] = {}
-        orders: Optional[List[Dict[str, Any]]] = None
+        if not cache_data:
+            detail_message = "暂无Redis每日盈余缓存，请刷新账户快照后重试。"
+            refresh_hint = "请在账户服务恢复后触发刷新或等待定时任务写入缓存。"
+            return {
+                "success": False,
+                "detail": detail_message,
+                "refresh_hint": refresh_hint,
+                "days": [],
+                "range": {
+                    "start": start_date.isoformat(),
+                    "end": end_date.isoformat(),
+                },
+                "net_liquidation": None,
+                "net_liquidation_timestamp": None,
+                "base_surplus": None,
+                "surplus_source": "unknown",
+                "timezone": "America/New_York",
+            }
 
-        if cache_data and len(cache_data) > 0:
-            for day_str, metrics in cache_data.items():
-                try:
-                    trade_day = date.fromisoformat(day_str)
-                except (TypeError, ValueError):
-                    continue
-                if trade_day < start_date or trade_day > end_date:
-                    continue
-                pnl_raw = metrics.get("pnl", 0.0)
-                orders_raw = metrics.get("orders", 0)
-                try:
-                    pnl_value = float(pnl_raw)
-                except (TypeError, ValueError):
-                    pnl_value = 0.0
-                try:
-                    orders_count = int(orders_raw)
-                except (TypeError, ValueError):
-                    orders_count = 0
-                daily_stats[trade_day] = {"pnl": pnl_value, "orders": orders_count}
-        else:
-            db = get_db_manager()
-            orders = db.fetch_orders_for_pnl()
-            for order in orders:
-                try:
-                    pnl_value = float(order.get("pnl") or 0.0)
-                except (TypeError, ValueError):
-                    pnl_value = 0.0
-                ts = parse_local_datetime(order.get("executed_at") or order.get("created_at"))
-                if ts is None:
-                    continue
-                ts_ny = ts.astimezone(NY_TZ)
-                trade_date = ts_ny.date()
-                if trade_date < start_date or trade_date > end_date:
-                    continue
-                entry = daily_stats.setdefault(trade_date, {"pnl": 0.0, "orders": 0})
-                entry["pnl"] += pnl_value
-                entry["orders"] += 1
-            if cache_data == {} and orders is not None:
-                try:
-                    await rebuild_account_daily_cache(orders)
-                except Exception as exc:  # pragma: no cover - defensive guard
-                    logger.debug(
-                        "Failed to rebuild account daily cache",
-                        error=str(exc),
-                    )
+        daily_stats: Dict[date, Dict[str, float]] = {}
+        for day_str, metrics in cache_data.items():
+            try:
+                trade_day = date.fromisoformat(day_str)
+            except (TypeError, ValueError):
+                continue
+            if trade_day < start_date or trade_day > end_date:
+                continue
+            pnl_raw = metrics.get("pnl", 0.0)
+            orders_raw = metrics.get("orders", 0)
+            try:
+                pnl_value = float(pnl_raw)
+            except (TypeError, ValueError):
+                pnl_value = 0.0
+            try:
+                orders_count = int(orders_raw)
+            except (TypeError, ValueError):
+                orders_count = 0
+            daily_stats[trade_day] = {"pnl": pnl_value, "orders": orders_count}
 
         ordered_dates: List[date] = []
         current = start_date
@@ -442,7 +465,15 @@ async def get_account_daily_summary(
             except (TypeError, ValueError):
                 return None
 
-        service_info, _ = await _fetch_account_info_from_service(False)
+        service_info: Optional[Dict[str, Any]] = None
+        try:
+            service_info = await _get_account_service_client().fetch_info(
+                force_refresh=False
+            )
+        except (ServiceUnavailableError, ServiceResponseError, ServiceClientError) as exc:
+            logger.debug("Account service fetch for daily summary failed: {}", exc)
+            service_info = None
+
         if net_liquidation is None and service_info is not None:
             resolved = resolve_net(service_info)
             if resolved is not None:
