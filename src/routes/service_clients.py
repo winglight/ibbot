@@ -316,6 +316,12 @@ class ConnectionControlClient(ServiceClient):
     env_prefix = "CONNECTION_CONTROL"
     default_base_url = "http://localhost:8050"
 
+    async def fetch_config(self) -> Any:
+        return await self.request("GET", "/connection/config")
+
+    async def update_config(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request("PUT", "/connection/config", json=dict(payload))
+
     async def fetch_status(self) -> Any:
         return await self.request("GET", "/connection/status")
 
