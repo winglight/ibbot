@@ -44,6 +44,12 @@ sys.path.append(str(Path(__file__).parent))
 import core
 from src.cache import hgetall
 from src.database import get_db_manager
+from src.ib_command_health import (
+    IB_COMMAND_HEALTH_KEY,
+    IB_COMMAND_HEALTH_POLL_INTERVAL_SEC,
+    IB_COMMAND_HEALTH_STALE_AFTER_SEC,
+    build_ib_connection_health_payload,
+)
 from src.models import (
     HistoricalDataRequest,
     ChartDataRequest,
@@ -83,31 +89,6 @@ load_project_env()
 def get_core_services() -> core.CoreContainer:
     return core.require_container()
 
-
-def _get_interval_env(name: str, default: int) -> int:
-    """Read a non-negative interval (seconds) from environment variables.
-
-    Falls back to ``default`` when the value is missing or invalid and clamps
-    negative values to zero so the caller can treat ``0`` as "no throttling".
-    """
-
-    try:
-        value = int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-    return max(0, value)
-
-
-# Redis health monitoring configuration for IB command service
-IB_COMMAND_HEALTH_KEY = "hash:service:health:ib-command"
-IB_COMMAND_HEALTH_POLL_INTERVAL_SEC = _get_interval_env(
-    "IB_COMMAND_HEALTH_POLL_INTERVAL_SEC",
-    5,
-)
-IB_COMMAND_HEALTH_STALE_AFTER_SEC = _get_interval_env(
-    "IB_COMMAND_HEALTH_STALE_AFTER_SEC",
-    15,
-)
 
 # Context variables for request-scoped logging
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
@@ -421,75 +402,6 @@ async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
     return handle
 
 
-def _resolve_ib_account_type() -> str:
-    """Resolve the account type label for IB command service health."""
-
-    override = os.getenv("IB_COMMAND_ACCOUNT_TYPE") or os.getenv("IB_ACCOUNT_TYPE")
-    if override:
-        cleaned = override.strip()
-        if cleaned:
-            return cleaned.title()
-
-    flag = os.getenv("IBKR_PAPER_TRADING", "true").strip().lower()
-    if flag in {"0", "false", "no", "live"}:
-        return "Live"
-    return "Paper"
-
-
-def _build_ib_command_health_payload(
-    raw: Dict[str, str], *, stale_after: float
-) -> Dict[str, Any]:
-    """Normalise Redis health fields for websocket broadcasting."""
-
-    now = datetime.now(timezone.utc)
-    last_seen_raw = raw.get("last_seen", "")
-    last_seen_dt: datetime | None = None
-    age_seconds: float | None = None
-
-    if last_seen_raw:
-        try:
-            last_seen_dt = datetime.fromisoformat(last_seen_raw)
-        except ValueError:
-            last_seen_dt = None
-        else:
-            delta = now - last_seen_dt
-            age_seconds = max(delta.total_seconds(), 0.0)
-
-    threshold = stale_after if stale_after > 0 else 30.0
-    stale = age_seconds is None or age_seconds > threshold
-
-    queue_depth_raw = raw.get("queue_depth")
-    queue_depth: int | None = None
-    if queue_depth_raw is not None:
-        try:
-            queue_depth = int(queue_depth_raw)
-        except (TypeError, ValueError):
-            queue_depth = None
-
-    last_error_raw = raw.get("last_error")
-    last_error = last_error_raw.strip() if last_error_raw else ""
-    if not last_error:
-        last_error = None
-
-    connected = (
-        not stale
-        and last_error is None
-        and queue_depth is not None
-        and queue_depth >= 0
-    )
-
-    return {
-        "type": "connection_status",
-        "connected": connected,
-        "account_type": _resolve_ib_account_type(),
-        "last_seen": last_seen_dt.isoformat() if last_seen_dt else None,
-        "queue_depth": queue_depth,
-        "last_error": last_error,
-        "stale": stale,
-        "source": "redis",
-    }
-
-
 async def _fetch_ib_command_health_payload(
     *, stale_after: float, logger_: Any
 ) -> Dict[str, Any]:
@@ -498,7 +410,9 @@ async def _fetch_ib_command_health_payload(
     except Exception as exc:  # pragma: no cover - defensive guard
         logger_.debug("Failed to fetch IB command health from Redis: {}", exc)
         raw = {}
-    return _build_ib_command_health_payload(raw, stale_after=stale_after)
+    payload = build_ib_connection_health_payload(raw, stale_after=stale_after)
+    payload["type"] = "connection_status"
+    return payload
 
 
 async def _module_service_health_monitor(
