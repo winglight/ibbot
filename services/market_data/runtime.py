@@ -8,10 +8,15 @@ import os
 import time
 from copy import deepcopy
 from contextlib import suppress
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from loguru import logger
 
+from src.account_snapshot_cache import (
+    read_account_info_snapshot,
+    read_positions_snapshot,
+)
 from src.cache import ensure_redis
 from src.configuration.provider import (
     ConfigProvider,
@@ -20,6 +25,7 @@ from src.configuration.provider import (
 )
 from src.data_layer.event_bus import EventEnvelope
 from src.data_layer.persistence import InfluxPersistenceBackend, PersistenceBackend
+from src.utils import parse_local_datetime
 
 from .streams import StreamPublisher
 from .subscriptions import PubSubListener
@@ -85,7 +91,24 @@ class MarketDataRuntime:
             "last_error": None,
             "last_stream_error": None,
             "last_metrics_error": None,
+            "account_snapshot": {
+                "last_error": None,
+                "stale": None,
+                "updated_at": None,
+                "stale_reason": None,
+            },
         }
+        self._account_snapshot: dict[str, Any] = {
+            "account_info": None,
+            "positions": None,
+            "account_updated_at": None,
+            "account_stale": None,
+            "account_stale_reason": None,
+        }
+        self._account_snapshot_task: asyncio.Task[Any] | None = None
+        self._account_snapshot_refresh_interval: float = 0.0
+        self._account_snapshot_retry_interval: float = 30.0
+        self._account_snapshot_required: bool = False
 
     async def startup(self) -> None:
         """Initialise dependencies and start background tasks."""
@@ -111,6 +134,15 @@ class MarketDataRuntime:
                 self.metrics_period = float(config.metrics_period)
 
             self.redis = await self._redis_factory()
+            self._account_snapshot_refresh_interval = float(
+                getattr(config, "account_snapshot_refresh_interval", 0.0)
+            )
+            self._account_snapshot_retry_interval = float(
+                getattr(config, "account_snapshot_retry_interval", 30.0)
+            )
+            self._account_snapshot_required = bool(
+                getattr(config, "account_snapshot_required", False)
+            )
             self._shutdown_event.clear()
 
             listener: SupportsLifecycle | None
@@ -146,6 +178,12 @@ class MarketDataRuntime:
                 self.metrics_backend = await self._resolve_metrics_backend(config)
                 self.metrics_task = asyncio.create_task(self._default_metrics_loop())
 
+            await self._refresh_account_snapshot()
+            if self._account_snapshot_refresh_interval > 0:
+                self._account_snapshot_task = asyncio.create_task(
+                    self._account_snapshot_loop()
+                )
+
             self._started = True
             logger.info(
                 "Market data runtime started",
@@ -167,6 +205,12 @@ class MarketDataRuntime:
                 with suppress(asyncio.CancelledError):
                     await self.metrics_task
                 self.metrics_task = None
+
+            if self._account_snapshot_task is not None:
+                self._account_snapshot_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._account_snapshot_task
+                self._account_snapshot_task = None
 
             if self.listener is not None:
                 with suppress(Exception):
@@ -250,6 +294,171 @@ class MarketDataRuntime:
 
         self._notify_update_listeners(event)
 
+    def _record_account_snapshot_error(self, error: str | None) -> None:
+        state = self.health_state.setdefault(
+            "account_snapshot",
+            {"last_error": None, "stale": None, "updated_at": None, "stale_reason": None},
+        )
+        state["last_error"] = error
+        if error and self._account_snapshot_required:
+            self.health_state["last_error"] = error
+
+    def _account_snapshot_view(self) -> dict[str, Any]:
+        state = self._account_snapshot
+        return {
+            "account_info": deepcopy(state.get("account_info")),
+            "positions": deepcopy(state.get("positions")),
+            "account_updated_at": state.get("account_updated_at"),
+            "account_stale": state.get("account_stale"),
+        }
+
+    def _apply_account_snapshot_to_all(self) -> None:
+        if not self._snapshots:
+            return
+        for snapshot in self._snapshots.values():
+            snapshot.update(self._account_snapshot_view())
+
+    def _update_account_snapshot(
+        self,
+        *,
+        account_info: Any,
+        positions: Any,
+        updated_at: str | None,
+        stale: bool | None,
+        stale_reason: str | None,
+    ) -> None:
+        self._account_snapshot = {
+            "account_info": deepcopy(account_info),
+            "positions": deepcopy(positions),
+            "account_updated_at": updated_at,
+            "account_stale": stale,
+            "account_stale_reason": stale_reason,
+        }
+        state = self.health_state.setdefault(
+            "account_snapshot",
+            {"last_error": None, "stale": None, "updated_at": None, "stale_reason": None},
+        )
+        state["stale"] = stale
+        state["updated_at"] = updated_at
+        state["stale_reason"] = stale_reason
+        self._apply_account_snapshot_to_all()
+
+    def _select_account_updated_at(self, *snapshots: Mapping[str, Any] | None) -> str | None:
+        best_dt: datetime | None = None
+        best_str: str | None = None
+        fallback: str | None = None
+        for snapshot in snapshots:
+            if not snapshot:
+                continue
+            candidate = snapshot.get("updated_at")
+            if isinstance(candidate, datetime):
+                candidate_dt = candidate
+                candidate_str = candidate.isoformat()
+            elif isinstance(candidate, str):
+                parsed = parse_local_datetime(candidate)
+                if parsed is None:
+                    if fallback is None:
+                        fallback = candidate
+                    continue
+                candidate_dt = parsed
+                candidate_str = candidate
+            else:
+                continue
+            if best_dt is None or candidate_dt > best_dt:
+                best_dt = candidate_dt
+                best_str = candidate_str
+        if best_str is not None:
+            return best_str
+        return fallback
+
+    async def _refresh_account_snapshot(self) -> bool:
+        try:
+            account_info_snapshot, positions_snapshot = await asyncio.gather(
+                read_account_info_snapshot(),
+                read_positions_snapshot(),
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to refresh account snapshots", error=str(exc))
+            self._record_account_snapshot_error(str(exc))
+            return False
+
+        previous = self._account_snapshot
+
+        if account_info_snapshot is None and positions_snapshot is None:
+            self._record_account_snapshot_error("missing_snapshot_data")
+            self._update_account_snapshot(
+                account_info=previous.get("account_info"),
+                positions=previous.get("positions"),
+                updated_at=previous.get("account_updated_at"),
+                stale=previous.get("account_stale"),
+                stale_reason=previous.get("account_stale_reason"),
+            )
+            return False
+
+        info_data = (
+            deepcopy(account_info_snapshot.get("data"))
+            if isinstance(account_info_snapshot, Mapping) and account_info_snapshot.get("data") is not None
+            else deepcopy(previous.get("account_info"))
+        )
+        positions_data = (
+            deepcopy(positions_snapshot.get("data"))
+            if isinstance(positions_snapshot, Mapping) and positions_snapshot.get("data") is not None
+            else deepcopy(previous.get("positions"))
+        )
+
+        stale = previous.get("account_stale")
+        stale_reasons: list[str] = []
+        for snapshot in (account_info_snapshot, positions_snapshot):
+            if not isinstance(snapshot, Mapping):
+                continue
+            if snapshot.get("stale"):
+                stale = True
+                reason = snapshot.get("stale_reason")
+                if isinstance(reason, str) and reason.strip():
+                    stale_reasons.append(reason.strip())
+        if stale is None:
+            stale = False
+        stale_reason = ", ".join(dict.fromkeys(stale_reasons)) or None
+
+        updated_at = self._select_account_updated_at(
+            account_info_snapshot if isinstance(account_info_snapshot, Mapping) else None,
+            positions_snapshot if isinstance(positions_snapshot, Mapping) else None,
+        )
+        if updated_at is None:
+            updated_at = previous.get("account_updated_at")
+
+        self._record_account_snapshot_error(None)
+        if stale:
+            logger.debug("Account snapshots marked as stale", reason=stale_reason)
+
+        self._update_account_snapshot(
+            account_info=info_data,
+            positions=positions_data,
+            updated_at=updated_at,
+            stale=stale,
+            stale_reason=stale_reason,
+        )
+        return True
+
+    async def _account_snapshot_loop(self) -> None:
+        try:
+            while not self._shutdown_event.is_set():
+                success = await self._refresh_account_snapshot()
+                interval = (
+                    self._account_snapshot_refresh_interval
+                    if success
+                    else self._account_snapshot_retry_interval
+                )
+                if interval <= 0:
+                    await asyncio.sleep(0)
+                    continue
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
+                    break
+                except asyncio.TimeoutError:
+                    continue
+        except asyncio.CancelledError:  # pragma: no cover - cancellation path
+            raise
     async def _default_metrics_loop(self) -> None:
         """Periodically emit service metrics."""
 
@@ -354,13 +563,18 @@ class MarketDataRuntime:
         if error:
             self.health_state["last_error"] = error
 
+    def _augment_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        enriched = deepcopy(snapshot)
+        enriched.update(self._account_snapshot_view())
+        return enriched
+
     def get_snapshot(self, symbol: str) -> dict[str, Any] | None:
         """Return a deepcopy of the snapshot for *symbol* if available."""
 
         snapshot = self._snapshots.get(symbol)
         if snapshot is None:
             return None
-        return deepcopy(snapshot)
+        return self._augment_snapshot(snapshot)
 
     def get_snapshots(self, *, stale: bool | None = None) -> list[dict[str, Any]]:
         """Return a list of snapshots, optionally filtered by stale flag."""
@@ -371,7 +585,7 @@ class MarketDataRuntime:
             if stale is not None:
                 if bool(snapshot.get("stale")) is not stale:
                     continue
-            items.append(deepcopy(snapshot))
+            items.append(self._augment_snapshot(snapshot))
         return items
 
     async def get_metrics_summary(self) -> dict[str, Any] | None:

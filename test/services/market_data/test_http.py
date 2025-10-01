@@ -37,11 +37,17 @@ def test_get_market_snapshot_returns_data() -> None:
         "symbol": "BTCUSDT",
         "price": 100.5,
         "dom": {"bids": [[100.4, 1.2]]},
-        "account": {"currency": "USD"},
         "updated_at": "2024-01-01T00:00:00+00:00",
         "latency_ms": 12.3,
         "stale": False,
     }
+    runtime._update_account_snapshot(
+        account_info={"currency": "USD"},
+        positions=[{"symbol": "BTCUSDT", "position": 1}],
+        updated_at="2024-01-01T00:00:00+00:00",
+        stale=False,
+        stale_reason=None,
+    )
 
     with _create_test_app(runtime) as client:
         response = client.get("/market/BTCUSDT")
@@ -50,7 +56,9 @@ def test_get_market_snapshot_returns_data() -> None:
     payload = response.json()
     assert payload["symbol"] == "BTCUSDT"
     assert payload["price"] == 100.5
-    assert payload["account"] == {"currency": "USD"}
+    assert payload["account_info"] == {"currency": "USD"}
+    assert payload["positions"] == [{"symbol": "BTCUSDT", "position": 1}]
+    assert payload["account_stale"] is False
 
 
 def test_get_market_snapshot_missing_symbol_returns_404() -> None:
@@ -69,6 +77,13 @@ def test_list_market_snapshots_filters_by_stale_flag() -> None:
         "BTC": {"symbol": "BTC", "price": 1, "dom": None, "account": None, "updated_at": None, "latency_ms": None, "stale": False},
         "ETH": {"symbol": "ETH", "price": 2, "dom": None, "account": None, "updated_at": None, "latency_ms": None, "stale": True},
     }
+    runtime._update_account_snapshot(
+        account_info=None,
+        positions=None,
+        updated_at=None,
+        stale=False,
+        stale_reason=None,
+    )
 
     with _create_test_app(runtime) as client:
         response = client.get("/market", params={"stale": "true"})
@@ -96,6 +111,13 @@ def test_health_endpoint_reports_runtime_state() -> None:
         }
     )
     runtime.health_state["last_error"] = None
+    runtime._update_account_snapshot(
+        account_info={"balance": 1},
+        positions=[{"symbol": "ETH", "qty": 2}],
+        updated_at="2024-01-02T00:00:00+00:00",
+        stale=True,
+        stale_reason="manual",
+    )
 
     with _create_test_app(runtime) as client:
         response = client.get("/health")
@@ -106,6 +128,8 @@ def test_health_endpoint_reports_runtime_state() -> None:
     assert payload["redis"] == {"connected": True, "error": None}
     assert payload["metrics"]["events"] == 5
     assert payload["health"]["last_error"] is None
+    assert payload["health"]["account_snapshot"]["stale"] is True
+    assert payload["health"]["account_snapshot"]["stale_reason"] == "manual"
 
 
 def test_legacy_endpoint_aliases_market_snapshot() -> None:
@@ -119,6 +143,13 @@ def test_legacy_endpoint_aliases_market_snapshot() -> None:
         "latency_ms": None,
         "stale": False,
     }
+    runtime._update_account_snapshot(
+        account_info=None,
+        positions=None,
+        updated_at=None,
+        stale=False,
+        stale_reason=None,
+    )
 
     with _create_test_app(runtime) as client:
         legacy = client.get("/api/realtime_data/BTCUSDT")

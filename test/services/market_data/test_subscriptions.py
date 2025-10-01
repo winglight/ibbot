@@ -103,6 +103,13 @@ async def test_listener_recovers_from_disconnect_and_updates_snapshots() -> None
     redis = FakeRedis()
     redis.fail_first_listen = True
     runtime = MarketDataRuntime()
+    runtime._update_account_snapshot(
+        account_info=None,
+        positions=None,
+        updated_at=None,
+        stale=False,
+        stale_reason=None,
+    )
 
     listener = PubSubListener(
         config_provider=provider,
@@ -152,6 +159,13 @@ async def test_listener_updates_channels_and_loads_snapshots() -> None:
     }
 
     runtime = MarketDataRuntime()
+    runtime._update_account_snapshot(
+        account_info=None,
+        positions=None,
+        updated_at=None,
+        stale=False,
+        stale_reason=None,
+    )
     listener = PubSubListener(
         config_provider=provider,
         redis_client=redis,

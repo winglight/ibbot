@@ -303,7 +303,12 @@ class PubSubListener:
                 "latency_ms": None,
                 "stale": False,
             }
+            snapshot.update(self._runtime._account_snapshot_view())
             self._runtime._snapshots[symbol] = snapshot
+        else:
+            account_attachment = self._runtime._account_snapshot_view()
+            for key, value in account_attachment.items():
+                snapshot.setdefault(key, value)
         return snapshot
 
     def _build_channels(self, symbols: Iterable[str]) -> set[str]:
