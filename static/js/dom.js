@@ -379,13 +379,50 @@ class DOMManager {
         }
     }
 
+    setNumberInputValue(elementId, value) {
+        const element = document.getElementById(elementId);
+        if (!element) return null;
+        const numeric = this.toNumber(value);
+        if (Number.isFinite(numeric)) {
+            element.value = String(Math.trunc(numeric));
+        } else {
+            element.value = '';
+        }
+        return element;
+    }
+
     async loadConfig() {
         try {
-            const data = await this.app.apiCall('/config/dom');
-            if (data) {
-                document.getElementById('domWindow').value = data.window;
-                document.getElementById('domMaxLevels').value = data.max_levels;
-                this.applyTrendThresholds(data.trend_thresholds);
+            const response = await this.app.apiCall('/config/dom', { allowReadOnly: true });
+            const config = response && typeof response === 'object'
+                ? (response.config && typeof response.config === 'object' ? response.config : response)
+                : null;
+            if (!config) return;
+
+            const windowValue = this.toNumber(config.window ?? config.processor_window);
+            const maxLevelsValue = this.toNumber(config.max_levels ?? config.maxLevels);
+            const numRowsValue = this.toNumber(config.num_rows ?? config.numRows);
+            const thresholds = Array.isArray(config.trend_thresholds)
+                ? config.trend_thresholds
+                : Array.isArray(config.trendThresholds)
+                    ? config.trendThresholds
+                    : null;
+
+            this.setNumberInputValue('domWindow', windowValue);
+            this.setNumberInputValue('domMaxLevels', maxLevelsValue);
+
+            const numRowsEl = document.getElementById('domNumRows');
+            if (numRowsEl) {
+                if (Number.isFinite(numRowsValue) && numRowsValue > 0) {
+                    this.numRows = Math.max(1, Math.min(30, Math.trunc(numRowsValue)));
+                    numRowsEl.value = String(this.numRows);
+                } else if (!numRowsEl.value) {
+                    numRowsEl.value = String(this.numRows);
+                }
+            }
+
+            if (thresholds) {
+                this.applyTrendThresholds(thresholds);
             }
         } catch (e) {
             console.error('Failed to load DOM config', e);
