@@ -119,7 +119,9 @@ def run_services(
         )
         return 2
 
-    if not skip_redis_check:
+    should_skip_redis_check = skip_redis_check or dry_run
+
+    if not should_skip_redis_check:
         ok, errors = _ensure_redis_available(services)
         if not ok:
             print(
