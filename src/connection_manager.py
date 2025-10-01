@@ -141,6 +141,15 @@ class ConnectionManager:
         # Weak reference back to IBKRClient (assigned during IBKRClient initialisation)
         self._ibkr_client_ref = None  # type: ignore[attr-defined]
         self._ibkr_connect_in_progress = False
+        self._client_id_min = max(0, _get_env_int("IBKR_CLIENT_ID_MIN", 1))
+        self._client_id_max = max(self._client_id_min, _get_env_int("IBKR_CLIENT_ID_MAX", 32))
+        if self._client_id_min == self._client_id_max:
+            self._client_id_cycle_size = 1
+        else:
+            self._client_id_cycle_size = (self._client_id_max - self._client_id_min) + 1
+        self._client_id_retry_limit = max(1, _get_env_int("IBKR_CLIENT_ID_RETRY_LIMIT", 5))
+        self._next_client_id_hint = self._normalize_client_id(self.config.client_id)
+        self.config.client_id = self._next_client_id_hint
 
     def _notify_ibkr_client_connected(self, *, external: bool) -> None:
         """Inform ``IBKRClient`` when a connection succeeds outside its control."""
@@ -167,6 +176,115 @@ class ConnectionManager:
                 "IBKR client notification after connect failed",
                 error=str(exc),
             )
+
+    def _normalize_client_id(self, candidate: int) -> int:
+        try:
+            candidate = int(candidate)
+        except Exception:
+            candidate = self._client_id_min
+
+        lower = self._client_id_min
+        upper = self._client_id_max
+        span = max(1, getattr(self, "_client_id_cycle_size", 1))
+
+        if lower > upper:
+            lower, upper = upper, lower
+            span = max(1, (upper - lower) + 1)
+
+        if span <= 1:
+            return lower
+
+        if candidate < lower or candidate > upper:
+            normalized = lower + ((candidate - lower) % span)
+        else:
+            normalized = candidate
+
+        if normalized < lower:
+            normalized = lower
+        elif normalized > upper:
+            normalized = upper
+
+        return normalized
+
+    def _compute_next_client_id(self, current: int) -> int:
+        lower = self._client_id_min
+        span = max(1, getattr(self, "_client_id_cycle_size", 1))
+        current_norm = self._normalize_client_id(current)
+
+        if span <= 1:
+            return current_norm
+
+        offset = (current_norm - lower + 1) % span
+        return lower + offset
+
+    def _handle_client_id_conflict(
+        self,
+        current_id: Optional[int],
+        *,
+        source: str,
+        notify_client: bool = True,
+    ) -> int:
+        with self._connect_attempt_lock:
+            conflict_id = self._normalize_client_id(current_id or self.config.client_id)
+            next_id = self._compute_next_client_id(conflict_id)
+            self.config.client_id = next_id
+            self._next_client_id_hint = next_id
+            self._last_connect_error = "检测到客户端ID冲突"
+
+        if next_id == conflict_id and self._client_id_cycle_size <= 1:
+            connection_logger.warning(
+                "Detected IBKR client ID conflict but no alternate IDs are configured",
+                client_id=conflict_id,
+                source=source,
+            )
+            return conflict_id
+
+        connection_logger.warning(
+            "Detected IBKR client ID conflict; advancing to next ID",
+            previous_client_id=conflict_id,
+            next_client_id=next_id,
+            source=source,
+        )
+
+        try:
+            if self.ib and self.ib.isConnected():
+                self.ib.disconnect()
+        except Exception:
+            pass
+
+        self.connected = False
+
+        client = None
+        ref = getattr(self, "_ibkr_client_ref", None)
+        if ref is not None:
+            try:
+                client = ref()
+            except Exception:
+                client = None
+
+        if client is not None and notify_client:
+            loop = getattr(client, "_async_loop", None)
+
+            def _trigger_reconnect() -> None:
+                try:
+                    client._handle_disconnect_detected("client-id-conflict")  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                try:
+                    client._schedule_reconnect_task()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
+            if loop and not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(_trigger_reconnect)
+                except RuntimeError:
+                    if loop.is_running():
+                        _trigger_reconnect()
+            else:
+                _trigger_reconnect()
+
+        return next_id
         
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
@@ -287,14 +405,17 @@ class ConnectionManager:
                 self._patch_wrapper_depth_guard(self.ib.wrapper)
                 
                 # 尝试连接，如果客户端ID冲突则自动尝试其他ID
-                original_client_id = self.config.client_id
                 connected = False
-                
-                for attempt in range(5):  # 最多尝试5次
-                    try_client_id = original_client_id + attempt
-                    if try_client_id > 32:  # IBKR客户端ID范围是1-32
-                        try_client_id = try_client_id - 32
-                    
+                attempts = 0
+                attempted_ids = set()
+                try_client_id = self._normalize_client_id(self._next_client_id_hint)
+
+                while attempts < self._client_id_retry_limit:
+                    if try_client_id in attempted_ids:
+                        break
+                    attempted_ids.add(try_client_id)
+                    attempts += 1
+                    self.config.client_id = try_client_id
                     try:
                         connection_logger.info(f"尝试连接IBKR，客户端ID: {try_client_id}")
                         # 使用asyncio.wait_for添加额外的超时保护
@@ -310,9 +431,9 @@ class ConnectionManager:
                                 # 验证连接是否真正建立
                         if self.ib.isConnected():
                             # 连接成功，更新配置中的客户端ID
-                            self.config.client_id = try_client_id
                             connected = True
                             self._last_connect_error = None
+                            self._next_client_id_hint = try_client_id
                             connection_logger.info(f"成功连接IBKR，使用客户端ID: {try_client_id}")
                             break
                         else:
@@ -333,11 +454,12 @@ class ConnectionManager:
                             "error 326",
                         )
                         if any(signal in lower_error for signal in client_id_in_use_signals):
-                            connection_logger.warning(f"客户端ID {try_client_id} 已被使用，尝试下一个ID")
-                            try:
-                                self.ib.disconnect()
-                            except Exception:
-                                pass
+                            next_id = self._handle_client_id_conflict(
+                                try_client_id,
+                                source="connect-attempt",
+                                notify_client=False,
+                            )
+                            try_client_id = next_id
                             continue
                         elif "TimeoutError" in error_msg or "timeout" in error_msg.lower():
                             self._last_connect_error = f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
@@ -346,13 +468,17 @@ class ConnectionManager:
                             self._last_connect_error = f"连接被拒绝 - TWS/Gateway可能未运行或端口错误 (端口: {self.config.port})"
                             raise Exception(self._last_connect_error)
                         else:
-                            if attempt == 4:  # 最后一次尝试
+                            if attempts >= self._client_id_retry_limit:
                                 self._last_connect_error = f"连接失败: {error_msg}"
                                 raise Exception(self._last_connect_error)
                             connection_logger.warning(f"客户端ID {try_client_id} 连接失败: {error_msg}，尝试下一个ID")
-                 
+
+                    try_client_id = self._compute_next_client_id(try_client_id)
+                    self._next_client_id_hint = try_client_id
+
                 if not connected:
-                    self._last_connect_error = f"无法找到可用的客户端ID (尝试了 {original_client_id} 到 {original_client_id + 4})"
+                    attempted_list = ", ".join(str(cid) for cid in sorted(attempted_ids)) or str(self.config.client_id)
+                    self._last_connect_error = f"无法找到可用的客户端ID (尝试了 {attempted_list})"
                     raise Exception(self._last_connect_error)
                 
                 # 连接后设置默认市场数据类型，避免无权限时报 10197
@@ -398,6 +524,20 @@ class ConnectionManager:
                     def error_handler(reqId, errorCode, errorString, advancedOrderRejectJson=""):
                         """处理IBKR错误，特别是订单相关错误"""
                         connection_logger.info(f"IBKR Error - ReqId: {reqId}, Code: {errorCode}, Message: {errorString}")
+
+                        lower_error_string = (errorString or "").lower()
+                        conflict_signals = (
+                            "client id is already in use",
+                            "clientid already in use",
+                            "already connected",
+                            "duplicate",
+                            "peer closed connection",
+                            "error 326",
+                        )
+
+                        if errorCode == 326 or any(signal in lower_error_string for signal in conflict_signals):
+                            self._handle_client_id_conflict(self.config.client_id, source="error-handler")
+                            return
 
                         if errorCode in {2107, 2108}:
                             connection_logger.info(
