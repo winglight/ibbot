@@ -46,6 +46,18 @@ class MarketDataServiceConfig:
         default=14,
         metadata={"env": "MARKET_DATA_INDICATOR_PERIOD"},
     )
+    service_name: str = field(
+        default="market-data",
+        metadata={"env": "MARKET_DATA_SERVICE_NAME"},
+    )
+    stream_key: str = field(
+        default="stream:market-data",
+        metadata={"env": "MARKET_DATA_STREAM_KEY"},
+    )
+    metrics_period: float = field(
+        default=60.0,
+        metadata={"env": "MARKET_DATA_METRICS_PERIOD"},
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.symbols, Iterable) or isinstance(self.symbols, (str, bytes)):
@@ -65,6 +77,12 @@ class MarketDataServiceConfig:
             raise ValueError("stream_length must be a positive integer")
         if not isinstance(self.indicator_period, int) or self.indicator_period <= 0:
             raise ValueError("indicator_period must be a positive integer")
+        if not isinstance(self.service_name, str) or not self.service_name.strip():
+            raise ValueError("service_name must be a non-empty string")
+        if not isinstance(self.stream_key, str) or not self.stream_key.strip():
+            raise ValueError("stream_key must be a non-empty string")
+        if not isinstance(self.metrics_period, (int, float)) or self.metrics_period <= 0:
+            raise ValueError("metrics_period must be a positive number")
 
 
 class ConfigProvider(Iterable[T]):
