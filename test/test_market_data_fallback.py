@@ -1,3 +1,7 @@
+from datetime import timedelta
+
+import pytest
+
 from src.database import get_db_manager
 from src.routes import market_data as market_data_module
 
@@ -75,3 +79,66 @@ def test_chart_data_fallback_returns_db_cache(monkeypatch, client, admin_headers
     first = payload["data"][0]
     assert first["close"] == 108.0
     assert first["open"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_snapshot_prefers_service(monkeypatch):
+    captured = {}
+
+    async def fetch_service(path: str):
+        captured["path"] = path
+        return {
+            "symbol": "ES",
+            "price": 4444.25,
+            "bid": 4444.0,
+            "ask": 4444.5,
+            "volume": 10,
+            "timestamp": market_data_module.now_local().isoformat(),
+            "stale": False,
+        }
+
+    async def ensure_stub(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(market_data_module, "_fetch_service_json", fetch_service)
+    monkeypatch.setattr(market_data_module, "ensure_redis", ensure_stub)
+
+    snapshot = await market_data_module._fetch_market_snapshot("ES")
+
+    assert captured["path"].endswith("ES")
+    assert snapshot["source"] == "service"
+    assert snapshot["last"] == pytest.approx(4444.25)
+    assert snapshot["bid"] == pytest.approx(4444.0)
+    assert snapshot["stale"] is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_snapshot_marks_stale_from_redis(monkeypatch):
+    class FakeRedis:
+        async def hgetall(self, key: str):
+            assert key == "hash:market:snapshot:ES"
+            ts = market_data_module.now_local() - timedelta(minutes=15)
+            return {
+                "symbol": "ES",
+                "price": "4441.0",
+                "bid": "4440.75",
+                "ask": "4441.25",
+                "volume": "12",
+                "timestamp": ts.isoformat(),
+                "stale": "1",
+            }
+
+    async def fetch_service(*_args, **_kwargs):
+        return None
+
+    async def ensure_stub(*_args, **_kwargs):
+        return FakeRedis()
+
+    monkeypatch.setattr(market_data_module, "_fetch_service_json", fetch_service)
+    monkeypatch.setattr(market_data_module, "ensure_redis", ensure_stub)
+
+    snapshot = await market_data_module._fetch_market_snapshot("ES")
+
+    assert snapshot["source"] == "redis"
+    assert snapshot["stale"] is True
+    assert snapshot["bid"] == pytest.approx(4440.75)
