@@ -176,6 +176,31 @@ async def publish_market_update(
     return int(receivers or 0)
 
 
+async def read_hash(
+    key: str,
+    *,
+    redis: Redis | None = None,
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    """Read a Redis hash and normalise byte payloads to ``str`` values."""
+
+    client = await _ensure_client(redis)
+    raw = await client.hgetall(key)
+    if not raw:
+        return {}
+
+    result: dict[str, Any] = {}
+    for field, value in raw.items():
+        if isinstance(field, (bytes, bytearray)):
+            field = field.decode(encoding, errors="ignore")
+        else:
+            field = str(field)
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode(encoding, errors="ignore")
+        result[field] = value
+    return result
+
+
 async def read_stream(
     *,
     stream_key: str = DEFAULT_MARKET_STREAM,
@@ -407,6 +432,7 @@ __all__ = [
     "redis_get",
     "enqueue_ib_command",
     "publish_market_update",
+    "read_hash",
     "read_stream",
     "ack_stream",
     "get_queue_length",
