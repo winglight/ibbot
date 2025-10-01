@@ -137,6 +137,31 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.anyio("asyncio")
+async def test_startup_allows_disabling_embedded_risk_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = FakeRedis()
+
+    async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
+        return fake_redis
+
+    monkeypatch.setenv("ENABLE_EMBEDDED_RISK_MANAGER", "0")
+    monkeypatch.setattr("core.container.init_redis", fake_init_redis)
+    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
+
+    await core.shutdown()
+
+    async with app.router.lifespan_context(app):
+        container = core.require_container()
+        risk_manager = container.risk_manager
+        assert risk_manager is not None
+        assert not getattr(risk_manager, "monitoring_active", False)
+
+    await core.shutdown()
+
+
+@pytest.mark.anyio("asyncio")
 async def test_app_routes_available_without_ib(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_redis = FakeRedis()
 
