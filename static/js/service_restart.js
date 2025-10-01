@@ -18,10 +18,10 @@
     };
 
     const BADGE_LABELS = {
-        idle: '待命',
+        idle: '已下线',
         running: '重启中',
-        success: '已就绪',
-        error: '失败',
+        success: '运行中',
+        error: '不健康',
     };
 
     function formatMessage(template, replacements = {}) {

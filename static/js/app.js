@@ -937,10 +937,10 @@ class TradingApp {
                     errorMessage: '重启失败，请稍后重试',
                     initialMessage: '点击重启以重新启动 {service}。',
                     badgeLabels: {
-                        idle: '待命',
+                        idle: '已下线',
                         running: '重启中',
-                        success: '已就绪',
-                        error: '失败',
+                        success: '运行中',
+                        error: '不健康',
                     },
                     onStatusChange: (info) => {
                         if (info.meta?.trigger !== 'restart') {

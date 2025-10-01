@@ -450,8 +450,15 @@ body.side-panel-open {
     animation: panelFocusPulse 1.2s ease;
 }
 
+
+.service-status-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 0.75rem;
+}
+
 .service-status-list > .service-status-item + .service-status-item {
-    margin-top: 0.75rem;
+    margin-top: 0;
 }
 
 .service-status-item {
