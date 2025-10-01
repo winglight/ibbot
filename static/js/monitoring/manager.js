@@ -103,6 +103,7 @@
             this._syncingCharts = false;
             this.monitorModalFullscreen = false;
             this._monitorFullscreenChangeHandler = null;
+            this.latestServiceHealth = {};
         }
 
         ensureApp(methodName = 'method') {
@@ -1786,6 +1787,43 @@
                 }
             } finally {
                 this._syncingCharts = false;
+            }
+        }
+
+        applyServiceHealth(services = {}, payload = {}) {
+            if (!services || typeof services !== 'object') {
+                this.latestServiceHealth = {};
+            } else {
+                this.latestServiceHealth = { ...services };
+            }
+            this.renderServiceHealth(payload);
+            return true;
+        }
+
+        renderServiceHealth(meta = {}) {
+            const container = document.querySelector('[data-service-health]');
+            if (!container) return;
+            const entries = Object.entries(this.latestServiceHealth || {});
+            if (entries.length === 0) {
+                container.textContent = 'No service metrics';
+                container.dataset.state = 'empty';
+                container.title = '';
+                return;
+            }
+            const summary = entries.map(([name, values]) => {
+                let status = 'unknown';
+                if (values && typeof values === 'object' && values.status) {
+                    status = String(values.status);
+                }
+                const lastSeen = values && typeof values === 'object' && values.last_seen ? ` (last: ${values.last_seen})` : '';
+                return `${name}: ${status}${lastSeen}`;
+            }).join(' | ');
+            container.textContent = summary;
+            container.dataset.state = 'ok';
+            try {
+                container.title = JSON.stringify(this.latestServiceHealth, null, 2);
+            } catch (error) {
+                container.title = '';
             }
         }
 
