@@ -14,7 +14,7 @@ from .account_snapshot_cache import (
     write_account_info_snapshot,
     write_positions_snapshot,
 )
-from .utils import now_local
+from .utils import now_local, to_local_iso
 
 
 def _read_interval_env(name: str, default: int) -> int:
@@ -150,7 +150,11 @@ class AccountSnapshotService:
         info = await ib_client.get_account_info()
         if info is not None:
             await write_account_info_snapshot(info, reason)
-            self._last_account_refresh = now_local()
+            refreshed_at = now_local()
+            self._last_account_refresh = refreshed_at
+            self._log_snapshot_update(
+                "account_info", reason=reason, refreshed_at=refreshed_at
+            )
         return info
 
     async def refresh_positions(
@@ -164,7 +168,11 @@ class AccountSnapshotService:
 
         positions = await ib_client.get_positions(fast=fast)
         await write_positions_snapshot(positions, reason)
-        self._last_positions_refresh = now_local()
+        refreshed_at = now_local()
+        self._last_positions_refresh = refreshed_at
+        self._log_snapshot_update(
+            "positions", reason=reason, refreshed_at=refreshed_at
+        )
         return positions
 
     async def refresh_both(
@@ -185,6 +193,8 @@ class AccountSnapshotService:
         now = now_local()
         self._last_account_refresh = now
         self._last_positions_refresh = now
+        self._log_snapshot_update("account_info", reason=reason, refreshed_at=now)
+        self._log_snapshot_update("positions", reason=reason, refreshed_at=now)
         return {"account_info": info, "positions": positions}
 
     # ------------------------------------------------------------------
@@ -247,6 +257,34 @@ class AccountSnapshotService:
             >= timedelta(seconds=self.refresh_interval_seconds)
         )
         return account_due or positions_due
+
+    # ------------------------------------------------------------------
+    # Logging helpers
+
+    def _next_refresh_display(self, reference: Optional[datetime] = None) -> str:
+        """Return a human-readable timestamp for the next planned refresh."""
+
+        if self.refresh_interval_seconds <= 0:
+            return "disabled"
+
+        base = reference or now_local()
+        next_refresh = base + timedelta(seconds=self.refresh_interval_seconds)
+        return to_local_iso(next_refresh) or "unknown"
+
+    def _log_snapshot_update(
+        self, scope: str, *, reason: str, refreshed_at: Optional[datetime]
+    ) -> None:
+        """Emit a structured log message after refreshing a snapshot."""
+
+        refreshed_text = to_local_iso(refreshed_at) if refreshed_at else "unknown"
+        next_refresh = self._next_refresh_display(refreshed_at)
+        snapshot_service_logger.info(
+            "{} snapshot updated (reason={}, refreshed_at={}, next_refresh={})",
+            scope,
+            reason,
+            refreshed_text,
+            next_refresh,
+        )
 
 
 def _get_ib_client():
