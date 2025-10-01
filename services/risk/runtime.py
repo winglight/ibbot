@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
 
 from services.risk.engine import RiskEngine, RiskEvent
+from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
     ack_stream,
@@ -64,6 +65,10 @@ class RiskRuntime:
     _pending_commands: MutableMapping[str, RiskEvent] = field(default_factory=dict, init=False, repr=False)
     _configured: bool = field(default=False, init=False, repr=False)
     _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _market_last_processed: datetime | None = field(default=None, init=False, repr=False)
+    _results_last_processed: datetime | None = field(default=None, init=False, repr=False)
+    _health_last_error: str = field(default="", init=False, repr=False)
+    _last_exception_message: str = field(default="", init=False, repr=False)
 
     async def update_config(self, config: Mapping[str, Any]) -> None:
         async with self._config_lock:
@@ -87,6 +92,46 @@ class RiskRuntime:
                 pass
             self._configured = True
 
+    def _health_metrics(self, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        metrics: dict[str, Any] = {
+            "market_last_processed_at": self._market_last_processed.isoformat()
+            if self._market_last_processed
+            else "",
+            "results_last_processed_at": self._results_last_processed.isoformat()
+            if self._results_last_processed
+            else "",
+            "pending_commands": len(self._pending_commands),
+        }
+        if self._last_exception_message:
+            metrics["last_exception"] = self._last_exception_message
+        if extra:
+            metrics.update(extra)
+        return metrics
+
+    async def _update_health(
+        self,
+        *,
+        healthy: bool,
+        last_error: str | None = None,
+        extra_metrics: Mapping[str, Any] | None = None,
+    ) -> None:
+        if self._redis is None:
+            return
+        if healthy:
+            self._health_last_error = ""
+        elif last_error is not None:
+            self._health_last_error = last_error
+            self._last_exception_message = last_error
+        metrics = self._health_metrics(extra_metrics)
+        await update_service_health(
+            self._redis,
+            self.service_name,
+            healthy=healthy,
+            last_error=self._health_last_error,
+            metrics=metrics,
+            logger=self._logger,
+        )
+
     async def start(self) -> None:
         if not self._configured:
             raise RuntimeError("RiskRuntime must be configured before starting")
@@ -96,6 +141,7 @@ class RiskRuntime:
         self._stop_event.clear()
         self._market_task = asyncio.create_task(self._market_loop(), name="risk-market-loop")
         self._results_task = asyncio.create_task(self._results_loop(), name="risk-results-loop")
+        await self._update_health(healthy=True, extra_metrics={"state": "started"})
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -108,6 +154,12 @@ class RiskRuntime:
         )
         self._market_task = None
         self._results_task = None
+        if self._redis is not None:
+            await self._update_health(
+                healthy=False,
+                last_error="stopped",
+                extra_metrics={"state": "stopped"},
+            )
         self._redis = None
         self._pending_commands.clear()
 
@@ -147,14 +199,24 @@ class RiskRuntime:
                     block=int(self.poll_interval * 1000),
                     redis=self._redis,
                 )
-            except Exception:
+            except Exception as exc:
                 if self._logger:
                     self._logger.warning("Failed to read market stream", exc_info=True)
+                await self._update_health(
+                    healthy=False,
+                    last_error=str(exc),
+                    extra_metrics={"loop": "market", "state": "read_failed"},
+                )
                 await asyncio.sleep(self.reconnect_delay)
                 continue
             if not messages:
+                await self._update_health(
+                    healthy=True,
+                    extra_metrics={"loop": "market", "messages": 0, "state": "idle"},
+                )
                 continue
             ack_ids: list[str] = []
+            self._market_last_processed = _utc_now()
             for message in messages:
                 handled = await self._handle_market_message(message.data)
                 if handled:
@@ -162,9 +224,23 @@ class RiskRuntime:
             if ack_ids:
                 try:
                     await ack_stream(ack_ids, stream_key=self.market_stream_key, group=self.market_group, redis=self._redis)
-                except Exception:
+                except Exception as exc:
                     if self._logger:
                         self._logger.warning("Failed to acknowledge market messages", exc_info=True)
+                    await self._update_health(
+                        healthy=False,
+                        last_error=str(exc),
+                        extra_metrics={
+                            "loop": "market",
+                            "state": "ack_failed",
+                            "messages": len(messages),
+                        },
+                    )
+                    continue
+            await self._update_health(
+                healthy=True,
+                extra_metrics={"loop": "market", "messages": len(messages), "state": "processed"},
+            )
 
     async def _results_loop(self) -> None:
         assert self._redis is not None
@@ -178,14 +254,24 @@ class RiskRuntime:
                     block=int(self.poll_interval * 1000),
                     redis=self._redis,
                 )
-            except Exception:
+            except Exception as exc:
                 if self._logger:
                     self._logger.warning("Failed to read results stream", exc_info=True)
+                await self._update_health(
+                    healthy=False,
+                    last_error=str(exc),
+                    extra_metrics={"loop": "results", "state": "read_failed"},
+                )
                 await asyncio.sleep(self.reconnect_delay)
                 continue
             if not messages:
+                await self._update_health(
+                    healthy=True,
+                    extra_metrics={"loop": "results", "messages": 0, "state": "idle"},
+                )
                 continue
             ack_ids: list[str] = []
+            self._results_last_processed = _utc_now()
             for message in messages:
                 handled = await self._handle_result_message(message.data)
                 if handled:
@@ -193,9 +279,23 @@ class RiskRuntime:
             if ack_ids:
                 try:
                     await ack_stream(ack_ids, stream_key=self.results_stream_key, group=self.results_group, redis=self._redis)
-                except Exception:
+                except Exception as exc:
                     if self._logger:
                         self._logger.warning("Failed to acknowledge result messages", exc_info=True)
+                    await self._update_health(
+                        healthy=False,
+                        last_error=str(exc),
+                        extra_metrics={
+                            "loop": "results",
+                            "state": "ack_failed",
+                            "messages": len(messages),
+                        },
+                    )
+                    continue
+            await self._update_health(
+                healthy=True,
+                extra_metrics={"loop": "results", "messages": len(messages), "state": "processed"},
+            )
 
     async def _handle_market_message(self, payload: Mapping[str, Any]) -> bool:
         symbol = payload.get("symbol")
