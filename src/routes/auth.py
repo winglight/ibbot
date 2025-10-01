@@ -66,7 +66,10 @@ def _build_user_accounts() -> list[UserAccount]:
     return users
 
 
-USER_ACCOUNTS = _build_user_accounts()
+def get_user_accounts() -> list[UserAccount]:
+    """Return the configured application user accounts."""
+
+    return _build_user_accounts()
 
 
 EXEMPT_PATHS = {
@@ -122,7 +125,7 @@ async def get_current_user(request: Request):
 @router.post('/api/login', response_model=TokenResponse)
 async def login(req: LoginRequest):
     matched: Optional[UserAccount] = None
-    for account in USER_ACCOUNTS:
+    for account in get_user_accounts():
         if req.username == account.username and req.password == account.password:
             matched = account
             break
@@ -161,13 +164,19 @@ def require_roles(*roles: str, action: str | None = None):
                 success=False,
                 detail=f"forbidden: requires {'/'.join(sorted(allowed_roles))}",
             )
-            detail: Mapping[str, object] = {
+            if getattr(request.state, 'is_read_only', False):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Read-only accounts cannot perform this action",
+                )
+
+            detail_payload: Mapping[str, object] = {
                 "error": "RBAC_FORBIDDEN",
                 "message": "Insufficient permissions",
                 "required_roles": sorted(allowed_roles),
                 "role": role,
             }
-            raise HTTPException(status_code=403, detail=detail)
+            raise HTTPException(status_code=403, detail=detail_payload)
 
         return user
 

@@ -1,6 +1,8 @@
 # Environment overrides
-.env
+.env.local
+.env.*.local
 .env.*
+!.env
 !.env.example
 
 # Data directories generated at runtime

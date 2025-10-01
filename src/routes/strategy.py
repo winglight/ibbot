@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional, Sequence
@@ -24,17 +26,36 @@ from src.models import (
 )
 from src.strategy_manager import StrategyManager
 from src.utils import now_local, parse_local_datetime
+from src.ibbot.redis import get_redis_client
 
 router = APIRouter()
+
+# Optional module-level override used by tests to bypass the global core container.
+strategy_manager: StrategyManager | None = None
 
 _strategy_service_url_env = os.getenv("STRATEGY_SERVICE_URL", "").strip()
 STRATEGY_SERVICE_URL = _strategy_service_url_env.rstrip("/") if _strategy_service_url_env else None
 DEFAULT_STRATEGY_SERVICE_URL = "http://localhost:8045"
 STRATEGY_SERVICE_TIMEOUT = float(os.getenv("STRATEGY_SERVICE_TIMEOUT", "10.0"))
 
+STRATEGY_QUEUE_KEY = os.getenv("STRATEGY_QUEUE_KEY", "list:queue:strategy")
+STRATEGY_EVENT_STREAM_KEY = os.getenv("STRATEGY_EVENT_STREAM_KEY", "stream:strategy:events")
+
 
 def _strategy_service_base_url() -> str:
     return STRATEGY_SERVICE_URL or DEFAULT_STRATEGY_SERVICE_URL
+
+
+def _resolve_strategy_manager(request: Request) -> StrategyManager:
+    """Resolve the strategy manager instance for route handlers."""
+
+    if strategy_manager is not None:
+        return strategy_manager
+
+    try:
+        return get_strategy_manager(request)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="Strategy manager unavailable") from exc
 
 
 def _api_path(path: str) -> str:
@@ -124,6 +145,56 @@ async def _strategy_service_request(
 def _success_response(**payload: Any) -> Dict[str, Any]:
     response = {"success": True}
     response.update(payload)
+    return response
+
+
+async def _enqueue_strategy_task_local(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        redis = await get_redis_client()
+    except Exception as exc:
+        logger.error("Strategy queue unavailable", error=str(exc))
+        raise HTTPException(status_code=503, detail="Strategy queue unavailable") from exc
+
+    task_id = uuid.uuid4().hex
+    queued_at = now_local().isoformat()
+    command = {
+        "task_id": task_id,
+        "queued_at": queued_at,
+        "strategy": payload.get("strategy"),
+        "symbol": payload.get("symbol"),
+        "action": payload.get("action"),
+        "qty": payload.get("qty"),
+        "type": payload.get("type"),
+        "exchange": payload.get("exchange"),
+        "sec_type": payload.get("sec_type"),
+        "options": payload.get("options") or {},
+        "metadata": payload.get("metadata") or {},
+    }
+
+    await redis.rpush(STRATEGY_QUEUE_KEY, json.dumps(command))
+
+    status = "queued"
+    event_payload: Dict[str, Any] | None = None
+    try:
+        entries = await redis.xrevrange(STRATEGY_EVENT_STREAM_KEY, count=1)
+    except Exception as exc:
+        logger.debug("Failed to read strategy event stream", error=str(exc))
+        entries = []
+
+    if entries:
+        _, data = entries[0]
+        if isinstance(data, dict):
+            event_payload = dict(data)
+            status = str(event_payload.get("status") or status)
+
+    response: Dict[str, Any] = {
+        "success": True,
+        "task_id": task_id,
+        "queue": STRATEGY_QUEUE_KEY,
+        "status": status,
+    }
+    if event_payload:
+        response["event"] = event_payload
     return response
 
 
@@ -358,7 +429,7 @@ async def _clear_strategy_executions_local(
 @router.get("/api/strategy/settings")
 async def get_strategy_settings(
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "GET",
@@ -371,7 +442,7 @@ async def get_strategy_settings(
 async def update_strategy_settings(
     settings: StrategySettingsRequest,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "POST",
@@ -384,7 +455,7 @@ async def update_strategy_settings(
 @router.post("/api/strategy/settings/generate-token")
 async def generate_strategy_token(
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "POST",
@@ -396,7 +467,7 @@ async def generate_strategy_token(
 @router.get("/api/strategy/files")
 async def list_strategy_files(
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "GET",
@@ -408,7 +479,7 @@ async def list_strategy_files(
 @router.get("/api/strategies")
 async def list_strategies(
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "GET",
@@ -421,7 +492,7 @@ async def list_strategies(
 async def add_strategy_api(
     strategy: StrategyRequest,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "POST",
@@ -435,7 +506,7 @@ async def add_strategy_api(
 async def get_strategy_api(
     name: str,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "GET",
@@ -448,7 +519,7 @@ async def get_strategy_api(
 async def get_internal_strategy_info_api(
     name: str,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "GET",
@@ -462,7 +533,7 @@ async def update_strategy_parameter(
     name: str,
     payload: StrategyParameterUpdateRequest,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "POST",
@@ -476,7 +547,7 @@ async def update_strategy_parameter(
 async def get_strategy_risk_settings_api(
     name: str,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "GET",
@@ -490,7 +561,7 @@ async def update_strategy_risk_settings_api(
     name: str,
     payload: StrategyRiskSettings,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "PUT",
@@ -506,7 +577,7 @@ async def update_strategy_risk_settings_api(
 async def get_internal_strategy_status_api(
     name: str,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "GET",
@@ -520,7 +591,7 @@ async def request_strategy_data_push(
     name: str,
     payload: StrategyDataPushRequest,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "POST",
@@ -535,7 +606,7 @@ async def update_strategy_api(
     name: str,
     updates: Dict[str, Any],
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "PUT",
@@ -550,7 +621,7 @@ async def rename_strategy_api(
     name: str,
     payload: StrategyRenameRequest,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "POST",
@@ -564,7 +635,7 @@ async def rename_strategy_api(
 async def delete_strategy_api(
     name: str,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "DELETE",
@@ -578,7 +649,7 @@ async def toggle_strategy_api(
     name: str,
     enabled: bool,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "POST",
@@ -592,7 +663,7 @@ async def toggle_strategy_api(
 async def reset_strategy_data_api(
     name: str,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "POST",
@@ -608,7 +679,7 @@ async def get_strategy_performance_api(
     start: Optional[str] = None,
     end: Optional[str] = None,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     params = {"range": range}
     if start:
@@ -651,7 +722,12 @@ async def submit_external_strategy_order(
         metadata = data.setdefault("metadata", {})
         if isinstance(metadata, dict):
             metadata.setdefault("client", client_host)
-    return await _strategy_service_request("POST", "/strategy", json=data)
+    return await _strategy_service_request(
+        "POST",
+        "/strategy",
+        json=data,
+        fallback=lambda: _enqueue_strategy_task_local(dict(data)),
+    )
 
 
 @router.get("/api/strategies/{name}/executions")
@@ -660,7 +736,7 @@ async def get_strategy_executions(
     limit: int = 100,
     force_refresh: bool = False,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     params = {
         "limit": max(1, min(int(limit or 1), 1000)),
@@ -680,7 +756,7 @@ async def get_strategy_executions(
 async def clear_strategy_executions(
     name: str,
     user: Optional[str] = Depends(get_current_user),
-    strategy_manager: StrategyManager = Depends(get_strategy_manager),
+    strategy_manager: StrategyManager = Depends(_resolve_strategy_manager),
 ) -> Any:
     return await _strategy_service_request(
         "DELETE",
