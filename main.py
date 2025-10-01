@@ -14,6 +14,7 @@ import asyncio
 import os
 import sys
 import json
+from functools import partial
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -634,10 +635,6 @@ async def lifespan(app: FastAPI):
         await core.shutdown()
         main_logger.info("Application shutdown complete.")
 
-
-# 重新创建带有lifespan的FastAPI应用
-
-
 class _AppWrapper:
     def __init__(self) -> None:
         self._app = FastAPI(title="IBKR Trading Bot", version="1.0.0", lifespan=lifespan)
@@ -646,9 +643,11 @@ class _AppWrapper:
         return getattr(self._app, item)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        if args and isinstance(args[0], dict):
-            return self._app(*args, **kwargs)
-        return self._app
+        if not args and not kwargs:
+            return self._app
+        if len(args) == 1 and isinstance(args[0], dict) and not kwargs:
+            return partial(self._app, args[0])
+        return self._app(*args, **kwargs)
 
 
 app = _AppWrapper()

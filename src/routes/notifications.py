@@ -1,14 +1,50 @@
 from typing import Optional, Dict, Any, List
 
-from fastapi import APIRouter, HTTPException, Depends
+import core
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from loguru import logger
 
-from core.dependencies import get_notification_manager
-from .auth import get_current_user
+from src.notification_manager import NotificationManager
+from src.telegram_notifier import TelegramNotifier
 from src.database import get_db_manager, DatabaseManager
+from .auth import get_current_user
 
 router = APIRouter()
+
+notification_manager: NotificationManager | None = None
+telegram_notifier: TelegramNotifier | None = None
+
+
+def _resolve_notification_manager(request: Request) -> NotificationManager:
+    if notification_manager is not None:
+        return notification_manager
+
+    container = getattr(request.app.state, "core", None)
+    if container is None:
+        try:
+            container = core.require_container()
+        except RuntimeError as exc:  # pragma: no cover - defensive guard
+            raise HTTPException(status_code=503, detail="Notification manager unavailable") from exc
+
+    manager = getattr(container, "notification_manager", None)
+    if manager is None:  # pragma: no cover - unexpected configuration
+        raise HTTPException(status_code=503, detail="Notification manager unavailable")
+    return manager
+
+
+def _resolve_telegram_notifier(request: Request) -> TelegramNotifier | None:
+    if telegram_notifier is not None:
+        return telegram_notifier
+
+    container = getattr(request.app.state, "core", None)
+    if container is None:
+        try:
+            container = core.require_container()
+        except RuntimeError:
+            return None
+
+    return getattr(container, "telegram_notifier", None)
 
 class NotificationRequest(BaseModel):
     message: str
@@ -23,7 +59,7 @@ class NotificationTestRequest(BaseModel):
 async def send_notification(
     req: NotificationRequest,
     user: Optional[str] = Depends(get_current_user),
-    manager=Depends(get_notification_manager),
+    manager: NotificationManager = Depends(_resolve_notification_manager),
 ):
     """发送通知"""
     try:
@@ -46,6 +82,7 @@ async def send_notification(
 
 @router.get("/api/notifications/settings")
 async def get_notification_settings(
+    request: Request,
     user: Optional[str] = Depends(get_current_user),
     db: DatabaseManager = Depends(get_db_manager),
 ):
@@ -224,18 +261,20 @@ async def update_notification_settings(
         db.save_notification_config(settings)
 
         # 更新Telegram通知器配置（使用update_config以重建Bot实例）
-        if "telegram" in settings and telegram_notifier:
+        notifier = _resolve_telegram_notifier(request)
+        if "telegram" in settings and notifier:
             telegram_config = settings.get("telegram", {})
             config = telegram_config.get("config", {})
             bot_token = (config.get("bot_token") or "").strip()
             chat_id = (config.get("chat_id") or "").strip()
             try:
-                telegram_notifier.update_config(bot_token=bot_token, chat_id=chat_id)
+                notifier.update_config(bot_token=bot_token, chat_id=chat_id)
             except Exception as e:
                 logger.error(f"Update telegram notifier config failed: {e}")
 
-        if hasattr(notification_manager, "invalidate_settings_cache"):
-            notification_manager.invalidate_settings_cache()
+        manager = _resolve_notification_manager(request)
+        if hasattr(manager, "invalidate_settings_cache"):
+            manager.invalidate_settings_cache()
 
         return {"success": True, "message": "Notification settings updated"}
     except Exception as e:
@@ -283,6 +322,7 @@ async def clear_notification_history(
 @router.post("/api/notifications/test")
 async def test_notification(
     req: NotificationTestRequest,
+    request: Request,
     user: Optional[str] = Depends(get_current_user)
 ):
     """测试通知发送"""
@@ -295,7 +335,8 @@ async def test_notification(
         else:
             channels = [req.channel]
 
-        results = await notification_manager.send_notification(
+        manager = _resolve_notification_manager(request)
+        results = await manager.send_notification(
             message=req.message,
             event_type="test",
             channels=channels,

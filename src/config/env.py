@@ -51,7 +51,7 @@ def load_project_env(extra_files: Iterable[Path | str] | None = None) -> None:
                 "and retry."
             )
 
-    env_files.append((base_file, False))
+    env_files.append((base_file, True))
 
     for file_path, override in env_files:
         if file_path:
