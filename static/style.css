@@ -450,6 +450,40 @@ body.side-panel-open {
     animation: panelFocusPulse 1.2s ease;
 }
 
+.service-status-list > .service-status-item + .service-status-item {
+    margin-top: 0.75rem;
+}
+
+.service-status-item {
+    border-radius: 0.75rem;
+}
+
+.service-status-meta {
+    min-width: 0;
+}
+
+.service-status-meta .small {
+    margin-top: 0.25rem;
+}
+
+.service-status-actions {
+    flex-shrink: 0;
+}
+
+.service-status-actions .badge {
+    min-width: 3.5rem;
+    text-align: center;
+}
+
+.service-status-actions .spinner-border {
+    width: 1rem;
+    height: 1rem;
+}
+
+.service-status-actions [data-action="restart"] {
+    white-space: nowrap;
+}
+
 @keyframes panelFocusPulse {
     0% {
         box-shadow: 0 0 0 0 rgba(13, 110, 253, 0.35);
