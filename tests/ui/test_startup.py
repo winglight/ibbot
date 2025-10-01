@@ -3,12 +3,66 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 import pytest
+from httpx import ASGITransport, AsyncClient
+
+import sys
+import types
+from dataclasses import dataclass
+
+
+if "src.connection_manager" not in sys.modules:
+    @dataclass
+    class _ConnectionConfigStub:
+        host: str = "127.0.0.1"
+        port: int = 4002
+        client_id: int = 1
+        paper_trading: bool = True
+
+    class _StubConnectionManager:
+        def __init__(self) -> None:
+            self.connected = False
+            self.config = _ConnectionConfigStub()
+            self._last_error: str | None = None
+
+        def get_config(self) -> _ConnectionConfigStub:
+            return self.config
+
+        def update_config(self, config: _ConnectionConfigStub) -> None:
+            self.config = config
+
+        def connect(self) -> bool:
+            self.connected = False
+            return False
+
+        def disconnect(self) -> None:
+            self.connected = False
+
+        def is_connected(self) -> bool:
+            return self.connected
+
+        def get_last_connect_error(self) -> str | None:
+            return self._last_error
+
+    _connection_manager_stub = _StubConnectionManager()
+    class _LoggerStub:
+        def debug(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        info = warning = error = debug
+
+    stub_module = types.ModuleType("src.connection_manager")
+    stub_module.connection_manager = _connection_manager_stub
+    stub_module.ConnectionConfig = _ConnectionConfigStub
+    stub_module.connection_logger = _LoggerStub()
+    sys.modules["src.connection_manager"] = stub_module
 
 import core
 from core.container import HealthResult
+from src.ib_command_health import IB_COMMAND_HEALTH_KEY
 from main import app
 
 
@@ -82,5 +136,125 @@ async def test_startup_initialises_core_and_records_health(monkeypatch: pytest.M
         result = await fake_redis.hgetall("hash:service:health:notifications")
         assert result["status"] == "up"
         assert json.loads(result["response"]) == {"healthy": True}
+
+    await core.shutdown()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_app_routes_available_without_ib(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_redis = FakeRedis()
+
+    async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
+        return fake_redis
+
+    async def fake_probe_health(module: str, url: str) -> HealthResult:
+        return HealthResult(
+            module=module,
+            healthy=False,
+            status_code=503,
+            latency_ms=10.0,
+            response={"healthy": False},
+        )
+
+    monkeypatch.setattr("core.container.init_redis", fake_init_redis)
+    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
+    monkeypatch.setattr("core.container._probe_health", fake_probe_health)
+    await core.shutdown()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        login_response = await client.post(
+            "/api/login",
+            json={"username": "admin", "password": "change_me"},
+        )
+        assert login_response.status_code == 200
+        token = login_response.json().get("access_token")
+        assert token
+        headers = {"Authorization": f"Bearer {token}"}
+
+        index_response = await client.get("/")
+        assert index_response.status_code == 200
+
+        status_response = await client.get("/api/connection_status", headers=headers)
+        assert status_response.status_code == 200
+        payload = status_response.json()
+        assert payload.get("connected") is False
+        assert payload.get("source") == "http"
+        assert "account_type" in payload
+        assert payload.get("stale") is False
+
+        docs_response = await client.get("/api-docs.json")
+        assert docs_response.status_code == 200
+
+    await core.shutdown()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_connection_status_prefers_redis_when_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = FakeRedis()
+
+    async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
+        return fake_redis
+
+    async def fake_probe_health(module: str, url: str) -> HealthResult:
+        return HealthResult(
+            module=module,
+            healthy=True,
+            status_code=200,
+            latency_ms=5.0,
+            response={"healthy": True},
+        )
+
+    monkeypatch.setattr("core.container.init_redis", fake_init_redis)
+    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
+    monkeypatch.setattr("core.container._probe_health", fake_probe_health)
+    await core.shutdown()
+
+    services = await core.initialise(force=True)
+    assert services.redis_client is fake_redis
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await fake_redis.hset(
+        IB_COMMAND_HEALTH_KEY,
+        {
+            "last_seen": now_iso,
+            "queue_depth": "0",
+            "last_error": "",
+        },
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        login_response = await client.post(
+            "/api/login",
+            json={"username": "admin", "password": "change_me"},
+        )
+        assert login_response.status_code == 200
+        token = login_response.json().get("access_token")
+        assert token
+        headers = {"Authorization": f"Bearer {token}"}
+
+        await fake_redis.hset(
+            IB_COMMAND_HEALTH_KEY,
+            {
+                "last_seen": now_iso,
+                "queue_depth": "0",
+                "last_error": "",
+            },
+        )
+
+        status_response = await client.get("/api/connection_status", headers=headers)
+        assert status_response.status_code == 200
+        payload = status_response.json()
+        assert payload.get("source") == "redis", payload
+        assert payload.get("connected") is True
+        assert payload.get("stale") is False
+        assert payload.get("queue_depth") == 0
+        assert payload.get("last_error") is None
+        assert isinstance(payload.get("last_seen"), str)
 
     await core.shutdown()

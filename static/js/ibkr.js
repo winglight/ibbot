@@ -11,6 +11,7 @@ class IBKRConnectionManager {
         this._wsThrottle = {};
         this._wsPendingMessages = [];
         this._lastConnectionStatus = null;
+        this.connectionStatusMeta = null;
         this._pendingStatusResolvers = new Set();
         this.setupEventListeners();
         this.startPeriodicStatusCheck();
@@ -78,12 +79,20 @@ class IBKRConnectionManager {
     }
 
     _notifyConnectionStatus(payload = {}) {
+        const status = this.normalizeConnectionStatus(payload);
+        const receivedAt = Date.now();
+        status.receivedAt = Number.isFinite(status.receivedAt) ? status.receivedAt : receivedAt;
         this._lastConnectionStatus = {
-            connected: !!payload.connected,
-            account_type: payload.account_type || '',
-            last_error: payload.last_error,
-            received_at: Date.now(),
-            source: payload.source || 'websocket'
+            connected: status.connected,
+            account_type: status.accountType,
+            last_error: status.lastError,
+            queue_depth: status.queueDepth,
+            last_seen: status.lastSeen,
+            redis: status.redis ? { ...status.redis } : undefined,
+            stale: status.stale,
+            received_at: receivedAt,
+            receivedAt: status.receivedAt,
+            source: status.source || 'websocket'
         };
         if (!this._pendingStatusResolvers || this._pendingStatusResolvers.size === 0) {
             return;
@@ -92,7 +101,7 @@ class IBKRConnectionManager {
         this._pendingStatusResolvers.clear();
         resolvers.forEach(resolver => {
             try {
-                resolver(this._lastConnectionStatus);
+                resolver({ ...this._lastConnectionStatus });
             } catch (error) {
                 console.error('[ws] connection status resolver error', error);
             }
@@ -396,7 +405,7 @@ class IBKRConnectionManager {
             this.app.showAlert('success', 'Connected successfully');
             // Immediately update UI buttons
             const accountType = (document.getElementById('accountType')?.value || 'paper');
-            this.updateConnectionStatus(true, accountType);
+            this.updateConnectionStatus(true, accountType, { source: 'http', stale: false });
             
             // Close connection modal
             const modalElement = document.getElementById('connectionModal');
@@ -454,7 +463,7 @@ class IBKRConnectionManager {
         try {
             await this.app.apiCall('/disconnect', { method: 'POST' });
             this.app.showAlert('info', 'Disconnected successfully');
-            this.updateConnectionStatus(false);
+            this.updateConnectionStatus(false, '', { source: 'http', stale: false });
             this.app.clearData();
             // 停止定期状态检查
             this.stopPeriodicStatusCheck();
@@ -489,9 +498,10 @@ class IBKRConnectionManager {
                 useCache: false
             });
 
-            this.updateConnectionStatus(data.connected, data.account_type);
+            const status = this.normalizeConnectionStatus(data);
+            this.updateConnectionStatus(status.connected, status.accountType, status);
 
-            if (data.connected) {
+            if (status.connected) {
                 // Load data asynchronously to avoid blocking
                 setTimeout(() => {
                     this.app.loadOrders();
@@ -502,30 +512,198 @@ class IBKRConnectionManager {
             }
         } catch (error) {
             console.warn('Connection status check failed:', error?.message || error);
-            this.updateConnectionStatus(false);
+            this.updateConnectionStatus(false, '', { source: 'http', last_error: error?.message, stale: false });
         }
     }
 
     /**
      * 更新连接状态UI
      */
-    updateConnectionStatus(connected, accountType = '') {
-        this.connected = connected;
-        this.app.connected = connected; // 同步到主应用
-        
+    _normalizeSource(source) {
+        if (!source) return '';
+        const text = String(source).trim();
+        if (!text) return '';
+        const lower = text.toLowerCase();
+        if (['redis', 'http', 'websocket'].includes(lower)) {
+            return lower;
+        }
+        return text;
+    }
+
+    _describeConnectionSource(source) {
+        const normalized = this._normalizeSource(source);
+        if (!normalized) return '';
+        if (normalized === 'redis') return 'ib-command';
+        if (normalized === 'http') return 'gateway';
+        if (normalized === 'websocket') return 'websocket';
+        return normalized;
+    }
+
+    normalizeConnectionStatus(payload = {}) {
+        const result = {
+            connected: false,
+            accountType: '',
+            source: '',
+            stale: false,
+            lastError: null,
+            queueDepth: null,
+            lastSeen: null,
+            redis: null,
+            receivedAt: null,
+        };
+        if (!payload || typeof payload !== 'object') {
+            return result;
+        }
+
+        const safe = payload;
+        const redisData = safe.redis && typeof safe.redis === 'object'
+            ? { ...safe.redis }
+            : null;
+
+        if (typeof safe.connected === 'boolean') {
+            result.connected = safe.connected;
+        } else if (redisData && typeof redisData.connected === 'boolean') {
+            result.connected = redisData.connected;
+        }
+
+        const accountType = safe.account_type ?? safe.accountType;
+        if (typeof accountType === 'string' && accountType.trim()) {
+            result.accountType = accountType;
+        } else if (redisData && typeof redisData.account_type === 'string' && redisData.account_type.trim()) {
+            result.accountType = redisData.account_type;
+        }
+
+        const source = safe.source || (redisData ? redisData.source : '');
+        if (typeof source === 'string' && source) {
+            result.source = source;
+        }
+
+        const receivedAtRaw = safe.received_at ?? safe.receivedAt;
+        if (receivedAtRaw !== undefined && receivedAtRaw !== null) {
+            const receivedAtNum = Number(receivedAtRaw);
+            if (Number.isFinite(receivedAtNum)) {
+                result.receivedAt = receivedAtNum;
+            }
+        }
+
+        if (typeof safe.stale === 'boolean') {
+            result.stale = safe.stale;
+        } else if (redisData && typeof redisData.stale === 'boolean') {
+            result.stale = redisData.stale;
+        }
+
+        const lastError = safe.last_error ?? safe.lastError;
+        if (typeof lastError === 'string' && lastError.trim()) {
+            result.lastError = lastError;
+        } else if (redisData) {
+            const redisError = redisData.last_error ?? redisData.lastError;
+            if (typeof redisError === 'string' && redisError.trim()) {
+                result.lastError = redisError;
+            }
+        }
+
+        const queueDepth = safe.queue_depth ?? safe.queueDepth;
+        if (queueDepth !== undefined && queueDepth !== null) {
+            const depthNum = Number(queueDepth);
+            if (Number.isFinite(depthNum)) {
+                result.queueDepth = depthNum;
+            }
+        } else if (redisData) {
+            const redisDepth = redisData.queue_depth ?? redisData.queueDepth;
+            if (redisDepth !== undefined && redisDepth !== null) {
+                const depthNum = Number(redisDepth);
+                if (Number.isFinite(depthNum)) {
+                    result.queueDepth = depthNum;
+                }
+            }
+        }
+
+        const lastSeen = safe.last_seen ?? safe.lastSeen;
+        if (typeof lastSeen === 'string') {
+            result.lastSeen = lastSeen;
+        } else if (redisData) {
+            const redisSeen = redisData.last_seen ?? redisData.lastSeen;
+            if (typeof redisSeen === 'string') {
+                result.lastSeen = redisSeen;
+            }
+        }
+
+        if (redisData) {
+            redisData.source = this._normalizeSource(redisData.source || 'redis');
+            redisData.stale = Boolean(redisData.stale);
+            if (!Number.isFinite(result.receivedAt)) {
+                const redisReceived = redisData.received_at ?? redisData.receivedAt;
+                if (redisReceived !== undefined && redisReceived !== null) {
+                    const redisReceivedNum = Number(redisReceived);
+                    if (Number.isFinite(redisReceivedNum)) {
+                        result.receivedAt = redisReceivedNum;
+                    }
+                }
+            }
+            result.redis = redisData;
+            if (!result.source) {
+                result.source = redisData.source;
+            }
+        }
+
+        result.source = this._normalizeSource(result.source);
+        if (!result.source && typeof safe.connected === 'boolean') {
+            result.source = 'http';
+        }
+        result.accountType = result.accountType || '';
+
+        return result;
+    }
+
+    updateConnectionStatus(connected, accountType = '', meta = {}) {
+        const payload = { ...(meta && typeof meta === 'object' ? meta : {}) };
+        if (typeof connected === 'boolean') {
+            payload.connected = connected;
+        }
+        if (accountType && !payload.account_type && !payload.accountType) {
+            payload.account_type = accountType;
+        }
+
+        const normalized = this.normalizeConnectionStatus(payload);
+        if (!normalized.accountType && accountType) {
+            normalized.accountType = accountType;
+        }
+        normalized.connected = Boolean(connected);
+        if (!Number.isFinite(normalized.receivedAt)) {
+            normalized.receivedAt = Date.now();
+        }
+
+        this.connectionStatusMeta = normalized;
+        this.connected = normalized.connected;
+        this.app.connected = normalized.connected; // 同步到主应用
+
         const statusIndicator = document.getElementById('connectionStatus');
         const statusText = document.getElementById('connectionText');
         const connectBtn = document.getElementById('connectBtn');
         const disconnectBtn = document.getElementById('disconnectBtn');
-        
-        if (connected) {
-            statusIndicator.className = 'status-indicator status-connected';
-            statusText.textContent = `Connected (${accountType})`;
-            connectBtn.disabled = true;
-            disconnectBtn.disabled = false;
-            if (connectBtn) connectBtn.style.display = 'none';
-            if (disconnectBtn) disconnectBtn.style.display = 'inline-block';
-            
+
+        const displayAccountType = normalized.accountType || accountType || '';
+        const sourceLabel = this._describeConnectionSource(normalized.source);
+        const suffixParts = [];
+        if (displayAccountType) suffixParts.push(displayAccountType);
+        if (sourceLabel) suffixParts.push(sourceLabel);
+        if (normalized.stale && normalized.source === 'redis') {
+            suffixParts.push('stale');
+        }
+        const suffix = suffixParts.length ? ` (${suffixParts.join(' · ')})` : '';
+
+        if (normalized.connected) {
+            if (statusIndicator) statusIndicator.className = 'status-indicator status-connected';
+            if (statusText) statusText.textContent = `Connected${suffix || (displayAccountType ? ` (${displayAccountType})` : '')}`;
+            if (connectBtn) {
+                connectBtn.disabled = true;
+                connectBtn.style.display = 'none';
+            }
+            if (disconnectBtn) {
+                disconnectBtn.disabled = false;
+                disconnectBtn.style.display = 'inline-block';
+            }
+
             // 连接成功后加载需要IB连接的数据
             this.app.loadOrders();
             this.app.loadPortfolio();
@@ -534,12 +712,22 @@ class IBKRConnectionManager {
             this.stopPeriodicStatusCheck();
             this.startPeriodicStatusCheck();
         } else {
-            statusIndicator.className = 'status-indicator status-disconnected';
-            statusText.textContent = 'Disconnected';
-            connectBtn.disabled = false;
-            disconnectBtn.disabled = true;
-            if (connectBtn) connectBtn.style.display = 'inline-block';
-            if (disconnectBtn) disconnectBtn.style.display = 'none';
+            if (statusIndicator) statusIndicator.className = 'status-indicator status-disconnected';
+            const downParts = [];
+            if (sourceLabel) downParts.push(sourceLabel);
+            if (normalized.redis && normalized.redis.stale) {
+                downParts.push('stale');
+            }
+            const disconnectText = downParts.length ? `Disconnected (${downParts.join(' · ')})` : 'Disconnected';
+            if (statusText) statusText.textContent = disconnectText;
+            if (connectBtn) {
+                connectBtn.disabled = false;
+                connectBtn.style.display = 'inline-block';
+            }
+            if (disconnectBtn) {
+                disconnectBtn.disabled = true;
+                disconnectBtn.style.display = 'none';
+            }
         }
     }
 
@@ -594,23 +782,24 @@ class IBKRConnectionManager {
             const sendResult = this.requestConnectionStatus({ force: true });
             if (sendResult !== 'failed') {
                 const backendStatus = await waitForStatus();
-                if (backendStatus) {
+                const normalized = backendStatus ? this.normalizeConnectionStatus(backendStatus) : null;
+                if (normalized) {
                     console.log('后端状态:');
-                    console.log('  connected:', backendStatus.connected);
-                    console.log('  account_type:', backendStatus.account_type);
+                    console.log('  connected:', normalized.connected);
+                    console.log('  account_type:', normalized.accountType);
                 } else {
                     console.log('后端状态: 未收到最新状态，使用缓存');
                 }
-                const backendConnected = backendStatus ? !!backendStatus.connected : this.connected;
+                const backendConnected = normalized ? !!normalized.connected : this.connected;
                 const statusMatch = this.connected === backendConnected;
                 console.log('状态一致性:', statusMatch ? '✓ 一致' : '✗ 不一致');
-                if (!statusMatch && backendStatus) {
+                if (!statusMatch && normalized) {
                     console.log('正在同步状态...');
-                    this.updateConnectionStatus(backendStatus.connected, backendStatus.account_type);
+                    this.updateConnectionStatus(normalized.connected, normalized.accountType, normalized);
                 }
                 return {
                     frontend: { connected: this.connected, app_connected: this.app.connected },
-                    backend: backendStatus || { note: 'no_response' },
+                    backend: normalized || backendStatus || { note: 'no_response' },
                     consistent: statusMatch
                 };
             }
@@ -622,21 +811,22 @@ class IBKRConnectionManager {
                 maxRetries: 0,
                 useCache: false
             });
+            const normalized = this.normalizeConnectionStatus(backendStatus);
             console.log('后端状态:');
-            console.log('  connected:', backendStatus.connected);
-            console.log('  account_type:', backendStatus.account_type);
+            console.log('  connected:', normalized.connected);
+            console.log('  account_type:', normalized.accountType);
 
-            const statusMatch = this.connected === backendStatus.connected;
+            const statusMatch = this.connected === normalized.connected;
             console.log('状态一致性:', statusMatch ? '✓ 一致' : '✗ 不一致');
 
             if (!statusMatch) {
                 console.log('正在同步状态...');
-                this.updateConnectionStatus(backendStatus.connected, backendStatus.account_type);
+                this.updateConnectionStatus(normalized.connected, normalized.accountType, normalized);
             }
 
             return {
                 frontend: { connected: this.connected, app_connected: this.app.connected },
-                backend: backendStatus,
+                backend: normalized,
                 consistent: statusMatch
             };
         } catch (error) {
@@ -699,11 +889,9 @@ class IBKRConnectionManager {
     handleWebSocketMessage(data) {
         switch (data.type) {
             case 'connection_status':
-                this.updateConnectionStatus(data.connected, data.account_type);
-                // 同步连接状态到主应用
-                this.connected = data.connected;
-                this.app.connected = data.connected;
-                this._notifyConnectionStatus(data);
+                const status = this.normalizeConnectionStatus(data);
+                this.updateConnectionStatus(status.connected, status.accountType, status);
+                this._notifyConnectionStatus(status);
                 break;
             case 'order_placed':
                 // 清除订单缓存以强制刷新
