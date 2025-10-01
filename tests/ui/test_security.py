@@ -35,7 +35,7 @@ def secured_orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     async def fake_enqueue(payload: dict[str, Any]) -> None:
         pass
 
-    monkeypatch.setattr(orders_module, "enqueue_ib_command", fake_enqueue)
+    monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
     monkeypatch.setattr(orders_module, "websocket_manager", DummyWebSocketManager())
     app.dependency_overrides[orders_module.get_current_user] = operator
     return app
