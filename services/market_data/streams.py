@@ -135,6 +135,25 @@ class StreamPublisher:
             "last_error": self._last_error,
         }
 
+    async def get_summary(self) -> dict[str, Any]:
+        """Return the current stream statistics without resetting counters."""
+
+        async with self._lock:
+            latency_samples = self._latency_samples
+            latency_total = self._latency_total
+            avg_latency = None
+            if latency_samples:
+                avg_latency = latency_total / latency_samples
+
+            return {
+                "events": self._event_count,
+                "avg_latency_ms": avg_latency,
+                "max_latency_ms": self._latency_max if latency_samples else None,
+                "latency_samples": latency_samples,
+                "last_publish_ts_ns": self._last_publish_ns,
+                "last_error": self._last_error,
+            }
+
     def _normalise_payload(self, data: Mapping[str, Any] | Any) -> Mapping[str, Any]:
         if isinstance(data, Mapping):
             return data

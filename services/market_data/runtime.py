@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import os
 import time
+from copy import deepcopy
 from contextlib import suppress
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -315,3 +316,60 @@ class MarketDataRuntime:
         self.health_state["last_metrics_error"] = error
         if error:
             self.health_state["last_error"] = error
+
+    def get_snapshot(self, symbol: str) -> dict[str, Any] | None:
+        """Return a deepcopy of the snapshot for *symbol* if available."""
+
+        snapshot = self._snapshots.get(symbol)
+        if snapshot is None:
+            return None
+        return deepcopy(snapshot)
+
+    def get_snapshots(self, *, stale: bool | None = None) -> list[dict[str, Any]]:
+        """Return a list of snapshots, optionally filtered by stale flag."""
+
+        items = []
+        for symbol in sorted(self._snapshots):
+            snapshot = self._snapshots[symbol]
+            if stale is not None:
+                if bool(snapshot.get("stale")) is not stale:
+                    continue
+            items.append(deepcopy(snapshot))
+        return items
+
+    async def get_metrics_summary(self) -> dict[str, Any] | None:
+        """Return the current metrics summary without resetting counters."""
+
+        publisher = self.stream_publisher
+        if publisher is None:
+            return None
+        try:
+            return await publisher.get_summary()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to collect metrics summary", error=str(exc))
+            self._record_metrics_error(str(exc))
+            return None
+
+    async def get_health_snapshot(self) -> dict[str, Any]:
+        """Return health information for diagnostics endpoints."""
+
+        redis_status: dict[str, Any]
+        redis = self.redis
+        if redis is None:
+            redis_status = {"connected": False, "error": "not_initialised"}
+        else:
+            try:
+                ping_result = await redis.ping()
+            except Exception as exc:  # pragma: no cover - defensive logging
+                redis_status = {"connected": False, "error": str(exc)}
+            else:
+                redis_status = {"connected": bool(ping_result), "error": None}
+
+        metrics = await self.get_metrics_summary()
+
+        return {
+            "subscriptions": len(self._snapshots),
+            "redis": redis_status,
+            "metrics": metrics,
+            "health": deepcopy(self.health_state),
+        }
