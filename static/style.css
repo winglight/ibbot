@@ -462,6 +462,67 @@ body.side-panel-open {
     }
 }
 
+.service-health-grid {
+    --service-health-border: rgba(15, 23, 42, 0.08);
+}
+
+.service-health-grid .service-health-item {
+    background-color: #ffffff;
+    border: 1px solid var(--service-health-border);
+    border-radius: 0.75rem;
+    padding: 1rem 1.25rem;
+    box-shadow: 0 0.75rem 1.5rem rgba(15, 23, 42, 0.05);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    min-height: 124px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+.service-health-grid .service-health-item:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 1rem 2rem rgba(15, 23, 42, 0.08);
+}
+
+.service-health-grid .service-health-item.offline {
+    border-left: 4px solid #6c757d;
+}
+
+.service-health-grid .service-health-item.running {
+    border-left: 4px solid #198754;
+}
+
+.service-health-grid .service-health-item.unhealthy {
+    border-left: 4px solid #dc3545;
+}
+
+.service-health-grid .service-health-item .service-name {
+    font-weight: 600;
+    font-size: 1rem;
+    color: #0f172a;
+}
+
+.service-health-grid .service-health-item .service-status-badge {
+    font-size: 0.85rem;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+}
+
+.service-health-grid .service-health-meta {
+    font-size: 0.85rem;
+    color: #6b7280;
+}
+
+.service-health-grid .service-health-meta div + div {
+    margin-top: 0.35rem;
+}
+
+.service-health-grid .service-health-empty {
+    border: 1px dashed var(--service-health-border);
+    border-radius: 0.75rem;
+    background-color: rgba(15, 23, 42, 0.02);
+}
+
 @media (max-width: 992px) {
     .side-panel {
         width: min(360px, 92vw);
