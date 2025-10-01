@@ -143,6 +143,7 @@ class TradingApp {
         }
         this.monitoringManager = new MonitoringManagerClass(this);
         this.monitoring = this.monitoringManager;
+        this.wsHandlers = new Map();
         this.monitoringDashboard = typeof MonitoringDashboardClass === 'function'
             ? new MonitoringDashboardClass(this)
             : null;
@@ -159,7 +160,6 @@ class TradingApp {
         this.summaryPrimarySaving = false;
         this.summaryPrimaryCurrent = null;
         this.summaryDataFeedCurrent = null;
-        this.wsHandlers = new Map();
         this.riskRulesManager = new RiskRulesManager(this);
         this.strategiesManager = typeof StrategiesManagerClass === 'function'
             ? new StrategiesManagerClass(this)
@@ -447,6 +447,9 @@ class TradingApp {
     registerWebSocketHandler(type, handler) {
         if (!type || typeof handler !== 'function') {
             return () => {};
+        }
+        if (!this.wsHandlers) {
+            this.wsHandlers = new Map();
         }
         if (!this.wsHandlers.has(type)) {
             this.wsHandlers.set(type, new Set());
