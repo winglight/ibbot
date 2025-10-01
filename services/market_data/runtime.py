@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import time
 from copy import deepcopy
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from loguru import logger
@@ -47,6 +48,8 @@ MetricsBackendFactory = Callable[[MarketDataServiceConfig], Awaitable[Persistenc
 ConfigProviderFactory = Callable[[], Awaitable[ConfigProvider[MarketDataServiceConfig]]]
 RedisFactory = Callable[[], Awaitable[Any]]
 
+AlertCallback = Callable[[str, Mapping[str, Any]], Awaitable[None] | None]
+
 
 class MarketDataRuntime:
     """Coordinate the long running tasks for the market data service."""
@@ -62,6 +65,11 @@ class MarketDataRuntime:
         service_name: str | None = None,
         stream_key: str | None = None,
         metrics_period: float | None = None,
+        service_version: str | None = None,
+        health_period: float | None = None,
+        latency_warning_ms: float | None = None,
+        subscription_failure_threshold: int | None = None,
+        alert_callback: AlertCallback | None = None,
     ) -> None:
         self._config_provider_factory = config_provider_factory or get_provider
         self._redis_factory = redis_factory
@@ -86,6 +94,29 @@ class MarketDataRuntime:
         self.service_name = service_name
         self.stream_key = stream_key
         self.metrics_period = metrics_period
+        self.version = service_version or os.getenv("MARKET_DATA_SERVICE_VERSION", "unknown")
+        self._config_summary: dict[str, Any] | None = None
+        self._health_update_interval = (
+            5.0 if health_period is None else float(max(0.0, health_period))
+        )
+        self._health_task: asyncio.Task[Any] | None = None
+        self.latency_warning_ms = (
+            float(latency_warning_ms) if latency_warning_ms is not None else None
+        )
+        if self.latency_warning_ms is not None and self.latency_warning_ms <= 0:
+            self.latency_warning_ms = None
+        self.subscription_failure_threshold = (
+            int(subscription_failure_threshold)
+            if subscription_failure_threshold is not None
+            else None
+        )
+        if (
+            self.subscription_failure_threshold is not None
+            and self.subscription_failure_threshold <= 0
+        ):
+            self.subscription_failure_threshold = None
+        self._alert_callback = alert_callback
+        self._subscription_failures: dict[str, int] = {}
         self._started = False
         self.health_state: dict[str, Any] = {
             "last_error": None,
@@ -97,6 +128,16 @@ class MarketDataRuntime:
                 "updated_at": None,
                 "stale_reason": None,
             },
+            "heartbeat_ts": None,
+            "last_success": None,
+            "write_failures": {
+                "redis_stream": 0,
+                "redis_health": 0,
+                "influx": 0,
+            },
+            "write_failures_last_error": {},
+            "subscription_failures": {},
+            "last_latency_alert": None,
         }
         self._account_snapshot: dict[str, Any] = {
             "account_info": None,
@@ -132,6 +173,10 @@ class MarketDataRuntime:
                 self.stream_key = config.stream_key
             if self.metrics_period is None:
                 self.metrics_period = float(config.metrics_period)
+            self._config_summary = {
+                "symbols": list(config.symbols),
+                "stream_length": getattr(config, "stream_length", None),
+            }
 
             self.redis = await self._redis_factory()
             self._account_snapshot_refresh_interval = float(
@@ -183,6 +228,8 @@ class MarketDataRuntime:
                 self._account_snapshot_task = asyncio.create_task(
                     self._account_snapshot_loop()
                 )
+            if self._health_update_interval:
+                self._health_task = asyncio.create_task(self._health_loop())
 
             self._started = True
             logger.info(
@@ -211,6 +258,12 @@ class MarketDataRuntime:
                 with suppress(asyncio.CancelledError):
                     await self._account_snapshot_task
                 self._account_snapshot_task = None
+
+            if self._health_task is not None:
+                self._health_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._health_task
+                self._health_task = None
 
             if self.listener is not None:
                 with suppress(Exception):
@@ -284,13 +337,33 @@ class MarketDataRuntime:
                 except (TypeError, ValueError, OverflowError):
                     ts_ns = None
 
-            await publisher.publish(
+            result = await publisher.publish(
                 symbol=symbol,
                 event_type=event_type,
                 data=data,
                 ts_ns=ts_ns,
                 latency_ms=latency_ms,
             )
+            if result:
+                now = datetime.now(timezone.utc).isoformat()
+                self.health_state["last_success"] = now
+            if latency_ms is not None and self.latency_warning_ms is not None:
+                if latency_ms > self.latency_warning_ms:
+                    alert_payload = {
+                        "symbol": symbol,
+                        "latency_ms": float(latency_ms),
+                        "threshold_ms": self.latency_warning_ms,
+                        "event_type": event_type,
+                    }
+                    logger.warning(
+                        "Latency threshold exceeded",
+                        **alert_payload,
+                    )
+                    self.health_state["last_latency_alert"] = {
+                        **alert_payload,
+                        "triggered_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    await self._emit_alert("latency_threshold", alert_payload)
 
         self._notify_update_listeners(event)
 
@@ -507,7 +580,10 @@ class MarketDataRuntime:
         )
 
         try:
-            backend.write_event(envelope)
+            await self._execute_with_retries(
+                "influx",
+                lambda: backend.write_event(envelope),
+            )
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.warning("Failed to write metrics", error=str(exc))
             self._record_metrics_error(str(exc))
@@ -557,11 +633,17 @@ class MarketDataRuntime:
         self.health_state["last_stream_error"] = error
         if error:
             self.health_state["last_error"] = error
+            self._increment_write_failure("redis_stream", error)
+        else:
+            self._clear_write_failure("redis_stream")
 
     def _record_metrics_error(self, error: str | None) -> None:
         self.health_state["last_metrics_error"] = error
         if error:
             self.health_state["last_error"] = error
+            self._increment_write_failure("influx", error)
+        else:
+            self._clear_write_failure("influx")
 
     def _augment_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         enriched = deepcopy(snapshot)
@@ -623,4 +705,142 @@ class MarketDataRuntime:
             "redis": redis_status,
             "metrics": metrics,
             "health": deepcopy(self.health_state),
+            "service": self.service_name,
+            "version": self.version,
+            "config": deepcopy(self._config_summary) if self._config_summary else None,
         }
+
+    async def _health_loop(self) -> None:
+        try:
+            while not self._shutdown_event.is_set():
+                await self._write_health_status()
+                interval = self._health_update_interval
+                if interval <= 0:
+                    await asyncio.sleep(0)
+                    continue
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
+                    break
+                except asyncio.TimeoutError:
+                    continue
+        except asyncio.CancelledError:  # pragma: no cover - cancellation path
+            raise
+
+    async def _write_health_status(self) -> None:
+        redis = self.redis
+        if redis is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self.health_state["heartbeat_ts"] = now
+        payload = {
+            "heartbeat_ts": now,
+            "subscriptions": str(len(self._snapshots)),
+            "last_success_ts": self.health_state.get("last_success") or "",
+            "last_error": self.health_state.get("last_error") or "",
+            "version": self.version,
+            "config_summary": json.dumps(self._config_summary or {}),
+        }
+        try:
+            await self._execute_with_retries(
+                "redis_health",
+                lambda: redis.hset(
+                    "hash:service:health:market-data",
+                    mapping=payload,
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to write runtime health heartbeat", error=str(exc))
+            self._increment_write_failure("redis_health", str(exc))
+        else:
+            self._clear_write_failure("redis_health")
+
+    async def _execute_with_retries(
+        self,
+        failure_key: str,
+        operation: Callable[[], Awaitable[Any] | Any],
+        *,
+        attempts: int = 3,
+        base_delay: float = 0.05,
+    ) -> Any:
+        if attempts <= 0:
+            attempts = 1
+        if base_delay < 0:
+            base_delay = 0.0
+        attempt = 0
+        last_exc: Exception | None = None
+        while attempt < attempts and not self._shutdown_event.is_set():
+            try:
+                result = operation()
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception as exc:  # pragma: no cover - defensive logging
+                attempt += 1
+                last_exc = exc
+                self._increment_write_failure(failure_key, str(exc))
+                if attempt >= attempts:
+                    break
+                delay = base_delay * (2 ** (attempt - 1))
+                if delay:
+                    try:
+                        await asyncio.wait_for(self._shutdown_event.wait(), timeout=delay)
+                        break
+                    except asyncio.TimeoutError:
+                        continue
+                continue
+            else:
+                self._clear_write_failure(failure_key)
+                return result
+        if last_exc is not None:
+            raise last_exc
+
+    async def _emit_alert(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        callback = self._alert_callback
+        if callback is None:
+            return
+        try:
+            result = callback(event_type, payload)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Alert callback failed", event_type=event_type, error=str(exc))
+
+    def _increment_write_failure(self, key: str, error: str | None) -> None:
+        failures = self.health_state.setdefault("write_failures", {})
+        failures[key] = failures.get(key, 0) + 1
+        last_error_map = self.health_state.setdefault("write_failures_last_error", {})
+        last_error_map[key] = error
+        if error:
+            self.health_state["last_error"] = error
+
+    def _clear_write_failure(self, key: str) -> None:
+        failures = self.health_state.setdefault("write_failures", {})
+        failures.setdefault(key, 0)
+        last_error_map = self.health_state.setdefault("write_failures_last_error", {})
+        if key in last_error_map:
+            del last_error_map[key]
+
+    def record_subscription_failure(self, symbol: str, reason: str) -> None:
+        count = self._subscription_failures.get(symbol, 0) + 1
+        self._subscription_failures[symbol] = count
+        entry = {
+            "count": count,
+            "reason": reason,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        failures = self.health_state.setdefault("subscription_failures", {})
+        failures[symbol] = entry
+        threshold = self.subscription_failure_threshold
+        if threshold is not None and count >= threshold:
+            payload = {"symbol": symbol, "failures": count, "reason": reason}
+            logger.warning(
+                "Subscription failure threshold exceeded",
+                **payload,
+            )
+            asyncio.create_task(self._emit_alert("subscription_failure", payload))
+
+    def record_subscription_success(self, symbol: str) -> None:
+        if symbol in self._subscription_failures:
+            del self._subscription_failures[symbol]
+        failures = self.health_state.setdefault("subscription_failures", {})
+        if symbol in failures:
+            del failures[symbol]

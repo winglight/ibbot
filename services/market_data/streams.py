@@ -26,6 +26,8 @@ class StreamPublisher:
         maxlen: int = 5000,
         approximate: bool = True,
         error_callback: ErrorCallback | None = None,
+        retry_attempts: int = 3,
+        retry_base_delay: float = 0.05,
     ) -> None:
         if maxlen <= 0:
             raise ValueError("maxlen must be a positive integer")
@@ -35,6 +37,13 @@ class StreamPublisher:
         self.maxlen = maxlen
         self.approximate = approximate
         self._error_callback = error_callback
+
+        if retry_attempts <= 0:
+            retry_attempts = 1
+        if retry_base_delay < 0:
+            retry_base_delay = 0.0
+        self._retry_attempts = retry_attempts
+        self._retry_base_delay = retry_base_delay
 
         self._lock = asyncio.Lock()
         self._event_count = 0
@@ -75,20 +84,35 @@ class StreamPublisher:
             "latency_ms": "" if latency_ms is None else str(float(latency_ms)),
         }
 
-        try:
-            await self._redis.xadd(
-                self.stream_key,
-                entry,
-                maxlen=self.maxlen,
-                approximate=self.approximate,
-            )
-        except Exception as exc:  # pragma: no cover - defensive logging
-            message = f"Failed to publish stream event: {exc}"
-            logger.warning(message)
-            self._last_error = message
-            if self._error_callback is not None:
-                self._error_callback(message)
-            return False
+        attempt = 0
+        while True:
+            try:
+                await self._redis.xadd(
+                    self.stream_key,
+                    entry,
+                    maxlen=self.maxlen,
+                    approximate=self.approximate,
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                attempt += 1
+                message = f"Failed to publish stream event: {exc}"
+                logger.warning(
+                    "Stream publish attempt failed",
+                    error=str(exc),
+                    attempt=attempt,
+                    max_attempts=self._retry_attempts,
+                )
+                self._last_error = message
+                if self._error_callback is not None:
+                    self._error_callback(message)
+                if attempt >= self._retry_attempts:
+                    return False
+                delay = self._retry_base_delay * (2 ** (attempt - 1))
+                if delay:
+                    await asyncio.sleep(delay)
+                continue
+            else:
+                break
 
         async with self._lock:
             self._event_count += 1

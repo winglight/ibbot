@@ -157,6 +157,7 @@ class PubSubListener:
             raw = await self._redis.hgetall(key)
         except Exception as exc:  # pragma: no cover - defensive log
             logger.warning("Failed to load snapshot from Redis", symbol=symbol, error=str(exc))
+            self._runtime.record_subscription_failure(symbol, "snapshot_load_error")
             return
 
         if not raw:
@@ -226,6 +227,7 @@ class PubSubListener:
             price = payload.get("value")
         price_value = self._coerce_float(price)
         if price_value is None:
+            self._runtime.record_subscription_failure(symbol, "invalid_price_payload")
             return
 
         timestamp = self._extract_timestamp(payload)
@@ -251,6 +253,9 @@ class PubSubListener:
                 dom_value = json.loads(dom_value)
             except json.JSONDecodeError:
                 pass
+        if dom_value is None:
+            self._runtime.record_subscription_failure(symbol, "invalid_dom_payload")
+            return
 
         timestamp = self._extract_timestamp(payload)
         latency = self._update_snapshot(
@@ -289,6 +294,7 @@ class PubSubListener:
         snapshot["latency_ms"] = latency
         snapshot["stale"] = False
         self._runtime._snapshots[symbol] = snapshot
+        self._runtime.record_subscription_success(symbol)
         return latency
 
     def _ensure_snapshot(self, symbol: str) -> dict[str, Any]:
