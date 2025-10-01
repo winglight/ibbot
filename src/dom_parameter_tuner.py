@@ -96,6 +96,8 @@ class SessionProfile:
 def _log_penalty_event(event: str, **kwargs: float) -> None:
     """Emit structured logs for penalty adjustments respecting verbosity flags."""
 
+    if not is_parameter_tuner_enabled():
+        return
     settings = get_logging_settings()
     level = "INFO" if settings.verbose_penalty_logs else "DEBUG"
     logger.bind(dom_event="penalty_adjustment", configured_level=settings.log_level).log(
