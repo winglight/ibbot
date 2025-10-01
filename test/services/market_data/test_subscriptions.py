@@ -199,3 +199,74 @@ async def test_listener_updates_channels_and_loads_snapshots() -> None:
     await wait_for(lambda: "pubsub:ib:price:BTCUSDT" not in listener._current_channels)
 
     await listener.stop()
+
+
+async def test_update_snapshot_merges_account_state_and_latency() -> None:
+    provider = StubProvider(MarketDataServiceConfig(symbols=["BTCUSDT"]))
+    runtime = MarketDataRuntime()
+    runtime._update_account_snapshot(
+        account_info={"currency": "USD"},
+        positions=[{"symbol": "BTCUSDT", "qty": 1}],
+        updated_at="2024-01-01T00:00:00+00:00",
+        stale=False,
+        stale_reason=None,
+    )
+
+    listener = PubSubListener(
+        config_provider=provider,
+        redis_client=None,
+        runtime=runtime,
+    )
+
+    await listener._update_symbols(["BTCUSDT"], load_snapshots=False)
+
+    message_timestamp = datetime.now(timezone.utc)
+    latency = listener._update_snapshot(
+        "BTCUSDT",
+        price=101.25,
+        message_timestamp=message_timestamp,
+    )
+
+    snapshot = runtime._snapshots["BTCUSDT"]
+    assert snapshot["price"] == pytest.approx(101.25)
+    assert snapshot["stale"] is False
+    assert snapshot["account_info"] == {"currency": "USD"}
+    assert snapshot["positions"] == [{"symbol": "BTCUSDT", "qty": 1}]
+    assert snapshot["account_updated_at"] == "2024-01-01T00:00:00+00:00"
+    assert latency is None or latency >= 0
+
+
+async def test_load_snapshot_parses_types_and_account_attachment() -> None:
+    config = MarketDataServiceConfig(symbols=["ETHUSDT"])
+    provider = StubProvider(config)
+    redis = FakeRedis()
+    redis.hashes["hash:market:snapshot:ETHUSDT"] = {
+        b"price": b"2500.5",
+        b"latency_ms": b"7.5",
+        b"stale": b"true",
+        b"account": b"margin",
+    }
+    runtime = MarketDataRuntime()
+    runtime._update_account_snapshot(
+        account_info=None,
+        positions=None,
+        updated_at="2024-01-02T00:00:00+00:00",
+        stale=True,
+        stale_reason="manual",
+    )
+
+    listener = PubSubListener(
+        config_provider=provider,
+        redis_client=redis,
+        runtime=runtime,
+    )
+
+    await listener._update_symbols(["ETHUSDT"], load_snapshots=True)
+
+    snapshot = runtime._snapshots["ETHUSDT"]
+    assert snapshot["price"] == pytest.approx(2500.5)
+    assert snapshot["latency_ms"] == pytest.approx(7.5)
+    assert snapshot["stale"] is True
+    assert snapshot["account"] == "margin"
+    assert snapshot["account_stale"] is True
+    assert snapshot["account_updated_at"] == "2024-01-02T00:00:00+00:00"

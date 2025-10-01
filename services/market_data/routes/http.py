@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -23,7 +23,13 @@ async def get_market_snapshot(
 ) -> Any:
     """Return a runtime snapshot for a single symbol."""
 
-    snapshot = runtime.get_snapshot(symbol)
+    try:
+        snapshot = runtime.get_snapshot(symbol)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - exercised via tests
+        _raise_runtime_error(exc)
+
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Symbol not subscribed")
     return snapshot
@@ -36,7 +42,12 @@ async def list_market_snapshots(
 ) -> list[dict[str, Any]]:
     """Return the current runtime snapshots."""
 
-    return runtime.get_snapshots(stale=stale)
+    try:
+        return runtime.get_snapshots(stale=stale)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - exercised via tests
+        _raise_runtime_error(exc)
 
 
 @router.get("/health")
@@ -45,7 +56,12 @@ async def health_check(
 ) -> dict[str, Any]:
     """Return health information for the market data runtime."""
 
-    return await runtime.get_health_snapshot()
+    try:
+        return await runtime.get_health_snapshot()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - exercised via tests
+        _raise_runtime_error(exc)
 
 
 @router.get("/api/realtime_data/{symbol}")
@@ -59,3 +75,13 @@ async def legacy_realtime_data(
 
 
 __all__ = ["router"]
+
+
+def _raise_runtime_error(exc: Exception) -> NoReturn:
+    if isinstance(exc, HTTPException):
+        raise exc
+    if isinstance(exc, ConnectionError):
+        detail = str(exc) or "Upstream data source unavailable"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    detail = str(exc) or "Service unavailable"
+    raise HTTPException(status_code=503, detail=detail) from exc
