@@ -122,20 +122,21 @@ def test_enqueue_command_uses_config_provider(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.fixture()
 def strategy_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
-    class DummyStrategyManager:
-        def get_settings(self) -> dict[str, Any]:
-            return {}
+    class StubClient:
+        async def request(self, method: str, path: str, **kwargs: Any) -> Any:
+            raise strategy_module.ServiceUnavailableError("strategy", "offline")
 
-        def validate_auth_token(self, token: str) -> bool:
-            return token == "valid"
-
-        def get_strategy(self, name: str) -> dict[str, Any]:
-            return {"enabled": True}
-
-    monkeypatch.setattr(strategy_module, "strategy_manager", DummyStrategyManager())
+    stub = StubClient()
+    monkeypatch.setattr(strategy_module, "_STRATEGY_SERVICE_CLIENT", stub)
+    monkeypatch.setattr(strategy_module, "_get_strategy_service_client", lambda: stub)
 
     app = FastAPI()
     app.include_router(strategy_module.router)
+
+    async def allow_user() -> str:
+        return "tester"
+
+    app.dependency_overrides[strategy_module.get_current_user] = allow_user
     return app
 
 
@@ -177,8 +178,10 @@ def test_strategy_task_enqueued_and_event_returned(strategy_app: FastAPI, monkey
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     payload = response.json()
+    assert payload["success"] is False
+    assert payload["detail"] == "Strategy service unavailable; order queued"
     assert payload["task_id"] == "task-001"
     assert payload["status"] == "started"
     assert payload["queue"] == strategy_module.STRATEGY_QUEUE_KEY
@@ -229,8 +232,10 @@ def test_strategy_task_without_event_returns_queued(strategy_app: FastAPI, monke
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     payload = response.json()
+    assert payload["success"] is False
+    assert payload["detail"] == "Strategy service unavailable; order queued"
     assert payload["status"] == "queued"
     assert "event" not in payload
 
