@@ -61,12 +61,8 @@ from src.models import (
 from core import (
     telegram_notifier,
     notification_manager,
-    risk_manager,
-    strategy_manager,
-    queue_manager,
     websocket_manager,
     order_manager,
-    account_snapshot_service,
     get_dom_service,
 )
 
@@ -347,124 +343,6 @@ async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHan
 
     return handle
 
-async def _module_risk_manager(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-
-    try:
-        risk_manager.start()
-        context.logger.info("Risk manager started during application startup")
-    except Exception as exc:
-        context.logger.warning(f"Risk manager startup warning: {exc}")
-        return handle
-
-    def _shutdown_risk_manager() -> None:
-        try:
-            if getattr(risk_manager, 'scheduler', None) and risk_manager.scheduler.running:
-                risk_manager.scheduler.shutdown()
-                context.logger.info("Risk manager scheduler shutdown")
-        except Exception as exc:
-            context.logger.warning(f"Risk manager shutdown warning: {exc}")
-
-    handle.finalizers.append(_shutdown_risk_manager)
-    return handle
-
-
-async def _module_account_snapshot(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-
-    try:
-        account_snapshot_service.start()
-        context.logger.info("Account snapshot service started during application startup")
-    except Exception as exc:
-        context.logger.warning(
-            f"Account snapshot service startup warning: {exc}"
-        )
-        return handle
-
-    async def _stop_account_snapshot() -> None:
-        try:
-            await account_snapshot_service.stop()
-            context.logger.info("Account snapshot service stopped")
-        except Exception as exc:
-            context.logger.warning(
-                f"Account snapshot service shutdown warning: {exc}"
-            )
-
-    handle.finalizers.append(_stop_account_snapshot)
-    return handle
-
-
-async def _module_strategy_manager(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-
-    try:
-        strategy_manager.start()
-        context.logger.info("Strategy manager initialized during application startup")
-    except Exception as exc:
-        context.logger.warning(f"Strategy manager startup warning: {exc}")
-        return handle
-
-    async def _restore_data_push_states() -> None:
-        try:
-            await strategy_manager.restore_data_push_states()
-            context.logger.info("Strategy data push states restored after startup")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            context.logger.warning(
-                f"Deferred data push restoration failed: {exc}"
-            )
-
-    handle.tasks.append(
-        asyncio.create_task(
-            _restore_data_push_states(),
-            name="module-strategy-restore",
-        )
-    )
-
-    def _stop_strategy_manager() -> None:
-        try:
-            strategy_manager.stop()
-            context.logger.info("Strategy manager scheduler stopped")
-        except Exception as exc:
-            context.logger.warning(f"Strategy manager shutdown warning: {exc}")
-
-    handle.finalizers.append(_stop_strategy_manager)
-    return handle
-
-
-async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-    if getattr(core, "ibkr_client", None) is None:
-        try:
-            core.ibkr_client = core.IBKRClient()
-            context.logger.info("IBKRClient initialized for queue worker startup")
-        except Exception as exc:
-            context.logger.warning(f"IBKR client initialization warning: {exc}")
-            return handle
-
-    if getattr(core, "ibkr_client", None) is None:
-        context.logger.warning("Queue worker not started because IBKR client is unavailable")
-        return handle
-
-    try:
-        await queue_manager.start_worker()
-        context.logger.info("Queue worker started during application startup")
-    except Exception as exc:
-        context.logger.warning(f"Queue worker startup warning: {exc}")
-        return handle
-
-    async def _stop_queue_worker() -> None:
-        try:
-            await queue_manager.stop_worker()
-            context.logger.info("Queue worker stopped")
-        except Exception as exc:
-            context.logger.warning(f"Queue worker shutdown warning: {exc}")
-
-    handle.finalizers.append(_stop_queue_worker)
-    return handle
-
-
 def _build_module_registry(main_logger) -> ModuleRegistry:
     registry = ModuleRegistry(main_logger)
     registry.register(
@@ -479,34 +357,6 @@ def _build_module_registry(main_logger) -> ModuleRegistry:
             name="data_subscriptions",
             start=_module_data_subscriptions,
             description="Initialise unified data subscriptions and DOM auto-start.",
-        )
-    )
-    registry.register(
-        ModuleDefinition(
-            name="risk_manager",
-            start=_module_risk_manager,
-            description="Start the risk manager scheduler.",
-        )
-    )
-    registry.register(
-        ModuleDefinition(
-            name="account_snapshot",
-            start=_module_account_snapshot,
-            description="Run the periodic account snapshot service.",
-        )
-    )
-    registry.register(
-        ModuleDefinition(
-            name="strategy_manager",
-            start=_module_strategy_manager,
-            description="Boot the strategy manager and restore push states.",
-        )
-    )
-    registry.register(
-        ModuleDefinition(
-            name="queue_worker",
-            start=_module_queue_worker,
-            description="Start the background queue worker for internal orders.",
         )
     )
     return registry
