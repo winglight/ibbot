@@ -290,7 +290,7 @@ class ConnectionManager:
                 original_client_id = self.config.client_id
                 connected = False
                 
-                for attempt in range(5):  # 最多尝试5次
+                for attempt in range(6):  # 最多尝试6次（原始ID + 后续5个）
                     try_client_id = original_client_id + attempt
                     if try_client_id > 32:  # IBKR客户端ID范围是1-32
                         try_client_id = try_client_id - 32
@@ -333,13 +333,13 @@ class ConnectionManager:
                             self._last_connect_error = f"连接被拒绝 - TWS/Gateway可能未运行或端口错误 (端口: {self.config.port})"
                             raise Exception(self._last_connect_error)
                         else:
-                            if attempt == 4:  # 最后一次尝试
+                            if attempt == 5:  # 最后一次尝试
                                 self._last_connect_error = f"连接失败: {error_msg}"
                                 raise Exception(self._last_connect_error)
                             connection_logger.warning(f"客户端ID {try_client_id} 连接失败: {error_msg}，尝试下一个ID")
-                 
+
                 if not connected:
-                    self._last_connect_error = f"无法找到可用的客户端ID (尝试了 {original_client_id} 到 {original_client_id + 4})"
+                    self._last_connect_error = f"无法找到可用的客户端ID (尝试了 {original_client_id} 到 {original_client_id + 5})"
                     raise Exception(self._last_connect_error)
                 
                 # 连接后设置默认市场数据类型，避免无权限时报 10197

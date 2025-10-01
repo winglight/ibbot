@@ -37,7 +37,7 @@ async def test_ibkr_connection(host: str, port: int, client_id: int) -> bool:
     ib = IB()
     
     # 尝试多个客户端ID
-    for attempt in range(5):
+    for attempt in range(6):
         try_client_id = client_id + attempt
         if try_client_id > 32:
             try_client_id = try_client_id - 32
@@ -53,7 +53,7 @@ async def test_ibkr_connection(host: str, port: int, client_id: int) -> bool:
             if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():
                 print(f"   客户端ID {try_client_id} 已被使用")
                 continue
-            elif attempt == 4:  # 最后一次尝试
+            elif attempt == 5:  # 最后一次尝试
                 logger.error(f"IBKR连接测试失败: {e}")
                 return False
             else:
