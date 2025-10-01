@@ -9,20 +9,22 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 import core
-from core import connection_manager, websocket_manager
+from core import get_core_container
 
 order_manager = getattr(core, "order_manager", None)
 risk_manager = getattr(core, "risk_manager", None)
 strategy_manager = getattr(core, "strategy_manager", None)
-from src.database import get_db_manager
 from src.dom_optimizer import get_dom_optimization_orchestrator
-from src.dom_service import get_dom_service
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.utils.strategy_cache import (
     compute_performance_metrics as cache_compute_performance,
     get_strategy_stats as cache_get_strategy_stats,
 )
 
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
+websocket_manager = core_container.websocket_manager
+dom_service = core_container.dom_service
 router = APIRouter()
 
 RATE_LIMIT_SECONDS = 15.0
@@ -181,7 +183,7 @@ def _enrich_sizing_history_items(items: List[Dict[str, Any]]) -> List[Dict[str, 
     if not items:
         return items
 
-    db = get_db_manager()
+    db = core_container.get_db_manager()
     try:
         s_rules_config = db.get_config("s_rules", {}) or {}
     except Exception as exc:
@@ -356,7 +358,7 @@ async def websocket_endpoint(websocket: WebSocket):
     realtime_tasks: Dict[str, asyncio.Task] = {}
     request_tracker: Dict[str, float] = {}
     last_responses: Dict[str, Dict[str, Any]] = {}
-    dom_service = get_dom_service()
+    dom_service = core_container.dom_service
     orchestrator = None
     try:
         while True:
@@ -826,7 +828,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    db = get_db_manager()
+                    db = core_container.get_db_manager()
                     items = db.load_sizing_history(symbol=symbol, since=since_raw, limit=limit)
                     enriched = _enrich_sizing_history_items(items)
                     meta = {

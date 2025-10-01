@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
 import core
-from core import connection_manager
+from core import get_core_container
 
 risk_manager = getattr(core, "risk_manager", None)
 from .auth import get_current_user
@@ -20,7 +20,8 @@ from src.models import (
     RiskConfigUpdateRequest,
     PositionSizingRequest,
 )
-from src.database import get_db_manager
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
 
 from .orders import (
     _validate_g7_basic_params,
@@ -374,7 +375,7 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
         
         # 写入历史
         try:
-            db = get_db_manager()
+            db = core_container.get_db_manager()
             db.save_sizing_history(
                 symbol=payload.symbol,
                 action="calculate",
@@ -414,7 +415,7 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
 @router.get("/api/sizing/history")
 async def get_sizing_history(symbol: Optional[str] = None, since: Optional[str] = None, limit: int = 100, user: Optional[str] = Depends(get_current_user)):
     try:
-        db = get_db_manager()
+        db = core_container.get_db_manager()
         items = db.load_sizing_history(symbol=symbol, since=since, limit=limit)
         
         # 为每个历史记录添加g_rules_status和s_rules_status
@@ -498,7 +499,7 @@ async def get_sizing_history(symbol: Optional[str] = None, since: Optional[str] 
 @router.get("/api/config/rules")
 async def get_config_rules(user: Optional[str] = Depends(get_current_user)):
     try:
-        db = get_db_manager()
+        db = core_container.get_db_manager()
         
         # 从新的config表获取配置
         g_rules = db.get_config("g_rules", {})
@@ -526,7 +527,7 @@ async def get_config_rules(user: Optional[str] = Depends(get_current_user)):
 @router.put("/api/config/rules")
 async def update_config_rules(payload: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
     try:
-        db = get_db_manager()
+        db = core_container.get_db_manager()
         
         # 保存G Rules和S Rules到config表
         if "g_rules" in payload:

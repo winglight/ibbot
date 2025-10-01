@@ -172,7 +172,7 @@
 
 ## 5. 主程序修改方案
 1. **模块化启动**：
-   - 移除 `core/__init__` 的全局单例，改为在 FastAPI 启动事件中实例化配置、Redis、Influx 客户端。
+   - 通过 `core.CoreContainer` 统一管理 Redis、配置提供者与 Influx 管道，FastAPI 入口通过容器获取依赖。
    - 根据配置向各服务暴露的接口发起健康检查，写入 Redis `hash:service:health`。
 2. **API 重写**：
    - 下单类 API -> 调用 `enqueue_ib_command`，立即返回 `command_id`。

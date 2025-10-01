@@ -42,7 +42,8 @@ from starlette.middleware.gzip import GZipMiddleware
 sys.path.append(str(Path(__file__).parent))
 
 import core
-from src.connection_manager import connection_manager, ConnectionConfig
+from core import get_core_container
+from src.connection_manager import ConnectionConfig
 from src.database import get_db_manager
 from src.models import (
     HistoricalDataRequest,
@@ -58,7 +59,9 @@ from src.models import (
 )
 
 # Shared application services
-from core import get_dom_service, websocket_manager
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
+websocket_manager = core_container.websocket_manager
 
 # Authentication and routers
 from src.routes.auth import get_current_user, router as auth_router
@@ -73,7 +76,6 @@ from src.routes.queue import router as queue_router
 from src.routes.logs import router as logs_router
 from src.routes.websocket import router as websocket_router
 from src.routes.dom import router as dom_router
-from src.data_layer import get_data_source_manager
 
 
 # Global variables
@@ -299,14 +301,14 @@ async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHan
     handle = ModuleHandle(name=context.module_name)
 
     try:
-        get_data_source_manager()
+        core_container.get_data_source_manager()
     except Exception as exc:
         context.logger.warning(f"Data subscription manager initialisation warning: {exc}")
     else:
         context.logger.info("Data source manager initialised for subscriptions")
 
     try:
-        dom_service = get_dom_service()
+        dom_service = core_container.dom_service
     except Exception as exc:
         context.logger.warning(f"DOM service unavailable for auto-start: {exc}")
         return handle

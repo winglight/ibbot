@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
 import core
-from core import connection_manager, websocket_manager
+from core import get_core_container
 
 order_manager = getattr(core, "order_manager", None)
 risk_manager = getattr(core, "risk_manager", None)
@@ -15,6 +15,9 @@ from .auth import get_current_user
 from src.models import OrderRequest
 from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
+websocket_manager = core_container.websocket_manager
 router = APIRouter()
 
 NY_TZ = ZoneInfo("America/New_York")
