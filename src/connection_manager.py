@@ -702,103 +702,103 @@ class ConnectionManager:
                                     executed_at=executed_at,
                                 )
 
-                                    if not updated:
+                                if not updated:
+                                    try:
+                                        contract = getattr(trade, 'contract', None)
+                                        order_obj = getattr(trade, 'order', None)
+                                        symbol = (
+                                            getattr(contract, 'symbol', None)
+                                            or getattr(contract, 'localSymbol', None)
+                                            or getattr(order_obj, 'symbol', None)
+                                            or getattr(order_obj, 'localSymbol', '')
+                                        )
+                                        action = (getattr(order_obj, 'action', None) or '').upper()
+                                        quantity = getattr(order_obj, 'totalQuantity', 0) or 0
+                                        order_type = str(getattr(order_obj, 'orderType', None) or 'MKT').upper()
+                                        lmt_price = getattr(order_obj, 'lmtPrice', None)
+                                        aux_price = getattr(order_obj, 'auxPrice', None)
+                                        price_value = None
+                                        for candidate in (lmt_price, aux_price):
+                                            if isinstance(candidate, (int, float)) and candidate != 0:
+                                                price_value = float(candidate)
+                                                break
+
+                                        order_source = None
+
+                                        # 优先尝试从 RiskManager/OrderManager 中识别订单来源
                                         try:
-                                            contract = getattr(trade, 'contract', None)
-                                            order_obj = getattr(trade, 'order', None)
-                                            symbol = (
-                                                getattr(contract, 'symbol', None)
-                                                or getattr(contract, 'localSymbol', None)
-                                                or getattr(order_obj, 'symbol', None)
-                                                or getattr(order_obj, 'localSymbol', '')
-                                            )
-                                            action = (getattr(order_obj, 'action', None) or '').upper()
-                                            quantity = getattr(order_obj, 'totalQuantity', 0) or 0
-                                            order_type = str(getattr(order_obj, 'orderType', None) or 'MKT').upper()
-                                            lmt_price = getattr(order_obj, 'lmtPrice', None)
-                                            aux_price = getattr(order_obj, 'auxPrice', None)
-                                            price_value = None
-                                            for candidate in (lmt_price, aux_price):
-                                                if isinstance(candidate, (int, float)) and candidate != 0:
-                                                    price_value = float(candidate)
-                                                    break
+                                            import core  # 延迟导入避免循环依赖
 
-                                            order_source = None
+                                            risk_manager = getattr(core, 'risk_manager', None)
+                                            if (risk_manager and
+                                                    hasattr(risk_manager, 'auto_orders') and
+                                                    order_id in risk_manager.auto_orders):
+                                                auto_order = risk_manager.auto_orders.get(order_id)
+                                                candidate = getattr(auto_order, 'order_source', None)
+                                                if candidate:
+                                                    order_source = str(candidate)
 
-                                            # 优先尝试从 RiskManager/OrderManager 中识别订单来源
-                                            try:
-                                                import core  # 延迟导入避免循环依赖
-
-                                                risk_manager = getattr(core, 'risk_manager', None)
-                                                if (risk_manager and
-                                                        hasattr(risk_manager, 'auto_orders') and
-                                                        order_id in risk_manager.auto_orders):
-                                                    auto_order = risk_manager.auto_orders.get(order_id)
-                                                    candidate = getattr(auto_order, 'order_source', None)
-                                                    if candidate:
-                                                        order_source = str(candidate)
-
-                                                if order_source is None:
-                                                    existing = om.get_order(order_id)
-                                                    if existing and getattr(existing, 'order_source', None):
-                                                        order_source = str(existing.order_source)
-                                            except Exception as detect_err:  # pragma: no cover - defensive
-                                                connection_logger.debug(
-                                                    f"Order source detection failed for {order_id}: {detect_err}"
-                                                )
-
-                                            # 如果仍未识别来源，再回退到 orderRef 的启发式判断
-                                            if not order_source:
-                                                order_source = 'manual'
-                                                order_ref = getattr(order_obj, 'orderRef', '')
-                                                if isinstance(order_ref, str) and order_ref:
-                                                    lower_ref = order_ref.lower()
-                                                    if 'tp' in lower_ref:
-                                                        order_source = 'tp'
-                                                    elif 'sl' in lower_ref:
-                                                        order_source = 'sl'
-                                                    elif ('auto' in lower_ref or
-                                                          'strategy' in lower_ref or
-                                                          'risk' in lower_ref):
-                                                        order_source = 'auto'
-
-                                            await asyncio.to_thread(
-                                                om.add_order,
-                                                {
-                                                    'order_id': order_id,
-                                                    'symbol': str(symbol or ''),
-                                                    'action': action,
-                                                    'quantity': int(quantity),
-                                                    'order_type': order_type,
-                                                    'price': price_value,
-                                                    'status': status or 'Submitted',
-                                                    'order_source': order_source,
-                                                    'exchange': str(getattr(contract, 'exchange', 'SMART') or 'SMART'),
-                                                    'sec_type': str(getattr(contract, 'secType', 'STK') or 'STK'),
-                                                    'fill_price': fill_price,
-                                                },
+                                            if order_source is None:
+                                                existing = om.get_order(order_id)
+                                                if existing and getattr(existing, 'order_source', None):
+                                                    order_source = str(existing.order_source)
+                                        except Exception as detect_err:  # pragma: no cover - defensive
+                                            connection_logger.debug(
+                                                f"Order source detection failed for {order_id}: {detect_err}"
                                             )
 
-                                            await asyncio.to_thread(
-                                                om.update_order_status,
-                                                order_id=order_id,
-                                                status=status,
-                                                fill_price=fill_price,
-                                                executed_at=executed_at,
-                                            )
-                                        except Exception as add_err:
-                                            connection_logger.warning(
-                                                f"Failed to record order {order_id} from status event: {add_err}"
-                                            )
-                                except Exception as e:
-                                    connection_logger.warning(f"OrderManager status update failed for {order_id}: {e}")
+                                        # 如果仍未识别来源，再回退到 orderRef 的启发式判断
+                                        if not order_source:
+                                            order_source = 'manual'
+                                            order_ref = getattr(order_obj, 'orderRef', '')
+                                            if isinstance(order_ref, str) and order_ref:
+                                                lower_ref = order_ref.lower()
+                                                if 'tp' in lower_ref:
+                                                    order_source = 'tp'
+                                                elif 'sl' in lower_ref:
+                                                    order_source = 'sl'
+                                                elif ('auto' in lower_ref or
+                                                        'strategy' in lower_ref or
+                                                        'risk' in lower_ref):
+                                                    order_source = 'auto'
 
-                                # 如果订单已成交，处理佣金和PnL
-                                if status == 'Filled':
-                                    import core
-                                    asyncio.create_task(core.ibkr_client._handle_order_filled(trade))
+                                        await asyncio.to_thread(
+                                            om.add_order,
+                                            {
+                                                'order_id': order_id,
+                                                'symbol': str(symbol or ''),
+                                                'action': action,
+                                                'quantity': int(quantity),
+                                                'order_type': order_type,
+                                                'price': price_value,
+                                                'status': status or 'Submitted',
+                                                'order_source': order_source,
+                                                'exchange': str(getattr(contract, 'exchange', 'SMART') or 'SMART'),
+                                                'sec_type': str(getattr(contract, 'secType', 'STK') or 'STK'),
+                                                'fill_price': fill_price,
+                                            },
+                                        )
+
+                                        await asyncio.to_thread(
+                                            om.update_order_status,
+                                            order_id=order_id,
+                                            status=status,
+                                            fill_price=fill_price,
+                                            executed_at=executed_at,
+                                        )
+                                    except Exception as add_err:
+                                        connection_logger.warning(
+                                            f"Failed to record order {order_id} from status event: {add_err}"
+                                        )
                             except Exception as e:
-                                connection_logger.error(f"Error in order status handler: {e}")
+                                connection_logger.warning(f"OrderManager status update failed for {order_id}: {e}")
+
+                            # 如果订单已成交，处理佣金和PnL
+                            if status == 'Filled':
+                                import core
+                                asyncio.create_task(core.ibkr_client._handle_order_filled(trade))
+                        except Exception as e:
+                            connection_logger.error(f"Error in order status handler: {e}")
 
                         asyncio.create_task(_process_order_status())
 
@@ -836,9 +836,6 @@ class ConnectionManager:
                         self.ib.commissionReportEvent += commission_report_handler
                     connection_logger.debug("Added order status, exec details and commission report event handlers")
                     
-                except Exception as e:
-                    connection_logger.warning(f"Failed to setup event handlers: {e}")
-                
                 self.connected = True
                 account_type = "Paper" if self.config.paper_trading else "Live"
                 connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
