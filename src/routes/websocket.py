@@ -4,7 +4,7 @@ import math
 import os
 import time
 from datetime import timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Mapping
 
 import httpx
 
@@ -26,6 +26,11 @@ from src.routes.monitoring import build_influx_write_rate_payload, get_queue_met
 from src.utils.strategy_cache import (
     compute_performance_metrics as cache_compute_performance,
     get_strategy_stats as cache_get_strategy_stats,
+)
+from src.ib_command_health import (
+    IB_COMMAND_HEALTH_KEY,
+    IB_COMMAND_HEALTH_STALE_AFTER_SEC,
+    build_ib_connection_health_payload,
 )
 
 router = APIRouter()
@@ -180,6 +185,57 @@ def _load_risk_rules_snapshot() -> Optional[Dict[str, Dict[str, Any]]]:
 
 def _connection_manager():
     return core.connection_manager
+
+
+def _decode_redis_mapping(raw: Dict[Any, Any]) -> Dict[str, str]:
+    """Convert Redis hash payload into a plain string dictionary."""
+
+    result: Dict[str, str] = {}
+    for key, value in raw.items():
+        if key is None:
+            continue
+        if isinstance(key, (bytes, bytearray)):
+            key = key.decode("utf-8", errors="ignore")
+        else:
+            key = str(key)
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", errors="ignore")
+        elif value is None:
+            value = ""
+        else:
+            value = str(value)
+        result[key] = value
+    return result
+
+
+async def _load_ib_command_health() -> Optional[Dict[str, Any]]:
+    """Load ib-command service health details from Redis if available."""
+
+    container = core.get_container()
+    redis_client = getattr(container, "redis_client", None) if container else None
+    if redis_client is None:
+        return None
+
+    try:
+        raw = await redis_client.hgetall(IB_COMMAND_HEALTH_KEY)
+    except Exception as exc:  # pragma: no cover - redis access errors
+        logger.debug("Failed to load ib-command health from Redis: %s", exc)
+        return None
+
+    if not raw:
+        return None
+
+    stale_after = (
+        IB_COMMAND_HEALTH_STALE_AFTER_SEC
+        if IB_COMMAND_HEALTH_STALE_AFTER_SEC > 0
+        else 30.0
+    )
+
+    return build_ib_connection_health_payload(
+        _decode_redis_mapping(raw),
+        stale_after=stale_after,
+    )
+
 
 async def _send_json(websocket: WebSocket, payload: Dict[str, Any]) -> bool:
     try:
@@ -441,19 +497,93 @@ async def websocket_endpoint(websocket: WebSocket):
 
     await _websocket_manager().connect(websocket)
 
+    async def _resolve_connection_context(
+        payload: Optional[Mapping[str, Any]] = None,
+        *,
+        refresh: bool = False,
+    ) -> tuple[
+        Optional[Dict[str, Any]],
+        bool,
+        bool,
+        str,
+        Optional[str],
+        Optional[bool],
+        bool,
+    ]:
+        if refresh or payload is None:
+            payload = await _load_ib_command_health()
+
+        data: Dict[str, Any] = {}
+        if isinstance(payload, Mapping):
+            data = dict(payload)
+        elif payload:
+            try:
+                data = dict(payload)  # type: ignore[arg-type]
+            except Exception:
+                data = {}
+
+        redis_fresh = bool(data) and not bool(data.get("stale", True))
+        redis_connected = bool(data.get("connected")) if redis_fresh else None
+
+        try:
+            local_connected = bool(conn_manager.is_connected())
+        except Exception:
+            local_connected = False
+
+        connected_flag = redis_connected if redis_connected is not None else local_connected
+
+        account_type = data.get("account_type")
+        if not account_type:
+            try:
+                account_type = "Paper" if conn_manager.config.paper_trading else "Live"
+            except Exception:
+                account_type = "Paper"
+
+        last_error = data.get("last_error") or None
+        if not last_error:
+            try:
+                last_error = conn_manager.get_last_connect_error()
+            except Exception:
+                last_error = None
+
+        return (
+            data if data else None,
+            bool(connected_flag),
+            bool(local_connected),
+            account_type,
+            last_error,
+            redis_connected,
+            redis_fresh,
+        )
+
+    health_payload: Optional[Dict[str, Any]]
+    (
+        health_payload,
+        connected_flag,
+        local_connected_state,
+        account_type_label,
+        last_error_value,
+        _,
+        _,
+    ) = await _resolve_connection_context(refresh=True)
+
     # 新连接建立后，立即向该客户端单播当前连接状态
     try:
-        await websocket.send_text(json.dumps({
+        payload = {
             "type": "connection_status",
-            "connected": conn_manager.is_connected(),
-            "account_type": "Paper" if conn_manager.config.paper_trading else "Live",
-        }))
+            "connected": bool(connected_flag),
+            "account_type": account_type_label,
+        }
+        if last_error_value:
+            payload["last_error"] = last_error_value
+        await websocket.send_text(json.dumps(payload))
     except Exception as e:
         logger.debug(f"Failed to send initial connection status: {e}")
 
     # 初次连接后，向该连接单播账户信息快照
     try:
-        if conn_manager.is_connected():
+        should_fetch_account = connected_flag or local_connected_state
+        if should_fetch_account:
             info = await _fetch_account_info()
             if info is None:
                 snapshot = await read_account_info_snapshot()
@@ -464,6 +594,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if isinstance(info, dict):
                     payload_info = dict(info)
                     payload_info.setdefault("connected", True)
+                    if account_type_label:
+                        payload_info.setdefault("account_type", account_type_label)
                 await websocket.send_text(json.dumps({
                     "type": "account_update",
                     "account_info": payload_info,
@@ -471,14 +603,13 @@ async def websocket_endpoint(websocket: WebSocket):
             else:
                 logger.warning("Initial account_info snapshot unavailable on websocket connect")
         else:
-            last_err = None
-            try:
-                last_err = conn_manager.get_last_connect_error()
-            except Exception:
-                last_err = None
             await websocket.send_text(json.dumps({
                 "type": "account_update",
-                "account_info": {"connected": False, "last_error": last_err}
+                "account_info": {
+                    "connected": False,
+                    "last_error": last_error_value,
+                    "account_type": account_type_label,
+                },
             }))
     except Exception as e:
         logger.debug(f"Failed to send initial account_update: {e}")
@@ -512,7 +643,8 @@ async def websocket_endpoint(websocket: WebSocket):
     
     # 初次连接后，向该连接单播发送positions快照
     try:
-        if conn_manager.is_connected():
+        should_fetch_positions = connected_flag or local_connected_state
+        if should_fetch_positions:
             positions = await _fetch_positions(force_refresh=False, fast=True)
             if positions is None:
                 snapshot = await read_positions_snapshot()
@@ -563,44 +695,26 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
-                is_connected = getattr(conn_manager, "connected", False)
-                check_connected = getattr(conn_manager, "is_connected", None)
-                if callable(check_connected):
-                    try:
-                        is_connected = await asyncio.wait_for(
-                            asyncio.to_thread(check_connected),
-                            timeout=1.0,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            "Connection status request timed out; using cached state"
-                        )
-                        is_connected = getattr(conn_manager, "connected", False)
-                    except Exception as exc:
-                        logger.warning(f"Connection status request failed: {exc}")
-                        is_connected = getattr(conn_manager, "connected", False)
-
-                account_type = "Paper"
-                try:
-                    if not conn_manager.config.paper_trading:
-                        account_type = "Live"
-                except Exception:
-                    account_type = "Paper"
+                (
+                    health_payload,
+                    connected_flag,
+                    local_connected_state,
+                    account_type_label,
+                    last_error_value,
+                    _,
+                    _,
+                ) = await _resolve_connection_context(health_payload, refresh=True)
 
                 payload = {
                     "type": "connection_status",
-                    "connected": bool(is_connected),
-                    "account_type": account_type,
+                    "connected": bool(connected_flag),
+                    "account_type": account_type_label,
                     "success": True,
                     "source": "websocket",
                 }
 
-                try:
-                    last_error = conn_manager.get_last_connect_error()
-                    if last_error:
-                        payload["last_error"] = last_error
-                except Exception:
-                    pass
+                if last_error_value:
+                    payload["last_error"] = last_error_value
 
                 last_responses[key] = payload
                 await websocket.send_text(json.dumps(payload))
@@ -820,7 +934,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 key = "positions_snapshot"
                 force = bool(message.get("force"))
 
-                if not conn_manager.is_connected():
+                (
+                    health_payload,
+                    connected_flag,
+                    local_connected_state,
+                    account_type_label,
+                    last_error_value,
+                    _,
+                    _,
+                ) = await _resolve_connection_context(health_payload, refresh=True)
+
+                if not (connected_flag or local_connected_state):
                     payload = {
                         "type": "position_update",
                         "success": False,
@@ -828,6 +952,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "source": "websocket",
                         "positions": [],
                     }
+                    if last_error_value:
+                        payload["last_error"] = last_error_value
                     await websocket.send_text(json.dumps(payload))
                     continue
 
