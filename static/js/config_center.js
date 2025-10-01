@@ -389,5 +389,36 @@
     }
 
     namespace.createManager = createManager;
+    namespace.ready = true;
+
+    const rootTarget = typeof root !== 'undefined' ? root : null;
+    const dispatchReadyEvent = (target) => {
+        if (!target || typeof target.dispatchEvent !== 'function') {
+            return;
+        }
+
+        let event = null;
+        if (typeof Event === 'function') {
+            event = new Event('configCenter:ready');
+        } else if (typeof CustomEvent === 'function') {
+            event = new CustomEvent('configCenter:ready');
+        }
+
+        if (!event) {
+            return;
+        }
+
+        try {
+            target.dispatchEvent(event);
+        } catch (error) {
+            if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+                console.warn('Failed to dispatch config center ready event', error);
+            }
+        }
+    };
+
+    if (rootTarget) {
+        dispatchReadyEvent(rootTarget);
+    }
 })(typeof window !== 'undefined' ? window : globalThis);
 
