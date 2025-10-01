@@ -42,8 +42,11 @@ from starlette.middleware.gzip import GZipMiddleware
 sys.path.append(str(Path(__file__).parent))
 
 import core
+from src.account_snapshot_service import AccountSnapshotService
 from src.cache import hgetall
 from src.database import get_db_manager
+from src.notification_manager import NotificationManager
+from src.order_manager import get_order_manager
 from src.ib_command_health import (
     IB_COMMAND_HEALTH_KEY,
     IB_COMMAND_HEALTH_POLL_INTERVAL_SEC,
@@ -51,6 +54,8 @@ from src.ib_command_health import (
     build_ib_connection_health_payload,
 )
 from src.ibbot.redis import get_redis_client
+from src.queue_manager import QueueManager
+from src.risk_manager import RiskManager
 from src.models import (
     HistoricalDataRequest,
     ChartDataRequest,
@@ -63,6 +68,9 @@ from src.models import (
     PositionSizingRequest,
     CurrentPriceRequest,
 )
+from src.strategy_manager import StrategyManager
+from src.strategy_risk import StrategyRiskManager
+from src.telegram_notifier import TelegramNotifier
 
 # Authentication and routers
 from src.routes.auth import get_current_user, router as auth_router
@@ -268,6 +276,88 @@ class ModuleRegistry:
         self._handles.clear()
 
 
+async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+
+    container = core.require_container()
+    db_manager = get_db_manager()
+
+    telegram_notifier = TelegramNotifier()
+    notification_manager = NotificationManager(
+        telegram_notifier=telegram_notifier,
+        websocket_manager=container.websocket_manager,
+        db_manager=db_manager,
+    )
+
+    order_manager = get_order_manager()
+    risk_manager = RiskManager(notification_manager=notification_manager)
+    queue_manager = QueueManager()
+    strategy_manager = StrategyManager()
+    strategy_risk_manager = StrategyRiskManager(
+        db_manager=db_manager,
+        notification_manager=notification_manager,
+    )
+    account_snapshot_service = AccountSnapshotService()
+
+    notification_manager.set_dependencies(
+        telegram_notifier=telegram_notifier,
+        websocket_manager=container.websocket_manager,
+        db_manager=db_manager,
+    )
+    risk_manager.set_dependencies(order_manager=order_manager)
+    order_manager.set_dependencies(
+        websocket_manager=container.websocket_manager,
+        notification_manager=notification_manager,
+        risk_manager=risk_manager,
+    )
+    queue_manager.set_dependencies(
+        risk_manager=risk_manager,
+        strategy_manager=strategy_manager,
+        websocket_manager=container.websocket_manager,
+        order_manager=order_manager,
+        notification_manager=notification_manager,
+    )
+    strategy_manager.set_dependencies(
+        risk_manager=risk_manager,
+        queue_manager=queue_manager,
+        notification_manager=notification_manager,
+        strategy_risk_manager=strategy_risk_manager,
+    )
+    strategy_risk_manager.set_dependencies(
+        strategy_manager=strategy_manager,
+        queue_manager=queue_manager,
+        notification_manager=notification_manager,
+    )
+
+    container.telegram_notifier = telegram_notifier
+    container.notification_manager = notification_manager
+    container.order_manager = order_manager
+    container.risk_manager = risk_manager
+    container.strategy_risk_manager = strategy_risk_manager
+    container.strategy_manager = strategy_manager
+    container.queue_manager = queue_manager
+    container.account_snapshot_service = account_snapshot_service
+
+    risk_manager.start()
+    handle.finalizers.append(risk_manager.stop)
+
+    strategy_manager.start()
+    handle.finalizers.append(strategy_manager.stop)
+
+    strategy_risk_manager.start()
+    handle.finalizers.append(strategy_risk_manager.stop)
+
+    account_snapshot_service.start()
+    handle.finalizers.append(account_snapshot_service.stop)
+
+    await queue_manager.start_worker()
+    handle.finalizers.append(queue_manager.stop_worker)
+
+    context.logger.info("Core service managers initialised")
+
+    return handle
+
+
 async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
 
@@ -430,6 +520,13 @@ async def _module_service_health_monitor(
 
 def _build_module_registry(main_logger) -> ModuleRegistry:
     registry = ModuleRegistry(main_logger)
+    registry.register(
+        ModuleDefinition(
+            name="core_managers",
+            start=_module_core_managers,
+            description="Initialise core risk, strategy, queue, and notification managers.",
+        )
+    )
     registry.register(
         ModuleDefinition(
             name="data_subscriptions",
