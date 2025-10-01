@@ -150,6 +150,7 @@ class ConnectionManager:
         self._client_id_retry_limit = max(1, _get_env_int("IBKR_CLIENT_ID_RETRY_LIMIT", 5))
         self._next_client_id_hint = self._normalize_client_id(self.config.client_id)
         self.config.client_id = self._next_client_id_hint
+        self._client_id_conflict_detected: bool = False
 
     def _notify_ibkr_client_connected(self, *, external: bool) -> None:
         """Inform ``IBKRClient`` when a connection succeeds outside its control."""
@@ -385,6 +386,148 @@ class ConnectionManager:
         except Exception:
             pass
         connection_logger.debug("Patched ib_insync wrapper.updateMktDepthL2 to guard DOM depth indexes")
+
+    def _ensure_error_handler_installed(self, wrapper: Any) -> None:
+        """Install enhanced error handler once to capture client ID conflicts early."""
+
+        if not wrapper or getattr(wrapper, "_ibbot_error_handler_installed", False):
+            return
+
+        orig_error_handler = getattr(wrapper, "error", None)
+
+        def error_handler(self_wrapped, reqId, errorCode, errorString, advancedOrderRejectJson=""):
+            """处理IBKR错误，特别是订单相关错误"""
+            connection_logger.info(
+                f"IBKR Error - ReqId: {reqId}, Code: {errorCode}, Message: {errorString}"
+            )
+
+            lower_error_string = (errorString or "").lower()
+            conflict_signals = (
+                "client id is already in use",
+                "clientid already in use",
+                "already connected",
+                "duplicate",
+                "peer closed connection",
+                "error 326",
+            )
+
+            if errorCode == 326 or any(signal in lower_error_string for signal in conflict_signals):
+                self._client_id_conflict_detected = True
+                self._handle_client_id_conflict(self.config.client_id, source="error-handler")
+                if orig_error_handler and orig_error_handler is not error_handler:
+                    try:
+                        orig_error_handler(reqId, errorCode, errorString, advancedOrderRejectJson)
+                    except Exception:
+                        pass
+                return
+
+            if errorCode in {2107, 2108}:
+                connection_logger.info(
+                    f"IBKR data farm status {errorCode}: {errorString}"
+                )
+                client = None
+                ref = getattr(self, "_ibkr_client_ref", None)
+                if ref is not None:
+                    try:
+                        client = ref()
+                    except Exception:
+                        client = None
+                if client is not None:
+                    try:
+                        client.handle_data_farm_status(errorCode, errorString)
+                    except Exception as wake_err:  # pragma: no cover - defensive
+                        connection_logger.debug(
+                            f"Failed to schedule data farm wake-up: {wake_err}"
+                        )
+                if orig_error_handler and orig_error_handler is not error_handler:
+                    try:
+                        orig_error_handler(reqId, errorCode, errorString, advancedOrderRejectJson)
+                    except Exception:
+                        pass
+                return
+
+            try:
+                import core  # 延迟导入避免循环依赖
+
+                snapshot_service = getattr(core, "account_snapshot_service", None)
+                if snapshot_service:
+                    connection_loss_codes = {1100, 1300, 2103, 2105, 2110}
+                    connection_restore_codes = {1101, 1102, 1301, 2104, 2106, 2111}
+
+                    if errorCode in connection_loss_codes:
+                        snapshot_service.flag_connection_loss(
+                            errorString or f"IBKR error {errorCode}"
+                        )
+                    elif errorCode in connection_restore_codes:
+                        snapshot_service.request_immediate_refresh(
+                            reason="connection_restored"
+                        )
+            except Exception as snapshot_err:  # pragma: no cover - 防御性日志
+                connection_logger.debug(
+                    f"Snapshot service notification failed: {snapshot_err}"
+                )
+
+            if errorCode in {2103, 2105}:
+                client = None
+                ref = getattr(self, "_ibkr_client_ref", None)
+                if ref is not None:
+                    try:
+                        client = ref()
+                    except Exception:
+                        client = None
+                if client is not None:
+                    try:
+                        client.handle_gateway_broken(errorCode, errorString)
+                    except Exception as notify_err:  # pragma: no cover - defensive
+                        connection_logger.debug(
+                            f"Failed to dispatch gateway-broken handler: {notify_err}"
+                        )
+
+            if reqId and reqId > 0:  # reqId > 0 通常表示订单相关
+                margin_error_codes = [10148, 10149, 10150, 399, 400, 401, 402]
+                rejection_error_codes = [201, 202, 203, 434, 478, 10147, 300] + margin_error_codes
+
+                margin_keywords = [
+                    'insufficient', 'margin', 'buying power', 'rejected', 'not enough',
+                    'order rejected', 'insufficient funds', 'insufficient buying power',
+                    'margin requirement', 'account restriction', 'position limit'
+                ]
+
+                try:
+                    keyword_match = any(
+                        keyword.lower() in (errorString or "").lower()
+                        for keyword in margin_keywords
+                    )
+                except Exception:
+                    keyword_match = False
+
+                is_order_error = (
+                    errorCode in rejection_error_codes or keyword_match
+                )
+
+                if is_order_error:
+                    connection_logger.error(
+                        f"Order {reqId} rejected - Code: {errorCode}, Reason: {errorString}"
+                    )
+                    try:
+                        import core
+                        asyncio.create_task(
+                            core.ibkr_client._handle_order_error(reqId, errorCode, errorString)
+                        )
+                    except Exception as task_err:
+                        connection_logger.debug(
+                            f"Failed to dispatch order error handler: {task_err}"
+                        )
+
+            if orig_error_handler and orig_error_handler is not error_handler:
+                try:
+                    orig_error_handler(reqId, errorCode, errorString, advancedOrderRejectJson)
+                except Exception:
+                    pass
+
+        wrapper.error = types.MethodType(error_handler, wrapper)
+        setattr(wrapper, "_ibbot_error_handler_installed", True)
+        connection_logger.debug("Added IBKR error handler for order rejection detection")
     
     def _connect_in_thread(self) -> bool:
         """在独立线程中连接到IBKR服务器"""
@@ -403,7 +546,8 @@ class ConnectionManager:
                 # 创建新的IB实例
                 self.ib = IB()
                 self._patch_wrapper_depth_guard(self.ib.wrapper)
-                
+                self._ensure_error_handler_installed(self.ib.wrapper)
+
                 # 尝试连接，如果客户端ID冲突则自动尝试其他ID
                 connected = False
                 attempts = 0
@@ -411,6 +555,7 @@ class ConnectionManager:
                 try_client_id = self._normalize_client_id(self._next_client_id_hint)
 
                 while attempts < self._client_id_retry_limit:
+                    self._client_id_conflict_detected = False
                     if try_client_id in attempted_ids:
                         break
                     attempted_ids.add(try_client_id)
@@ -443,6 +588,14 @@ class ConnectionManager:
                         connection_logger.error(f"客户端ID {try_client_id} 连接超时")
                         raise Exception(self._last_connect_error)
                     except Exception as conn_error:
+                        if self._client_id_conflict_detected:
+                            self._client_id_conflict_detected = False
+                            try_client_id = self._normalize_client_id(self._next_client_id_hint)
+                            connection_logger.debug(
+                                "Retrying IBKR connection after conflict signalled by error handler",
+                                next_client_id=try_client_id,
+                            )
+                            continue
                         error_msg = str(conn_error)
                         lower_error = error_msg.lower()
                         client_id_in_use_signals = (
@@ -519,142 +672,35 @@ class ConnectionManager:
                 except Exception as e:
                     connection_logger.debug(f"Failed to patch wrapper.completedOrder: {e}")
                 
-                # 添加错误处理机制来捕获IBKR错误
+                # 添加错误处理机制来捕获IBKR错误（幂等安装）
                 try:
-                    def error_handler(reqId, errorCode, errorString, advancedOrderRejectJson=""):
-                        """处理IBKR错误，特别是订单相关错误"""
-                        connection_logger.info(f"IBKR Error - ReqId: {reqId}, Code: {errorCode}, Message: {errorString}")
+                    self._ensure_error_handler_installed(self.ib.wrapper)
+                except Exception as exc:
+                    connection_logger.debug(f"Failed to install error handler after connect: {exc}")
 
-                        lower_error_string = (errorString or "").lower()
-                        conflict_signals = (
-                            "client id is already in use",
-                            "clientid already in use",
-                            "already connected",
-                            "duplicate",
-                            "peer closed connection",
-                            "error 326",
-                        )
+                # 添加订单状态变化事件监听器
+                def order_status_handler(trade):
+                    """处理订单状态变化事件"""
 
-                        if errorCode == 326 or any(signal in lower_error_string for signal in conflict_signals):
-                            self._handle_client_id_conflict(self.config.client_id, source="error-handler")
-                            return
-
-                        if errorCode in {2107, 2108}:
-                            connection_logger.info(
-                                f"IBKR data farm status {errorCode}: {errorString}"
-                            )
-                            client = None
-                            ref = getattr(self, "_ibkr_client_ref", None)
-                            if ref is not None:
-                                try:
-                                    client = ref()
-                                except Exception:
-                                    client = None
-                            if client is not None:
-                                try:
-                                    client.handle_data_farm_status(errorCode, errorString)
-                                except Exception as wake_err:  # pragma: no cover - defensive
-                                    connection_logger.debug(
-                                        f"Failed to schedule data farm wake-up: {wake_err}"
-                                    )
-                            return
-
+                    async def _process_order_status():
                         try:
-                            import core  # 延迟导入避免循环依赖
+                            order_id = str(trade.order.orderId)
+                            status = trade.orderStatus.status
+                            connection_logger.info(f"Order status update: {order_id} -> {status}")
 
-                            snapshot_service = getattr(core, "account_snapshot_service", None)
-                            if snapshot_service:
-                                connection_loss_codes = {1100, 1300, 2103, 2105, 2110}
-                                connection_restore_codes = {1101, 1102, 1301, 2104, 2106, 2111}
-
-                                if errorCode in connection_loss_codes:
-                                    snapshot_service.flag_connection_loss(
-                                        errorString or f"IBKR error {errorCode}"
-                                    )
-                                elif errorCode in connection_restore_codes:
-                                    snapshot_service.request_immediate_refresh(
-                                        reason="connection_restored"
-                                    )
-                        except Exception as snapshot_err:  # pragma: no cover - 防御性日志
-                            connection_logger.debug(
-                                f"Snapshot service notification failed: {snapshot_err}"
-                            )
-
-                        if errorCode in {2103, 2105}:
-                            client = None
-                            ref = getattr(self, "_ibkr_client_ref", None)
-                            if ref is not None:
-                                try:
-                                    client = ref()
-                                except Exception:
-                                    client = None
-                            if client is not None:
-                                try:
-                                    client.handle_gateway_broken(errorCode, errorString)
-                                except Exception as notify_err:  # pragma: no cover - defensive
-                                    connection_logger.debug(
-                                        f"Failed to dispatch gateway-broken handler: {notify_err}"
-                                    )
-
-                        # 检查是否是订单相关错误
-                        if reqId and reqId > 0:  # reqId > 0 通常表示订单相关
-                            # 常见的订单错误代码：
-                            # 201: Order rejected - reason
-                            # 202: Order cancelled - reason  
-                            # 203: The security is not available or allowed for this account
-                            # 399: Order Message
-                            # 434: The order size is too small
-                            # 478: Order size does not conform to market rule
-                            # 10147: OrderId that GetOpenOrder is attempting to query does not exist
-                            # 10148: Requested market data is not subscribed
-                            # 保证金不足相关错误代码
-                            margin_error_codes = [10148, 10149, 10150, 399, 400, 401, 402]
-                            # 订单被拒绝相关错误代码
-                            rejection_error_codes = [201, 202, 203, 434, 478, 10147, 300] + margin_error_codes
-                            
-                            # 保证金不足相关关键词
-                            margin_keywords = [
-                                'insufficient', 'margin', 'buying power', 'rejected', 'not enough',
-                                'order rejected', 'insufficient funds', 'insufficient buying power',
-                                'margin requirement', 'account restriction', 'position limit'
-                            ]
-                            
-                            is_order_error = (errorCode in rejection_error_codes or 
-                                            any(keyword.lower() in errorString.lower() for keyword in margin_keywords))
-                            
-                            if is_order_error:
-                                connection_logger.error(f"Order {reqId} rejected - Code: {errorCode}, Reason: {errorString}")
-                                # 异步更新订单状态为失败
-                                import core
-                                asyncio.create_task(core.ibkr_client._handle_order_error(reqId, errorCode, errorString))
-                    
-                        # 绑定错误处理器到wrapper
-                    self.ib.wrapper.error = error_handler
-                    connection_logger.debug("Added IBKR error handler for order rejection detection")
-                    
-                    # 添加订单状态变化事件监听器
-                    def order_status_handler(trade):
-                        """处理订单状态变化事件"""
-
-                        async def _process_order_status():
+                            # 更新本地订单状态，确保手动市价单等及时同步
                             try:
-                                order_id = str(trade.order.orderId)
-                                status = trade.orderStatus.status
-                                connection_logger.info(f"Order status update: {order_id} -> {status}")
-
-                                # 更新本地订单状态，确保手动市价单等及时同步
-                                try:
-                                    from .order_manager import get_order_manager
-                                    om = get_order_manager()
-                                    fill_price = getattr(trade.orderStatus, 'avgFillPrice', None)
-                                    executed_at = now_local() if status in ('Filled', 'PartiallyFilled') else None
-                                    updated = await asyncio.to_thread(
-                                        om.update_order_status,
-                                        order_id=order_id,
-                                        status=status,
-                                        fill_price=fill_price,
-                                        executed_at=executed_at,
-                                    )
+                                from .order_manager import get_order_manager
+                                om = get_order_manager()
+                                fill_price = getattr(trade.orderStatus, 'avgFillPrice', None)
+                                executed_at = now_local() if status in ('Filled', 'PartiallyFilled') else None
+                                updated = await asyncio.to_thread(
+                                    om.update_order_status,
+                                    order_id=order_id,
+                                    status=status,
+                                    fill_price=fill_price,
+                                    executed_at=executed_at,
+                                )
 
                                     if not updated:
                                         try:
