@@ -123,7 +123,12 @@ python scripts/run_all.py
 
 # 仅做导入与环境自检，可自定义服务组合
 python scripts/run_all.py ib_feed strategy --dry-run
+
+# 在需要逐一排查服务时，也可以单独执行 dry-run
+python scripts/run_all.py --dry-run ib_command
 ```
+
+上述命令无需额外设置 `PYTHONPATH`，直接使用 `python scripts/run_all.py ...` 即可完成导入检测与服务启动。
 
 常见服务的外部依赖如下表所示：
 
