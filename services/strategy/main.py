@@ -68,7 +68,7 @@ async def run_service() -> None:
     consumer_task: asyncio.Task[None] | None = None
 
     if not strategies:
-        logger.warning("No strategies configured; strategy service will idle until shutdown")
+        logger.info("No strategies configured; strategy service will idle until shutdown")
     else:
         adapter = StrategyAdapter(
             redis,
