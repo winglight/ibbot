@@ -10,9 +10,8 @@ from src.utils import now_local, parse_local_datetime, NY_TZ, ensure_local_timez
 from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
-    write_account_info_snapshot,
-    write_positions_snapshot,
 )
+from src.account_snapshot_service import account_snapshot_service
 from src.utils.account_pnl_cache import (
     load_all_daily_totals,
     read_net_liquidation_snapshot,
@@ -78,37 +77,6 @@ def _snapshot_response(
         response["warning"] = warning
 
     return response
-
-
-def _get_active_ib_client():
-    """Return an initialized IBKR client if available, creating one on-demand."""
-    ib_client = getattr(core, "ibkr_client", None)
-    if ib_client is not None:
-        return ib_client
-
-    factory = getattr(core, "IBKRClient", None)
-    if factory is None:
-        logger.error("IBKRClient factory is not available on core module")
-        return None
-
-    try:
-        ib_client = factory()
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.error(f"Failed to initialize IBKR client: {exc}")
-        return None
-
-    core.ibkr_client = ib_client
-
-    # Best effort to keep risk manager dependency in sync when available.
-    try:
-        risk_manager = getattr(core, "risk_manager", None)
-        if risk_manager is not None:
-            setattr(risk_manager, "ibkr_client", ib_client)
-    except Exception as dep_err:  # pragma: no cover - defensive guard
-        logger.debug(f"Failed to sync risk_manager IBKR client dependency: {dep_err}")
-
-    return ib_client
-
 
 @router.post("/api/orders/backfill_commissions")
 async def backfill_commissions(
@@ -187,24 +155,14 @@ async def get_account_info(
             },
         )
 
-    ib_client = _get_active_ib_client()
-    if ib_client is None:
-        logger.error("IBKR client unavailable while connection manager reports connected")
-        raise HTTPException(status_code=503, detail="IBKR client unavailable")
-
-    service = getattr(core, "account_snapshot_service", None)
     reason = "api_force" if force_refresh else "api_miss"
 
     try:
-        if service:
-            info = await asyncio.wait_for(
-                service.refresh_account_info(reason=reason), timeout=10.0
-            )
-        else:
-            info = await asyncio.wait_for(
-                ib_client.get_account_info(), timeout=10.0
-            )
-            await write_account_info_snapshot(info or {}, reason)
+        info = await asyncio.wait_for(
+            account_snapshot_service.refresh_account_info(reason=reason),
+            timeout=float(account_snapshot_service.config.command_timeout_seconds)
+            + 5.0,
+        )
     except asyncio.TimeoutError:
         logger.warning("Account info request timed out")
         if snapshot:
@@ -288,25 +246,16 @@ async def get_positions(
             "warning": "Not connected to IBKR",
         }
 
-    ib_client = _get_active_ib_client()
-    if ib_client is None:
-        logger.error("IBKR client unavailable while fetching positions")
-        raise HTTPException(status_code=503, detail="IBKR client unavailable")
-
-    service = getattr(core, "account_snapshot_service", None)
     reason = "api_force" if force_refresh else "api_miss"
 
     try:
-        if service:
-            positions = await asyncio.wait_for(
-                service.refresh_positions(reason=reason, fast=fast),
-                timeout=10.0,
-            )
-        else:
-            positions = await asyncio.wait_for(
-                ib_client.get_positions(fast=fast), timeout=10.0
-            )
-            await write_positions_snapshot(positions or [], reason)
+        positions = await asyncio.wait_for(
+            account_snapshot_service.refresh_positions(
+                reason=reason, fast=fast
+            ),
+            timeout=float(account_snapshot_service.config.command_timeout_seconds)
+            + 5.0,
+        )
     except asyncio.TimeoutError:
         logger.warning("Positions request timed out")
         if snapshot:

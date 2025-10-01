@@ -24,6 +24,7 @@ from .utils.strategy_cache import record_filled_order as cache_record_filled_ord
 from .utils.account_pnl_cache import (
     record_account_fill as cache_record_account_fill,
 )
+from .account_snapshot_service import account_snapshot_service
 
 class OrderStatus(Enum):
     """订单状态枚举"""
@@ -695,38 +696,13 @@ class OrderManager:
 
             # 异步刷新账户与持仓快照，确保API能够快速返回最新数据
             try:
-                import core  # 延迟导入避免循环依赖
-
-                snapshot_service = getattr(core, "account_snapshot_service", None)
-                if snapshot_service:
-                    snapshot_service.notify_fill()
-                    self._schedule_async(
-                        snapshot_service.refresh_both(
-                            reason="fill_event", fast_positions=True
-                        ),
-                        "Account snapshot refresh after fill",
-                    )
-                else:
-                    async def _refresh_fallback():
-                        ib_client = getattr(core, "ibkr_client", None)
-                        if ib_client is None:
-                            return
-                        from .account_snapshot_cache import (
-                            write_account_info_snapshot,
-                            write_positions_snapshot,
-                        )
-
-                        account_info = await ib_client.get_account_info()
-                        positions = await ib_client.get_positions(fast=True)
-                        await write_account_info_snapshot(
-                            account_info or {}, "fill_event"
-                        )
-                        await write_positions_snapshot(positions or [], "fill_event")
-
-                    self._schedule_async(
-                        _refresh_fallback(),
-                        "Account snapshot refresh after fill (fallback)",
-                    )
+                account_snapshot_service.notify_fill()
+                self._schedule_async(
+                    account_snapshot_service.refresh_both(
+                        reason="fill_event", fast_positions=True
+                    ),
+                    "Account snapshot refresh after fill",
+                )
             except Exception as refresh_exc:
                 order_logger.warning(
                     f"Failed to refresh account snapshots after fill: {refresh_exc}"

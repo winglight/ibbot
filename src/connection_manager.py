@@ -9,6 +9,7 @@ except ImportError:  # pragma: no cover - fallback for test environments
 from loguru import logger
 
 from .utils import now_local
+from .account_snapshot_service import account_snapshot_service
 from .restart_utils import restart_program
 
 # 为connection模块创建专用logger
@@ -407,21 +408,17 @@ class ConnectionManager:
                             return
 
                         try:
-                            import core  # 延迟导入避免循环依赖
+                            connection_loss_codes = {1100, 1300, 2103, 2105, 2110}
+                            connection_restore_codes = {1101, 1102, 1301, 2104, 2106, 2111}
 
-                            snapshot_service = getattr(core, "account_snapshot_service", None)
-                            if snapshot_service:
-                                connection_loss_codes = {1100, 1300, 2103, 2105, 2110}
-                                connection_restore_codes = {1101, 1102, 1301, 2104, 2106, 2111}
-
-                                if errorCode in connection_loss_codes:
-                                    snapshot_service.flag_connection_loss(
-                                        errorString or f"IBKR error {errorCode}"
-                                    )
-                                elif errorCode in connection_restore_codes:
-                                    snapshot_service.request_immediate_refresh(
-                                        reason="connection_restored"
-                                    )
+                            if errorCode in connection_loss_codes:
+                                account_snapshot_service.flag_connection_loss(
+                                    errorString or f"IBKR error {errorCode}"
+                                )
+                            elif errorCode in connection_restore_codes:
+                                account_snapshot_service.request_immediate_refresh(
+                                    reason="connection_restored"
+                                )
                         except Exception as snapshot_err:  # pragma: no cover - 防御性日志
                             connection_logger.debug(
                                 f"Snapshot service notification failed: {snapshot_err}"
@@ -645,13 +642,9 @@ class ConnectionManager:
                 connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
 
                 try:
-                    import core
-
-                    snapshot_service = getattr(core, "account_snapshot_service", None)
-                    if snapshot_service:
-                        snapshot_service.request_immediate_refresh(
-                            reason="connection_established"
-                        )
+                    account_snapshot_service.request_immediate_refresh(
+                        reason="connection_established"
+                    )
                 except Exception as notify_err:  # pragma: no cover - defensive logging
                     connection_logger.debug(
                         f"Failed to notify snapshot service after connect: {notify_err}"
@@ -1104,11 +1097,7 @@ class ConnectionManager:
             self._connection_thread = None
 
             try:
-                import core
-
-                snapshot_service = getattr(core, "account_snapshot_service", None)
-                if snapshot_service:
-                    snapshot_service.flag_connection_loss("disconnected")
+                account_snapshot_service.flag_connection_loss("disconnected")
             except Exception as notify_err:  # pragma: no cover - defensive logging
                 connection_logger.debug(
                     f"Failed to notify snapshot service on disconnect: {notify_err}"
