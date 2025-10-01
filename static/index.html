@@ -91,29 +91,6 @@
                     <span id="connectionStatus" class="status-indicator status-disconnected"></span>
                     <span id="connectionText">Disconnected</span>
                 </span>
-                <div class="d-flex align-items-center gap-2 flex-wrap service-restart-controls">
-                    <select class="form-select form-select-sm bg-dark text-light border-secondary"
-                            id="serviceRestartSelect"
-                            aria-label="选择需要重启的服务">
-                        <option value="" selected disabled>选择服务</option>
-                        <option value="ib-gateway" data-label="IB Gateway">IB Gateway</option>
-                        <option value="ibbot" data-label="主应用">主应用 (ibbot)</option>
-                        <option value="ib_command" data-label="指令下发服务">指令下发服务 (ib_command)</option>
-                        <option value="ib_feed" data-label="行情订阅服务">行情订阅服务 (ib_feed)</option>
-                        <option value="risk-service" data-label="风险控制服务">风险控制服务</option>
-                        <option value="strategy" data-label="策略调度服务">策略调度服务</option>
-                        <option value="optimizer" data-label="优化器">优化器</option>
-                        <option value="cloudflared" data-label="Cloudflare 隧道">Cloudflare 隧道</option>
-                    </select>
-                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-1"
-                            id="serviceRestartBtn" type="button">
-                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
-                        <i class="fas fa-rotate-right"></i>
-                        <span class="d-none d-xl-inline">重启</span>
-                    </button>
-                    <span id="serviceRestartStatus" class="small text-muted"
-                          data-state="idle" aria-live="polite">选择服务后执行重启。</span>
-                </div>
                 <button class="btn btn-outline-light btn-sm" id="openNotificationsBtn" title="Notifications">
                     <i class="fas fa-bell"></i>
                 </button>
@@ -515,9 +492,9 @@
             <i class="fas fa-eye-slash me-2"></i>Visitor accounts are read-only and cannot execute trades or change settings.
         </div>
         <!-- Account Information Panel -->
-        <div class="row mb-4">
-            <div class="col-md-12">
-                <div class="card">
+        <div class="row mb-4 g-3 align-items-stretch">
+            <div class="col-12 col-lg-8 col-xl-7">
+                <div class="card h-100">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5 class="mb-0"><i class="fas fa-user"></i> Account Information</h5>
                         <button type="button" class="btn btn-outline-secondary btn-sm" id="openDailySummaryBtn" data-bs-toggle="modal" data-bs-target="#dailyAccountSummaryModal">
@@ -526,6 +503,148 @@
                     </div>
                     <div class="card-body" id="accountInfo">
                         <p class="text-muted">Connect to view account information</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-lg-4 col-xl-5">
+                <div class="card h-100" id="serviceStatusCard">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0 d-flex align-items-center gap-2">
+                            <i class="fas fa-server"></i>
+                            <span>服务状态</span>
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="service-status-list list-group" id="serviceStatusList">
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="ib-gateway" data-service-label="IB Gateway">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold">IB Gateway</div>
+                                    <div class="small text-muted" data-role="status-text">等待操作</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">待命</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="d-none d-xxl-inline">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="ibbot" data-service-label="主应用 (ibbot)">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold">主应用 (ibbot)</div>
+                                    <div class="small text-muted" data-role="status-text">等待操作</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">待命</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="d-none d-xxl-inline">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="ib_command" data-service-label="指令下发服务 (ib_command)">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold">指令下发服务 (ib_command)</div>
+                                    <div class="small text-muted" data-role="status-text">等待操作</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">待命</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="d-none d-xxl-inline">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="ib_feed" data-service-label="行情订阅服务 (ib_feed)">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold">行情订阅服务 (ib_feed)</div>
+                                    <div class="small text-muted" data-role="status-text">等待操作</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">待命</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="d-none d-xxl-inline">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="risk-service" data-service-label="风险控制服务">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold">风险控制服务</div>
+                                    <div class="small text-muted" data-role="status-text">等待操作</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">待命</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="d-none d-xxl-inline">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="strategy" data-service-label="策略调度服务">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold">策略调度服务</div>
+                                    <div class="small text-muted" data-role="status-text">等待操作</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">待命</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="d-none d-xxl-inline">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="optimizer" data-service-label="优化器">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold">优化器</div>
+                                    <div class="small text-muted" data-role="status-text">等待操作</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">待命</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="d-none d-xxl-inline">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="cloudflared" data-service-label="Cloudflare 隧道">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold">Cloudflare 隧道</div>
+                                    <div class="small text-muted" data-role="status-text">等待操作</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">待命</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="d-none d-xxl-inline">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

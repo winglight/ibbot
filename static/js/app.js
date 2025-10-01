@@ -913,42 +913,53 @@ class TradingApp {
         // DOM 已就绪时同步访客模式下的界面元素状态，避免初始渲染遗漏
         this.updateReadOnlyMode(this.isReadOnly, this.authRole, { persist: false });
 
-        if (!this.serviceRestartController && serviceRestartModules?.createController) {
-            const describeService = (value, selectEl) => {
-                const option = selectEl?.selectedOptions?.[0];
-                return option?.dataset?.label || option?.textContent?.trim() || value;
-            };
-            const controller = serviceRestartModules.createController({
-                document,
-                buttonId: 'serviceRestartBtn',
-                selectId: 'serviceRestartSelect',
-                statusId: 'serviceRestartStatus',
-                spinnerSelector: '.spinner-border',
-                fetcher: (payload) => this.apiCall('/services/restart', {
-                    method: 'POST',
-                    body: JSON.stringify(payload),
-                }),
-                describeService,
-                readOnlyMessage: '访客模式无法执行重启操作',
-                runningMessage: '正在重启 {service}...',
-                successMessage: '已重启 {services}',
-                errorMessage: '重启失败，请稍后重试',
-                initialMessage: '选择服务后执行重启。',
-                onStatusChange: (info) => {
-                    if (info.state === 'success') {
-                        this.showAlert('success', info.message);
-                    } else if (info.state === 'error') {
-                        const errorObj = info.payload?.error;
-                        const level = errorObj?.isReadOnly ? 'warning' : 'danger';
-                        this.showAlert(level, info.message);
+        if (!this.serviceRestartController && serviceRestartModules?.createListController) {
+            const listContainer = document.getElementById('serviceStatusList');
+            if (listContainer) {
+                const controller = serviceRestartModules.createListController({
+                    document,
+                    container: listContainer,
+                    fetcher: (payload) => this.apiCall('/services/restart', {
+                        method: 'POST',
+                        body: JSON.stringify(payload),
+                    }),
+                    describeService: (serviceName, element) => {
+                        if (element?.dataset?.serviceLabel) {
+                            return element.dataset.serviceLabel;
+                        }
+                        const title = element?.querySelector('.fw-semibold');
+                        return title?.textContent?.trim() || serviceName;
+                    },
+                    readOnlyMessage: '访客模式无法执行重启操作',
+                    runningMessage: '正在重启 {service}...',
+                    successMessage: '已重启 {services}',
+                    dependencySuccessMessage: '{service} 已随依赖重启',
+                    errorMessage: '重启失败，请稍后重试',
+                    initialMessage: '点击重启以重新启动 {service}。',
+                    badgeLabels: {
+                        idle: '待命',
+                        running: '重启中',
+                        success: '已就绪',
+                        error: '失败',
+                    },
+                    onStatusChange: (info) => {
+                        if (info.meta?.trigger !== 'restart') {
+                            return;
+                        }
+                        if (info.state === 'success') {
+                            this.showAlert('success', info.message);
+                        } else if (info.state === 'error') {
+                            const errorObj = info.payload?.error;
+                            const level = errorObj?.isReadOnly ? 'warning' : 'danger';
+                            this.showAlert(level, info.message);
+                        }
+                    },
+                });
+                if (controller) {
+                    this.serviceRestartController = controller;
+                    if (this.isReadOnly && typeof controller.setReadOnly === 'function') {
+                        controller.setReadOnly(true);
                     }
-                },
-            });
-            if (controller) {
-                this.serviceRestartController = controller;
-                if (this.isReadOnly) {
-                    controller.elements.button.disabled = true;
-                    controller.updateStatus('error', '访客模式无法执行重启操作');
                 }
             }
         }
@@ -1716,19 +1727,23 @@ class TradingApp {
 
         if (this.serviceRestartController) {
             const restartCtrl = this.serviceRestartController;
-            const statusEl = restartCtrl.elements?.status;
-            if (this.isReadOnly) {
-                if (restartCtrl.elements?.button) {
-                    restartCtrl.elements.button.disabled = true;
-                }
-                restartCtrl.updateStatus('error', '访客模式无法执行重启操作');
+            if (typeof restartCtrl.setReadOnly === 'function') {
+                restartCtrl.setReadOnly(this.isReadOnly);
             } else {
-                if (restartCtrl.elements?.button) {
-                    restartCtrl.elements.button.disabled = false;
-                }
-                const statusText = statusEl?.textContent?.trim();
-                if (statusText === '访客模式无法执行重启操作' || !statusText) {
-                    restartCtrl.updateStatus('idle', '选择服务后执行重启。');
+                const statusEl = restartCtrl.elements?.status;
+                if (this.isReadOnly) {
+                    if (restartCtrl.elements?.button) {
+                        restartCtrl.elements.button.disabled = true;
+                    }
+                    restartCtrl.updateStatus('error', '访客模式无法执行重启操作');
+                } else {
+                    if (restartCtrl.elements?.button) {
+                        restartCtrl.elements.button.disabled = false;
+                    }
+                    const statusText = statusEl?.textContent?.trim();
+                    if (statusText === '访客模式无法执行重启操作' || !statusText) {
+                        restartCtrl.updateStatus('idle', '选择服务后执行重启。');
+                    }
                 }
             }
         }

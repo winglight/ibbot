@@ -10,6 +10,33 @@
         error: ['text-danger']
     };
 
+    const BADGE_CLASS_MAP = {
+        idle: ['bg-secondary'],
+        running: ['bg-info'],
+        success: ['bg-success'],
+        error: ['bg-danger'],
+    };
+
+    const BADGE_LABELS = {
+        idle: '待命',
+        running: '重启中',
+        success: '已就绪',
+        error: '失败',
+    };
+
+    function formatMessage(template, replacements = {}) {
+        if (typeof template !== 'string') {
+            return '';
+        }
+        return template.replace(/\{([^}]+)\}/g, (match, key) => {
+            if (Object.prototype.hasOwnProperty.call(replacements, key)) {
+                const value = replacements[key];
+                return value === undefined || value === null ? '' : String(value);
+            }
+            return '';
+        });
+    }
+
     function applyStatusClass(element, state) {
         if (!element || !element.classList) return;
         const allClasses = new Set(['text-muted', 'text-info', 'text-success', 'text-danger']);
@@ -32,6 +59,291 @@
             return (label || '').trim() || fallback;
         }
         return fallback;
+    }
+
+    function applyStateClasses(element, state, classMap, fallback = ['bg-secondary']) {
+        if (!element || !element.classList) {
+            return;
+        }
+        const knownClasses = new Set(fallback);
+        Object.values(classMap || {}).forEach((classes) => {
+            (classes || []).forEach((cls) => knownClasses.add(cls));
+        });
+        knownClasses.forEach((cls) => element.classList.remove(cls));
+        const target = (classMap && classMap[state]) || fallback;
+        if (target && target.length) {
+            target.forEach((cls) => element.classList.add(cls));
+        }
+    }
+
+    function createListController(options = {}) {
+        const doc = options.document || root.document;
+        if (!doc) {
+            throw new Error('document is required to bind service restart controls');
+        }
+
+        const container = options.container
+            || (options.containerId ? doc.getElementById(options.containerId) : null);
+        if (!container) {
+            return null;
+        }
+
+        const fetcher = typeof options.fetcher === 'function' ? options.fetcher : null;
+        if (!fetcher) {
+            throw new Error('fetcher function is required');
+        }
+
+        const itemSelector = options.itemSelector || '[data-service]';
+        const serviceElements = Array.from(container.querySelectorAll(itemSelector));
+        if (!serviceElements.length) {
+            return null;
+        }
+
+        const includeDependencies = options.includeDependencies !== false;
+        const badgeLabels = { ...BADGE_LABELS, ...(options.badgeLabels || {}) };
+        const badgeClassMap = { ...BADGE_CLASS_MAP, ...(options.badgeClassMap || {}) };
+        const readOnlyMessage = options.readOnlyMessage || '访客模式无法执行重启操作';
+        const initialTemplate = typeof options.initialMessage === 'string'
+            ? options.initialMessage
+            : '点击重启以重新启动 {service}。';
+
+        const controller = {
+            state: 'idle',
+            lastResult: null,
+            includeDependencies,
+            options,
+            container,
+            items: {},
+            isReadOnly: false,
+            getLabel(serviceName) {
+                const item = this.items[serviceName];
+                if (item?.label) {
+                    return item.label;
+                }
+                if (typeof options.describeService === 'function') {
+                    const described = options.describeService(serviceName, item?.element || null);
+                    if (described) {
+                        return described;
+                    }
+                }
+                const element = item?.element || container.querySelector(`${itemSelector}[data-service="${serviceName}"]`);
+                const label = element?.dataset?.serviceLabel
+                    || element?.querySelector('.fw-semibold')?.textContent
+                    || serviceName;
+                return (label || serviceName).trim();
+            },
+            updateStatus(serviceName, state, message, payload, meta = {}) {
+                const item = this.items[serviceName];
+                if (!item) {
+                    return;
+                }
+                item.state = state;
+                if (item.status) {
+                    if (item.status.dataset) {
+                        item.status.dataset.state = state;
+                    }
+                    if (typeof message === 'string') {
+                        item.status.textContent = message;
+                        item.lastMessage = message;
+                    }
+                    applyStatusClass(item.status, state);
+                } else if (typeof message === 'string') {
+                    item.lastMessage = message;
+                }
+                if (item.badge) {
+                    if (item.badge.dataset) {
+                        item.badge.dataset.state = state;
+                    }
+                    const badgeText = badgeLabels[state];
+                    if (badgeText) {
+                        item.badge.textContent = formatMessage(badgeText, {
+                            service: this.getLabel(serviceName),
+                            state,
+                        });
+                    }
+                    applyStateClasses(item.badge, state, badgeClassMap);
+                }
+                if (meta.skipStateUpdate !== true) {
+                    this.state = state;
+                }
+                if (meta.silent !== true && typeof options.onStatusChange === 'function') {
+                    options.onStatusChange({
+                        state,
+                        message,
+                        payload,
+                        controller: this,
+                        service: serviceName,
+                        meta,
+                    });
+                }
+            },
+            setItemBusy(serviceName, busy) {
+                const item = this.items[serviceName];
+                if (!item) {
+                    return;
+                }
+                if (item.button) {
+                    if (busy) {
+                        item.button.disabled = true;
+                    } else {
+                        item.button.disabled = this.isReadOnly;
+                    }
+                }
+                if (item.spinner?.classList) {
+                    item.spinner.classList.toggle('d-none', !busy);
+                }
+            },
+            async restart(serviceName) {
+                const targetService = serviceName;
+                if (!targetService || !this.items[targetService]) {
+                    return null;
+                }
+                if (this.isReadOnly) {
+                    this.updateStatus(targetService, 'error', readOnlyMessage, { error: { isReadOnly: true } }, {
+                        trigger: 'restart',
+                    });
+                    return null;
+                }
+                const item = this.items[targetService];
+                if (item.state === 'running') {
+                    return null;
+                }
+
+                this.setItemBusy(targetService, true);
+
+                const label = this.getLabel(targetService) || targetService;
+                const runningMessage = formatMessage(options.runningMessage, { service: label })
+                    || `正在重启 ${label}...`;
+                this.updateStatus(targetService, 'running', runningMessage, null, { trigger: 'restart' });
+
+                try {
+                    const payload = await fetcher({
+                        service: targetService,
+                        include_dependencies: includeDependencies,
+                    });
+                    this.lastResult = payload;
+                    const restarted = Array.isArray(payload?.restarted) && payload.restarted.length
+                        ? payload.restarted
+                        : [targetService];
+                    const joined = restarted.join('、');
+                    let message;
+                    if (payload && typeof payload.message === 'string' && !options.ignoreResponseMessage) {
+                        message = payload.message;
+                    } else if (options.successMessage) {
+                        message = formatMessage(options.successMessage, {
+                            service: label,
+                            services: joined,
+                        });
+                    } else {
+                        message = `已重启 ${joined}`;
+                    }
+                    this.updateStatus(targetService, 'success', message, payload, { trigger: 'restart' });
+                    restarted.forEach((name) => {
+                        if (name === targetService || !this.items[name]) {
+                            return;
+                        }
+                        const dependencyLabel = this.getLabel(name);
+                        const depMessage = options.dependencySuccessMessage
+                            ? formatMessage(options.dependencySuccessMessage, {
+                                service: dependencyLabel,
+                                source: label,
+                            })
+                            : `已重启 ${dependencyLabel}`;
+                        this.updateStatus(name, 'success', depMessage, payload, {
+                            trigger: 'dependency',
+                            silent: true,
+                            skipStateUpdate: true,
+                        });
+                    });
+                    return payload;
+                } catch (error) {
+                    const friendly = error?.isReadOnly
+                        ? readOnlyMessage
+                        : (error?.message || options.errorMessage || '重启失败');
+                    this.updateStatus(targetService, 'error', friendly, { error }, { trigger: 'restart' });
+                    throw error;
+                } finally {
+                    this.setItemBusy(targetService, false);
+                }
+            },
+            setReadOnly(value) {
+                this.isReadOnly = !!value;
+                Object.entries(this.items).forEach(([serviceName, item]) => {
+                    if (item.button) {
+                        item.button.disabled = this.isReadOnly;
+                    }
+                    if (item.spinner?.classList) {
+                        item.spinner.classList.add('d-none');
+                    }
+                    if (this.isReadOnly) {
+                        this.updateStatus(serviceName, 'error', readOnlyMessage, null, {
+                            trigger: 'readOnly',
+                            silent: true,
+                            skipStateUpdate: true,
+                        });
+                    } else if (item.lastMessage === readOnlyMessage || !item.lastMessage) {
+                        this.updateStatus(serviceName, 'idle', item.defaultIdleMessage, null, {
+                            trigger: 'readOnly',
+                            silent: true,
+                            skipStateUpdate: true,
+                        });
+                    }
+                });
+            },
+        };
+
+        serviceElements.forEach((element) => {
+            const serviceName = element?.dataset?.service;
+            if (!serviceName || controller.items[serviceName]) {
+                return;
+            }
+            const button = element.querySelector(options.buttonSelector || '[data-action="restart"]');
+            if (!button) {
+                return;
+            }
+            const spinner = options.spinnerSelector
+                ? element.querySelector(options.spinnerSelector)
+                : button.querySelector('.spinner-border');
+            const statusEl = element.querySelector(options.statusSelector || '[data-role="status-text"]');
+            const badgeEl = element.querySelector(options.badgeSelector || '[data-role="status-badge"]');
+            const label = typeof options.describeService === 'function'
+                ? (options.describeService(serviceName, element) || element.dataset?.serviceLabel)
+                : element.dataset?.serviceLabel;
+            const resolvedLabel = (label || element.querySelector('.fw-semibold')?.textContent || serviceName).trim();
+            const defaultIdleMessage = formatMessage(initialTemplate, { service: resolvedLabel }) || initialTemplate;
+
+            controller.items[serviceName] = {
+                element,
+                button,
+                spinner,
+                status: statusEl,
+                badge: badgeEl,
+                state: 'idle',
+                lastMessage: defaultIdleMessage,
+                defaultIdleMessage,
+                label: resolvedLabel,
+            };
+
+            if (spinner?.classList) {
+                spinner.classList.add('d-none');
+            }
+
+            button.addEventListener('click', () => {
+                controller.restart(serviceName).catch(() => {});
+            });
+
+            controller.updateStatus(serviceName, 'idle', defaultIdleMessage, null, {
+                trigger: 'init',
+                silent: true,
+                skipStateUpdate: true,
+            });
+        });
+
+        if (!Object.keys(controller.items).length) {
+            return null;
+        }
+
+        return controller;
     }
 
     function createController(options = {}) {
@@ -151,5 +463,6 @@
     }
 
     module.createController = createController;
+    module.createListController = createListController;
     module.applyStatusClass = applyStatusClass;
 })(typeof window !== 'undefined' ? window : globalThis);
