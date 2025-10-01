@@ -23,7 +23,11 @@ const notificationsModules = appModules.notifications || {};
 const NotificationsManagerModule = notificationsModules.manager || {};
 const NotificationsManagerClass = NotificationsManagerModule.NotificationsManager || globalScope.NotificationsManager;
 const serviceRestartModules = appModules.serviceRestart || {};
-const configCenterModules = appModules.configCenter || {};
+
+const getConfigCenterModules = () => {
+    const modules = globalScope.appModules?.configCenter;
+    return modules && typeof modules === 'object' ? modules : null;
+};
 
 const {
     INTERVAL_MINUTES_MAP = {},
@@ -132,6 +136,7 @@ class TradingApp {
         this.notifications = [];
         this.serviceRestartController = null;
         this.configCenterManager = null;
+        this.configCenterInitRetry = null;
 
         if (typeof MonitoringManagerClass !== 'function') {
             throw new Error('MonitoringManager module is required');
@@ -4282,8 +4287,48 @@ class TradingApp {
     }
 
     initConfigCenter() {
-        if (this.configCenterManager || !configCenterModules?.createManager) {
+        if (this.configCenterManager) {
             return;
+        }
+
+        const configCenterModules = getConfigCenterModules();
+        if (!configCenterModules?.createManager) {
+            if (!this.configCenterInitRetry) {
+                let timerId = null;
+                const attemptInit = () => {
+                    if (timerId) {
+                        clearTimeout(timerId);
+                        timerId = null;
+                    }
+                    this.configCenterInitRetry = null;
+                    this.initConfigCenter();
+                };
+
+                if (typeof globalScope.addEventListener === 'function') {
+                    const handler = () => {
+                        globalScope.removeEventListener?.('configCenter:ready', handler);
+                        attemptInit();
+                    };
+                    try {
+                        globalScope.addEventListener('configCenter:ready', handler, { once: true });
+                    } catch (error) {
+                        try {
+                            globalScope.addEventListener('configCenter:ready', handler);
+                        } catch (err) {
+                            console.warn('Failed to listen for config center readiness', err);
+                        }
+                    }
+                }
+
+                timerId = setTimeout(attemptInit, 250);
+                this.configCenterInitRetry = timerId;
+            }
+            return;
+        }
+
+        if (this.configCenterInitRetry) {
+            clearTimeout(this.configCenterInitRetry);
+            this.configCenterInitRetry = null;
         }
 
         const manager = configCenterModules.createManager({
