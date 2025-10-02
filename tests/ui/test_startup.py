@@ -133,7 +133,7 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
         assert not hasattr(container, "notification_manager")
         assert not hasattr(container, "telegram_notifier")
         assert not hasattr(container, "queue_manager")
-        assert container.account_snapshot_service is None
+        assert not hasattr(container, "account_snapshot_service")
 
     await core.shutdown()
 
