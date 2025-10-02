@@ -73,6 +73,13 @@ def _default_compose_dir() -> Path:
     return _project_root() / "docker"
 
 
+_DEFAULT_SERVICE_NAME_MAP: Mapping[str, str] = {
+    "market_data_feed": "ib-feed",
+    "market_data": "market-data",
+    "queue_monitor": "queue-monitor",
+}
+
+
 class DockerComposeController:
     """Minimal docker-compose wrapper suitable for mocking in tests."""
 
@@ -84,6 +91,7 @@ class DockerComposeController:
         compose_command: Sequence[str] | None = None,
         project_dir: Path | str | None = None,
         env: Mapping[str, str] | None = None,
+        service_map: Mapping[str, str] | None = None,
     ) -> None:
         default_cmd = os.getenv("SERVICE_RESTART_COMPOSE_CMD")
         if compose_command is None:
@@ -106,6 +114,13 @@ class DockerComposeController:
         if compose_file:
             base_env.setdefault("COMPOSE_FILE", compose_file)
         self._env = base_env
+        mapping = dict(_DEFAULT_SERVICE_NAME_MAP)
+        if service_map:
+            mapping.update(service_map)
+        self._service_map = mapping
+
+    def _resolve_service_name(self, service: str) -> str:
+        return self._service_map.get(service, service)
 
     def is_available(self) -> bool:
         """Return ``True`` when docker compose tooling appears to be present."""
@@ -141,7 +156,8 @@ class DockerComposeController:
         return await asyncio.to_thread(_execute)
 
     async def restart(self, service: str) -> RestartCommandResult:
-        return await self._run(("restart", service), service)
+        target = self._resolve_service_name(service)
+        return await self._run(("restart", target), service)
 
 
 class LocalSupervisorController:
@@ -217,7 +233,6 @@ class LocalSupervisorController:
 
 
 DEFAULT_SERVICE_DEPENDENCIES: Mapping[str, Sequence[str]] = {
-    "connection_control": (),
     "queue_monitor": (),
     "ib_command": (),
     "account": (),
@@ -225,7 +240,7 @@ DEFAULT_SERVICE_DEPENDENCIES: Mapping[str, Sequence[str]] = {
     "market_data_feed": (),
     "market_data": ("market_data_feed",),
     "risk": ("orders",),
-    "notification": ("connection_control",),
+    "notification": (),
     "strategy": ("orders",),
     "ibbot": ("account", "orders"),
 }
