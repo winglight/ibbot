@@ -343,6 +343,9 @@ def create_app(service_factory: ServiceFactory | None = None) -> FastAPI:
     return app
 
 
+app = create_app()
+
+
 async def run_service() -> None:
     service, cleanup = await _default_service_factory()
     stop_event = asyncio.Event()

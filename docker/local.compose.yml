@@ -234,7 +234,7 @@ services:
         "python",
         "-m",
         "uvicorn",
-        "services.notification.main:create_app",
+        "services.notification.main:app",
         "--host",
         "0.0.0.0",
         "--port",

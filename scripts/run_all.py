@@ -154,13 +154,12 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
         ]
     elif service == "notification":
         port = os.getenv("NOTIFICATION_SERVICE_PORT", "8055")
-        app_path = "services.notification.main:create_app"
+        app_path = "services.notification.main:app"
         cmd = [
             sys.executable,
             "-m",
             "uvicorn",
             app_path,
-            "--factory",
             "--host",
             host,
             "--port",
