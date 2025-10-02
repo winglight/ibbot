@@ -43,7 +43,6 @@ from starlette.middleware.gzip import GZipMiddleware
 sys.path.append(str(Path(__file__).parent))
 
 import core
-from src.account_snapshot_service import AccountSnapshotService
 from src.cache import hgetall
 from src.database import get_db_manager
 from src.notification_manager import NotificationManager
@@ -289,7 +288,6 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
         db_manager=db_manager,
         notification_manager=notification_manager,
     )
-    account_snapshot_service = AccountSnapshotService()
 
     notification_manager.set_dependencies(
         telegram_notifier=telegram_notifier,
@@ -329,7 +327,6 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
     container.strategy_risk_manager = strategy_risk_manager
     container.strategy_manager = strategy_manager
     container.queue_manager = queue_manager
-    container.account_snapshot_service = account_snapshot_service
 
     if risk_manager is not None:
         risk_manager.start()
@@ -345,9 +342,6 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
 
     strategy_risk_manager.start()
     handle.finalizers.append(strategy_risk_manager.stop)
-
-    await account_snapshot_service.start()
-    handle.finalizers.append(account_snapshot_service.stop)
 
     await queue_manager.start_worker()
     handle.finalizers.append(queue_manager.stop_worker)

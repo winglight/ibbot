@@ -643,13 +643,26 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # 初次连接后，向该连接单播账户信息快照
     try:
+        snapshot = await read_account_info_snapshot()
         info = await _fetch_account_info()
         info_source = "service"
-        if info is None:
-            snapshot = await read_account_info_snapshot()
-            if isinstance(snapshot, dict):
-                info = snapshot.get("data")
-                info_source = snapshot.get("source", "redis") or "redis"
+        snapshot_source = None
+        stale_flag = False
+        snapshot_updated_at = None
+        stale_reason = None
+        stale_at = None
+
+        if isinstance(snapshot, dict):
+            snapshot_source = snapshot.get("source", "redis") or "redis"
+            stale_flag = bool(snapshot.get("stale"))
+            snapshot_updated_at = snapshot.get("updated_at")
+            stale_reason = snapshot.get("stale_reason")
+            stale_at = snapshot.get("stale_at")
+
+        if info is None and isinstance(snapshot, dict):
+            info = snapshot.get("data")
+            info_source = snapshot_source or "redis"
+
         if info is not None:
             payload_info = info
             if isinstance(info, dict):
@@ -657,16 +670,34 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload_info.setdefault("connected", bool(connected_flag))
                 if account_type_label:
                     payload_info.setdefault("account_type", account_type_label)
-            await websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "account_update",
-                        "success": True,
-                        "account_info": payload_info,
-                        "source": info_source,
-                    }
-                )
-            )
+            response_payload: Dict[str, Any] = {
+                "type": "account_update",
+                "success": True,
+                "account_info": payload_info,
+                "source": info_source,
+            }
+            if snapshot_updated_at:
+                response_payload["snapshot_updated_at"] = snapshot_updated_at
+            response_payload["stale"] = stale_flag
+            if stale_reason:
+                response_payload["stale_reason"] = stale_reason
+            if stale_at:
+                response_payload["stale_at"] = stale_at
+            await websocket.send_text(json.dumps(response_payload))
+            if stale_flag:
+                status_payload: Dict[str, Any] = {
+                    "type": "account_snapshot_status",
+                    "snapshot": "account_info",
+                    "stale": True,
+                    "refresh_in_progress": True,
+                }
+                if snapshot_updated_at:
+                    status_payload["snapshot_updated_at"] = snapshot_updated_at
+                if stale_reason:
+                    status_payload["stale_reason"] = stale_reason
+                if stale_at:
+                    status_payload["stale_at"] = stale_at
+                await websocket.send_text(json.dumps(status_payload))
         else:
             await websocket.send_text(
                 json.dumps(
@@ -677,6 +708,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             "account_type": account_type_label,
                             "last_error": last_error_value,
                         },
+                        stale=stale_flag,
+                        snapshot_updated_at=snapshot_updated_at,
                     )
                 )
             )
@@ -705,26 +738,58 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # 初次连接后，向该连接单播发送positions快照
     try:
+        positions_snapshot = await read_positions_snapshot()
         positions = await _fetch_positions(force_refresh=False, fast=True)
         positions_source = "service"
-        if positions is None:
-            snapshot = await read_positions_snapshot()
-            if isinstance(snapshot, dict):
-                data = snapshot.get("data")
-                if isinstance(data, list):
-                    positions = data
-                    positions_source = snapshot.get("source", "redis") or "redis"
-        if positions is not None:
-            await websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "position_update",
-                        "success": True,
-                        "positions": positions,
-                        "source": positions_source,
-                    }
-                )
+        positions_snapshot_source = None
+        positions_updated_at = None
+        positions_stale = False
+        positions_stale_reason = None
+        positions_stale_at = None
+        if isinstance(positions_snapshot, dict):
+            positions_updated_at = positions_snapshot.get("updated_at")
+            positions_snapshot_source = (
+                positions_snapshot.get("source", "redis") or "redis"
             )
+            positions_stale = bool(positions_snapshot.get("stale"))
+            positions_stale_reason = positions_snapshot.get("stale_reason")
+            positions_stale_at = positions_snapshot.get("stale_at")
+
+        if positions is None and isinstance(positions_snapshot, dict):
+            data = positions_snapshot.get("data")
+            if isinstance(data, list):
+                positions = data
+                positions_source = positions_snapshot_source or "redis"
+
+        if positions is not None:
+            response_payload = {
+                "type": "position_update",
+                "success": True,
+                "positions": positions,
+                "source": positions_source,
+                "stale": positions_stale,
+            }
+            if positions_updated_at:
+                response_payload["snapshot_updated_at"] = positions_updated_at
+            if positions_stale_reason:
+                response_payload["stale_reason"] = positions_stale_reason
+            if positions_stale_at:
+                response_payload["stale_at"] = positions_stale_at
+            await websocket.send_text(json.dumps(response_payload))
+            if positions_stale:
+                status_payload = {
+                    "type": "account_snapshot_status",
+                    "snapshot": "positions",
+                    "stale": True,
+                    "refresh_in_progress": True,
+                }
+                if positions_updated_at:
+                    status_payload["snapshot_updated_at"] = positions_updated_at
+                if positions_stale_reason:
+                    status_payload["stale_reason"] = positions_stale_reason
+                if positions_stale_at:
+                    status_payload["stale_at"] = positions_stale_at
+                await websocket.send_text(json.dumps(status_payload))
         else:
             await websocket.send_text(
                 json.dumps(
@@ -732,6 +797,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "position_update",
                         positions=[],
                         source="service",
+                        stale=positions_stale,
+                        snapshot_updated_at=positions_updated_at,
                     )
                 )
             )

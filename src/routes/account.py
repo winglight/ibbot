@@ -73,6 +73,7 @@ def _snapshot_response(
         "from_cache": from_cache,
         "connected": connected,
         "cache_updated_at": snapshot.get("updated_at") if snapshot else None,
+        "snapshot_updated_at": snapshot.get("updated_at") if snapshot else None,
         "cache_age_seconds": _compute_cache_age(
             snapshot.get("updated_at") if snapshot else None
         ),
