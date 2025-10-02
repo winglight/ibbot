@@ -18,6 +18,7 @@ from src.ibbot.redis import (
     enqueue_ib_command,
     read_stream,
     ResponseError,
+    StreamMessage,
 )
 from src.ibbot.influx import write_points
 
@@ -593,6 +594,178 @@ class RiskRuntime:
             metrics=metrics,
             logger=self._logger,
         )
+        self._log_loop_event(
+            str(extra_metrics.get("loop") if extra_metrics else "health"),
+            "Published risk runtime health metrics",
+            extra={"healthy": healthy, "metrics": dict(metrics)},
+        )
+
+    def _set_market_last_processed(self, timestamp: datetime) -> None:
+        self._market_last_processed = timestamp
+
+    def _set_results_last_processed(self, timestamp: datetime) -> None:
+        self._results_last_processed = timestamp
+
+    def _log_loop_event(
+        self,
+        loop_name: str,
+        message: str,
+        *,
+        level: str = "debug",
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        if not self._logger:
+            return
+        payload = {"loop": loop_name}
+        if extra:
+            payload.update({str(k): v for k, v in extra.items()})
+        log_method = getattr(self._logger, level, None)
+        if log_method is None:
+            log_method = getattr(self._logger, "debug", None)
+        if log_method is None:
+            return
+        try:
+            log_method(message, extra=payload)
+        except Exception:
+            pass
+
+    async def _process_stream_messages(
+        self,
+        *,
+        loop_name: str,
+        stream_key: str,
+        group: str,
+        messages: Iterable[StreamMessage],
+        handler: Callable[[Mapping[str, Any]], Awaitable[bool]],
+        on_processed: Callable[[datetime], None],
+    ) -> None:
+        assert self._redis is not None
+        batch = list(messages)
+        if not batch:
+            metrics = {"loop": loop_name, "messages": 0, "state": "idle"}
+            await self._update_health(healthy=True, extra_metrics=metrics)
+            self._log_loop_event(
+                loop_name,
+                f"{loop_name.title()} loop idle",
+                extra={"metrics": metrics},
+            )
+            return
+
+        timestamp = _utc_now()
+        on_processed(timestamp)
+        ack_ids: list[str] = []
+        for message in batch:
+            try:
+                handled = await handler(message.data)
+            except Exception:
+                self._log_loop_event(
+                    loop_name,
+                    f"Failed to handle {loop_name} message",
+                    level="warning",
+                    extra={"message_id": message.message_id},
+                )
+                continue
+            if handled:
+                ack_ids.append(message.message_id)
+
+        acknowledged = 0
+        if ack_ids:
+            try:
+                acknowledged = await ack_stream(
+                    ack_ids,
+                    stream_key=stream_key,
+                    group=group,
+                    redis=self._redis,
+                )
+                self._log_loop_event(
+                    loop_name,
+                    f"{loop_name.title()} loop acknowledged {acknowledged} messages in Redis",
+                    extra={"ack_ids": list(ack_ids)},
+                )
+            except Exception as exc:
+                self._log_loop_event(
+                    loop_name,
+                    f"{loop_name.title()} loop failed to acknowledge messages",
+                    level="warning",
+                    extra={"error": str(exc), "pending": len(batch)},
+                )
+                await self._update_health(
+                    healthy=False,
+                    last_error=str(exc),
+                    extra_metrics={
+                        "loop": loop_name,
+                        "state": "ack_failed",
+                        "messages": len(batch),
+                    },
+                )
+                return
+        else:
+            self._log_loop_event(
+                loop_name,
+                f"{loop_name.title()} loop had no messages to acknowledge",
+                extra={"pending": len(batch)},
+            )
+
+        metrics = {
+            "loop": loop_name,
+            "messages": len(batch),
+            "state": "processed",
+            "acknowledged": acknowledged,
+        }
+        await self._update_health(healthy=True, extra_metrics=metrics)
+        self._log_loop_event(
+            loop_name,
+            f"{loop_name.title()} loop published health metrics",
+            extra={"metrics": metrics},
+        )
+
+    async def _consume_stream_iteration(
+        self,
+        *,
+        loop_name: str,
+        stream_key: str,
+        group: str,
+        consumer: str,
+        handler: Callable[[Mapping[str, Any]], Awaitable[bool]],
+        on_processed: Callable[[datetime], None],
+    ) -> None:
+        assert self._redis is not None
+        try:
+            messages = await read_stream(
+                stream_key=stream_key,
+                group=group,
+                consumer=consumer,
+                count=self.batch_size,
+                block=int(self.poll_interval * 1000),
+                redis=self._redis,
+            )
+        except Exception as exc:
+            if self._logger:
+                self._logger.warning(
+                    "Failed to read %s stream", stream_key, exc_info=True
+                )
+            self._log_loop_event(
+                loop_name,
+                f"{loop_name.title()} loop encountered read failure",
+                level="warning",
+                extra={"error": str(exc)},
+            )
+            await self._update_health(
+                healthy=False,
+                last_error=str(exc),
+                extra_metrics={"loop": loop_name, "state": "read_failed"},
+            )
+            await asyncio.sleep(self.reconnect_delay)
+            return
+
+        await self._process_stream_messages(
+            loop_name=loop_name,
+            stream_key=stream_key,
+            group=group,
+            messages=messages,
+            handler=handler,
+            on_processed=on_processed,
+        )
 
     async def start(self) -> None:
         if not self._configured:
@@ -652,111 +825,25 @@ class RiskRuntime:
     async def _market_loop(self) -> None:
         assert self._redis is not None
         while not self._stop_event.is_set():
-            try:
-                messages = await read_stream(
-                    stream_key=self.market_stream_key,
-                    group=self.market_group,
-                    consumer=self._consumer_name,
-                    count=self.batch_size,
-                    block=int(self.poll_interval * 1000),
-                    redis=self._redis,
-                )
-            except Exception as exc:
-                if self._logger:
-                    self._logger.warning("Failed to read market stream", exc_info=True)
-                await self._update_health(
-                    healthy=False,
-                    last_error=str(exc),
-                    extra_metrics={"loop": "market", "state": "read_failed"},
-                )
-                await asyncio.sleep(self.reconnect_delay)
-                continue
-            if not messages:
-                await self._update_health(
-                    healthy=True,
-                    extra_metrics={"loop": "market", "messages": 0, "state": "idle"},
-                )
-                continue
-            ack_ids: list[str] = []
-            self._market_last_processed = _utc_now()
-            for message in messages:
-                handled = await self._handle_market_message(message.data)
-                if handled:
-                    ack_ids.append(message.message_id)
-            if ack_ids:
-                try:
-                    await ack_stream(ack_ids, stream_key=self.market_stream_key, group=self.market_group, redis=self._redis)
-                except Exception as exc:
-                    if self._logger:
-                        self._logger.warning("Failed to acknowledge market messages", exc_info=True)
-                    await self._update_health(
-                        healthy=False,
-                        last_error=str(exc),
-                        extra_metrics={
-                            "loop": "market",
-                            "state": "ack_failed",
-                            "messages": len(messages),
-                        },
-                    )
-                    continue
-            await self._update_health(
-                healthy=True,
-                extra_metrics={"loop": "market", "messages": len(messages), "state": "processed"},
+            await self._consume_stream_iteration(
+                loop_name="market",
+                stream_key=self.market_stream_key,
+                group=self.market_group,
+                consumer=self._consumer_name,
+                handler=self._handle_market_message,
+                on_processed=self._set_market_last_processed,
             )
 
     async def _results_loop(self) -> None:
         assert self._redis is not None
         while not self._stop_event.is_set():
-            try:
-                messages = await read_stream(
-                    stream_key=self.results_stream_key,
-                    group=self.results_group,
-                    consumer=f"{self._consumer_name}-results",
-                    count=self.batch_size,
-                    block=int(self.poll_interval * 1000),
-                    redis=self._redis,
-                )
-            except Exception as exc:
-                if self._logger:
-                    self._logger.warning("Failed to read results stream", exc_info=True)
-                await self._update_health(
-                    healthy=False,
-                    last_error=str(exc),
-                    extra_metrics={"loop": "results", "state": "read_failed"},
-                )
-                await asyncio.sleep(self.reconnect_delay)
-                continue
-            if not messages:
-                await self._update_health(
-                    healthy=True,
-                    extra_metrics={"loop": "results", "messages": 0, "state": "idle"},
-                )
-                continue
-            ack_ids: list[str] = []
-            self._results_last_processed = _utc_now()
-            for message in messages:
-                handled = await self._handle_result_message(message.data)
-                if handled:
-                    ack_ids.append(message.message_id)
-            if ack_ids:
-                try:
-                    await ack_stream(ack_ids, stream_key=self.results_stream_key, group=self.results_group, redis=self._redis)
-                except Exception as exc:
-                    if self._logger:
-                        self._logger.warning("Failed to acknowledge result messages", exc_info=True)
-                    await self._update_health(
-                        healthy=False,
-                        last_error=str(exc),
-                        extra_metrics={
-                            "loop": "results",
-                            "state": "ack_failed",
-                            "messages": len(messages),
-                        },
-                    )
-                    continue
-            await self._update_health(
-                healthy=True,
-                extra_metrics={"loop": "results", "messages": len(messages), "state": "processed"},
+            await self._consume_stream_iteration(
+                loop_name="results",
+                stream_key=self.results_stream_key,
+                group=self.results_group,
+                consumer=f"{self._consumer_name}-results",
+                handler=self._handle_result_message,
+                on_processed=self._set_results_last_processed,
             )
 
     async def _handle_market_message(self, payload: Mapping[str, Any]) -> bool:
