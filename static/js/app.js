@@ -931,9 +931,10 @@ class TradingApp {
                     const controller = serviceRestartModules.createListController({
                         document,
                         container: listContainer,
-                        fetcher: (payload) => this.apiCall('/services/restart', {
+                        initialPayload,
+                        fetcher: (request) => this.apiCall(request.endpoint || '/services/restart', {
                             method: 'POST',
-                            body: JSON.stringify(payload),
+                            body: JSON.stringify(request?.payload || {}),
                         }),
                         describeService: (serviceName, element) => {
                             if (element?.dataset?.serviceLabel) {

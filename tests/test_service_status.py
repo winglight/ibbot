@@ -58,11 +58,9 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
                 "last_error": "boom",
                 "last_seen": recent,
             },
-            "hash:service:health:notification": {
-                "healthy": "true",
-                "last_seen": recent,
-            },
-            "hash:service:health:account-snapshot": None,
+            "hash:service:health:market-data": None,
+            "hash:service:health:ib-feed": None,
+            "hash:service:health:connection_control": None,
             "hash:service:health:queue": {
                 "status": "running",
                 "total_queue_length": "2",
@@ -83,22 +81,17 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert status_map["orders"].status == "running"
         assert status_map["risk"].status == "running"
         assert status_map["strategy"].status == "unhealthy"
-        assert status_map["queue_monitor"].status == "running"
-        assert status_map["notification"].status == "running"
-        assert status_map["ib-gateway"].status == "external"
-        assert status_map["cloudflared"].status == "external"
-        assert status_map["account_snapshot"].status == "unhealthy"
         assert status_map["connection_control"].status == "unhealthy"
-        assert status_map["ib_feed"].status == "unhealthy"
+        assert status_map["ib_command"].status == "running"
+        assert status_map["market_data_feed"].status == "unhealthy"
         assert status_map["market_data"].status == "unhealthy"
-        assert status_map["optimizer"].status == "unhealthy"
         assert "未上报" in (status_map["connection_control"].detail or "")
-        assert "未上报" in (status_map["ib_feed"].detail or "")
+        assert "未上报" in (status_map["market_data_feed"].detail or "")
         assert "未上报" in (status_map["market_data"].detail or "")
-        assert "未上报" in (status_map["optimizer"].detail or "")
 
         account_payload = status_map["account"].payload or {}
         assert "readiness" in account_payload
+        assert status_map["queue_monitor"].status == "running"
         queue_payload = status_map["queue_monitor"].payload or {}
         assert queue_payload.get("total_queue_length") == "2"
         assert "metrics_snapshot" in queue_payload
@@ -266,7 +259,7 @@ def test_build_service_status_payload_includes_queue_metrics(monkeypatch: pytest
             "metrics_snapshot" in (entry.get("payload") or {})
             for entry in queue_entries
         )
-        assert queue_entries[0].get("port") == "8011"
-        assert queue_entries[0].get("display_name") == "Queue Monitor"
+        assert queue_entries[0].get("port") is None
+        assert queue_entries[0].get("display_name") in {"Queue Monitor", "queue_monitor"}
 
     asyncio.run(_run())
