@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from loguru import logger
+import uvicorn
 
 from src.account_snapshot_cache import (
     read_account_info_snapshot,
@@ -386,4 +387,15 @@ async def post_refresh_request() -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_200_OK, content=payload)
 
 
-__all__ = ["app"]
+def main() -> None:
+    """Run the account service using Uvicorn."""
+
+    port = int(os.getenv("ACCOUNT_SERVICE_PORT", "8020"))
+    uvicorn.run("services.account.main:app", host="0.0.0.0", port=port, log_level="info")
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    main()
+
+
+__all__ = ["app", "main"]

@@ -1,7 +1,5 @@
 """FastAPI application exposing strategy management endpoints."""
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import json
@@ -156,7 +154,7 @@ class StrategyRuntime:
             self._consumer.stop()
         tasks = [t for t in (self._event_task, self._health_task, self._consumer_task) if t is not None]
         for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError):  # type: ignore[name-defined]
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
         await self._publish_health(healthy=False)
 
@@ -375,7 +373,7 @@ async def _lifespan(
         app.state.runtime = runtime
         yield
     finally:
-        with contextlib.suppress(Exception):  # type: ignore[name-defined]
+        with contextlib.suppress(Exception):
             await runtime.stop()
         if owns_redis:
             with contextlib.suppress(Exception):

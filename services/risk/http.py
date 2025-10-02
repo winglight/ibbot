@@ -1,6 +1,5 @@
 """HTTP service exposing risk configuration and analytics endpoints."""
 
-from __future__ import annotations
 
 import asyncio
 import contextlib
@@ -231,7 +230,10 @@ def create_app(
 
     @app.get("/risk/config", status_code=status.HTTP_200_OK)
     @app.get("/risk-config", status_code=status.HTTP_200_OK)
-    async def get_config(redis = Depends(_get_redis), runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:  # type: ignore[override]
+    async def get_config(
+        redis=Depends(_get_redis),
+        runtime_instance: RiskRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:  # type: ignore[override]
         cached = await _load_json(redis, runtime_instance.config_cache_key)
         config = _strip_metadata(cached) or runtime_instance.get_config_snapshot()
         response: dict[str, Any] = {"success": True, "config": dict(config)}
@@ -263,7 +265,10 @@ def create_app(
 
     @app.get("/risk/rules", status_code=status.HTTP_200_OK)
     @app.get("/risk_rules", status_code=status.HTTP_200_OK)
-    async def get_rules(redis = Depends(_get_redis), runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:  # type: ignore[override]
+    async def get_rules(
+        redis=Depends(_get_redis),
+        runtime_instance: RiskRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:  # type: ignore[override]
         cached = await _load_json(redis, runtime_instance.rules_cache_key)
         rules_payload = {}
         if cached and isinstance(cached.get("rules"), Mapping):

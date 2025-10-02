@@ -57,6 +57,9 @@ services:
       - DOM_AUTOMATION_DEFAULT_SYMBOL=MNQ
       - DOM_AUTOMATION_DEFAULT_LIMIT=500
       - ACCOUNT_SERVICE_URL=http://account:8020
+      - ORDERS_SERVICE_URL=http://orders:8050
+      - RISK_SERVICE_URL=http://risk:8030
+      - STRATEGY_SERVICE_URL=http://strategy-api:8045
 
     volumes:
       - ../data/logs:/app/logs
@@ -64,6 +67,9 @@ services:
       - ../src/strategies:/app/src/strategies
     depends_on:
       - account
+      - orders
+      - risk
+      - strategy-api
       - ib-gateway
     networks:
       - ibbot-network
@@ -111,6 +117,81 @@ services:
     volumes:
       - ../data/logs:/app/logs
       - ../data:/app/data
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
+  orders:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-orders
+    command:
+      ["python", "-m", "uvicorn", "services.orders.main:app", "--host", "0.0.0.0", "--port", "8050"]
+    ports:
+      - "8050:8050"
+    env_file:
+      - ./.env
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
+  risk:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-risk
+    command:
+      ["python", "-m", "uvicorn", "services.risk.http:app", "--host", "0.0.0.0", "--port", "8030"]
+    ports:
+      - "8030:8030"
+    env_file:
+      - ./.env
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
+  strategy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-strategy
+    command: ["python", "-m", "services.strategy.main"]
+    env_file:
+      - ./.env
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+      - ../src/strategies:/app/src/strategies
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
+  strategy-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-strategy-api
+    command:
+      ["python", "-m", "uvicorn", "services.strategy.http:app", "--host", "0.0.0.0", "--port", "8045"]
+    ports:
+      - "8045:8045"
+    env_file:
+      - ./.env
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+      - ../src/strategies:/app/src/strategies
     networks:
       - ibbot-network
       - stack

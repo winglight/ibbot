@@ -16,6 +16,9 @@ x-app-env: &app-environment
     MARKET_DATA_SERVICE_URL: http://market-data:8010
     MARKET_DATA_SERVICE_WS_URL: ws://market-data:8010/ws/market
     ACCOUNT_SERVICE_URL: http://account:8020
+    ORDERS_SERVICE_URL: http://orders:8050
+    RISK_SERVICE_URL: http://risk:8030
+    STRATEGY_SERVICE_URL: http://strategy-api:8045
 
 services:
   redis:
@@ -166,8 +169,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     image: ${IBBOT_IMAGE:-ibbot/local}
-    command: ["python", "-m", "services.risk.main"]
+    command:
+      ["python", "-m", "uvicorn", "services.risk.http:app", "--host", "0.0.0.0", "--port", "8030"]
     container_name: ibbot-risk
+    ports:
+      - "8030:8030"
     volumes:
       - ./data/logs:/app/logs
       - ./data:/app/data
@@ -196,6 +202,32 @@ services:
       - ./src/strategies:/app/src/strategies
     depends_on:
       redis:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - strategy
+
+  strategy-api:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      ["python", "-m", "uvicorn", "services.strategy.http:app", "--host", "0.0.0.0", "--port", "8045"]
+    container_name: ibbot-strategy-api
+    ports:
+      - "8045:8045"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+      - ./src/strategies:/app/src/strategies
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
         condition: service_healthy
     networks:
       - ibbot-network
@@ -271,6 +303,27 @@ services:
       - ibbot-network
     restart: unless-stopped
 
+  orders:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      ["python", "-m", "uvicorn", "services.orders.main:app", "--host", "0.0.0.0", "--port", "8050"]
+    container_name: ibbot-orders
+    ports:
+      - "8050:8050"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+
   ibbot:
     <<: *app-environment
     build:
@@ -290,6 +343,12 @@ services:
       influxdb:
         condition: service_healthy
       account:
+        condition: service_started
+      orders:
+        condition: service_started
+      risk:
+        condition: service_started
+      strategy-api:
         condition: service_started
       ib-gateway:
         condition: service_started

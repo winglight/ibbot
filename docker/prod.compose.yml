@@ -54,6 +54,9 @@ services:
       AUTO_CONNECT: ${AUTO_CONNECT:-true}
       IBKR_PAPER_TRADING: ${IBKR_PAPER_TRADING:-False}
       ACCOUNT_SERVICE_URL: http://account:8020
+      ORDERS_SERVICE_URL: http://orders:8050
+      RISK_SERVICE_URL: http://risk:8030
+      STRATEGY_SERVICE_URL: http://strategy-api:8045
     ports:
       - "${IBBOT_WEB_PORT:-8000}:8000"
     volumes:
@@ -75,3 +78,16 @@ services:
     volumes:
       - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
       - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+  orders:
+    ports:
+      - "${ORDERS_SERVICE_PORT:-8050}:8050"
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+  strategy-api:
+    ports:
+      - "${STRATEGY_SERVICE_PORT:-8045}:8045"
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+      - ${IBBOT_STRATEGY_DIR:-/var/lib/ibbot/strategies}:/app/src/strategies

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict
+import uvicorn
 
 from src.ibbot import update_service_health
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, get_redis_client
@@ -491,3 +493,17 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
 
 
 app = create_app()
+
+
+def main() -> None:
+    """Run the orders service via Uvicorn."""
+
+    port = int(os.getenv("ORDERS_SERVICE_PORT", "8050"))
+    uvicorn.run("services.orders.main:app", host="0.0.0.0", port=port, log_level="info")
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    main()
+
+
+__all__ = ["app", "main"]
