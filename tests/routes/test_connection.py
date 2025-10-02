@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -141,31 +143,78 @@ def test_connect_dispatches_service_command(connection_app, monkeypatch: pytest.
     assert stub_client.calls == [payload]
 
 
-def test_connect_returns_502_when_service_fails(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connect_falls_back_to_queue_when_service_unavailable(
+    connection_app, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app, _ = connection_app
+
+    enqueued: list[dict[str, Any]] = []
+
+    async def fake_enqueue(payload):
+        enqueued.append(dict(payload))
 
     class StubClient:
         async def connect(self, payload):  # pragma: no cover - exercised in test
             raise connection_module.ServiceClientError("connection_control", "offline")
 
     monkeypatch.setattr(connection_module, "_get_connection_control_client", lambda: StubClient())
+    monkeypatch.setattr(connection_module, "_enqueue_command", fake_enqueue)
+
+    request_payload = {
+        "host": "localhost",
+        "port": 4001,
+        "client_id": 1,
+        "paper_trading": True,
+    }
 
     with TestClient(app) as client:
-        response = client.post(
-            "/api/connect",
-            json={
-                "host": "localhost",
-                "port": 4001,
-                "client_id": 1,
-                "paper_trading": True,
-            },
-        )
+        response = client.post("/api/connect", json=request_payload)
 
-    assert response.status_code == 502
-    assert response.json()["detail"] == "Failed to dispatch connect command"
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["service"] == "redis"
+    assert body["status"] == "queued"
+    assert body.get("fallback") is True
+    assert body.get("command_id")
+
+    assert enqueued, "expected fallback enqueue"
+    command = enqueued[0]
+    assert command["method"] == "connect"
+    assert command["metadata"]["config"]["host"] == request_payload["host"]
 
 
-def test_disconnect_enqueues_command(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_disconnect_dispatches_service_command(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _ = connection_app
+
+    class StubClient:
+        def __init__(self) -> None:
+            self.called = False
+
+        async def disconnect(self):
+            self.called = True
+            return {"status": "queued", "command_id": "xyz"}
+
+    stub_client = StubClient()
+    monkeypatch.setattr(connection_module, "_get_connection_control_client", lambda: stub_client)
+
+    with TestClient(app) as client:
+        response = client.post("/api/disconnect")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "success": True,
+        "status": "dispatched",
+        "service": "connection_control",
+        "result": {"status": "queued", "command_id": "xyz"},
+    }
+    assert stub_client.called is True
+
+
+def test_disconnect_enqueues_command_when_service_unavailable(
+    connection_app, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app, _ = connection_app
 
     enqueued: list[dict[str, object]] = []
@@ -173,7 +222,12 @@ def test_disconnect_enqueues_command(connection_app, monkeypatch: pytest.MonkeyP
     async def fake_enqueue(payload):
         enqueued.append(dict(payload))
 
+    class StubClient:
+        async def disconnect(self):  # pragma: no cover - exercised in test
+            raise connection_module.ServiceClientError("connection_control", "offline")
+
     monkeypatch.setattr(connection_module, "_enqueue_command", fake_enqueue)
+    monkeypatch.setattr(connection_module, "_get_connection_control_client", lambda: StubClient())
 
     with TestClient(app) as client:
         response = client.post("/api/disconnect")
@@ -181,6 +235,8 @@ def test_disconnect_enqueues_command(connection_app, monkeypatch: pytest.MonkeyP
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "queued"
+    assert payload["service"] == "redis"
+    assert payload.get("fallback") is True
     assert enqueued and enqueued[0]["method"] == "disconnect"
 
 

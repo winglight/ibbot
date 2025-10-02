@@ -424,7 +424,7 @@ class NotificationServiceClient(ServiceClient):
 class ConnectionControlClient(ServiceClient):
     service_name = "connection_control"
     env_prefix = "CONNECTION_CONTROL"
-    default_base_url = "http://localhost:8050"
+    default_base_url = "http://localhost:8056"
 
     async def fetch_config(self) -> Any:
         return await self.request("GET", "/connection/config")

@@ -25,6 +25,37 @@ _COMMAND_QUEUE_OVERRIDE = os.getenv("IB_COMMAND_QUEUE_KEY", "").strip() or None
 _CONNECTION_CONFIG_MODULE = "ib-connection"
 
 
+def _build_connect_command(payload: Mapping[str, Any], user: str | None) -> tuple[str, dict[str, Any]]:
+    command_id = uuid.uuid4().hex
+    command = {
+        "command_id": command_id,
+        "method": "connect",
+        "args": [],
+        "kwargs": {},
+        "metadata": {
+            "source": "api.connect",
+            "submitted_by": user or "anonymous",
+            "config": dict(payload),
+        },
+    }
+    return command_id, command
+
+
+def _build_disconnect_command(user: str | None) -> tuple[str, dict[str, Any]]:
+    command_id = uuid.uuid4().hex
+    command = {
+        "command_id": command_id,
+        "method": "disconnect",
+        "args": [],
+        "kwargs": {},
+        "metadata": {
+            "source": "api.disconnect",
+            "submitted_by": user or "anonymous",
+        },
+    }
+    return command_id, command
+
+
 def _decode_redis_mapping(raw: Dict[Any, Any]) -> Dict[str, str]:
     """Convert Redis hash payload into a plain string dictionary."""
 
@@ -248,13 +279,34 @@ async def connect_ibkr(
         logger.error("Failed to dispatch connect command via service: {}", exc)
         await audit_log_failure(
             request,
-            detail="failed to dispatch connect command",
-            extra={"service": "connection_control"},
+            detail="failed to dispatch connect command via service",
+            extra={"service": "connection_control", "fallback": "redis"},
         )
-        raise HTTPException(
-            status_code=502,
-            detail="Failed to dispatch connect command",
-        ) from exc
+
+        command_id, command = _build_connect_command(payload, user)
+        try:
+            await _enqueue_command(command)
+        except Exception as queue_exc:
+            logger.error("Failed to enqueue connect command via fallback: {}", queue_exc)
+            raise HTTPException(status_code=503, detail="Failed to enqueue connect command") from queue_exc
+
+        await audit_log_success(
+            request,
+            detail="connect command enqueued via fallback",
+            extra={
+                "paper_trading": bool(config.paper_trading),
+                "service": "redis",
+                "command_id": command_id,
+            },
+        )
+
+        return {
+            "success": True,
+            "status": "queued",
+            "service": "redis",
+            "command_id": command_id,
+            "fallback": True,
+        }
 
     await audit_log_success(
         request,
@@ -280,36 +332,54 @@ async def disconnect_ibkr(
     request: Request,
     user: Optional[str] = Depends(require_roles("admin", "operator", action="connection.disconnect")),
 ):
-    command_id = uuid.uuid4().hex
-    command = {
-        "command_id": command_id,
-        "method": "disconnect",
-        "args": [],
-        "kwargs": {},
-        "metadata": {
-            "source": "api.disconnect",
-            "submitted_by": user or "anonymous",
-        },
-    }
+    client = _get_connection_control_client()
 
     try:
-        await _enqueue_command(command)
-    except Exception as exc:
-        logger.error("Failed to enqueue disconnect command: {}", exc)
-        await audit_log_failure(request, detail="failed to enqueue disconnect command")
-        raise HTTPException(status_code=503, detail="Failed to enqueue disconnect command") from exc
+        result = await client.disconnect()
+    except ServiceClientError as exc:
+        logger.error("Failed to dispatch disconnect command via service: {}", exc)
+        await audit_log_failure(
+            request,
+            detail="failed to dispatch disconnect command via service",
+            extra={"service": "connection_control", "fallback": "redis"},
+        )
+
+        command_id, command = _build_disconnect_command(user)
+        try:
+            await _enqueue_command(command)
+        except Exception as queue_exc:
+            logger.error("Failed to enqueue disconnect command: {}", queue_exc)
+            await audit_log_failure(request, detail="failed to enqueue disconnect command")
+            raise HTTPException(status_code=503, detail="Failed to enqueue disconnect command") from queue_exc
+
+        await audit_log_success(
+            request,
+            detail="disconnect command enqueued via fallback",
+            extra={"command_id": command_id, "service": "redis"},
+        )
+
+        return {
+            "success": True,
+            "status": "queued",
+            "service": "redis",
+            "command_id": command_id,
+            "fallback": True,
+        }
 
     await audit_log_success(
         request,
-        detail="disconnect command enqueued",
-        extra={"command_id": command_id},
+        detail="disconnect command dispatched via service",
+        extra={"service": "connection_control", "result": result},
     )
 
-    return {
+    response: Dict[str, Any] = {
         "success": True,
-        "status": "queued",
-        "command_id": command_id,
+        "status": "dispatched",
+        "service": "connection_control",
     }
+    if result is not None:
+        response["result"] = result
+    return response
 
 
 @router.get("/api/connection_status")
