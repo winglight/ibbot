@@ -6,12 +6,14 @@ import asyncio
 import inspect
 import json
 import logging
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from src.ibbot.influx import InfluxPoint, write_points
+from src.ibbot import update_service_health
 from src.ibbot.redis import StreamMessage
 
 logger = logging.getLogger("ibbot.services.notification")
@@ -88,6 +90,10 @@ class NotificationService:
         write: Callable[[Iterable[InfluxPoint | Mapping[str, Any]]], Awaitable[int] | int] = write_points,
         service_name: str = "notification",
         logger_instance: logging.Logger | None = None,
+        redis_client: Any | None = None,
+        command_queue: str = "queue:notification:dispatch",
+        command_status_prefix: str = "hash:notification:command",
+        command_batch_size: int = 10,
     ) -> None:
         self._stream_reader = stream_reader
         self._channels = OrderedDict((channel.name, channel) for channel in channels)
@@ -100,6 +106,10 @@ class NotificationService:
         self._pending_retries: dict[tuple[str, str, str], RetryItem] = {}
         self._stop_requested = False
         self._last_error: str | None = None
+        self._redis = redis_client
+        self._command_queue = command_queue
+        self._command_status_prefix = command_status_prefix.rstrip(":")
+        self._command_batch_size = max(1, int(command_batch_size))
 
     # ------------------------------------------------------------------
     # public API
@@ -118,15 +128,18 @@ class NotificationService:
         try:
             while not self._stop_requested:
                 processed = await self.poll_once()
+                await self._publish_health_metrics()
                 if processed == 0 and self._poll_interval > 0:
                     await asyncio.sleep(self._poll_interval)
         finally:
             self._logger.info("Notification service stopped")
 
-    async def poll_once(self) -> int:
-        """Process pending retries and fetch new events once."""
+    async def poll_once(self, *, include_commands: bool = True) -> int:
+        """Process queued commands, pending retries, and fetch new events once."""
 
         processed = 0
+        if include_commands:
+            processed += await self._process_command_queue()
         processed += await self._process_pending_retries()
 
         try:
@@ -176,6 +189,129 @@ class NotificationService:
     # ------------------------------------------------------------------
     # internal helpers
     # ------------------------------------------------------------------
+    async def _process_command_queue(self) -> int:
+        if self._redis is None or not self._command_queue:
+            return 0
+
+        processed = 0
+        for _ in range(self._command_batch_size):
+            try:
+                raw = await self._redis.lpop(self._command_queue)
+            except Exception as exc:
+                self._logger.warning("Failed to read notification command queue", exc_info=True)
+                self._last_error = str(exc)
+                break
+            if raw is None:
+                break
+            processed += 1
+            await self._handle_command(raw)
+        return processed
+
+    async def _handle_command(self, raw: Any) -> None:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            self._logger.warning("Discarding malformed notification command", extra={"payload": raw})
+            return
+
+        command_id = str(data.get("command_id") or uuid.uuid4().hex)
+        command_type = str(data.get("type") or "dispatch")
+        payload = data.get("payload")
+        await self._update_command_status(
+            command_id,
+            status="processing",
+            type=command_type,
+        )
+
+        results: dict[str, Any] | None = None
+        error: str | None = None
+        try:
+            results = await self._execute_command(command_id, command_type, payload)
+        except Exception as exc:
+            error = str(exc)
+            self._last_error = error
+            self._logger.warning(
+                "Notification command failed",
+                extra={"command_id": command_id, "type": command_type},
+                exc_info=True,
+            )
+
+        status = "failed"
+        if results is not None:
+            statuses = [entry.get("status") for entry in results.get("results", {}).values()]
+            if statuses and all(value == "success" for value in statuses):
+                status = "success"
+                self._last_error = None
+            elif any(value == "success" for value in statuses):
+                status = "partial"
+                if error is None:
+                    error = self._last_error
+            elif error is None:
+                error = self._last_error
+
+        mapping: dict[str, Any] = {"status": status}
+        if results is not None:
+            mapping["results"] = json.dumps(results.get("results", {}), ensure_ascii=False)
+            mapping["event"] = json.dumps(results.get("event", {}), ensure_ascii=False)
+        if error:
+            mapping["last_error"] = error
+        await self._update_command_status(command_id, **mapping)
+
+    async def _execute_command(
+        self, command_id: str, command_type: str, payload: Any
+    ) -> dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise ValueError("Command payload must be a mapping")
+
+        raw_channels: Iterable[str] | None
+        if "channels" in payload and isinstance(payload["channels"], Iterable):
+            raw_channels = payload["channels"]  # type: ignore[assignment]
+        elif payload.get("channel"):
+            raw_channels = [payload["channel"]]
+        else:
+            raw_channels = None
+
+        allowed_channels: set[str] | None = None
+        if raw_channels:
+            allowed_channels = {str(value).strip().lower() for value in raw_channels if str(value).strip()}
+        message_id = command_id
+        stream = str(payload.get("stream") or f"command:{command_type}")
+        event_payload = dict(payload)
+        event_payload.setdefault("command_id", command_id)
+        event = NotificationEvent(stream=stream, message_id=message_id, payload=event_payload)
+
+        results: dict[str, Any] = {}
+        await self._dispatch_event(event, allowed_channels=allowed_channels, results=results)
+
+        if allowed_channels is not None:
+            missing = [name for name in allowed_channels if name not in self._channels]
+            for name in missing:
+                results.setdefault(name, {"status": "missing", "error": "Channel not configured"})
+
+        return {"results": results, "event": {"stream": event.stream, "message_id": event.message_id}}
+
+    async def _update_command_status(self, command_id: str, **fields: Any) -> None:
+        if self._redis is None:
+            return
+        mapping: dict[str, str] = {}
+        for key, value in fields.items():
+            if value is None:
+                continue
+            if isinstance(value, (str, bytes)):
+                serialised = value.decode() if isinstance(value, bytes) else value
+            else:
+                serialised = str(value)
+            mapping[str(key)] = serialised
+        mapping["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            await self._redis.hset(self._command_status_key(command_id), mapping=mapping)
+        except Exception as exc:
+            self._logger.debug("Failed to persist command status", exc_info=True)
+            self._last_error = str(exc)
+
+    def _command_status_key(self, command_id: str) -> str:
+        return f"{self._command_status_prefix}:{command_id}"
+
     async def _process_pending_retries(self) -> int:
         if not self._pending_retries:
             return 0
@@ -224,13 +360,25 @@ class NotificationService:
 
         return processed
 
-    async def _dispatch_event(self, event: NotificationEvent) -> None:
+    async def _dispatch_event(
+        self,
+        event: NotificationEvent,
+        *,
+        allowed_channels: Iterable[str] | None = None,
+        results: MutableMapping[str, Any] | None = None,
+    ) -> None:
         if not self._channels:
             self._logger.debug("No notification channels configured; skipping event", extra={"stream": event.stream})
             return
 
+        allowed_set = None
+        if allowed_channels is not None:
+            allowed_set = {str(name).strip().lower() for name in allowed_channels if str(name).strip()}
+
         message = self._format_event(event)
         for channel in self._channels.values():
+            if allowed_set is not None and channel.name not in allowed_set:
+                continue
             try:
                 await channel.send(event, message)
             except Exception as exc:
@@ -240,6 +388,8 @@ class NotificationService:
                     exc_info=True,
                 )
                 attempts = self._schedule_retry(event, channel.name, message, str(exc))
+                if results is not None:
+                    results[channel.name] = {"status": "retrying", "error": str(exc), "retries": attempts}
                 await self._write_log_point(
                     stream=event.stream,
                     channel=channel.name,
@@ -257,6 +407,11 @@ class NotificationService:
                 message=message,
                 retries=self.get_retry_count(event.stream, event.message_id, channel.name),
             )
+            if results is not None:
+                results[channel.name] = {
+                    "status": "success",
+                    "retries": self.get_retry_count(event.stream, event.message_id, channel.name),
+                }
             if (event.stream, event.message_id, channel.name) not in self._pending_retries:
                 self._last_error = None
 
@@ -312,3 +467,36 @@ class NotificationService:
                 await result
         except Exception:  # pragma: no cover - logging only, depends on influx availability
             self._logger.debug("Failed to write notification log point", exc_info=True)
+
+    async def _publish_health_metrics(self) -> None:
+        if self._redis is None:
+            return
+        queue_pending = 0
+        try:
+            queue_pending = int(await self._redis.llen(self._command_queue))
+        except Exception:
+            self._logger.debug("Failed to read notification queue length", exc_info=True)
+        pending_total = queue_pending + len(self._pending_retries)
+        metrics = {"pending": pending_total, "last_error": self._last_error or ""}
+        try:
+            await update_service_health(
+                self._redis,
+                self._service_name,
+                healthy=self._last_error is None,
+                last_error=self._last_error,
+                metrics=metrics,
+            )
+        except Exception:
+            self._logger.debug("Failed to update notification health", exc_info=True)
+
+    @property
+    def redis(self) -> Any | None:
+        return self._redis
+
+    @property
+    def command_queue(self) -> str:
+        return self._command_queue
+
+    @property
+    def command_status_prefix(self) -> str:
+        return self._command_status_prefix

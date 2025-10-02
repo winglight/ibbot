@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
-from collections.abc import Awaitable, Callable
+import uuid
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from services.notification import NotificationChannel, NotificationService, RedisStreamReader
 from src.ibbot.config import ConfigProvider
@@ -18,9 +22,30 @@ from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_cl
 
 SERVICE_NAME = "notification"
 DEFAULT_STREAMS = ["stream:ib:results", "stream:risk:events", "stream:strategy:events"]
+DEFAULT_COMMAND_QUEUE = "queue:notification:dispatch"
+DEFAULT_STATUS_PREFIX = "hash:notification:command"
 
 CleanupCallback = Callable[[], Awaitable[None] | None] | None
 ServiceFactory = Callable[[], Awaitable[tuple[NotificationService, CleanupCallback]]]
+
+
+class NotificationDispatchRequest(BaseModel):
+    """Payload accepted by the dispatch endpoint."""
+
+    message: str = Field(..., description="Notification message to deliver")
+    event_type: str | None = Field(None, description="Logical event type")
+    category: str | None = Field(None, description="Notification category")
+    channel: str | None = Field(None, description="Single channel name override")
+    channels: list[str] | None = Field(None, description="Explicit channel list")
+    metadata: Mapping[str, Any] | None = Field(None, description="Additional metadata")
+
+    model_config = ConfigDict(extra="allow")
+
+
+class NotificationTestRequest(NotificationDispatchRequest):
+    """Payload accepted by the test endpoint."""
+
+    message: str | None = Field(None, description="Optional test message override")
 
 
 def _resolve_redis_url(override_key: str) -> str:
@@ -89,6 +114,10 @@ async def _default_service_factory() -> tuple[NotificationService, CleanupCallba
 
     poll_interval = float(config.get("poll_interval", 1.0) or 1.0)
     max_retries = int(config.get("max_retries", 3) or 3)
+    command_queue = str(config.get("command_queue") or DEFAULT_COMMAND_QUEUE)
+    status_prefix = str(config.get("command_status_prefix") or DEFAULT_STATUS_PREFIX)
+    batch_size_value = config.get("command_batch_size")
+    command_batch_size = int(batch_size_value) if batch_size_value else 10
 
     service = NotificationService(
         stream_reader=reader,
@@ -98,6 +127,10 @@ async def _default_service_factory() -> tuple[NotificationService, CleanupCallba
         write=write_points,
         service_name=SERVICE_NAME,
         logger_instance=logger,
+        redis_client=redis,
+        command_queue=command_queue,
+        command_status_prefix=status_prefix,
+        command_batch_size=command_batch_size,
     )
 
     async def _cleanup() -> None:
@@ -118,6 +151,10 @@ def create_app(service_factory: ServiceFactory | None = None) -> FastAPI:
         app.state.service = service
         app.state.cleanup = cleanup
         app.state.worker = asyncio.create_task(service.run_forever())
+        redis = getattr(service, "redis", None)
+        app.state.redis = redis
+        app.state.command_queue = getattr(service, "command_queue", DEFAULT_COMMAND_QUEUE)
+        app.state.command_status_prefix = getattr(service, "command_status_prefix", DEFAULT_STATUS_PREFIX)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -136,6 +173,7 @@ def create_app(service_factory: ServiceFactory | None = None) -> FastAPI:
             result = cleanup()
             if asyncio.iscoroutine(result):
                 await result
+        app.state.redis = None
 
     @app.get("/health")
     async def health() -> Any:
@@ -143,6 +181,96 @@ def create_app(service_factory: ServiceFactory | None = None) -> FastAPI:
         if service is None:
             raise HTTPException(status_code=503, detail="Notification service not initialised")
         return service.health_status
+
+    def _get_runtime_state() -> tuple[Any, str, str]:
+        redis = getattr(app.state, "redis", None)
+        if redis is None:
+            raise HTTPException(status_code=503, detail="Notification runtime unavailable")
+        queue_key = getattr(app.state, "command_queue", DEFAULT_COMMAND_QUEUE)
+        status_prefix = getattr(app.state, "command_status_prefix", DEFAULT_STATUS_PREFIX)
+        return redis, queue_key, status_prefix
+
+    def _normalise_channels(request: NotificationDispatchRequest) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+
+        def _add(candidate: str | None) -> None:
+            if not candidate:
+                return
+            name = candidate.strip().lower()
+            if not name or name in seen:
+                return
+            seen.add(name)
+            result.append(name)
+
+        if request.channels:
+            for entry in request.channels:
+                _add(str(entry) if entry is not None else None)
+        _add(request.channel)
+        return result
+
+    def _json_default(value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, Mapping):
+            return dict(value)
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+            return list(value)
+        return str(value)
+
+    async def _enqueue_command(command_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        redis, queue_key, status_prefix = _get_runtime_state()
+        command_id = uuid.uuid4().hex
+        envelope = {"command_id": command_id, "type": command_type, "payload": dict(payload)}
+        status_key = f"{status_prefix.rstrip(':')}:{command_id}"
+        timestamp = datetime.now(timezone.utc).isoformat()
+        await redis.hset(status_key, mapping={"status": "queued", "type": command_type, "requested_at": timestamp})
+        await redis.rpush(queue_key, json.dumps(envelope, ensure_ascii=False, default=_json_default))
+        return {"success": True, "command_id": command_id, "status": "queued"}
+
+    @app.post("/notifications/dispatch", status_code=status.HTTP_202_ACCEPTED)
+    async def dispatch_notification(request: NotificationDispatchRequest) -> Mapping[str, Any]:
+        channels = _normalise_channels(request)
+        payload = request.model_dump(mode="python")
+        if channels:
+            payload["channels"] = channels
+        result = await _enqueue_command("dispatch", payload)
+        return result
+
+    @app.post("/notifications/test", status_code=status.HTTP_202_ACCEPTED)
+    async def test_notification(request: NotificationTestRequest) -> Mapping[str, Any]:
+        payload = request.model_dump(mode="python")
+        if not payload.get("message"):
+            payload["message"] = "Test notification from IBBot"
+        payload.setdefault("event_type", "test")
+        payload.setdefault("category", "api")
+        payload["test_mode"] = True
+        channels = _normalise_channels(request)
+        if channels:
+            payload["channels"] = channels
+        result = await _enqueue_command("test", payload)
+        return result
+
+    @app.get("/notifications/status")
+    async def notification_status(command_id: str) -> Mapping[str, Any]:
+        if not command_id:
+            raise HTTPException(status_code=400, detail="command_id is required")
+        redis, _, status_prefix = _get_runtime_state()
+        status_key = f"{status_prefix.rstrip(':')}:{command_id}"
+        record = await redis.hgetall(status_key)
+        if not record:
+            raise HTTPException(status_code=404, detail="Command not found")
+        payload: dict[str, Any] = {str(key): value for key, value in record.items()}
+        for field in ("results", "event"):
+            raw = payload.get(field)
+            if isinstance(raw, str):
+                try:
+                    payload[field] = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+        payload["command_id"] = command_id
+        payload.setdefault("status", "unknown")
+        return payload
 
     return app
 
