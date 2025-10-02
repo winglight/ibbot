@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Any, AsyncIterator, Dict, Optional, Tuple
+from datetime import date, datetime, timedelta
+from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Tuple
 
 from contextlib import asynccontextmanager
 
@@ -19,7 +20,17 @@ from src.account_snapshot_cache import (
 from src.account_snapshot_service import AccountSnapshotService
 from src.ibbot import update_service_health
 from src.ibbot.redis import get_redis_client, request_ib_command
-from src.utils import now_local, parse_local_datetime, to_local_iso
+from src.utils import (
+    NY_TZ,
+    ensure_local_timezone,
+    now_local,
+    parse_local_datetime,
+    to_local_iso,
+)
+from src.utils.account_pnl_cache import (
+    load_all_daily_totals,
+    read_net_liquidation_snapshot,
+)
 
 
 ACCOUNT_SERVICE_NAME = "account-service"
@@ -81,6 +92,32 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Account Service", lifespan=_lifespan)
 _state = AccountServiceState()
+
+
+_UNSET = object()
+
+
+def _snapshot_needs_refresh(
+    snapshot: Optional[Mapping[str, Any]],
+    *,
+    refresh_interval: float,
+) -> bool:
+    if not snapshot:
+        return True
+    data = snapshot.get("data") if isinstance(snapshot, Mapping) else None
+    if data is None:
+        return True
+    if bool(snapshot.get("stale")):
+        return True
+    if _state.stale:
+        return True
+    if refresh_interval <= 0:
+        return False
+    updated_at = parse_local_datetime(snapshot.get("updated_at"))
+    if updated_at is None:
+        return True
+    age = now_local() - updated_at
+    return age > timedelta(seconds=refresh_interval * 2)
 
 
 def _read_health_interval() -> float:
@@ -331,17 +368,30 @@ async def _shutdown() -> None:
     logger.info("Account service shutdown complete")
 
 
-def _snapshot_response(snapshot: Dict[str, Any], *, data_key: str) -> Dict[str, Any]:
-    return {
+def _snapshot_response(
+    snapshot: Mapping[str, Any],
+    *,
+    data_key: str,
+    from_cache: bool = True,
+    data_override: Any = _UNSET,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    data_value = snapshot.get("data")
+    if data_override is not _UNSET:
+        data_value = data_override
+    payload: Dict[str, Any] = {
         "success": True,
-        data_key: snapshot.get("data"),
-        "from_cache": True,
+        data_key: data_value,
+        "from_cache": from_cache,
         "cache_updated_at": snapshot.get("updated_at"),
         "cache_source": snapshot.get("source"),
         "stale": snapshot.get("stale", False),
         "stale_reason": snapshot.get("stale_reason"),
         "stale_at": snapshot.get("stale_at"),
     }
+    if extra:
+        payload.update(dict(extra))
+    return payload
 
 
 async def _ensure_snapshot(snapshot: Optional[Dict[str, Any]], *, kind: str) -> Dict[str, Any]:
@@ -351,32 +401,408 @@ async def _ensure_snapshot(snapshot: Optional[Dict[str, Any]], *, kind: str) -> 
     return snapshot
 
 
+async def _read_orders_snapshot() -> Optional[Dict[str, Any]]:
+    redis_client = _state.redis
+    if redis_client is None:
+        try:
+            redis_client = await get_redis_client()
+            _state.redis = redis_client
+        except Exception as exc:  # pragma: no cover - redis optional in tests
+            logger.debug("Orders snapshot Redis unavailable: %s", exc)
+            return None
+
+    try:
+        raw = await redis_client.get("json:orders:snapshot")
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to read orders snapshot: %s", exc)
+        return None
+
+    if not raw:
+        return None
+
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except Exception:
+            raw = raw.decode("utf-8", errors="ignore")
+
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Invalid orders snapshot payload: %s", exc)
+        return None
+
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
 @app.get("/account/info")
-async def get_account_info() -> Dict[str, Any]:
-    snapshot = await _ensure_snapshot(
-        await read_account_info_snapshot(),
-        kind="Account info",
+async def get_account_info(force_refresh: bool = False) -> Dict[str, Any]:
+    service = _state.snapshot_service
+    refresh_interval = (
+        float(getattr(service, "refresh_interval_seconds", 0) or 0.0)
+        if service is not None
+        else 0.0
     )
-    return _snapshot_response(snapshot, data_key="account_info")
+
+    initial_snapshot = await read_account_info_snapshot()
+    should_refresh = force_refresh or _snapshot_needs_refresh(
+        initial_snapshot, refresh_interval=refresh_interval
+    )
+
+    refresh_attempted = False
+    refresh_succeeded = False
+    refresh_error: Optional[str] = None
+    refresh_reason = "force" if force_refresh else "stale"
+
+    if should_refresh:
+        if service is None:
+            refresh_error = "snapshot service unavailable"
+        else:
+            refresh_attempted = True
+            try:
+                await service.refresh_account_info(
+                    reason="api_force_refresh" if force_refresh else "api_auto_refresh"
+                )
+                refresh_succeeded = True
+                _state.stale = False
+                _state.last_refresh_error = None
+            except Exception as exc:  # pragma: no cover - defensive guard
+                refresh_error = str(exc)
+                _state.last_refresh_error = refresh_error
+                logger.warning("Account info refresh failed: %s", exc)
+
+    latest_snapshot = await read_account_info_snapshot()
+    if latest_snapshot is None and initial_snapshot is not None:
+        latest_snapshot = initial_snapshot
+
+    snapshot = await _ensure_snapshot(latest_snapshot, kind="Account info")
+
+    extra: Dict[str, Any] = {
+        "refresh_requested": bool(force_refresh),
+        "refresh_attempted": refresh_attempted,
+        "refresh_reason": refresh_reason if should_refresh else None,
+        "refresh_succeeded": refresh_succeeded,
+    }
+    if refresh_error:
+        extra["refresh_error"] = refresh_error
+
+    return _snapshot_response(
+        snapshot,
+        data_key="account_info",
+        from_cache=not refresh_succeeded,
+        extra=extra,
+    )
 
 
 @app.get("/account/positions")
-async def get_account_positions() -> Dict[str, Any]:
-    snapshot = await _ensure_snapshot(
-        await read_positions_snapshot(),
-        kind="Positions",
+async def get_account_positions(
+    fast: bool = True, force_refresh: bool = False
+) -> Dict[str, Any]:
+    service = _state.snapshot_service
+    refresh_interval = (
+        float(getattr(service, "refresh_interval_seconds", 0) or 0.0)
+        if service is not None
+        else 0.0
     )
-    return _snapshot_response(snapshot, data_key="positions")
+
+    initial_snapshot = await read_positions_snapshot()
+    should_refresh = force_refresh or _snapshot_needs_refresh(
+        initial_snapshot, refresh_interval=refresh_interval
+    )
+
+    refresh_attempted = False
+    refresh_succeeded = False
+    refresh_error: Optional[str] = None
+    refresh_reason = "force" if force_refresh else "stale"
+
+    if should_refresh:
+        if service is None:
+            refresh_error = "snapshot service unavailable"
+        else:
+            refresh_attempted = True
+            try:
+                await service.refresh_positions(
+                    reason="api_force_refresh" if force_refresh else "api_auto_refresh",
+                    fast=fast,
+                )
+                refresh_succeeded = True
+                _state.stale = False
+                _state.last_refresh_error = None
+            except Exception as exc:  # pragma: no cover - defensive guard
+                refresh_error = str(exc)
+                _state.last_refresh_error = refresh_error
+                logger.warning("Positions refresh failed: %s", exc)
+
+    latest_snapshot = await read_positions_snapshot()
+    if latest_snapshot is None and initial_snapshot is not None:
+        latest_snapshot = initial_snapshot
+
+    snapshot = await _ensure_snapshot(latest_snapshot, kind="Positions")
+
+    extra: Dict[str, Any] = {
+        "fast": bool(fast),
+        "refresh_requested": bool(force_refresh),
+        "refresh_attempted": refresh_attempted,
+        "refresh_reason": refresh_reason if should_refresh else None,
+        "refresh_succeeded": refresh_succeeded,
+    }
+    if refresh_error:
+        extra["refresh_error"] = refresh_error
+
+    return _snapshot_response(
+        snapshot,
+        data_key="positions",
+        from_cache=not refresh_succeeded,
+        extra=extra,
+    )
 
 
 @app.get("/account/orders")
-async def get_account_orders() -> Dict[str, Any]:
-    return {"success": True, "orders": [], "from_cache": True}
+async def get_account_orders(
+    limit: int = 50,
+    offset: int = 0,
+    start_date: Optional[str] = None,
+) -> Dict[str, Any]:
+    snapshot = await _read_orders_snapshot()
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orders snapshot unavailable",
+        )
+
+    active_entries: List[Any] = []
+    raw_active = snapshot.get("active_orders")
+    if isinstance(raw_active, Mapping):
+        active_entries = list(raw_active.values())
+    elif isinstance(raw_active, list):
+        active_entries = raw_active
+    elif snapshot.get("orders") is not None:
+        fallback_orders = snapshot.get("orders")
+        if isinstance(fallback_orders, list):
+            active_entries = fallback_orders
+
+    active_orders: List[Dict[str, Any]] = []
+    for entry in active_entries:
+        if isinstance(entry, Mapping):
+            active_orders.append(dict(entry))
+
+    history_entries = snapshot.get("history")
+    history_orders: List[Dict[str, Any]] = []
+    if isinstance(history_entries, list):
+        for entry in history_entries:
+            if isinstance(entry, Mapping):
+                history_orders.append(dict(entry))
+
+    total_history = len(history_orders)
+    safe_offset = max(0, int(offset))
+    safe_limit = max(0, int(limit)) if limit is not None else 0
+    if safe_limit == 0:
+        paginated_history = history_orders[safe_offset:]
+    else:
+        paginated_history = history_orders[safe_offset : safe_offset + safe_limit]
+
+    combined_orders = list(active_orders) + paginated_history
+    total_orders = len(active_orders) + total_history
+
+    meta: Dict[str, Any] = {
+        "total": total_orders,
+        "active": len(active_orders),
+        "history_total": total_history,
+        "offset": safe_offset,
+        "limit": safe_limit,
+    }
+    if start_date:
+        meta["start_date"] = start_date
+
+    payload: Dict[str, Any] = {
+        "success": True,
+        "orders": combined_orders,
+        "active_orders": active_orders,
+        "history": paginated_history,
+        "from_cache": True,
+        "cache_updated_at": snapshot.get("updated_at"),
+        "cache_source": snapshot.get("source"),
+        "meta": meta,
+    }
+    return payload
 
 
 @app.get("/account/daily-summary")
-async def get_daily_summary() -> Dict[str, Any]:
-    return {"success": True, "daily_summary": [], "from_cache": True}
+async def get_daily_summary(days: int = 30) -> Dict[str, Any]:
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
+
+    ny_now = datetime.now(NY_TZ)
+    end_date = ny_now.date()
+    start_date = end_date - timedelta(days=days - 1)
+
+    cache_data = await load_all_daily_totals()
+    if not cache_data:
+        detail_message = "暂无Redis每日盈余缓存，请刷新账户快照后重试。"
+        refresh_hint = "请在账户服务恢复后触发刷新或等待定时任务写入缓存。"
+        return {
+            "success": False,
+            "detail": detail_message,
+            "refresh_hint": refresh_hint,
+            "days": [],
+            "range": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+            },
+            "net_liquidation": None,
+            "net_liquidation_timestamp": None,
+            "base_surplus": None,
+            "surplus_source": "unknown",
+            "timezone": "America/New_York",
+            "from_cache": True,
+        }
+
+    daily_stats: Dict[date, Dict[str, float]] = {}
+    for day_str, metrics in cache_data.items():
+        try:
+            trade_day = date.fromisoformat(str(day_str))
+        except (TypeError, ValueError):
+            continue
+        if trade_day < start_date or trade_day > end_date:
+            continue
+        pnl_raw = metrics.get("pnl", 0.0) if isinstance(metrics, Mapping) else 0.0
+        orders_raw = metrics.get("orders", 0) if isinstance(metrics, Mapping) else 0
+        try:
+            pnl_value = float(pnl_raw)
+        except (TypeError, ValueError):
+            pnl_value = 0.0
+        try:
+            orders_value = int(float(orders_raw))
+        except (TypeError, ValueError):
+            orders_value = 0
+        daily_stats[trade_day] = {"pnl": pnl_value, "orders": orders_value}
+
+    ordered_dates: List[date] = []
+    current = start_date
+    while current <= end_date:
+        ordered_dates.append(current)
+        current += timedelta(days=1)
+
+    net_cache = await read_net_liquidation_snapshot()
+    net_liquidation: Optional[float] = None
+    net_liquidation_timestamp: Optional[str] = None
+    surplus_source = "unknown"
+
+    if isinstance(net_cache, Mapping):
+        raw_value = net_cache.get("value")
+        try:
+            if raw_value is not None:
+                net_liquidation = float(raw_value)
+                surplus_source = net_cache.get("source") or "redis"
+        except (TypeError, ValueError):
+            net_liquidation = None
+        ts_raw = net_cache.get("timestamp")
+        if isinstance(ts_raw, datetime):
+            net_liquidation_timestamp = ensure_local_timezone(ts_raw).isoformat()
+        elif isinstance(ts_raw, str):
+            parsed = parse_local_datetime(ts_raw)
+            if parsed is not None:
+                net_liquidation_timestamp = parsed.isoformat()
+            else:
+                net_liquidation_timestamp = ts_raw
+
+    account_snapshot = await read_account_info_snapshot()
+    account_data = (
+        account_snapshot.get("data")
+        if isinstance(account_snapshot, Mapping)
+        else None
+    )
+    account_updated_at = None
+    if isinstance(account_snapshot, Mapping):
+        account_updated_at = account_snapshot.get("updated_at")
+
+    def _resolve_net_from_account(info: Mapping[str, Any] | None) -> Optional[float]:
+        if not isinstance(info, Mapping):
+            return None
+        for key in ("net_liquidation", "netLiquidation", "net_liquidation_value"):
+            value = info.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    if net_liquidation is None:
+        resolved = _resolve_net_from_account(account_data)
+        if resolved is not None:
+            net_liquidation = resolved
+            surplus_source = "ibkr_cached"
+            if isinstance(account_updated_at, str):
+                parsed = parse_local_datetime(account_updated_at)
+                if parsed is not None:
+                    net_liquidation_timestamp = parsed.isoformat()
+                else:
+                    net_liquidation_timestamp = account_updated_at
+            elif isinstance(account_updated_at, datetime):
+                net_liquidation_timestamp = ensure_local_timezone(
+                    account_updated_at
+                ).isoformat()
+
+    total_pnl = sum(
+        float(daily_stats.get(day, {}).get("pnl", 0.0)) for day in ordered_dates
+    )
+    base_surplus: Optional[float] = None
+    if net_liquidation is not None:
+        base_surplus = float(net_liquidation) - float(total_pnl)
+
+    summary: List[Dict[str, Any]] = []
+    running_surplus = base_surplus
+    for trade_day in ordered_dates:
+        stats = daily_stats.get(trade_day, {"pnl": 0.0, "orders": 0})
+        pnl_value = stats.get("pnl", 0.0) or 0.0
+        orders_value = stats.get("orders", 0) or 0
+        try:
+            pnl_float = float(pnl_value)
+        except (TypeError, ValueError):
+            pnl_float = 0.0
+        try:
+            orders_int = int(orders_value)
+        except (TypeError, ValueError):
+            orders_int = 0
+
+        if running_surplus is None:
+            start_val = None
+            end_val = None
+        else:
+            start_val = running_surplus
+            end_val = running_surplus + pnl_float
+            running_surplus = end_val
+
+        summary.append(
+            {
+                "date": trade_day.isoformat(),
+                "orders": orders_int,
+                "has_orders": orders_int > 0,
+                "realized_pnl": round(pnl_float, 2),
+                "starting_surplus": round(start_val, 2)
+                if start_val is not None
+                else None,
+                "ending_surplus": round(end_val, 2) if end_val is not None else None,
+            }
+        )
+
+    return {
+        "success": True,
+        "days": summary,
+        "range": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+        "net_liquidation": float(net_liquidation)
+        if net_liquidation is not None
+        else None,
+        "net_liquidation_timestamp": net_liquidation_timestamp,
+        "base_surplus": round(base_surplus, 2) if base_surplus is not None else None,
+        "surplus_source": surplus_source,
+        "timezone": "America/New_York",
+        "from_cache": True,
+    }
 
 
 @app.post("/account/refresh")

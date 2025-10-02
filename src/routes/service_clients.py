@@ -198,7 +198,9 @@ class AccountServiceClient(ServiceClient):
     service_name = "account"
     default_base_url = "http://localhost:8020"
 
-    async def fetch_info(self, *, force_refresh: bool = False) -> Dict[str, Any] | None:
+    async def fetch_info(
+        self, *, force_refresh: bool = False, raw: bool = False
+    ) -> Dict[str, Any] | None:
         payload = await self.request(
             "GET",
             "/account/info",
@@ -206,6 +208,8 @@ class AccountServiceClient(ServiceClient):
         )
         if not isinstance(payload, Mapping):
             return None
+        if raw:
+            return dict(payload)
         if "account_info" in payload and isinstance(payload["account_info"], Mapping):
             return dict(payload["account_info"])
         if "data" in payload and isinstance(payload["data"], Mapping):
@@ -224,7 +228,8 @@ class AccountServiceClient(ServiceClient):
         *,
         fast: bool = False,
         force_refresh: bool = False,
-    ) -> list[Any] | None:
+        raw: bool = False,
+    ) -> Mapping[str, Any] | list[Any] | None:
         payload = await self.request(
             "GET",
             "/account/positions",
@@ -233,13 +238,19 @@ class AccountServiceClient(ServiceClient):
                 "force_refresh": str(force_refresh).lower(),
             },
         )
-        if isinstance(payload, list):
-            return list(payload)
         if isinstance(payload, Mapping):
+            if raw:
+                return dict(payload)
             for key in ("positions", "data", "result"):
                 value = payload.get(key)
                 if isinstance(value, list):
                     return list(value)
+        if isinstance(payload, list):
+            if raw:
+                return {"positions": list(payload)}
+            for key in ("positions", "data", "result"):
+                if key == "positions":
+                    return list(payload)
         return None
 
     async def fetch_orders(

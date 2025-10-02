@@ -129,7 +129,9 @@ async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
 
 async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str, Any]]:
     try:
-        payload = await _ACCOUNT_CLIENT.fetch_info(force_refresh=force_refresh)
+        payload = await _ACCOUNT_CLIENT.fetch_info(
+            force_refresh=force_refresh, raw=True
+        )
     except ServiceUnavailableError as exc:
         logger.debug("Account service unavailable: %s", exc)
         error_payload = _service_unavailable_payload("account_update")
@@ -140,28 +142,18 @@ async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str,
         return None
 
     if isinstance(payload, Mapping):
-        if isinstance(payload.get("account_info"), Mapping):
-            return dict(payload["account_info"])
-        if isinstance(payload.get("data"), Mapping):
-            return dict(payload["data"])
-        if isinstance(payload.get("result"), Mapping):
-            return dict(payload["result"])
-        extracted = {
-            key: value
-            for key, value in payload.items()
-            if key not in {"success", "from_cache"}
-        }
-        return dict(extracted) if extracted else None
+        return dict(payload)
     return None
 
 
 async def _fetch_positions(
     *, force_refresh: bool = False, fast: bool = True
-) -> Optional[List[Dict[str, Any]]]:
+) -> Optional[Dict[str, Any]]:
     try:
         payload = await _ACCOUNT_CLIENT.fetch_positions(
             force_refresh=force_refresh,
             fast=fast,
+            raw=True,
         )
     except ServiceUnavailableError as exc:
         logger.debug("Account service unavailable for positions: %s", exc)
@@ -172,14 +164,23 @@ async def _fetch_positions(
         logger.warning("Account service error fetching positions: %s", exc)
         return None
 
-    if isinstance(payload, list):
-        return [dict(item) if isinstance(item, Mapping) else item for item in payload]
     if isinstance(payload, Mapping):
-        items = payload.get("positions")
+        result = dict(payload)
+        items = result.get("positions")
         if items is None:
-            items = payload.get("data")
+            items = result.get("data")
         if isinstance(items, list):
-            return [dict(item) if isinstance(item, Mapping) else item for item in items]
+            result["positions"] = [
+                dict(item) if isinstance(item, Mapping) else item for item in items
+            ]
+        return result
+    if isinstance(payload, list):
+        return {
+            "success": True,
+            "positions": [
+                dict(item) if isinstance(item, Mapping) else item for item in payload
+            ],
+        }
     return None
 
 
@@ -762,23 +763,49 @@ async def websocket_endpoint(websocket: WebSocket):
             unavailable_payload.setdefault("stale", stale_flag)
             await websocket.send_text(json.dumps(unavailable_payload))
         else:
-            if info is None and isinstance(snapshot, dict):
-                info = snapshot.get("data")
-                info_source = snapshot_source or "redis"
+            info_payload = info if isinstance(info, Mapping) else None
+            info_data: Optional[Mapping[str, Any]] = None
+            info_meta: Dict[str, Any] = {}
+            info_source = "service"
+            success_flag = True
 
-            if info is not None:
-                payload_info = info
-                if isinstance(info, dict):
-                    payload_info = dict(info)
-                    payload_info.setdefault("connected", bool(connected_flag))
-                    if account_type_label:
-                        payload_info.setdefault("account_type", account_type_label)
-                response_payload: Dict[str, Any] = {
+            if info_payload is not None:
+                success_flag = bool(info_payload.get("success", True))
+                candidate: Any = info_payload.get("account_info")
+                if not isinstance(candidate, Mapping):
+                    candidate = info_payload.get("data")
+                if not isinstance(candidate, Mapping):
+                    candidate = info_payload.get("result")
+                if isinstance(candidate, Mapping):
+                    info_data = dict(candidate)
+                info_meta = {
+                    key: value
+                    for key, value in info_payload.items()
+                    if key not in {"account_info", "data", "result"}
+                }
+                info_meta.pop("success", None)
+
+            if info_data is None and isinstance(snapshot, dict):
+                data = snapshot.get("data")
+                if isinstance(data, Mapping):
+                    info_data = dict(data)
+                    info_source = snapshot_source or "redis"
+                    info_meta.setdefault("from_cache", True)
+                    success_flag = True
+
+            if info_data is not None:
+                payload_info = dict(info_data)
+                payload_info.setdefault("connected", bool(connected_flag))
+                if account_type_label:
+                    payload_info.setdefault("account_type", account_type_label)
+                response_payload = {
                     "type": "account_update",
-                    "success": True,
+                    "success": success_flag,
                     "account_info": payload_info,
                     "source": info_source,
                 }
+                if info_meta:
+                    response_payload["meta"] = info_meta
                 if snapshot_updated_at:
                     response_payload["snapshot_updated_at"] = snapshot_updated_at
                 response_payload["stale"] = stale_flag
@@ -788,7 +815,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     response_payload["stale_at"] = stale_at
                 await websocket.send_text(json.dumps(response_payload))
                 if stale_flag:
-                    status_payload: Dict[str, Any] = {
+                    status_payload = {
                         "type": "account_snapshot_status",
                         "snapshot": "account_info",
                         "stale": True,
@@ -856,9 +883,9 @@ async def websocket_endpoint(websocket: WebSocket):
     # 初次连接后，向该连接单播发送positions快照
     try:
         positions_snapshot = await read_positions_snapshot()
-        positions = await _fetch_positions(force_refresh=False, fast=True)
+        positions_payload = await _fetch_positions(force_refresh=False, fast=True)
         unavailable_positions = _extract_service_unavailable_payload(
-            positions, "position_update"
+            positions_payload, "position_update"
         )
         positions_source = "service"
         positions_snapshot_source = None
@@ -887,32 +914,63 @@ async def websocket_endpoint(websocket: WebSocket):
             unavailable_positions.setdefault("stale", positions_stale)
             await websocket.send_text(json.dumps(unavailable_positions))
         else:
-            if positions is None and isinstance(positions_snapshot, dict):
+            positions_data: Optional[List[Dict[str, Any]]] = None
+            positions_meta: Dict[str, Any] = {}
+            success_flag = True
+            if isinstance(positions_payload, Mapping):
+                positions_meta = {
+                    key: value
+                    for key, value in positions_payload.items()
+                    if key not in {"positions", "data"}
+                }
+                success_flag = bool(positions_payload.get("success", True))
+                items = positions_payload.get("positions")
+                if items is None:
+                    items = positions_payload.get("data")
+                if isinstance(items, list):
+                    positions_data = [
+                        dict(item) if isinstance(item, Mapping) else item for item in items
+                    ]
+                positions_source = positions_payload.get("source", "service") or "service"
+                positions_meta.pop("success", None)
+            elif isinstance(positions_payload, list):
+                positions_data = [
+                    dict(item) if isinstance(item, Mapping) else item
+                    for item in positions_payload
+                ]
+
+            if positions_data is None and isinstance(positions_snapshot, dict):
                 data = positions_snapshot.get("data")
                 if isinstance(data, list):
-                    positions = data
+                    positions_data = [
+                        dict(item) if isinstance(item, Mapping) else item for item in data
+                    ]
                     positions_source = positions_snapshot_source or "redis"
+                    positions_meta.setdefault("from_cache", True)
+                    success_flag = True
 
-            if positions is not None:
+            if positions_data is not None:
                 response_payload = {
                     "type": "position_update",
-                    "success": True,
-                    "positions": positions,
+                    "success": success_flag,
+                    "positions": positions_data,
                     "source": positions_source,
-                "stale": positions_stale,
-            }
-            if positions_updated_at:
-                response_payload["snapshot_updated_at"] = positions_updated_at
-            if positions_stale_reason:
-                response_payload["stale_reason"] = positions_stale_reason
-            if positions_stale_at:
-                response_payload["stale_at"] = positions_stale_at
-            await websocket.send_text(json.dumps(response_payload))
-            if positions_stale:
-                status_payload = {
-                    "type": "account_snapshot_status",
-                    "snapshot": "positions",
-                    "stale": True,
+                    "stale": positions_stale,
+                }
+                if positions_meta:
+                    response_payload["meta"] = positions_meta
+                if positions_updated_at:
+                    response_payload["snapshot_updated_at"] = positions_updated_at
+                if positions_stale_reason:
+                    response_payload["stale_reason"] = positions_stale_reason
+                if positions_stale_at:
+                    response_payload["stale_at"] = positions_stale_at
+                await websocket.send_text(json.dumps(response_payload))
+                if positions_stale:
+                    status_payload = {
+                        "type": "account_snapshot_status",
+                        "snapshot": "positions",
+                        "stale": True,
                     "refresh_in_progress": True,
                 }
                 if positions_updated_at:
@@ -1335,9 +1393,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 fast = bool(fast_flag) if fast_flag is not None else False
 
                 try:
-                    positions = await _fetch_positions(force_refresh=force, fast=fast)
+                    positions_payload = await _fetch_positions(
+                        force_refresh=force, fast=fast
+                    )
                     unavailable_positions = _extract_service_unavailable_payload(
-                        positions, "position_update"
+                        positions_payload, "position_update"
                     )
                     source = "service"
                     if unavailable_positions is not None:
@@ -1349,14 +1409,47 @@ async def websocket_endpoint(websocket: WebSocket):
                         last_responses[key] = unavailable_positions
                         await websocket.send_text(json.dumps(unavailable_positions))
                         continue
-                    if positions is None:
+
+                    positions_data: Optional[List[Dict[str, Any]]] = None
+                    positions_meta: Dict[str, Any] = {}
+                    success_flag = True
+                    if isinstance(positions_payload, Mapping):
+                        positions_meta = {
+                            field: value
+                            for field, value in positions_payload.items()
+                            if field not in {"positions", "data"}
+                        }
+                        success_flag = bool(positions_payload.get("success", True))
+                        items = positions_payload.get("positions")
+                        if items is None:
+                            items = positions_payload.get("data")
+                        if isinstance(items, list):
+                            positions_data = [
+                                dict(item) if isinstance(item, Mapping) else item
+                                for item in items
+                            ]
+                        source = positions_payload.get("source", "service") or "service"
+                        positions_meta.pop("success", None)
+                    elif isinstance(positions_payload, list):
+                        positions_data = [
+                            dict(item) if isinstance(item, Mapping) else item
+                            for item in positions_payload
+                        ]
+
+                    if positions_data is None:
                         snapshot = await read_positions_snapshot()
                         if isinstance(snapshot, dict):
                             data = snapshot.get("data")
                             if isinstance(data, list):
-                                positions = data
+                                positions_data = [
+                                    dict(item) if isinstance(item, Mapping) else item
+                                    for item in data
+                                ]
                                 source = snapshot.get("source", "redis") or "redis"
-                    if positions is None:
+                                positions_meta.setdefault("from_cache", True)
+                                success_flag = True
+
+                    if positions_data is None:
                         unavailable_payload = _service_unavailable_payload(
                             "position_update",
                             positions=[],
@@ -1374,13 +1467,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
                     payload = {
                         "type": "position_update",
-                        "success": True,
-                        "positions": positions,
+                        "success": success_flag,
+                        "positions": positions_data,
                         "source": source,
                         "fast": fast,
                         "connected": bool(connected_flag),
                         "fresh": bool(redis_fresh),
                     }
+                    if positions_meta:
+                        payload["meta"] = positions_meta
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
                 except Exception as exc:
