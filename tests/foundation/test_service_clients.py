@@ -6,6 +6,7 @@ import pytest
 
 from src.routes.service_clients import (
     AccountServiceClient,
+    AccountServiceResult,
     RiskServiceClient,
     ServiceClient,
     ServiceResponseError,
@@ -86,9 +87,11 @@ async def test_account_service_extracts_nested_payload(monkeypatch: pytest.Monke
 
     client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
 
-    payload = await client.fetch_info()
+    result = await client.fetch_info()
 
-    assert payload == {"balance": 123}
+    assert isinstance(result, AccountServiceResult)
+    assert result.data == {"balance": 123}
+    assert result.metadata == {}
 
 
 @pytest.mark.anyio("asyncio")
@@ -101,9 +104,28 @@ async def test_account_service_positions_handles_list(monkeypatch: pytest.Monkey
 
     client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
 
-    positions = await client.fetch_positions(fast=True)
+    result = await client.fetch_positions(fast=True)
 
-    assert positions == [1, 2, 3]
+    assert isinstance(result, AccountServiceResult)
+    assert result.data == [1, 2, 3]
+    assert result.metadata == {}
+
+
+@pytest.mark.anyio("asyncio")
+async def test_account_service_omits_false_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ACCOUNT_SERVICE_URL", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "fast" not in request.url.params
+        assert "force_refresh" not in request.url.params
+        return httpx.Response(200, json={"data": {"ok": True}})
+
+    client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
+
+    result = await client.fetch_info(force_refresh=False)
+
+    assert isinstance(result, AccountServiceResult)
+    assert result.data == {"ok": True}
 
 
 @pytest.mark.anyio("asyncio")
@@ -123,7 +145,7 @@ async def test_risk_service_post_rule_invokes_endpoint(monkeypatch: pytest.Monke
 
     assert captured == {
         "method": "POST",
-        "path": "/risk_rules",
+        "path": "/risk/rules",
         "payload": {"symbol": "ES"},
     }
     assert result == {"success": True}

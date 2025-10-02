@@ -16,6 +16,7 @@ while automatically mapping empty responses to ``None``.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, MutableMapping, Optional
 
 import httpx
@@ -26,6 +27,7 @@ __all__ = [
     "ServiceUnavailableError",
     "ServiceResponseError",
     "AccountServiceClient",
+    "AccountServiceResult",
     "OrdersServiceClient",
     "RiskServiceClient",
     "StrategyServiceClient",
@@ -194,24 +196,87 @@ class ServiceClient:
         return payload
 
 
+@dataclass(slots=True)
+class AccountServiceResult:
+    """Container holding payload data and accompanying metadata."""
+
+    data: Any
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    raw: Mapping[str, Any] | None = None
+
+    def is_stale(self) -> bool:
+        return AccountServiceClient.is_metadata_stale(self.metadata)
+
+    def snapshot_updated_at(self) -> Optional[str]:
+        value = self.metadata.get("snapshot_updated_at")
+        if isinstance(value, str):
+            return value
+        updated_at = self.metadata.get("updated_at")
+        return str(updated_at) if isinstance(updated_at, str) else None
+
+
 class AccountServiceClient(ServiceClient):
     service_name = "account"
     default_base_url = "http://localhost:8020"
 
-    async def fetch_info(self, *, force_refresh: bool = False) -> Dict[str, Any] | None:
-        payload = await self.request(
-            "GET",
-            "/account/info",
-            params={"force_refresh": str(force_refresh).lower()},
-        )
-        if not isinstance(payload, Mapping):
-            return None
-        if "account_info" in payload and isinstance(payload["account_info"], Mapping):
-            return dict(payload["account_info"])
-        if "data" in payload and isinstance(payload["data"], Mapping):
-            return dict(payload["data"])
-        if "result" in payload and isinstance(payload["result"], Mapping):
-            return dict(payload["result"])
+    _METADATA_KEYS = (
+        "source",
+        "snapshot_updated_at",
+        "updated_at",
+        "stale",
+        "stale_reason",
+        "stale_at",
+        "from_cache",
+    )
+
+    @staticmethod
+    def is_metadata_stale(metadata: Mapping[str, Any] | None) -> bool:
+        if not isinstance(metadata, Mapping):
+            return False
+        stale = metadata.get("stale")
+        if isinstance(stale, bool) and stale:
+            return True
+        reason = metadata.get("stale_reason")
+        if isinstance(reason, str) and reason.strip():
+            return True
+        return False
+
+    @staticmethod
+    def _bool_param(value: bool) -> Optional[str]:
+        return "true" if value else None
+
+    @classmethod
+    def _extract_metadata(cls, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {}
+
+        def _merge(source: Mapping[str, Any]) -> None:
+            for key in cls._METADATA_KEYS:
+                if key in metadata:
+                    continue
+                value = source.get(key)
+                if value is not None:
+                    metadata[key] = value
+
+        _merge(payload)
+        for key in ("metadata", "meta", "snapshot", "snapshot_metadata"):
+            nested = payload.get(key)
+            if isinstance(nested, Mapping):
+                _merge(nested)
+
+        return metadata
+
+    @staticmethod
+    def _extract_mapping_payload(
+        payload: Mapping[str, Any],
+        *,
+        keys: tuple[str, ...],
+    ) -> Any:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, Mapping):
+                return dict(value)
+            if isinstance(value, list):
+                return list(value)
         filtered = {
             key: value
             for key, value in payload.items()
@@ -219,27 +284,73 @@ class AccountServiceClient(ServiceClient):
         }
         return dict(filtered) if filtered else None
 
+    def _wrap_result(
+        self,
+        payload: Any,
+        *,
+        data_keys: tuple[str, ...],
+    ) -> AccountServiceResult | None:
+        if isinstance(payload, Mapping):
+            metadata = self._extract_metadata(payload)
+            data = self._extract_mapping_payload(payload, keys=data_keys)
+            if data is None:
+                return None
+            return AccountServiceResult(data=data, metadata=metadata, raw=dict(payload))
+
+        if isinstance(payload, list):
+            return AccountServiceResult(data=list(payload), metadata={}, raw=None)
+
+        return None
+
+    async def fetch_info(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> AccountServiceResult | None:
+        params: Dict[str, str] = {}
+        if force_refresh:
+            params["force_refresh"] = "true"
+
+        payload = await self.request(
+            "GET",
+            "/account/info",
+            params=params or None,
+        )
+
+        return self._wrap_result(
+            payload,
+            data_keys=("account_info", "data", "result"),
+        )
+
     async def fetch_positions(
         self,
         *,
         fast: bool = False,
         force_refresh: bool = False,
-    ) -> list[Any] | None:
+    ) -> AccountServiceResult | None:
+        params: Dict[str, str] = {}
+        if fast:
+            params["fast"] = "true"
+        if force_refresh:
+            params["force_refresh"] = "true"
+
         payload = await self.request(
             "GET",
             "/account/positions",
-            params={
-                "fast": str(fast).lower(),
-                "force_refresh": str(force_refresh).lower(),
-            },
+            params=params or None,
         )
+
+        result = self._wrap_result(
+            payload,
+            data_keys=("positions", "data", "result"),
+        )
+
+        if result and isinstance(result.data, list):
+            return result
+
         if isinstance(payload, list):
-            return list(payload)
-        if isinstance(payload, Mapping):
-            for key in ("positions", "data", "result"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return list(value)
+            return AccountServiceResult(data=list(payload), metadata={}, raw=None)
+
         return None
 
     async def fetch_orders(
