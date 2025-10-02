@@ -37,7 +37,7 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 └──────────────┘      └────────────────────┘
 ```
 
-- **core/** 初始化共享实例（通知、策略、风险、订单、队列、DOM、ATR 等）。
+- **core/** 初始化共享实例（通知、策略、风险、队列、DOM、ATR 等；订单流由独立的 `services/orders` 提供）。
 - **src/routes/** 按功能拆分的 REST/WebSocket 接口；`docs/api_doc.json` 自动从 OpenAPI 导出。
 - **src/dom_*** 深度行情分析、参数调优与自动化调度。
 - **src/optimizer_service/** 提供 DOM 优化任务编排与异步执行。

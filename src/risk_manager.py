@@ -103,7 +103,6 @@ class RiskManager:
         self._monitor_lock: asyncio.Lock = asyncio.Lock()
 
         # 组件依赖
-        self.order_manager = None
         self.ibkr_client = None
         self._ibkr_client_warning_logged = False
         self.atr_service = None
@@ -1316,42 +1315,10 @@ class RiskManager:
                         self.auto_orders[str(trade.order.orderId)] = auto_order
                         await asyncio.to_thread(self.save_auto_order_to_db, auto_order)
 
-                        # 同步到订单管理器，保持前端订单列表与数据库一致
-                        if self.order_manager:
-                            try:
-                                from .order_manager import Order, OrderStatus
-
-                                order_obj = Order(
-                                    order_id=str(trade.order.orderId),
-                                    symbol=symbol,
-                                    action=action,
-                                    quantity=abs(position_qty),
-                                    order_type="MARKET",
-                                    price=current_price,
-                                    status=OrderStatus.SUBMITTED.value,
-                                    order_source="sl",
-                                    notes=f"Stop loss triggered at ${current_price:.2f}"
-                                )
-
-                                synced_order = self.order_manager.add_order(order_obj)
-                                executed_at = now_local()
-                                self.order_manager.update_order_status(
-                                    order_id=str(trade.order.orderId),
-                                    status=OrderStatus.FILLED.value,
-                                    fill_price=current_price,
-                                    executed_at=executed_at
-                                )
-
-                                auto_order.status = "Filled"
-                                auto_order.executed_at = executed_at
-                                self.update_order_status(str(trade.order.orderId), "Filled")
-                                risk_logger.info(f"Stop loss order synced to OrderManager: {synced_order.order_id}")
-                            except Exception as om_err:
-                                risk_logger.warning(
-                                    f"Failed to sync stop-loss order {trade.order.orderId} to OrderManager: {om_err}"
-                                )
-                        else:
-                            risk_logger.warning("OrderManager not available, skip syncing stop-loss order")
+                        risk_logger.debug(
+                            "Stop loss order handled externally by orders service",
+                            order_id=str(trade.order.orderId),
+                        )
 
                         risk_logger.info(f"✅ Market order placed for stop loss: {symbol} at market price ${current_price:.2f}")
 
@@ -1458,108 +1425,9 @@ class RiskManager:
     
     def _auto_sync_market_orders(self):
         """自动同步所有活跃订单状态和成交价格（包括市价单和限价单）"""
-        try:
-            client = self._get_ibkr_client()
-            if client is None:
-                return
-
-            # If the underlying IBKR connection is unavailable, skip syncs to
-            # avoid spamming errors while the auto-reconnect logic does its job.
-            if not getattr(client, "is_connected", lambda: False)():
-                return
-
-            ib_instance = getattr(client, "ib", None)
-            if ib_instance is None or not getattr(ib_instance, "isConnected", lambda: False)():
-                return
-            # 定期清理警告记录，避免内存泄漏（每100次调用清理一次）
-            if len(self.warned_order_downgrades) > 100:
-                self.warned_order_downgrades.clear()
-                risk_logger.debug("已清理订单状态倒退警告记录")
-            
-            # 获取订单管理器
-            order_manager = getattr(self, 'order_manager', None)
-            if not order_manager:
-                return
-            
-            # 获取所有活跃状态的订单（包括Submitted、PreSubmitted、PendingSubmit等）
-            active_orders = []
-            active_statuses = ["Submitted", "PreSubmitted", "PendingSubmit", "PendingCancel"]
-            for order_id, order in order_manager.orders.items():
-                if order.status in active_statuses:
-                    active_orders.append(order)
-            
-            if not active_orders:
-                return
-            
-            # 检查活跃订单状态（避免全量同步）
-            try:
-                synced_count = 0
-                for order in active_orders:
-                    # 检查订单是否在IBKR的trades中
-                    order_id_int = int(order.order_id)
-                    trade = None
-                    
-                    # 查找对应的trade
-                    for t in ib_instance.trades():
-                        if t.order.orderId == order_id_int:
-                            trade = t
-                            break
-                    
-                    if trade:
-                        current_status = trade.orderStatus.status
-                        # 将IBKR的Inactive状态映射为Rejected状态
-                        if current_status == "Inactive":
-                            current_status = "Rejected"
-                        
-                        # 检查状态是否需要更新，避免重复更新和状态倒退
-                        if current_status != order.status:
-                            # 定义状态转换的优先级（数字越大优先级越高）
-                            status_priority = {
-                                "PendingSubmit": 1,
-                                "PreSubmitted": 2,
-                                "Submitted": 3,
-                                "Filled": 4,
-                                "Cancelled": 4,
-                                "Rejected": 4
-                            }
-                            
-                            current_priority = status_priority.get(current_status, 0)
-                            order_priority = status_priority.get(order.status, 0)
-                            
-                            # 只允许状态向前推进，不允许倒退
-                            if current_priority >= order_priority:
-                                # 更新订单状态
-                                fill_price = None
-                                if current_status == "Filled" and trade.orderStatus.avgFillPrice:
-                                    fill_price = float(trade.orderStatus.avgFillPrice)
-                                
-                                order_manager.update_order_status(
-                                    order.order_id,
-                                    current_status,
-                                    fill_price=fill_price,
-                                    executed_at=now_local() if current_status == "Filled" else None
-                                )
-                                synced_count += 1
-                                risk_logger.debug(f"Order {order.order_id} status updated: {order.status} -> {current_status}")
-                            else:
-                                # 避免重复警告同一个订单的状态倒退
-                                warning_key = f"{order.order_id}_{order.status}_{current_status}"
-                                if warning_key not in self.warned_order_downgrades:
-                                    self.warned_order_downgrades.add(warning_key)
-                                    risk_logger.warning(f"拒绝订单状态倒退: Order {order.order_id} 当前状态={order.status} (优先级{order_priority}), IBKR状态={current_status} (优先级{current_priority})")
-                                    
-                                    # 可选：直接从订单管理器中删除这个有问题的订单
-                                    # order_manager.remove_order(order.order_id)
-                                    # risk_logger.info(f"已删除状态异常的订单: {order.order_id}")
-                
-                if synced_count > 0:
-                    risk_logger.debug(f"Auto-synced {synced_count} active orders")
-                    
-            except Exception as sync_err:
-                risk_logger.warning(f"Failed to auto-sync market orders: {sync_err}")
-                
-        except Exception as e:
-            risk_logger.error(f"Error in auto sync market orders: {e}")
+        risk_logger.debug(
+            "Auto sync skipped; orders service provides authoritative order state",
+        )
     
     def _check_sufficient_funds(self, account_info: Dict, position: Dict) -> bool:
         """检查资金是否充足"""
@@ -1663,51 +1531,10 @@ class RiskManager:
                 self.auto_orders[str(order_id)] = auto_order
                 await asyncio.to_thread(self.save_auto_order_to_db, auto_order)
                 
-                # 同步到订单管理器
-                if self.order_manager:
-                    from .order_manager import Order, OrderStatus, OrderSource
-                    order = Order(
-                        order_id=str(order_id),
-                        symbol=order_request.symbol,
-                        action=action,
-                        quantity=order_request.quantity,
-                        order_type="MARKET",
-                        price=position['current_price'],
-                        status=OrderStatus.SUBMITTED.value,
-                        created_at=now_local(),
-                        order_source=order_source,
-                        notes=order_request.reason
-                    )
-                    self.order_manager.add_order(order)
-                    risk_logger.info(f"订单已同步到订单管理器: {order_id}")
-                    
-                    # 对于市价单，立即更新状态为已成交
-                    # 市价单通常会立即成交，所以我们可以直接更新状态
-                    if order.order_type == "MARKET":
-                        from datetime import datetime
-                        executed_at = now_local()
-                        self.order_manager.update_order_status(
-                            order_id=str(order_id),
-                            status=OrderStatus.FILLED.value,
-                            fill_price=position['current_price'],
-                            executed_at=executed_at
-                        )
-                        risk_logger.info(f"市价单状态已更新为已成交: {order_id}")
-                        
-                        # 同时更新内存中的自动订单状态
-                        auto_order.status = "Filled"
-                        auto_order.executed_at = executed_at
-                        self.update_order_status(str(order_id), "Filled")
-
-                        # 触发一次佣金/PNL回填（使用executor避免阻塞事件循环）
-                        try:
-                            risk_logger.info("触发commission/PNL回填以避免市价单本地成交后缺失")
-                            updated = await client.backfill_commissions()
-                            risk_logger.info(f"commission/PNL回填完成，尝试更新次数: {updated}")
-                        except Exception as bf_err:
-                            risk_logger.warning(f"commission/PNL回填失败: {bf_err}")
-                else:
-                    risk_logger.warning(f"订单管理器未初始化，无法同步订单: {order_id}")
+                risk_logger.debug(
+                    "Order synchronisation handled by orders service",
+                    order_id=str(order_id),
+                )
                 
                 # Send notification based on order type (unified via NotificationManager)
                 if order_request.order_type == OrderType.STOP_LOSS:
@@ -1802,9 +1629,8 @@ class RiskManager:
             })
         return orders
 
-    def set_dependencies(self, order_manager=None, atr_service=None):
+    def set_dependencies(self, atr_service=None):
         """注入外部依赖"""
-        self.order_manager = order_manager
         if atr_service is not None:
             self.atr_service = atr_service
             for rule in self.risk_rules.values():
@@ -1813,21 +1639,11 @@ class RiskManager:
     def remove_order_record(self, order_id: str):
         """从记录中删除订单"""
         try:
-            soft_deleted = False
-            # 优先尝试通过 OrderManager 执行软删除，避免被 IBKR 重新同步
-            if getattr(self, 'order_manager', None) and hasattr(self.order_manager, 'mark_order_deleted'):
-                try:
-                    soft_deleted = bool(self.order_manager.mark_order_deleted(order_id))
-                    if soft_deleted:
-                        risk_logger.info(f"Order {order_id} soft-deleted via OrderManager")
-                except Exception as e:
-                    risk_logger.warning(f"Order {order_id} soft-delete failed: {e}")
-
             had_memory_record = order_id in self.auto_orders
             if had_memory_record:
                 del self.auto_orders[order_id]
 
-            if soft_deleted or had_memory_record:
+            if had_memory_record:
                 risk_logger.info(f"Order {order_id} removed from records")
                 return True
             else:

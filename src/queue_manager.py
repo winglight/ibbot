@@ -16,7 +16,6 @@ from aiojobs import Scheduler, Job
 queue_logger = logger.bind(module="queue_manager", request_id="-")
 from pathlib import Path
 
-from .database import Order
 from .ibkr_client import INDEX_FUTURE_SYMBOLS
 from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
@@ -59,7 +58,6 @@ class QueueManager:
         self.risk_manager = None
         self.strategy_manager = None
         self.websocket_manager = None
-        self.order_manager = None
         self.notification_manager = None
 
         # 确保数据目录存在
@@ -94,14 +92,12 @@ class QueueManager:
         risk_manager=None,
         strategy_manager=None,
         websocket_manager=None,
-        order_manager=None,
         notification_manager=None,
     ):
         """设置依赖对象"""
         self.risk_manager = risk_manager
         self.strategy_manager = strategy_manager
         self.websocket_manager = websocket_manager
-        self.order_manager = order_manager
         if notification_manager:
             self.notification_manager = notification_manager
         queue_logger.info("Dependencies set for QueueManager")
@@ -853,71 +849,11 @@ class QueueManager:
             except Exception as exc:
                 queue_logger.warning(f"Finalize internal order state failed: {exc}")
 
-        # 记录订单（优先使用 OrderManager）
-        if getattr(self, 'order_manager', None):
-            try:
-                await asyncio.to_thread(
-                    self.order_manager.create_order,
-                    order_id=order_id,
-                    symbol=payload['symbol'],
-                    action=action,
-                    quantity=payload['qty'],
-                    order_type=order_type_for_record,
-                    price=payload.get('price', 0.0),
-                    order_source="strategy",
-                    strategy_name=strategy_name_for_record,
-                    rule_id=strategy_name_for_record,
-                    exchange=exchange,
-                    sec_type=sec_type,
-                )
-            except Exception as e:
-                queue_logger.warning(f"Failed to create order via OrderManager: {e}, falling back to RiskManager")
-                if self.risk_manager:
-                    created_at = now_local()
-                    auto_order = Order(
-                        order_id=order_id,
-                        symbol=payload['symbol'],
-                        action=action,
-                        quantity=payload['qty'],
-                        order_type=order_type_for_record,
-                        price=payload.get('price', 0.0),
-                        timestamp=to_local_iso(created_at) or created_at.isoformat(),
-                        status="Submitted",
-                        executed_at=None,
-                        rule_id=strategy_name_for_record,
-                        order_source="strategy",
-                        strategy_name=strategy_name_for_record,
-                    )
-                    auto_order.created_at = created_at
-                    auto_order.executed_at = None
-                    self.risk_manager.auto_orders[order_id] = auto_order
-                    await asyncio.to_thread(
-                        self.risk_manager.save_auto_order_to_db,
-                        auto_order,
-                    )
-        elif self.risk_manager:
-            created_at = now_local()
-            auto_order = Order(
-                order_id=order_id,
-                symbol=payload['symbol'],
-                action=action,
-                quantity=payload['qty'],
-                order_type=order_type_for_record,
-                price=payload.get('price', 0.0),
-                timestamp=to_local_iso(created_at) or created_at.isoformat(),
-                status="Submitted",
-                executed_at=None,
-                rule_id=strategy_name_for_record,
-                order_source="strategy",
-                strategy_name=strategy_name_for_record,
-            )
-            auto_order.created_at = created_at
-            auto_order.executed_at = None
-            self.risk_manager.auto_orders[order_id] = auto_order
-            await asyncio.to_thread(
-                self.risk_manager.save_auto_order_to_db,
-                auto_order,
-            )
+        queue_logger.debug(
+            "Strategy order recorded via orders service",
+            order_id=order_id,
+            strategy=strategy_name_for_record,
+        )
         
         # 注意：不在此处记录策略执行，而是等订单实际成交时通过IBKR客户端的状态更新机制
         # 使用实际成交数量来记录执行，避免下单数量与成交数量不一致导致的持仓计算错误

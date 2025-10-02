@@ -1946,355 +1946,118 @@ class IBKRClient:
             ibkr_logger.error(f"Failed to cancel all orders: {e}")
             return 0
     
-    def get_orders(self, risk_manager=None, strategy_manager=None, order_manager=None) -> List[Dict]:
-        """获取订单列表（支持去抖动，避免重复刷新，并同步到 OrderManager）"""
+    def get_orders(self, risk_manager=None, strategy_manager=None) -> List[Dict]:
+        """获取订单列表（支持去抖动，避免重复刷新）。"""
         try:
-            # 确保连接
             if not self.is_connected():
                 ibkr_logger.error("Cannot retrieve orders: IBKR is not connected")
                 return []
-            
+
             ib = self.ib
             if not ib or not ib.isConnected():
-                ibkr_logger.error(f"IBKR connection lost for get orders")
+                ibkr_logger.error("IBKR connection lost for get orders")
                 return []
 
-            # 添加去抖逻辑 - 避免在短时间内重复刷新
             current_time = time.time()
-            if not hasattr(self, '_last_order_refresh_time'):
-                self._last_order_refresh_time = 0
-            
-            # 如果距离上次刷新不足1秒，直接返回缓存的trades数据
-            time_since_last_refresh = current_time - self._last_order_refresh_time
-            if time_since_last_refresh < 1.0:
-                ibkr_logger.debug(f"Skipping order refresh, last refresh was {time_since_last_refresh:.1f}s ago")
-                # 直接使用缓存的开放订单，不重复请求
+            last_refresh = getattr(self, "_last_order_refresh_time", 0.0)
+            if current_time - last_refresh < 1.0:
+                ibkr_logger.debug(
+                    "Skipping order refresh, last refresh was %.1fs ago",
+                    current_time - last_refresh,
+                )
                 trades = ib.openTrades()
             else:
-                # 刷新订单数据并更新刷新时间
                 self.refresh_orders()
                 self._last_order_refresh_time = current_time
-                # 读取最新的开放订单列表
                 trades = ib.openTrades()
-            
-            # 处理订单数据
+
             orders: List[Dict[str, Any]] = []
-            updated_orders = False  # Track if any orders were updated
-            changed_orders: List[tuple[str, str]] = []  # (order_id_str, new_status)
-            
+            auto_orders = getattr(risk_manager, "auto_orders", {}) if risk_manager else {}
+
             for trade in trades:
-                # 检查orderId是否有效，跳过ID为0的订单
-                order_id = trade.order.orderId
-                if order_id == 0 or order_id is None:
-                    ibkr_logger.warning(
-                        f"⚠️ 跳过无效订单ID: orderId={order_id}, "
-                        f"symbol={getattr(trade.contract, 'symbol', 'Unknown')}, "
-                        f"action={trade.order.action}, quantity={trade.order.totalQuantity}. "
-                        f"无法确定对应的本地订单，跳过更新以避免错误覆盖。"
+                order_id = getattr(trade.order, "orderId", None)
+                if not order_id:
+                    ibkr_logger.debug(
+                        "Skipping trade without valid order id: %s",
+                        getattr(trade.contract, "symbol", "unknown"),
                     )
                     continue
-                
-                # 检查剩余数量，跳过已完成的订单（剩余数量为0）
-                remaining_qty = getattr(trade.order, 'totalQuantity', 0) - getattr(trade, 'filled', 0)
+
+                remaining_qty = (
+                    getattr(trade.order, "totalQuantity", 0)
+                    - getattr(trade, "filled", 0)
+                )
                 if remaining_qty <= 0:
                     ibkr_logger.debug(
-                        f"跳过已完成订单: orderId={order_id}, "
-                        f"symbol={getattr(trade.contract, 'symbol', 'Unknown')}, "
-                        f"totalQty={trade.order.totalQuantity}, filled={getattr(trade, 'filled', 0)}"
+                        "Skipping completed order %s (remaining=%s)",
+                        order_id,
+                        remaining_qty,
                     )
                     continue
-                
-                # 从risk_manager的auto_orders中获取订单来源信息
-                order_source = "未知"
-                order_id_str = str(order_id)
-                
-                # 先尝试从 OrderManager 中获取订单
-                existing_order = None
-                if order_manager:
-                    existing_order = order_manager.get_order(order_id_str)
-                
-                # 如果未找到现有订单，尝试基于根符号/动作/数量进行匹配，并修正主键
-                if order_manager and not existing_order:
-                    try:
-                        matched_order = order_manager.find_potential_match(
-                            symbol=getattr(trade.contract, 'localSymbol', None) or trade.contract.symbol,
-                            sec_type=getattr(trade.contract, 'secType', 'STK'),
-                            action=trade.order.action,
-                            quantity=trade.order.totalQuantity,
-                            time_window_seconds=300
-                        )
-                        if matched_order and matched_order.order_id != order_id_str:
-                            # 将内存和数据库中的旧订单ID更正为IB返回的orderId
-                            old_order_id = matched_order.order_id
-                            if order_manager.rekey_order_id(old_order_id, order_id_str):
-                                existing_order = order_manager.get_order(order_id_str)
-                                ibkr_logger.info(f"Re-keyed matched order {old_order_id} -> {order_id_str} by root-symbol match")
-                    except Exception as match_err:
-                        ibkr_logger.warning(f"Failed to match/rekey order for IB order {order_id_str}: {match_err}")
-                
-                if risk_manager and hasattr(risk_manager, 'auto_orders'):
-                    if order_id_str in risk_manager.auto_orders:
-                        auto_order = risk_manager.auto_orders[order_id_str]
-                        raw_src = getattr(auto_order, 'order_source', None) or "auto"
-                        if raw_src in ("manual", "auto", "strategy", "tp", "sl", "bot"):
-                            detected_source_code = raw_src
-                        else:
-                            detected_source_code = "manual"
-                        if detected_source_code == "manual":
-                            order_source = "人工"
-                        elif detected_source_code == "auto":
-                            order_source = "机器人"
-                        else:
-                            order_source = detected_source_code
-                        
-                        # Synchronize order data back to risk_manager if status or price changed
-                        current_status = trade.orderStatus.status
-                        current_avg_fill_price = trade.orderStatus.avgFillPrice
-                        
-                        if (auto_order.status != current_status or 
-                            (current_avg_fill_price and current_avg_fill_price > 0 and auto_order.price != current_avg_fill_price)):
-                            
-                            # Update the auto_order with latest data from IBKR
-                            auto_order.status = current_status
-                            if current_avg_fill_price and current_avg_fill_price > 0:
-                                auto_order.price = current_avg_fill_price
-                            
-                            # Set executed_at if order is filled and not already set
-                            if current_status == "Filled" and auto_order.executed_at is None:
-                                from datetime import datetime
-                                auto_order.executed_at = now_local()
-                                
-                            
-                                # strategy execution tracking removed; orders table records fills
-                                pass
 
-                                updated_orders = True
-                                changed_orders.append((order_id_str, current_status))
-                                ibkr_logger.info(f"Updated order {order_id_str}: status={current_status}, price={current_avg_fill_price}")
-                            
-                    else:
-                        # 如果在auto_orders中找不到记录，可能是历史订单，默认为人工
-                        detected_source_code = "manual"
-                        order_source = "人工"
-                else:
-                    # 如果没有risk_manager，默认为人工
-                    detected_source_code = "manual"
-                    order_source = "人工"
-                
-                # 同步订单到 OrderManager
-                if order_manager:
+                order_id_str = str(order_id)
+                auto_order = auto_orders.get(order_id_str) if auto_orders else None
+                raw_source = getattr(auto_order, "order_source", None) if auto_order else None
+                source_code = raw_source if raw_source in {"manual", "auto", "strategy", "tp", "sl", "bot"} else "manual"
+                source_labels = {
+                    "manual": "人工",
+                    "auto": "机器人",
+                    "strategy": "策略",
+                    "tp": "tp",
+                    "sl": "sl",
+                    "bot": "bot",
+                }
+                order_source = source_labels.get(source_code, source_code)
+
+                if auto_order is not None:
                     current_status = trade.orderStatus.status
                     current_avg_fill_price = trade.orderStatus.avgFillPrice
-                    
-                    if existing_order:
-                        # 更新现有订单状态
-                        if (existing_order.status != current_status or 
-                            (current_avg_fill_price and current_avg_fill_price > 0 and existing_order.fill_price != current_avg_fill_price)):
-                            
-                            try:
-                                from datetime import datetime
-                                executed_at = None
-                                if current_status == "Filled" and existing_order.executed_at is None:
-                                    executed_at = now_local()
-                                
-                                # 从Trade对象的fills中提取commission和realizedPNL
-                                commission = None
-                                pnl = None
-                                ibkr_logger.info(f"DEBUG: Processing order {order_id_str} for commission/PnL extraction")
-                                ibkr_logger.info(f"DEBUG: Trade object type: {type(trade)}")
-                                ibkr_logger.info(f"DEBUG: Trade object attributes: {dir(trade)}")
-                                ibkr_logger.info(f"DEBUG: Trade has fills attribute: {hasattr(trade, 'fills')}")
-                                
-                                # 检查Trade对象的其他可能包含commission/pnl的属性
-                                if hasattr(trade, 'orderStatus'):
-                                    ibkr_logger.info(f"DEBUG: Trade.orderStatus: {trade.orderStatus}")
-                                    ibkr_logger.info(f"DEBUG: OrderStatus attributes: {dir(trade.orderStatus)}")
-                                if hasattr(trade, 'contract'):
-                                    ibkr_logger.info(f"DEBUG: Trade.contract: {trade.contract}")
-                                if hasattr(trade, 'order'):
-                                    ibkr_logger.info(f"DEBUG: Trade.order: {trade.order}")
-                                    ibkr_logger.info(f"DEBUG: Order attributes: {dir(trade.order)}")
-                                
-                                if hasattr(trade, 'fills'):
-                                    ibkr_logger.info(f"DEBUG: Trade.fills value: {trade.fills}")
-                                    ibkr_logger.info(f"DEBUG: Trade.fills type: {type(trade.fills)}")
-                                    if trade.fills:
-                                        total_commission = 0
-                                        total_pnl = 0
-                                        ibkr_logger.info(f"Processing {len(trade.fills)} fills for order {order_id_str}")
-                                        for i, fill in enumerate(trade.fills):
-                                            ibkr_logger.info(f"DEBUG: Fill {i}: {fill}")
-                                            ibkr_logger.info(f"DEBUG: Fill {i} type: {type(fill)}")
-                                            ibkr_logger.info(f"DEBUG: Fill {i} has commissionReport: {hasattr(fill, 'commissionReport')}")
-                                            
-                                            if hasattr(fill, 'commissionReport'):
-                                                ibkr_logger.info(f"DEBUG: Fill {i} commissionReport: {fill.commissionReport}")
-                                                if fill.commissionReport:
-                                                    if hasattr(fill.commissionReport, 'commission'):
-                                                        fill_commission = fill.commissionReport.commission
-                                                        total_commission += fill_commission
-                                                        ibkr_logger.info(f"Fill {i} commission: {fill_commission}, total: {total_commission}")
-                                                    else:
-                                                        ibkr_logger.info(f"DEBUG: Fill {i} commissionReport has no commission attribute")
-                                                    
-                                                    if hasattr(fill.commissionReport, 'realizedPNL'):
-                                                        fill_pnl = fill.commissionReport.realizedPNL
-                                                        total_pnl += fill_pnl
-                                                        ibkr_logger.info(f"Fill {i} PnL: {fill_pnl}, total: {total_pnl}")
-                                                    else:
-                                                        ibkr_logger.info(f"DEBUG: Fill {i} commissionReport has no realizedPNL attribute")
-                                                else:
-                                                    ibkr_logger.info(f"DEBUG: Fill {i} commissionReport is None/empty")
-                                            else:
-                                                ibkr_logger.info(f"Fill {i} has no commissionReport attribute")
-                                        
-                                        commission = total_commission
-                                        pnl = total_pnl
-                                        ibkr_logger.info(f"Order {order_id_str} final commission: {commission}, PnL: {pnl}")
-                                    else:
-                                        ibkr_logger.info(f"DEBUG: Trade.fills is empty for order {order_id_str}")
-                                else:
-                                    ibkr_logger.info(f"DEBUG: Trade has no fills attribute for order {order_id_str}")
-                                
-                                order_manager.update_order_status(
-                                    order_id=order_id_str,
-                                    status=current_status,
-                                    fill_price=current_avg_fill_price if current_avg_fill_price and current_avg_fill_price > 0 else None,
-                                    executed_at=executed_at,
-                                    commission=commission,
-                                    pnl=pnl
-                                )
-                                ibkr_logger.debug(f"OrderManager: Updated order {order_id_str} status to {current_status}")
-                                
-                                # 检查是否需要自动创建风险规则（针对新资产的市价单）
-                                if (current_status == "Filled" and current_avg_fill_price and current_avg_fill_price > 0 and 
-                                    hasattr(order_manager, 'check_and_create_auto_risk_rule')):
-                                    try:
-                                        order_manager.check_and_create_auto_risk_rule(
-                                            order_id=order_id_str,
-                                            fill_price=current_avg_fill_price,
-                                            ibkr_client=self,
-                                            risk_manager=risk_manager
-                                        )
-                                    except Exception as risk_err:
-                                        ibkr_logger.warning(f"Failed to create auto risk rule for order {order_id_str}: {risk_err}")
-                                
-                                # 不再从 IB 同步覆盖 order_source，避免覆盖用户/策略设置，仅更新状态/成交价/时间
-                                ibkr_logger.debug(f"Skip syncing order_source for {order_id_str}; keep existing value: {existing_order.order_source}")
-                            except Exception as om_err:
-                                ibkr_logger.warning(f"Failed to update order {order_id_str} in OrderManager: {om_err}")
-                    else:
-                        # 若该订单此前被软删除，则跳过创建，防止从IBKR重新同步
-                        try:
-                            if hasattr(order_manager, 'was_order_deleted') and order_manager.was_order_deleted(order_id_str):
-                                ibkr_logger.info(f"Skip re-creating soft-deleted order {order_id_str} from IBKR sync")
-                            else:
-                                # 为从 IBKR 获取的历史订单创建记录（如果不存在）
-                                # 尝试根据 IBKR 的订单信息推断订单类型
-                                order_type = "MKT" if trade.order.orderType.upper() in ('MKT', 'MARKET') else "LMT"
-                                price = getattr(trade.order, 'lmtPrice', None) or current_avg_fill_price
-                                
-                                # 获取订单来源信息
-                                detected_source = "manual"  # 默认为手动
-                                if existing_order and existing_order.order_source:
-                                    detected_source = existing_order.order_source
-                                elif order_source == "机器人":
-                                    detected_source = "auto"
-                                
-                                order_manager.create_order(
-                                    order_id=order_id_str,
-                                    symbol=getattr(trade.contract, 'localSymbol', None) or trade.contract.symbol,
-                                    action=trade.order.action,
-                                    quantity=trade.order.totalQuantity,
-                                    order_type=order_type,
-                                    price=price,
-                                    order_source=detected_source,
-                                    strategy_name=None,  # 暂无法从 IBKR 推断
-                                    rule_id=None,
-                                    parent_order_id=None,
-                                    exchange=getattr(trade.contract, 'exchange', 'SMART'),
-                                    sec_type=getattr(trade.contract, 'secType', 'STK'),
-                                    notes=f"从 IBKR 同步的历史订单"
-                                )
-                                
-                                # 立即更新状态和成交价
-                                if current_status != "Submitted":
-                                    from datetime import datetime
-                                    executed_at = None
-                                    if current_status == "Filled":
-                                        executed_at = now_local()
-                                    
-                                    # 从Trade对象的fills中提取commission和realizedPNL
-                                    commission = None
-                                    pnl = None
-                                    if hasattr(trade, 'fills') and trade.fills:
-                                        total_commission = 0
-                                        total_pnl = 0
-                                        ibkr_logger.info(f"Processing {len(trade.fills)} fills for historical order {order_id_str}")
-                                        for fill in trade.fills:
-                                            if hasattr(fill, 'commissionReport') and fill.commissionReport:
-                                                if hasattr(fill.commissionReport, 'commission'):
-                                                    fill_commission = fill.commissionReport.commission
-                                                    total_commission += fill_commission
-                                                    ibkr_logger.info(f"Historical fill commission: {fill_commission}, total: {total_commission}")
-                                                if hasattr(fill.commissionReport, 'realizedPNL'):
-                                                    fill_pnl = fill.commissionReport.realizedPNL
-                                                    total_pnl += fill_pnl
-                                                    ibkr_logger.info(f"Historical fill PnL: {fill_pnl}, total: {total_pnl}")
-                                            else:
-                                                ibkr_logger.info(f"Historical fill has no commissionReport: {fill}")
-                                        commission = total_commission
-                                        pnl = total_pnl
-                                        ibkr_logger.info(f"Historical order {order_id_str} final commission: {commission}, PnL: {pnl}")
-                                    else:
-                                        ibkr_logger.info(f"Historical order {order_id_str} has no fills or fills is empty")
-                                    
-                                    order_manager.update_order_status(
-                                        order_id=order_id_str,
-                                        status=current_status,
-                                        fill_price=current_avg_fill_price if current_avg_fill_price and current_avg_fill_price > 0 else None,
-                                        executed_at=executed_at,
-                                        commission=commission,
-                                        pnl=pnl
-                                    )
-                                
-                                ibkr_logger.info(f"OrderManager: Created historical order {order_id_str} from IBKR sync")
-                        except Exception as create_err:
-                            ibkr_logger.warning(f"Failed to create historical order {order_id_str} in OrderManager: {create_err}")
-                
-                # Add debug logging for order data
-                ibkr_logger.debug(f"Processing order {order_id_str}: totalQuantity={trade.order.totalQuantity}, action={trade.order.action}, orderType={trade.order.orderType}, status={trade.orderStatus.status}")
-                
-                orders.append({
-                    'order_id': order_id_str,
-                    'symbol': getattr(trade.contract, 'localSymbol', None) or trade.contract.symbol,
-                    'action': trade.order.action,
-                    'quantity': trade.order.totalQuantity,
-                    'order_type': trade.order.orderType,
-                    'limit_price': getattr(trade.order, 'lmtPrice', None),
-                    'status': trade.orderStatus.status,
-                    'filled': trade.orderStatus.filled,
-                    'remaining': trade.orderStatus.remaining,
-                    'avg_fill_price': trade.orderStatus.avgFillPrice,
-                    'submit_time': trade.log[0].time if trade.log else None,
-                    'order_source': order_source
-                })
-            
-            # Save updated orders to database if any were changed
-            if updated_orders and risk_manager:
-                for oid, new_status in changed_orders:
-                    try:
-                        risk_manager.update_order_status(oid, new_status)
-                    except Exception as e:
-                        ibkr_logger.warning(f"Failed to persist updated order {oid}: {e}")
-                ibkr_logger.info("Updated order data saved to database through RiskManager")
-            
+                    if auto_order.status != current_status:
+                        auto_order.status = current_status
+                    if (
+                        current_avg_fill_price
+                        and current_avg_fill_price > 0
+                        and getattr(auto_order, "price", None) != current_avg_fill_price
+                    ):
+                        auto_order.price = current_avg_fill_price
+                    if (
+                        current_status == "Filled"
+                        and getattr(auto_order, "executed_at", None) is None
+                    ):
+                        auto_order.executed_at = now_local()
+
+                ibkr_logger.debug(
+                    "Processing order %s: totalQuantity=%s, action=%s, orderType=%s, status=%s",
+                    order_id_str,
+                    getattr(trade.order, "totalQuantity", None),
+                    getattr(trade.order, "action", None),
+                    getattr(trade.order, "orderType", None),
+                    trade.orderStatus.status,
+                )
+
+                orders.append(
+                    {
+                        "order_id": order_id_str,
+                        "symbol": getattr(trade.contract, "localSymbol", None)
+                        or getattr(trade.contract, "symbol", None),
+                        "action": getattr(trade.order, "action", None),
+                        "quantity": getattr(trade.order, "totalQuantity", 0),
+                        "order_type": getattr(trade.order, "orderType", None),
+                        "limit_price": getattr(trade.order, "lmtPrice", None),
+                        "status": trade.orderStatus.status,
+                        "filled": trade.orderStatus.filled,
+                        "remaining": trade.orderStatus.remaining,
+                        "avg_fill_price": trade.orderStatus.avgFillPrice,
+                        "submit_time": trade.log[0].time if trade.log else None,
+                        "order_source": order_source,
+                    }
+                )
+
             return orders
 
         except Exception as e:
             ibkr_logger.error(f"Failed to get orders: {e}")
             return []
-
     async def get_account_info(self) -> Dict:
         """获取账户信息"""
         try:
@@ -2648,29 +2411,24 @@ class IBKRClient:
     async def _handle_order_error(self, req_id, error_code, error_string):
         """处理订单错误，更新订单状态为失败"""
         try:
-            from .order_manager import get_order_manager, OrderStatus
-            
-            # 记录错误信息
-            connection_logger.error(f"Order error - ReqId: {req_id}, Code: {error_code}, Message: {error_string}")
-            
-            # 从IBKRClient获取reqId到订单ID的映射
+            connection_logger.error(
+                "Order error - ReqId: %s, Code: %s, Message: %s",
+                req_id,
+                error_code,
+                error_string,
+            )
+
             order_id = self.req_id_to_order_id.get(req_id)
             if order_id:
-                # 更新订单状态为失败
-                order_manager = get_order_manager()
-                await asyncio.to_thread(
-                    order_manager.update_order_status,
-                    order_id=order_id,
-                    status=OrderStatus.REJECTED.value,
-                    notes=f"IBKR Error {error_code}: {error_string}"
+                connection_logger.info(
+                    "Marking order %s as failed due to IBKR error %s",
+                    order_id,
+                    error_code,
                 )
-                connection_logger.info(f"Updated order {order_id} status to REJECTED due to error {error_code}")
-                
-                # 清理映射
                 del self.req_id_to_order_id[req_id]
             else:
-                connection_logger.warning(f"No order mapping found for reqId {req_id}")
-            
+                connection_logger.warning("No order mapping found for reqId %s", req_id)
+
         except Exception as e:
             connection_logger.error(f"Failed to handle order error: {e}")
     
@@ -2699,77 +2457,22 @@ class IBKRClient:
             connection_logger.error(f"Error handling filled order: {e}")
     
     async def _update_order_commission_pnl(self, order_id, commission, pnl):
-        """更新订单的佣金和PnL到数据库并同步内存对象"""
+        """更新订单的佣金和PnL到数据库。"""
         try:
             from .database import get_db_manager
-            
+
             db = get_db_manager()
             oid = str(order_id)
             await db.update_order_commission_pnl(oid, commission, pnl)
-            connection_logger.info(f"Updated order {oid} commission={commission}, pnl={pnl} in database")
+            connection_logger.info(
+                "Updated order %s commission=%s, pnl=%s in database",
+                oid,
+                commission,
+                pnl,
+            )
 
-            # 同步内存中的订单（如果存在）
-            try:
-                from .order_manager import get_order_manager
-                om = get_order_manager()
-                oid = str(order_id)
-                order = om.orders.get(oid)
-                if order:
-                    prev_comm, prev_pnl = order.commission, order.pnl
-                    if commission is not None:
-                        order.commission = commission
-                    if pnl is not None:
-                        order.pnl = pnl
-                    connection_logger.debug(
-                        f"Synchronized in-memory order {oid} commission: {prev_comm} -> {order.commission}, pnl: {prev_pnl} -> {order.pnl}"
-                    )
-                    try:
-                        if getattr(order, "status", "").lower() == "filled":
-                            from .utils.strategy_cache import (
-                                record_filled_order as cache_record_filled_order,
-                            )
-                            from .utils.account_pnl_cache import (
-                                record_account_fill as cache_record_account_fill,
-                            )
-
-                            await cache_record_filled_order(order)
-                            await cache_record_account_fill(order)
-                    except Exception as cache_err:
-                        connection_logger.debug(
-                            f"Strategy cache update skipped for order {oid}: {cache_err}"
-                        )
-                else:
-                    connection_logger.debug(f"In-memory order {oid} not found for commission/pnl sync")
-            except Exception as sync_err:
-                connection_logger.debug(f"Failed to sync in-memory order commission/pnl: {sync_err}")
-            
-            # 将最新的佣金和PnL更新通过 WebSocket 广播给前端，触发订单列表刷新
-            try:
-                from .websocket_manager import websocket_manager
-                message = {
-                    "type": "order_update",
-                    "order_id": oid,
-                    "commission": commission,
-                    "pnl": pnl,
-                }
-                # 如果拿到了内存中的订单对象，补充更多字段（与 order_filled 事件保持一致的结构）
-                if 'order' in locals() and order:
-                    message.update({
-                        "symbol": getattr(order, 'symbol', None),
-                        "action": getattr(order, 'action', None),
-                        "quantity": getattr(order, 'quantity', None),
-                        "fill_price": getattr(order, 'fill_price', None),
-                        "order_type": getattr(order, 'order_type', None),
-                        "executed_at": order.executed_at.isoformat() if getattr(order, 'executed_at', None) else None,
-                    })
-                await websocket_manager.broadcast(message)
-                connection_logger.info(f"Broadcasted order_update for order {oid} (commission={commission}, pnl={pnl})")
-            except Exception as ws_err:
-                connection_logger.warning(f"Failed to broadcast order_update for order {oid}: {ws_err}")
-            
         except Exception as e:
-            connection_logger.error(f"Error updating order commission/pnl in database: {e}")
-    
+            connection_logger.error(f"Failed to update order commission/pnl: {e}")
     async def backfill_commissions(self, days: int = 7) -> int:
         """Backfill commission and PnL for recent executions by requesting executions from IBKR.
         This will not override existing non-null commission/pnl in DB thanks to COALESCE guards.

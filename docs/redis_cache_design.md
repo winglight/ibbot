@@ -36,7 +36,7 @@
 
 ### 写入触发点
 
-- `OrderManager.update_order_status`：当订单状态进入 `Filled` 后立即更新基础统计字段（成交数、最近触发时间等），并把成交快照写入 capped list（例如仅保留最近 200 条）。
+- 订单服务订单状态事件：当状态进入 `Filled` 后立即更新基础统计字段（成交数、最近触发时间等），并把成交快照写入 capped list（例如仅保留最近 200 条）。
 - `IBKRClient._update_order_commission_pnl`：佣金和盈亏就绪后，再补充盈利总额、平方和、胜负单统计、最大回撤状态及日度盈亏增量等高阶指标。
 
 两个触发点通过 pipeline/Lua 保证原子性，避免并发写入造成统计错乱。
@@ -95,7 +95,7 @@
 ## 后续工作清单
 
 1. 实现 `src/cache.py`（或 `src/utils/cache.py`）提供统一的 Redis 客户端与 pipeline 辅助方法。
-2. 在应用初始化阶段（如 `core/__init__.py`）加载 Redis 配置并注入到 StrategyManager、OrderManager、IBKRClient 等组件。
+2. 在应用初始化阶段（如 `core/__init__.py`）加载 Redis 配置并注入到 StrategyManager、IBKRClient 等组件；订单事件由 `services/orders` 负责写入。
 3. 按上述触发点更新订单处理流程，并确保单元测试覆盖 Filled 事件的缓存写入。
 4. 为回填与清理逻辑编写 CLI/脚本或管理接口，方便在 Redis 数据损坏时重建。
 5. 更新部署文档与 Docker Compose，确保 Redis 服务在默认环境中可用，并在 `.env.example` 中说明相关变量。

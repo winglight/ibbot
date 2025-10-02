@@ -706,9 +706,6 @@ class StrategyManager:
             core_module = None
 
         if core_module is not None:
-            order_mgr = getattr(core_module, "order_manager", None)
-            if order_mgr is not None:
-                dependency_kwargs["order_manager"] = order_mgr
             notifier = getattr(core_module, "notification_manager", None)
             if notifier is not None:
                 dependency_kwargs["notification_manager"] = notifier

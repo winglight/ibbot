@@ -130,7 +130,6 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
         assert provider is not None and getattr(provider, "_started", False)
         assert container.telegram_notifier is not None
         assert container.notification_manager is not None
-        assert container.order_manager is not None
         assert container.risk_manager is not None and getattr(
             container.risk_manager, "monitoring_active", False
         )

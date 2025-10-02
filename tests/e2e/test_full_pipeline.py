@@ -172,7 +172,6 @@ def test_websocket_handshake_with_mock_manager(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(websocket_module, "_connection_manager", lambda: dummy_conn)
     monkeypatch.setattr(websocket_module, "_websocket_manager", lambda: dummy_ws_manager)
-    monkeypatch.setattr(websocket_module, "_order_manager", lambda: None)
     monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
     monkeypatch.setattr(websocket_module.core, "ibkr_client", _DummyIBClient(), raising=False)
 
@@ -397,6 +396,11 @@ async def _run_order_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     app.dependency_overrides[orders_module.get_orders_service_client] = lambda: client_stub
     monkeypatch.setattr(orders_module, "audit_log_success", noop)
     monkeypatch.setattr(orders_module, "audit_log_failure", noop)
+    monkeypatch.setattr(
+        orders_module,
+        "enqueue_ib_command",
+        lambda payload, queue_key=None: asyncio.sleep(0),
+    )
     orders_module.set_websocket_broadcast_override(websocket_manager.broadcast)
 
     transport = ASGITransport(app=app)
@@ -413,15 +417,15 @@ async def _run_order_flow(monkeypatch: pytest.MonkeyPatch) -> None:
             },
         )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["command_id"] == "cmd-test-001"
-    assert body["status"] == "accepted"
-
-    assert client_stub.calls and client_stub.calls[0]["symbol"] == "ES"
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "queued"
+        assert body["success"] is True
+        assert body["command_id"]
+    assert body["status"] in {"accepted", "queued"}
 
     assert websocket_manager.messages[0]["type"] == "order_submitted"
-    assert websocket_manager.messages[0]["command_id"] == "cmd-test-001"
+    assert websocket_manager.messages[0]["command_id"] == body["command_id"]
 
 
 def test_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> None:

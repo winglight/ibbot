@@ -16,7 +16,6 @@ class BaseStrategy:
         self.enabled: bool = True
         self.active: bool = False
         self.strategy_manager: Optional[Any] = None
-        self.order_manager: Optional[Any] = None
         self.queue_manager: Optional[Any] = None
         self.risk_manager: Optional[Any] = None
         self.notification_manager: Optional[Any] = None
@@ -29,7 +28,6 @@ class BaseStrategy:
         self,
         *,
         strategy_manager: Optional[Any] = None,
-        order_manager: Optional[Any] = None,
         queue_manager: Optional[Any] = None,
         risk_manager: Optional[Any] = None,
         strategy_risk_manager: Optional[Any] = None,
@@ -39,8 +37,6 @@ class BaseStrategy:
 
         if strategy_manager is not None:
             self.strategy_manager = strategy_manager
-        if order_manager is not None:
-            self.order_manager = order_manager
         if queue_manager is not None:
             self.queue_manager = queue_manager
         if risk_manager is not None:
