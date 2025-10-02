@@ -564,6 +564,7 @@ async def websocket_endpoint(websocket: WebSocket):
         Optional[bool],
         bool,
         Optional[str],
+        Optional[str],
     ]:
         if refresh or payload is None:
             payload = await _load_ib_command_health()
@@ -846,6 +847,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     redis_connected,
                     redis_fresh,
                     health_error,
+                    error_code_value,
                 ) = await _resolve_connection_context(health_payload, refresh=True)
 
                 payload = {
@@ -856,6 +858,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     "source": "websocket",
                 }
 
+                if error_code_value:
+                    payload["error_code"] = error_code_value
                 if last_error_value:
                     payload["last_error"] = last_error_value
                 if health_payload is not None:
@@ -1128,6 +1132,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     redis_connected,
                     redis_fresh,
                     health_error,
+                    error_code_value,
                 ) = await _resolve_connection_context(health_payload, refresh=True)
 
                 if health_payload is None:
@@ -1140,6 +1145,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         payload["error"] = health_error
                     if last_error_value:
                         payload["last_error"] = last_error_value
+                    if error_code_value:
+                        payload["error_code"] = error_code_value
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
                     continue
