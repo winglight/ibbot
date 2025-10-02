@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, MutableMapping, Sequence
@@ -17,44 +16,21 @@ from src.ib_command_health import (
     build_ib_connection_health_payload,
 )
 from src.ibbot.redis import get_redis_client
+from src.routes.service_registry import (
+    DOM_SERVICE_HEALTH_KEY,
+    DOM_SERVICE_NAME,
+    QUEUE_MONITOR_METRICS_KEY,
+    SERVICE_REGISTRY,
+    SERVICE_REGISTRY_MAP,
+    ServiceMetadata,
+)
 
 
 __all__ = [
-    "SERVICE_HEALTH_PROBES",
     "ServiceStatus",
     "gather_service_statuses",
     "build_service_status_payload",
 ]
-
-
-SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
-    (
-        "risk_service_probe",
-        "risk-service",
-        os.getenv("RISK_SERVICE_HEALTH_KEY", "hash:service:health:risk-service"),
-    ),
-    (
-        "strategy_service_probe",
-        "strategy",
-        os.getenv("STRATEGY_SERVICE_HEALTH_KEY", "hash:service:health:strategy"),
-    ),
-    (
-        "account_snapshot_probe",
-        "account-snapshot",
-        os.getenv(
-            "ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY",
-            "hash:service:health:account-snapshot",
-        ),
-    ),
-    (
-        "queue_worker_probe",
-        "queue-monitor",
-        os.getenv("QUEUE_SERVICE_HEALTH_KEY", "hash:service:health:queue"),
-    ),
-)
-
-DOM_SERVICE_NAME = os.getenv("DOM_SERVICE_NAME", "dom-service")
-DOM_SERVICE_HEALTH_KEY = (os.getenv("DOM_SERVICE_HEALTH_KEY", "") or "").strip()
 
 
 @dataclass(slots=True)
@@ -102,20 +78,6 @@ _STATUS_NORMALISATION = {
     "unhealthy": "unhealthy",
     "warning": "unhealthy",
     "degraded": "unhealthy",
-}
-
-
-_PLACEHOLDER_SERVICES: dict[str, str] = {
-    "ib-gateway": "IB Gateway 状态未接入健康检查，假定运行中。",
-    "ib_feed": "行情订阅服务未上报健康信息，默认显示运行中。",
-    "optimizer": "Optimizer Engine 未提供健康接口，默认显示运行中。",
-    "cloudflared": "Cloudflare Tunnel 状态未接入健康检查，默认显示运行中。",
-    "notification": "通知服务未集成统一健康检查，默认显示运行中。",
-    "market_data": "行情落地服务未接入健康检查，默认显示运行中。",
-}
-
-_SERVICE_ALIASES: dict[str, str] = {
-    "queue-monitor": "queue_monitor",
 }
 
 
@@ -227,8 +189,37 @@ def _build_status_from_payload(
     )
 
 
-async def _build_ib_command_status(redis: Any) -> ServiceStatus:
-    raw = await _load_hash(redis, IB_COMMAND_HEALTH_KEY) or {}
+def _status_from_metadata(
+    metadata: ServiceMetadata,
+    *,
+    status: str | None = None,
+    detail: str | None = None,
+) -> ServiceStatus:
+    resolved_status = status or metadata.fallback_status or "unhealthy"
+    resolved_detail = detail if detail is not None else metadata.fallback_detail
+    if resolved_detail:
+        resolved_detail = str(resolved_detail)
+    else:
+        resolved_detail = None
+    return ServiceStatus(
+        service=metadata.service,
+        status=resolved_status,
+        detail=resolved_detail,
+    )
+
+
+async def _build_ib_command_status(
+    redis: Any | None, metadata: ServiceMetadata
+) -> ServiceStatus:
+    health_key = metadata.health_key or IB_COMMAND_HEALTH_KEY
+    if redis is None or not health_key:
+        return _status_from_metadata(
+            metadata,
+            status="unhealthy",
+            detail=metadata.fallback_detail or "无法加载健康信息",
+        )
+
+    raw = await _load_hash(redis, health_key) or {}
     payload = build_ib_connection_health_payload(
         raw,
         stale_after=float(IB_COMMAND_HEALTH_STALE_AFTER_SEC or 30),
@@ -261,73 +252,129 @@ async def _build_ib_command_status(redis: Any) -> ServiceStatus:
     )
 
 
-async def _build_queue_monitor_status(redis: Any) -> ServiceStatus:
-    payload = await _load_hash(redis, "hash:service:queue-monitor")
-    if not payload:
-        return ServiceStatus(
-            service="queue_monitor",
+async def _build_queue_monitor_status(
+    metadata: ServiceMetadata, redis: Any | None
+) -> ServiceStatus:
+    if redis is None:
+        return _status_from_metadata(
+            metadata,
             status="unhealthy",
-            detail="未上报队列指标，检查 queue-monitor 服务。",
-            last_reported=None,
-            payload=None,
+            detail="未提供 Redis 连接，无法加载队列指标。",
         )
 
-    timestamp = _normalise_timestamp(payload.get("timestamp"))
-    detail = "队列指标已更新"
-    if timestamp:
-        try:
-            ts_dt = datetime.fromisoformat(timestamp)
-        except ValueError:
-            ts_dt = None
-        else:
-            now = datetime.now(timezone.utc)
-            if (now - ts_dt).total_seconds() > 60:
-                detail = "队列指标超过 60 秒未更新"
-                return ServiceStatus(
-                    service="queue_monitor",
-                    status="unhealthy",
-                    detail=detail,
-                    last_reported=timestamp,
-                    payload=payload,
-                )
-    return ServiceStatus(
-        service="queue_monitor",
-        status="running",
-        detail=detail,
-        last_reported=timestamp,
-        payload=payload,
+    metrics = await _load_hash(redis, QUEUE_MONITOR_METRICS_KEY)
+    health_payload: Mapping[str, Any] | None = None
+    if metadata.health_key:
+        health_payload = await _load_hash(redis, metadata.health_key)
+
+    if metrics:
+        timestamp = _normalise_timestamp(metrics.get("timestamp"))
+        detail = "队列指标已更新"
+        if timestamp:
+            try:
+                ts_dt = datetime.fromisoformat(timestamp)
+            except ValueError:
+                ts_dt = None
+            else:
+                now = datetime.now(timezone.utc)
+                if (now - ts_dt).total_seconds() > 60:
+                    combined_payload = dict(health_payload or {})
+                    combined_payload.update(metrics)
+                    return ServiceStatus(
+                        service=metadata.service,
+                        status="unhealthy",
+                        detail="队列指标超过 60 秒未更新",
+                        last_reported=timestamp,
+                        payload=combined_payload,
+                    )
+        combined_payload = dict(health_payload or {})
+        combined_payload.update(metrics)
+        return ServiceStatus(
+            service=metadata.service,
+            status="running",
+            detail=detail,
+            last_reported=timestamp,
+            payload=combined_payload,
+        )
+
+    if health_payload:
+        return _build_status_from_payload(metadata.service, health_payload)
+
+    return _status_from_metadata(
+        metadata,
+        status=metadata.fallback_status or "unhealthy",
+        detail=metadata.fallback_detail or "未上报队列指标，检查 queue-monitor 服务。",
     )
 
 
-def _build_dom_placeholder_status() -> ServiceStatus:
-    detail = "DOM 服务由外部部署提供（external/not provisioned），界面不会尝试自动启动。"
-    return ServiceStatus(
-        service=DOM_SERVICE_NAME,
-        status="offline",
-        detail=detail,
+def _build_dom_placeholder_status(metadata: ServiceMetadata) -> ServiceStatus:
+    return _status_from_metadata(
+        metadata,
+        status=metadata.fallback_status or "offline",
+        detail=metadata.fallback_detail
+        or "DOM 服务由外部部署提供（external/not provisioned），界面不会尝试自动启动。",
     )
 
 
-async def _build_dom_service_status(redis: Any | None) -> ServiceStatus:
-    if not DOM_SERVICE_HEALTH_KEY:
-        return _build_dom_placeholder_status()
+async def _build_dom_service_status(
+    metadata: ServiceMetadata, redis: Any | None
+) -> ServiceStatus:
+    if not metadata.health_key:
+        return _build_dom_placeholder_status(metadata)
 
     if redis is None:
         return ServiceStatus(
-            service=DOM_SERVICE_NAME,
+            service=metadata.service,
             status="unhealthy",
             detail="未提供 Redis 连接，无法加载 DOM 服务健康状态。",
         )
 
-    payload = await _load_hash(redis, DOM_SERVICE_HEALTH_KEY)
+    payload = await _load_hash(redis, metadata.health_key)
     if not payload:
-        return ServiceStatus(
-            service=DOM_SERVICE_NAME,
-            status="unhealthy",
-            detail="未上报 DOM 服务健康数据，检查外部 DOM 服务。",
+        return _status_from_metadata(
+            metadata,
+            status=metadata.fallback_status or "unhealthy",
+            detail=metadata.fallback_detail
+            or "未上报 DOM 服务健康数据，检查外部 DOM 服务。",
         )
 
-    return _build_status_from_payload(DOM_SERVICE_NAME, payload)
+    return _build_status_from_payload(metadata.service, payload)
+
+
+async def _build_account_service_status(
+    metadata: ServiceMetadata,
+) -> ServiceStatus:
+    try:
+        readiness = await refresh_account_service_status(
+            max_age=60.0, log_failure=False
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to refresh account service readiness: %s", exc)
+        return ServiceStatus(
+            service=metadata.service,
+            status="unhealthy",
+            detail=f"无法刷新账户服务状态: {exc}",
+        )
+
+    readiness_payload = readiness.as_payload()
+    checked_at = readiness_payload.get("checked_at")
+    if readiness.ready:
+        detail = "账户服务可用"
+        status = "running"
+    elif readiness.checked_at is None:
+        detail = metadata.fallback_detail or "账户服务尚未执行连通性检查"
+        status = "unhealthy"
+    else:
+        detail = f"无法连接账户服务: {readiness.error or '未知错误'}"
+        status = "unhealthy"
+
+    return ServiceStatus(
+        service=metadata.service,
+        status=status,
+        detail=detail,
+        last_reported=checked_at,
+        payload=readiness_payload,
+    )
 
 
 async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceStatus]:
@@ -336,118 +383,128 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
     close_client = False
     client = redis
     if client is None:
-        client = await get_redis_client()
-        close_client = True
-
-    statuses: list[ServiceStatus] = [
-        ServiceStatus(
-            service="ibbot",
-            status="running",
-            detail="主程序运行中",
-            last_reported=datetime.now(timezone.utc).isoformat(),
-        )
-    ]
-
-    try:
-        statuses.append(await _build_ib_command_status(client))
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to build ib_command health payload: %s", exc)
-        statuses.append(
-            ServiceStatus(
-                service="ib_command",
-                status="unhealthy",
-                detail=f"无法加载健康信息: {exc}",
-            )
-        )
-
-    try:
-        readiness = await refresh_account_service_status(max_age=60.0, log_failure=False)
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to refresh account service readiness: %s", exc)
-        statuses.append(
-            ServiceStatus(
-                service="account-service",
-                status="unhealthy",
-                detail=f"无法刷新账户服务状态: {exc}",
-            )
-        )
-    else:
-        readiness_payload = readiness.as_payload()
-        checked_at = readiness_payload.get("checked_at")
-        if readiness.ready:
-            detail = "账户服务可用"
-        elif readiness.checked_at is None:
-            detail = "账户服务尚未执行连通性检查"
+        try:
+            client = await get_redis_client()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Failed to acquire Redis client for service status: %s", exc)
+            client = None
         else:
-            detail = f"无法连接账户服务: {readiness.error or '未知错误'}"
-        statuses.append(
-            ServiceStatus(
-                service="account-service",
-                status="running" if readiness.ready else "unhealthy",
-                detail=detail,
-                last_reported=checked_at,
-                payload=readiness_payload,
-            )
-        )
+            close_client = True
 
-    for _, service_name, redis_key in SERVICE_HEALTH_PROBES:
-        if not redis_key:
+    statuses: dict[str, ServiceStatus] = {}
+
+    ibbot_meta = SERVICE_REGISTRY_MAP.get("ibbot")
+    base_detail = ibbot_meta.fallback_detail if ibbot_meta else None
+    statuses["ibbot"] = ServiceStatus(
+        service="ibbot",
+        status="running",
+        detail=base_detail or "主程序运行中",
+        last_reported=datetime.now(timezone.utc).isoformat(),
+    )
+
+    for entry in SERVICE_REGISTRY:
+        service = entry.service
+        if service == "ibbot":
             continue
-        ui_service = _SERVICE_ALIASES.get(service_name, service_name)
-        payload = await _load_hash(client, redis_key)
-        if not payload:
-            statuses.append(
-                ServiceStatus(
-                    service=ui_service,
+
+        if service == "ib_command":
+            try:
+                statuses[service] = await _build_ib_command_status(client, entry)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning("Failed to build ib_command health payload: %s", exc)
+                statuses[service] = ServiceStatus(
+                    service=service,
                     status="unhealthy",
-                    detail="未上报健康数据",
+                    detail=f"无法加载健康信息: {exc}",
                 )
-            )
             continue
-        statuses.append(_build_status_from_payload(ui_service, payload))
 
-    try:
-        statuses.append(await _build_queue_monitor_status(client))
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to build queue monitor status: %s", exc)
-        statuses.append(
-            ServiceStatus(
-                service="queue_monitor",
-                status="unhealthy",
-                detail=f"无法加载队列指标: {exc}",
-            )
-        )
+        if service == "account-service":
+            statuses[service] = await _build_account_service_status(entry)
+            continue
 
-    try:
-        statuses.append(await _build_dom_service_status(client))
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to build DOM service status: %s", exc)
-        statuses.append(
-            ServiceStatus(
-                service=DOM_SERVICE_NAME,
-                status="unhealthy",
-                detail=f"无法加载 DOM 服务状态: {exc}",
-            )
-        )
+        if service == "queue_monitor":
+            try:
+                statuses[service] = await _build_queue_monitor_status(entry, client)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning("Failed to build queue monitor status: %s", exc)
+                statuses[service] = ServiceStatus(
+                    service=service,
+                    status="unhealthy",
+                    detail=f"无法加载队列指标: {exc}",
+                )
+            continue
 
-    for service, message in _PLACEHOLDER_SERVICES.items():
-        statuses.append(
-            ServiceStatus(
-                service=service,
-                status="running",
-                detail=message,
-            )
-        )
+        if service == DOM_SERVICE_NAME:
+            try:
+                statuses[service] = await _build_dom_service_status(entry, client)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning("Failed to build DOM service status: %s", exc)
+                statuses[service] = ServiceStatus(
+                    service=service,
+                    status="unhealthy",
+                    detail=f"无法加载 DOM 服务状态: {exc}",
+                )
+            continue
+
+        if entry.health_key:
+            if client is None:
+                statuses[service] = _status_from_metadata(
+                    entry,
+                    status=entry.fallback_status or "unhealthy",
+                    detail=entry.fallback_detail or "无法加载健康信息",
+                )
+                continue
+
+            payload = await _load_hash(client, entry.health_key)
+            if not payload:
+                statuses[service] = _status_from_metadata(
+                    entry,
+                    status=entry.fallback_status or "unhealthy",
+                    detail=entry.fallback_detail or "未上报健康数据",
+                )
+            else:
+                statuses[service] = _build_status_from_payload(service, payload)
+            continue
+
+        statuses[service] = _status_from_metadata(entry)
 
     if close_client and client is not None:
         await _close_redis(client)
 
-    return statuses
+    ordered: list[ServiceStatus] = []
+    seen: set[str] = set()
+    for entry in SERVICE_REGISTRY:
+        status = statuses.get(entry.service)
+        if status is None:
+            status = _status_from_metadata(entry)
+        ordered.append(status)
+        seen.add(entry.service)
+
+    for service, status in statuses.items():
+        if service not in seen:
+            ordered.append(status)
+
+    return ordered
 
 
 async def build_service_status_payload(redis: Any | None = None) -> Mapping[str, Any]:
     statuses = await gather_service_statuses(redis=redis)
+    services: list[dict[str, Any]] = []
+    for status in statuses:
+        entry = status.as_mapping()
+        metadata = SERVICE_REGISTRY_MAP.get(status.service)
+        if metadata is not None:
+            entry["label"] = metadata.display_name
+            entry["description"] = metadata.description
+            entry["internal"] = metadata.internal
+            if metadata.health_key:
+                entry["health_key"] = metadata.health_key
+            if metadata.ports:
+                entry["ports"] = list(metadata.ports)
+        services.append(entry)
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "services": [status.as_mapping() for status in statuses],
+        "services": services,
     }

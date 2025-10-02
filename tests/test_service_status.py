@@ -20,7 +20,56 @@ class StubRedis:
         return dict(value)
 
 
-def test_gather_service_statuses_normalises_payloads():
+@pytest.fixture()
+def service_status_patches(monkeypatch: pytest.MonkeyPatch):
+    state = {
+        "ready": True,
+        "error": None,
+        "checked_at": datetime.now(timezone.utc),
+    }
+
+    class DummyReadiness:
+        def __init__(self, ready: bool, checked_at: datetime | None, error: str | None) -> None:
+            self.ready = ready
+            self.checked_at = checked_at
+            self.error = error
+
+        def as_payload(self) -> dict[str, object]:
+            payload: dict[str, object] = {"ready": self.ready}
+            if self.checked_at is not None:
+                payload["checked_at"] = self.checked_at.isoformat()
+            else:
+                payload["checked_at"] = None
+            if self.error:
+                payload["error"] = self.error
+            return payload
+
+    async def fake_refresh_account_service_status(*_: object, **__: object) -> DummyReadiness:
+        return DummyReadiness(state["ready"], state["checked_at"], state["error"])
+
+    def fake_build_ib_payload(raw: dict[str, object], *, stale_after: float | None = None):
+        _ = stale_after
+        return {
+            "connected": bool(raw.get("connected", True)),
+            "queue_depth": int(raw.get("queue_depth", 0) or 0),
+            "stale": bool(raw.get("stale", False)),
+            "last_error": raw.get("last_error", ""),
+            "last_seen": raw.get("last_seen"),
+        }
+
+    monkeypatch.setattr(
+        "src.service_status.refresh_account_service_status",
+        fake_refresh_account_service_status,
+    )
+    monkeypatch.setattr(
+        "src.service_status.build_ib_connection_health_payload",
+        fake_build_ib_payload,
+    )
+
+    return state
+
+
+def test_gather_service_statuses_normalises_payloads(service_status_patches):
     async def _run() -> None:
         now = datetime.now(timezone.utc)
         recent = now.isoformat()
@@ -63,7 +112,7 @@ def test_gather_service_statuses_normalises_payloads():
     asyncio.run(_run())
 
 
-def test_build_service_status_payload_structure():
+def test_build_service_status_payload_structure(service_status_patches):
     async def _run() -> None:
         now = datetime.now(timezone.utc).isoformat()
         redis_data = {
@@ -88,11 +137,15 @@ def test_build_service_status_payload_structure():
         services = payload.get("services")
         assert isinstance(services, list)
         assert any(entry.get("service") == "ibbot" for entry in services)
+        # ensure metadata from registry is included
+        ibbot_entry = next(entry for entry in services if entry.get("service") == "ibbot")
+        assert ibbot_entry.get("label") == "Trading Core"
+        assert ibbot_entry.get("internal") is True
 
     asyncio.run(_run())
 
 
-def test_build_service_status_payload_includes_queue_metrics():
+def test_build_service_status_payload_includes_queue_metrics(service_status_patches):
     async def _run() -> None:
         now = datetime.now(timezone.utc).isoformat()
         redis_data = {

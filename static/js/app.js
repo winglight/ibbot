@@ -134,6 +134,8 @@ class TradingApp {
         this.orders = [];
         // 通知列表
         this.notifications = [];
+        this.serviceStatusMetadata = new Map();
+        this._serviceListSignature = null;
         this.serviceRestartController = null;
         this.configCenterManager = null;
         this.configCenterInitRetry = null;
@@ -912,63 +914,11 @@ class TradingApp {
         // DOM 已就绪时同步访客模式下的界面元素状态，避免初始渲染遗漏
         this.updateReadOnlyMode(this.isReadOnly, this.authRole, { persist: false });
 
-        if (!this.serviceRestartController && serviceRestartModules?.createListController) {
-            const listContainer = document.getElementById('serviceStatusList');
-            if (listContainer) {
-                const controller = serviceRestartModules.createListController({
-                    document,
-                    container: listContainer,
-                    fetcher: (payload) => this.apiCall('/services/restart', {
-                        method: 'POST',
-                        body: JSON.stringify(payload),
-                    }),
-                    describeService: (serviceName, element) => {
-                        if (element?.dataset?.serviceLabel) {
-                            return element.dataset.serviceLabel;
-                        }
-                        const title = element?.querySelector('.fw-semibold');
-                        return title?.textContent?.trim() || serviceName;
-                    },
-                    readOnlyMessage: '访客模式无法执行重启操作',
-                    runningMessage: '正在重启 {service}...',
-                    successMessage: '已重启 {services}',
-                    dependencySuccessMessage: '{service} 已随依赖重启',
-                    errorMessage: '重启失败，请稍后重试',
-                    initialMessage: '点击重启以重新启动 {service}。',
-                    badgeLabels: {
-                        idle: '已下线',
-                        running: '重启中',
-                        success: '运行中',
-                        error: '不健康',
-                    },
-                    onStatusChange: (info) => {
-                        if (info.meta?.trigger !== 'restart') {
-                            return;
-                        }
-                        if (info.state === 'success') {
-                            this.showAlert('success', info.message);
-                        } else if (info.state === 'error') {
-                            const errorObj = info.payload?.error;
-                            const level = errorObj?.isReadOnly ? 'warning' : 'danger';
-                            this.showAlert(level, info.message);
-                        }
-                    },
-                });
-                if (controller) {
-                    this.serviceRestartController = controller;
-                    if (this.isReadOnly && typeof controller.setReadOnly === 'function') {
-                        controller.setReadOnly(true);
-                    }
-                    const wsResult = this.ibkrManager?.requestServiceStatuses
-                        ? this.ibkrManager.requestServiceStatuses({ force: true })
-                        : 'failed';
-                    if (wsResult === 'failed') {
-                        this.loadServiceStatuses({ silent: true, preferSocket: false }).catch((error) => {
-                            console.warn('Failed to load initial service statuses', error);
-                        });
-                    }
-                }
-            }
+        const listContainer = document.getElementById('serviceStatusList');
+        if (listContainer) {
+            this.loadServiceStatuses({ silent: true, preferSocket: false }).catch((error) => {
+                console.warn('Failed to load initial service statuses', error);
+            });
         }
 
         const refreshButton = document.getElementById('btn-refresh');
@@ -1789,8 +1739,219 @@ class TradingApp {
         }
     }
 
+    formatServiceStatusDescription(entry = {}) {
+        const parts = [];
+        if (entry.description) {
+            parts.push(entry.description);
+        }
+        if (Array.isArray(entry.ports) && entry.ports.length) {
+            const portsText = entry.ports.join(', ');
+            parts.push(`端口 ${portsText}`);
+        }
+        if (typeof entry.internal === 'boolean') {
+            parts.push(entry.internal ? '内部服务' : '外部服务');
+        }
+        return parts.join(' · ');
+    }
+
+    updateServiceStatusElement(element, entry = {}) {
+        if (!element) {
+            return;
+        }
+        if (entry.service) {
+            element.dataset.service = entry.service;
+        }
+        const datasetLabel = entry.label
+            ? `${entry.label}${entry.service ? ` (${entry.service})` : ''}`
+            : entry.service;
+        if (datasetLabel) {
+            element.dataset.serviceLabel = datasetLabel;
+        }
+        if (typeof entry.internal === 'boolean') {
+            element.dataset.internal = entry.internal ? '1' : '0';
+        } else if (element.dataset.internal) {
+            delete element.dataset.internal;
+        }
+        if (entry.health_key) {
+            element.dataset.healthKey = entry.health_key;
+        } else if (element.dataset.healthKey) {
+            delete element.dataset.healthKey;
+        }
+
+        const title = element.querySelector('.service-name');
+        if (title) {
+            title.textContent = entry.label || entry.service || '';
+        }
+        const description = element.querySelector('.service-description');
+        if (description) {
+            description.textContent = this.formatServiceStatusDescription(entry);
+        }
+        const statusText = element.querySelector('[data-role="status-text"]');
+        if (statusText && !statusText.textContent) {
+            statusText.textContent = '等待状态更新';
+        }
+    }
+
+    createServiceStatusElement(entry = {}) {
+        const item = document.createElement('div');
+        item.className = 'service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3';
+        const meta = document.createElement('div');
+        meta.className = 'service-status-meta';
+        const title = document.createElement('div');
+        title.className = 'fw-semibold service-name';
+        meta.appendChild(title);
+        const description = document.createElement('div');
+        description.className = 'service-description small text-muted';
+        meta.appendChild(description);
+        const statusText = document.createElement('div');
+        statusText.className = 'service-status-text small text-muted';
+        statusText.dataset.role = 'status-text';
+        statusText.textContent = '等待状态更新';
+        meta.appendChild(statusText);
+        item.appendChild(meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'service-status-actions d-flex align-items-center gap-2';
+        const badge = document.createElement('span');
+        badge.className = 'badge bg-secondary';
+        badge.dataset.role = 'status-badge';
+        badge.textContent = '已下线';
+        actions.appendChild(badge);
+        const button = document.createElement('button');
+        button.className = 'btn btn-outline-warning btn-sm d-flex align-items-center gap-2';
+        button.type = 'button';
+        button.dataset.action = 'restart';
+        const spinner = document.createElement('span');
+        spinner.className = 'spinner-border spinner-border-sm d-none';
+        spinner.setAttribute('role', 'status');
+        spinner.setAttribute('aria-hidden', 'true');
+        button.appendChild(spinner);
+        const icon = document.createElement('i');
+        icon.className = 'fas fa-rotate-right';
+        button.appendChild(icon);
+        const label = document.createElement('span');
+        label.className = 'restart-label';
+        label.textContent = '重启';
+        button.appendChild(label);
+        actions.appendChild(button);
+        item.appendChild(actions);
+
+        this.updateServiceStatusElement(item, entry);
+        return item;
+    }
+
+    initialiseServiceRestartController() {
+        if (this.serviceRestartController || !serviceRestartModules?.createListController) {
+            return this.serviceRestartController;
+        }
+        const listContainer = document.getElementById('serviceStatusList');
+        if (!listContainer) {
+            return null;
+        }
+        const controller = serviceRestartModules.createListController({
+            document,
+            container: listContainer,
+            fetcher: (payload) => this.apiCall('/services/restart', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            }),
+            describeService: (serviceName, element) => {
+                if (element?.dataset?.serviceLabel) {
+                    return element.dataset.serviceLabel;
+                }
+                const title = element?.querySelector('.fw-semibold');
+                return title?.textContent?.trim() || serviceName;
+            },
+            readOnlyMessage: '访客模式无法执行重启操作',
+            runningMessage: '正在重启 {service}...',
+            successMessage: '已重启 {services}',
+            dependencySuccessMessage: '{service} 已随依赖重启',
+            errorMessage: '重启失败，请稍后重试',
+            initialMessage: '点击重启以重新启动 {service}。',
+            badgeLabels: {
+                idle: '已下线',
+                running: '重启中',
+                success: '运行中',
+                error: '不健康',
+            },
+            onStatusChange: (info) => {
+                if (info.meta?.trigger !== 'restart') {
+                    return;
+                }
+                if (info.state === 'success') {
+                    this.showAlert('success', info.message);
+                } else if (info.state === 'error') {
+                    const errorObj = info.payload?.error;
+                    const level = errorObj?.isReadOnly ? 'warning' : 'danger';
+                    this.showAlert(level, info.message);
+                }
+            },
+        });
+        if (controller) {
+            this.serviceRestartController = controller;
+            if (this.isReadOnly && typeof controller.setReadOnly === 'function') {
+                controller.setReadOnly(true);
+            }
+        }
+        return this.serviceRestartController;
+    }
+
+    ensureServiceStatusListStructure(services = []) {
+        if (typeof document === 'undefined') {
+            return this.serviceRestartController;
+        }
+        const container = document.getElementById('serviceStatusList');
+        if (!container || !Array.isArray(services)) {
+            return this.serviceRestartController;
+        }
+
+        const placeholder = container.querySelector('[data-role="service-status-placeholder"]');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        const signature = JSON.stringify(
+            services
+                .filter((entry) => entry && entry.service)
+                .map((entry) => `${entry.service}|${entry.label || ''}`)
+        );
+
+        if (this._serviceListSignature !== signature) {
+            container.innerHTML = '';
+            const fragment = document.createDocumentFragment();
+            services.forEach((entry) => {
+                if (!entry || typeof entry !== 'object') {
+                    return;
+                }
+                fragment.appendChild(this.createServiceStatusElement(entry));
+            });
+            container.appendChild(fragment);
+            this._serviceListSignature = signature;
+            this.serviceRestartController = null;
+        } else {
+            services.forEach((entry) => {
+                if (!entry || typeof entry !== 'object') {
+                    return;
+                }
+                const element = container.querySelector(`[data-service="${entry.service}"]`);
+                if (element) {
+                    this.updateServiceStatusElement(element, entry);
+                }
+            });
+        }
+
+        this.serviceStatusMetadata = new Map(
+            services
+                .filter((entry) => entry && entry.service)
+                .map((entry) => [entry.service, entry])
+        );
+
+        return this.initialiseServiceRestartController();
+    }
+
     applyServiceStatusesPayload(payload, options = {}) {
-        const controller = this.serviceRestartController;
+        const services = Array.isArray(payload?.services) ? payload.services : [];
+        const controller = this.ensureServiceStatusListStructure(services);
         if (!controller || !controller.items) {
             return false;
         }
@@ -1801,7 +1962,6 @@ class TradingApp {
             unhealthy: { state: 'error', fallback: '服务状态异常' },
         };
 
-        const services = Array.isArray(payload?.services) ? payload.services : [];
         const seen = new Set();
         const metaDefaults = {
             skipStateUpdate: true,
@@ -1861,11 +2021,6 @@ class TradingApp {
     }
 
     async loadServiceStatuses(options = {}) {
-        const controller = this.serviceRestartController;
-        if (!controller || !controller.items) {
-            return null;
-        }
-
         const { silent = false, force = false, preferSocket = true, minInterval } = options || {};
         const socketAvailable = preferSocket !== false
             && typeof this.ibkrManager?.requestServiceStatuses === 'function';
