@@ -283,7 +283,6 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
     notification_manager = NotificationManager(
         telegram_notifier=telegram_notifier,
         websocket_manager=container.websocket_manager,
-        db_manager=db_manager,
     )
 
     order_manager = get_order_manager()
@@ -300,7 +299,6 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
     notification_manager.set_dependencies(
         telegram_notifier=telegram_notifier,
         websocket_manager=container.websocket_manager,
-        db_manager=db_manager,
     )
     if risk_manager is not None:
         risk_manager.set_dependencies(order_manager=order_manager)

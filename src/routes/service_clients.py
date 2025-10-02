@@ -562,6 +562,28 @@ class NotificationServiceClient(ServiceClient):
     async def test(self, payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
         return await self.request("POST", "/notifications/test", json=dict(payload))
 
+    async def history(
+        self,
+        *,
+        channel: str | None = None,
+        status: str | None = None,
+        since: str | None = None,
+        limit: int | None = None,
+    ) -> Mapping[str, Any]:
+        params: dict[str, Any] = {}
+        if channel:
+            params["channel"] = channel
+        if status:
+            params["status"] = status
+        if since:
+            params["since"] = since
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self.request("GET", "/notifications/history", params=params)
+
+    async def clear_history(self) -> Mapping[str, Any]:
+        return await self.request("DELETE", "/notifications/history")
+
 
 class ConnectionControlClient(ServiceClient):
     service_name = "connection_control"

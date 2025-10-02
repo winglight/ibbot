@@ -15,6 +15,7 @@ class FakeRedis:
     def __init__(self) -> None:
         self.queues: dict[str, list[str]] = {}
         self.hashes: dict[str, dict[str, str]] = {}
+        self.lists: dict[str, list[str]] = {}
 
     async def rpush(self, key: str, value: str) -> int:
         queue = self.queues.setdefault(key, [])
@@ -38,6 +39,48 @@ class FakeRedis:
 
     async def hgetall(self, key: str) -> Mapping[str, str]:
         return dict(self.hashes.get(key, {}))
+
+    async def lpush(self, key: str, value: str) -> int:
+        bucket = self.lists.setdefault(key, [])
+        bucket.insert(0, value)
+        return len(bucket)
+
+    async def ltrim(self, key: str, start: int, stop: int) -> int:
+        bucket = self.lists.get(key)
+        if bucket is None:
+            return 0
+        length = len(bucket)
+        if length == 0:
+            return 0
+        start = max(start, 0)
+        if stop < 0:
+            stop = length + stop
+        stop = min(stop, length - 1)
+        if start >= length or stop < start:
+            self.lists[key] = []
+        else:
+            self.lists[key] = bucket[start : stop + 1]
+        return len(self.lists[key])
+
+    async def lrange(self, key: str, start: int, stop: int) -> list[str]:
+        bucket = self.lists.get(key, [])
+        length = len(bucket)
+        if length == 0:
+            return []
+        if start < 0:
+            start = max(length + start, 0)
+        if stop < 0:
+            stop = length + stop
+        stop = min(stop, length - 1)
+        start = max(start, 0)
+        if stop < start:
+            return []
+        return bucket[start : stop + 1]
+
+    async def delete(self, key: str) -> int:
+        removed = 1 if key in self.lists else 0
+        self.lists.pop(key, None)
+        return removed
 
     async def xread(self, *_args: Any, **_kwargs: Any) -> list[Any]:
         return []
@@ -157,4 +200,48 @@ def test_notification_status_missing_command_returns_404() -> None:
     with client:
         response = client.get("/notifications/status", params={"command_id": "missing"})
         assert response.status_code == 404
+
+
+def test_history_endpoint_returns_recent_entries() -> None:
+    redis = FakeRedis()
+    client, service = _build_app(redis=redis, channels=[])
+
+    async def _populate() -> None:
+        await redis.lpush(service.history_key, json.dumps({"channel": "websocket", "status": "success", "timestamp": "2024-06-01T00:00:00+00:00"}))
+        await redis.lpush(service.history_key, json.dumps({"channel": "telegram", "status": "failed", "timestamp": "2024-06-02T00:00:00+00:00", "error": "boom"}))
+
+    asyncio.run(_populate())
+
+    with client:
+        response = client.get(
+            "/notifications/history",
+            params={"channel": "telegram", "status": "failed", "limit": 5},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert len(payload["history"]) == 1
+        assert payload["history"][0]["channel"] == "telegram"
+
+
+def test_clear_history_deletes_entries() -> None:
+    redis = FakeRedis()
+    client, service = _build_app(redis=redis, channels=[])
+
+    async def _populate() -> None:
+        await redis.lpush(service.history_key, json.dumps({"channel": "telegram", "status": "success"}))
+
+    asyncio.run(_populate())
+
+    with client:
+        response = client.delete("/notifications/history")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is True
+        assert body["cleared"] >= 0
+
+        response = client.post("/notifications/history/clear")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is True
 

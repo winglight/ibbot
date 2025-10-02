@@ -8,7 +8,6 @@ from loguru import logger
 from pydantic import BaseModel
 
 from src.cache import ensure_redis
-from src.database import DatabaseManager, get_db_manager
 from src.routes.service_clients import (
     NotificationServiceClient,
     ServiceClientError,
@@ -582,32 +581,59 @@ async def get_notification_history(
     since: Optional[str] = None,
     limit: int = 100,
     user: Optional[str] = Depends(get_current_user),
+    client: NotificationServiceClient | None = Depends(_get_notification_service_client),
 ) -> Dict[str, Any]:
+    if client is None:
+        raise HTTPException(status_code=503, detail="Notification service not available")
+
     try:
-        db = get_db_manager()
-        history = db.load_notification_history(
-            channel=channel,
-            status=status,
-            since=since,
-            limit=limit,
-        )
-        return {"success": True, "history": history}
-    except Exception as exc:
-        logger.error("Get notification history error: {}", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        payload = await client.history(channel=channel, status=status, since=since, limit=limit)
+    except ServiceUnavailableError as exc:
+        logger.info("Notification history unavailable", error=str(exc))
+        raise HTTPException(status_code=503, detail="Notification service not available") from exc
+    except ServiceResponseError as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else "Notification service request failed"
+        logger.error("Notification history request failed", status=exc.status_code, detail=detail)
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+    except ServiceClientError as exc:
+        logger.error("Notification history client error", error=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.exception("Unexpected notification history error")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return {"success": True, "history": payload}
 
 
 @router.delete("/api/notifications/history")
 async def clear_notification_history(
     user: Optional[str] = Depends(get_current_user),
+    client: NotificationServiceClient | None = Depends(_get_notification_service_client),
 ) -> Dict[str, Any]:
+    if client is None:
+        raise HTTPException(status_code=503, detail="Notification service not available")
+
     try:
-        db = get_db_manager()
-        deleted = db.clear_notification_history()
-        return {"success": True, "cleared": deleted}
-    except Exception as exc:
-        logger.error("Clear notification history error: {}", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        payload = await client.clear_history()
+    except ServiceUnavailableError as exc:
+        logger.info("Notification service unavailable for history clear", error=str(exc))
+        raise HTTPException(status_code=503, detail="Notification service not available") from exc
+    except ServiceResponseError as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else "Notification service request failed"
+        logger.error("Notification history clear failed", status=exc.status_code, detail=detail)
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+    except ServiceClientError as exc:
+        logger.error("Notification history clear client error", error=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.exception("Unexpected notification history clear error")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return {"success": True, "cleared": payload}
 
 
 @router.post("/api/notifications/test")

@@ -94,6 +94,8 @@ class NotificationService:
         command_queue: str = "queue:notification:dispatch",
         command_status_prefix: str = "hash:notification:command",
         command_batch_size: int = 10,
+        history_key: str = "list:notification:history",
+        history_max_entries: int = 500,
     ) -> None:
         self._stream_reader = stream_reader
         self._channels = OrderedDict((channel.name, channel) for channel in channels)
@@ -110,6 +112,8 @@ class NotificationService:
         self._command_queue = command_queue
         self._command_status_prefix = command_status_prefix.rstrip(":")
         self._command_batch_size = max(1, int(command_batch_size))
+        self._history_key = history_key
+        self._history_max_entries = max(0, int(history_max_entries))
 
     # ------------------------------------------------------------------
     # public API
@@ -337,6 +341,14 @@ class NotificationService:
                     message=f"Retry failed: {exc}",
                     retries=item.attempts,
                 )
+                await self._record_history(
+                    event=item.event,
+                    channel=channel_name,
+                    status="failed",
+                    message=item.message,
+                    retries=item.attempts,
+                    error=str(exc),
+                )
                 if self._max_retries and item.attempts >= self._max_retries:
                     self._logger.warning(
                         "Dropping notification after exhausting retries",
@@ -347,6 +359,13 @@ class NotificationService:
 
             await self._write_log_point(
                 stream=item.event.stream,
+                channel=channel_name,
+                status="success",
+                message=item.message,
+                retries=item.attempts,
+            )
+            await self._record_history(
+                event=item.event,
                 channel=channel_name,
                 status="success",
                 message=item.message,
@@ -397,11 +416,26 @@ class NotificationService:
                     message=f"{message} | error={exc}",
                     retries=attempts,
                 )
+                await self._record_history(
+                    event=event,
+                    channel=channel.name,
+                    status="failed",
+                    message=message,
+                    retries=attempts,
+                    error=str(exc),
+                )
                 self._last_error = str(exc)
                 continue
 
             await self._write_log_point(
                 stream=event.stream,
+                channel=channel.name,
+                status="success",
+                message=message,
+                retries=self.get_retry_count(event.stream, event.message_id, channel.name),
+            )
+            await self._record_history(
+                event=event,
                 channel=channel.name,
                 status="success",
                 message=message,
@@ -468,6 +502,49 @@ class NotificationService:
         except Exception:  # pragma: no cover - logging only, depends on influx availability
             self._logger.debug("Failed to write notification log point", exc_info=True)
 
+    async def _record_history(
+        self,
+        *,
+        event: NotificationEvent,
+        channel: str,
+        status: str,
+        message: str,
+        retries: int,
+        error: str | None = None,
+    ) -> None:
+        if self._redis is None or not self._history_key:
+            return
+
+        entry: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "stream": event.stream,
+            "message_id": event.message_id,
+            "channel": channel,
+            "status": status,
+            "message": message,
+            "retries": retries,
+        }
+        payload = event.payload
+        if isinstance(payload, Mapping):
+            for field in ("event_type", "category", "command_id"):
+                if field in payload:
+                    entry[field] = payload[field]
+        if error:
+            entry["error"] = error
+
+        try:
+            serialised = json.dumps(entry, ensure_ascii=False, default=self._safe_repr)
+        except TypeError:
+            entry.pop("message", None)
+            serialised = json.dumps(entry, ensure_ascii=False, default=self._safe_repr)
+
+        try:
+            await self._redis.lpush(self._history_key, serialised)
+            if self._history_max_entries:
+                await self._redis.ltrim(self._history_key, 0, self._history_max_entries - 1)
+        except Exception:  # pragma: no cover - storage errors shouldn't crash processing
+            self._logger.debug("Failed to record notification history", exc_info=True)
+
     async def _publish_health_metrics(self) -> None:
         if self._redis is None:
             return
@@ -500,3 +577,11 @@ class NotificationService:
     @property
     def command_status_prefix(self) -> str:
         return self._command_status_prefix
+
+    @property
+    def history_key(self) -> str:
+        return self._history_key
+
+    @property
+    def history_max_entries(self) -> int:
+        return self._history_max_entries
