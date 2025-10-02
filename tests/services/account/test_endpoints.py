@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytest
 from fastapi.testclient import TestClient
 
+from src.ibbot.redis import IBCommandTimeout
+
 from services.account.main import (
+    DEFAULT_DAILY_SUMMARY_COMMAND,
     DEFAULT_ORDER_LIMIT,
-    RECENT_ORDERS_CACHE_KEY,
+    DEFAULT_ORDERS_SNAPSHOT_KEY,
     app,
     _state,
 )
@@ -27,6 +30,18 @@ def reset_state() -> None:
     _state.stale = False
     _state.last_refresh_error = None
     _state.snapshot_updated_at = None
+    _state.orders_last_refreshed_at = None
+    _state.orders_source = None
+    _state.orders_from_cache = None
+    _state.orders_stale = None
+    _state.orders_stale_reason = None
+    _state.orders_last_error = None
+    _state.daily_summary_last_refreshed_at = None
+    _state.daily_summary_source = None
+    _state.daily_summary_from_cache = None
+    _state.daily_summary_stale = None
+    _state.daily_summary_stale_reason = None
+    _state.daily_summary_last_error = None
 
 
 class _InMemoryRedis:
@@ -74,9 +89,11 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr("services.account.main.get_redis_client", _fake_get_client)
 
     import src.account_snapshot_cache as snapshot_cache
+    import src.utils.account_pnl_cache as pnl_cache
 
     monkeypatch.setattr(snapshot_cache, "_ensure_client", _fake_ensure_client)
     snapshot_cache._redis_client = client  # type: ignore[attr-defined]
+    monkeypatch.setattr(pnl_cache, "ensure_redis", _fake_ensure_client)
 
     return client
 
@@ -137,11 +154,30 @@ def _write_snapshot(client: Any, key: str, payload: Dict[str, Any]) -> None:
     asyncio.run(_set())
 
 
-def _write_orders_cache(client: Any, payload: Dict[str, Any]) -> None:
+def _write_orders_snapshot(client: Any, payload: Dict[str, Any]) -> None:
     async def _set() -> None:
-        await client.set(RECENT_ORDERS_CACHE_KEY, json.dumps(payload))
+        await client.set(DEFAULT_ORDERS_SNAPSHOT_KEY, json.dumps(payload))
 
     asyncio.run(_set())
+
+
+def _write_daily_summary_cache(
+    client: Any,
+    totals: Dict[str, Dict[str, Any]],
+    net_liq: Optional[Dict[str, Any]] = None,
+) -> None:
+    async def _write() -> None:
+        if totals:
+            pnl_mapping = {day: str(values.get("pnl", 0.0)) for day, values in totals.items()}
+            orders_mapping = {
+                day: str(int(values.get("orders", 0))) for day, values in totals.items()
+            }
+            await client.hset("account:daily_pnl", pnl_mapping)
+            await client.hset("account:daily_orders", orders_mapping)
+        if net_liq is not None:
+            await client.set("account:net_liquidation", json.dumps(net_liq))
+
+    asyncio.run(_write())
 
 
 def test_get_account_info_success(test_client: TestClient, fake_redis: Any) -> None:
@@ -213,30 +249,61 @@ def test_refresh_endpoint_sets_timestamp(test_client: TestClient, monkeypatch: p
     assert triggered["called"] is True
 
 
-def test_orders_and_daily_summary_endpoints(test_client: TestClient) -> None:
+def test_orders_and_daily_summary_endpoints(
+    test_client: TestClient, fake_redis: Any
+) -> None:
+    orders_snapshot = {
+        "active_orders": [
+            {"id": "1", "symbol": "AAPL", "quantity": 10},
+            {"id": "2", "symbol": "MSFT", "quantity": 5},
+        ],
+        "history": [
+            {"id": "3", "symbol": "GOOG", "quantity": 1},
+        ],
+        "updated_at": "2024-01-01T05:00:00+00:00",
+        "source": "orders-service",
+        "stale": False,
+    }
+    _write_orders_snapshot(fake_redis, orders_snapshot)
+
+    daily_totals = {"2024-01-01": {"pnl": 125.5, "orders": 3}}
+    net_liq = {
+        "value": 150000.0,
+        "timestamp": "2024-01-01T15:30:00+00:00",
+        "source": "account-service",
+    }
+    _write_daily_summary_cache(fake_redis, daily_totals, net_liq)
+
     orders_response = test_client.get("/account/orders")
     assert orders_response.status_code == 200
     orders_payload = orders_response.json()
     assert orders_payload["success"] is True
-    assert orders_payload["orders"] == []
-    assert orders_payload["from_cache"] is True
+    assert len(orders_payload["orders"]) == 3
+    assert orders_payload["orders"][0]["symbol"] == "AAPL"
     assert orders_payload["meta"] == {
         "page": 1,
         "limit": DEFAULT_ORDER_LIMIT,
-        "total": 0,
-        "returned": 0,
+        "total": 3,
+        "returned": 3,
         "has_more": False,
     }
-    assert "source" in orders_payload
-    assert "snapshot_updated_at" in orders_payload
+    assert orders_payload["source"] == "orders-service"
+    assert orders_payload["snapshot_updated_at"] == orders_snapshot["updated_at"]
+    assert orders_payload["from_cache"] is True
+    assert orders_payload.get("stale") is False
 
     summary_response = test_client.get("/account/daily-summary")
     assert summary_response.status_code == 200
-    assert summary_response.json() == {
-        "success": True,
-        "daily_summary": [],
-        "from_cache": True,
-    }
+    summary_payload = summary_response.json()
+    assert summary_payload["success"] is True
+    assert summary_payload["daily_summary"] == [
+        {"date": "2024-01-01", "pnl": 125.5, "orders": 3}
+    ]
+    assert summary_payload["net_liquidation"] == net_liq
+    assert summary_payload["from_cache"] is True
+    assert summary_payload["source"] == net_liq["source"]
+    assert summary_payload["snapshot_updated_at"] == net_liq["timestamp"]
+    assert summary_payload.get("stale") in {False, None}
 
 
 def test_account_info_force_refresh_triggers_service(
@@ -345,38 +412,39 @@ def test_positions_force_refresh_respects_fast_flag(
     assert last_call["fast"] is False
 
 
-def test_account_orders_fast_path_returns_metadata(
+def test_account_orders_snapshot_pagination(
     test_client: TestClient, fake_redis: Any
 ) -> None:
-    orders_payload = {
-        "orders": [
-            {"order_id": 1, "symbol": "AAPL"},
-            {"order_id": 2, "symbol": "MSFT"},
+    orders_snapshot = {
+        "active_orders": [
+            {"id": "1", "symbol": "AAPL"},
+            {"id": "2", "symbol": "MSFT"},
+            {"id": "3", "symbol": "TSLA"},
         ],
-        "updated_at": "2024-01-01T05:00:00+00:00",
-        "source": "orders-cache",
+        "updated_at": "2024-01-01T06:00:00+00:00",
+        "source": "orders-snapshot",
         "stale": False,
-        "total": 2,
     }
-    _write_orders_cache(fake_redis, orders_payload)
+    _write_orders_snapshot(fake_redis, orders_snapshot)
 
     response = test_client.get(
         "/account/orders",
-        params={"limit": 1, "page": 2, "fast": "true"},
+        params={"limit": 1, "page": 2},
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["orders"] == [orders_payload["orders"][1]]
+    assert payload["orders"] == [{"id": "2", "symbol": "MSFT"}]
     assert payload["meta"] == {
         "page": 2,
         "limit": 1,
-        "total": 2,
+        "total": 3,
         "returned": 1,
-        "has_more": False,
+        "has_more": True,
     }
-    assert payload["source"] == "orders-cache"
-    assert payload["snapshot_updated_at"] == orders_payload["updated_at"]
+    assert payload["source"] == "orders-snapshot"
+    assert payload["snapshot_updated_at"] == orders_snapshot["updated_at"]
     assert payload["from_cache"] is True
+    assert payload.get("stale") is False
 
 
 def test_account_orders_force_refresh_triggers_snapshot_refresh(
@@ -399,3 +467,34 @@ def test_account_orders_force_refresh_triggers_snapshot_refresh(
     last_call = service.refresh_both_calls[-1]
     assert last_call["reason"] == "api-orders-force-refresh"
     assert last_call["fast_positions"] is False
+
+
+def test_account_orders_command_timeout_returns_504(
+    test_client: TestClient, fake_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _timeout(method: str, **_: Any) -> Dict[str, Any]:
+        raise IBCommandTimeout("timeout", command_id="cmd", payload={"method": method})
+
+    monkeypatch.setattr("services.account.main.request_ib_command", _timeout)
+
+    response = test_client.get("/account/orders")
+    assert response.status_code == 504
+    assert "timed out" in response.json()["detail"].lower()
+
+
+def test_daily_summary_missing_triggers_command_and_returns_503(
+    test_client: TestClient, fake_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called: Dict[str, Any] = {}
+
+    async def _fake_request(method: str, **_: Any) -> Dict[str, Any]:
+        called["method"] = method
+        return {"status": "success"}
+
+    monkeypatch.setattr("services.account.main.request_ib_command", _fake_request)
+
+    response = test_client.get("/account/daily-summary")
+    assert response.status_code == 503
+    detail = response.json()["detail"].lower()
+    assert "unavailable" in detail
+    assert called["method"] == DEFAULT_DAILY_SUMMARY_COMMAND

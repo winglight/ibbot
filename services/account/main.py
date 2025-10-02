@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, AsyncIterator, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from contextlib import asynccontextmanager
 
@@ -16,14 +16,28 @@ from loguru import logger
 from src.account_snapshot_cache import read_account_info_snapshot, read_positions_snapshot
 from src.account_snapshot_service import AccountSnapshotService
 from src.ibbot import update_service_health
-from src.ibbot.redis import get_redis_client, request_ib_command
+from src.ibbot.redis import IBCommandError, IBCommandTimeout, get_redis_client, request_ib_command
 from src.utils import now_local, parse_local_datetime, to_local_iso
+from src.utils.account_pnl_cache import (
+    load_all_daily_totals,
+    read_net_liquidation_snapshot,
+)
 
 
 ACCOUNT_SERVICE_NAME = "account-service"
 DEFAULT_HEALTH_INTERVAL = 30.0
 RECENT_ORDERS_CACHE_KEY = "account:orders:recent"
 DEFAULT_ORDER_LIMIT = 50
+ORDERS_SNAPSHOT_KEY_ENV = "ACCOUNT_ORDERS_SNAPSHOT_KEY"
+DEFAULT_ORDERS_SNAPSHOT_KEY = "json:orders:snapshot"
+ORDERS_COMMAND_METHOD_ENV = "ACCOUNT_ORDERS_COMMAND"
+DEFAULT_ORDERS_COMMAND_METHOD = "get_orders"
+ORDERS_COMMAND_TIMEOUT_ENV = "ACCOUNT_ORDERS_COMMAND_TIMEOUT"
+DEFAULT_ORDERS_COMMAND_TIMEOUT = 5.0
+DAILY_SUMMARY_COMMAND_ENV = "ACCOUNT_DAILY_SUMMARY_COMMAND"
+DEFAULT_DAILY_SUMMARY_COMMAND = "get_account_daily_summary"
+DAILY_SUMMARY_TIMEOUT_ENV = "ACCOUNT_DAILY_SUMMARY_TIMEOUT"
+DEFAULT_DAILY_SUMMARY_TIMEOUT = 5.0
 
 
 @dataclass
@@ -41,6 +55,18 @@ class AccountServiceState:
     last_refresh_error: Optional[str] = None
     snapshot_updated_at: Optional[str] = None
     stale_reason: Optional[str] = None
+    orders_last_refreshed_at: Optional[str] = None
+    orders_source: Optional[str] = None
+    orders_from_cache: Optional[bool] = None
+    orders_stale: Optional[bool] = None
+    orders_stale_reason: Optional[str] = None
+    orders_last_error: Optional[str] = None
+    daily_summary_last_refreshed_at: Optional[str] = None
+    daily_summary_source: Optional[str] = None
+    daily_summary_from_cache: Optional[bool] = None
+    daily_summary_stale: Optional[bool] = None
+    daily_summary_stale_reason: Optional[str] = None
+    daily_summary_last_error: Optional[str] = None
 
     def update_snapshot_metadata(
         self, *, info: Optional[Dict[str, Any]], positions: Optional[Dict[str, Any]]
@@ -69,6 +95,26 @@ class AccountServiceState:
             "last_refresh_error": self.last_refresh_error or "",
             "stale_reason": self.stale_reason or "",
         }
+        metrics.update(
+            {
+                "orders_last_refreshed_at": self.orders_last_refreshed_at or "",
+                "orders_source": self.orders_source or "",
+                "orders_from_cache": "" if self.orders_from_cache is None else self.orders_from_cache,
+                "orders_stale": "" if self.orders_stale is None else self.orders_stale,
+                "orders_stale_reason": self.orders_stale_reason or "",
+                "orders_last_error": self.orders_last_error or "",
+                "daily_summary_last_refreshed_at": self.daily_summary_last_refreshed_at or "",
+                "daily_summary_source": self.daily_summary_source or "",
+                "daily_summary_from_cache": ""
+                if self.daily_summary_from_cache is None
+                else self.daily_summary_from_cache,
+                "daily_summary_stale": ""
+                if self.daily_summary_stale is None
+                else self.daily_summary_stale,
+                "daily_summary_stale_reason": self.daily_summary_stale_reason or "",
+                "daily_summary_last_error": self.daily_summary_last_error or "",
+            }
+        )
         return metrics
 
 
@@ -99,6 +145,308 @@ async def _collect_snapshots() -> tuple[Optional[Dict[str, Any]], Optional[Dict[
     positions_snapshot = await read_positions_snapshot()
     return info_snapshot, positions_snapshot
 
+
+def _resolve_orders_snapshot_key() -> str:
+    return os.getenv(ORDERS_SNAPSHOT_KEY_ENV, DEFAULT_ORDERS_SNAPSHOT_KEY) or DEFAULT_ORDERS_SNAPSHOT_KEY
+
+
+def _resolve_orders_command_method() -> str:
+    return os.getenv(ORDERS_COMMAND_METHOD_ENV, DEFAULT_ORDERS_COMMAND_METHOD) or DEFAULT_ORDERS_COMMAND_METHOD
+
+
+def _resolve_orders_command_timeout() -> float:
+    raw = os.getenv(ORDERS_COMMAND_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_ORDERS_COMMAND_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_ORDERS_COMMAND_TIMEOUT
+    return max(0.0, value)
+
+
+def _resolve_daily_summary_command_method() -> str:
+    return os.getenv(DAILY_SUMMARY_COMMAND_ENV, DEFAULT_DAILY_SUMMARY_COMMAND) or DEFAULT_DAILY_SUMMARY_COMMAND
+
+
+def _resolve_daily_summary_timeout() -> float:
+    raw = os.getenv(DAILY_SUMMARY_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_DAILY_SUMMARY_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DAILY_SUMMARY_TIMEOUT
+    return max(0.0, value)
+
+
+async def _ensure_redis_client() -> Any | None:
+    client = _state.redis
+    if client is not None:
+        return client
+    try:
+        client = await get_redis_client()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to acquire Redis client: %s", exc)
+        return None
+    _state.redis = client
+    return client
+
+
+def _coerce_order_iterable(collection: Any) -> list[Dict[str, Any]]:
+    if isinstance(collection, Mapping):
+        iterable: Iterable[Any] = collection.values()
+    elif isinstance(collection, Sequence) and not isinstance(collection, (str, bytes, bytearray)):
+        iterable = collection
+    elif isinstance(collection, Iterable) and not isinstance(collection, (str, bytes, bytearray)):
+        iterable = collection
+    else:
+        return []
+
+    result: list[Dict[str, Any]] = []
+    for entry in iterable:
+        if isinstance(entry, Mapping):
+            result.append(dict(entry))
+    return result
+
+
+def _extract_orders(payload: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    orders_field = payload.get("orders")
+    if isinstance(orders_field, Sequence) and not isinstance(orders_field, (str, bytes, bytearray)):
+        return [dict(entry) for entry in orders_field if isinstance(entry, Mapping)]
+
+    orders: list[Dict[str, Any]] = []
+    orders.extend(_coerce_order_iterable(payload.get("active_orders")))
+    orders.extend(_coerce_order_iterable(payload.get("history")))
+    return orders
+
+
+def _orders_metadata(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "source": payload.get("source") or "orders-snapshot",
+        "snapshot_updated_at": payload.get("updated_at"),
+        "stale": bool(payload.get("stale", False)),
+        "stale_reason": payload.get("stale_reason"),
+        "stale_at": payload.get("stale_at"),
+    }
+    return metadata
+
+
+async def _read_orders_snapshot(client: Any) -> Optional[Dict[str, Any]]:
+    key = _resolve_orders_snapshot_key()
+    try:
+        raw = await client.get(key)
+    except Exception as exc:
+        logger.warning("Failed to read orders snapshot %s: %s", key, exc)
+        return None
+
+    if not raw:
+        return None
+
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8")
+        except Exception:
+            raw = raw.decode("utf-8", errors="ignore")
+
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:
+        logger.warning("Invalid orders snapshot payload: %s", exc)
+        return None
+
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return None
+
+
+def _normalise_orders_command_result(result: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(result, Mapping):
+        return dict(result)
+    if isinstance(result, Sequence) and not isinstance(result, (str, bytes, bytearray)):
+        orders = [dict(entry) for entry in result if isinstance(entry, Mapping)]
+        return {"orders": orders}
+    return None
+
+
+def _orders_payload_to_response(
+    payload: Mapping[str, Any],
+    *,
+    limit: int,
+    offset: int,
+    from_cache: bool,
+    source_override: Optional[str] = None,
+) -> Tuple[list[Dict[str, Any]], int, Dict[str, Any]]:
+    orders_all = _extract_orders(payload)
+    total_raw = payload.get("total")
+    try:
+        total = int(total_raw)
+    except (TypeError, ValueError):
+        total = len(orders_all)
+
+    metadata = _orders_metadata(payload)
+    if source_override:
+        metadata["source"] = source_override
+    metadata["from_cache"] = from_cache
+
+    sliced = orders_all[offset : offset + limit]
+    return sliced, total, metadata
+
+
+async def _load_orders_snapshot_payload() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    metadata: Dict[str, Any] = {
+        "source": "orders-snapshot-miss",
+        "snapshot_updated_at": None,
+        "stale": True,
+        "stale_reason": "orders-snapshot-missing",
+        "stale_at": None,
+        "from_cache": True,
+    }
+
+    client = await _ensure_redis_client()
+    if client is None:
+        metadata.update(
+            {
+                "source": "orders-snapshot-unavailable",
+                "from_cache": False,
+                "stale_reason": "redis-unavailable",
+            }
+        )
+        return None, metadata
+
+    payload = await _read_orders_snapshot(client)
+    if payload is None:
+        return None, metadata
+
+    metadata = _orders_metadata(payload)
+    metadata["from_cache"] = True
+    return payload, metadata
+
+
+def _normalise_daily_summary_rows(totals: Mapping[str, Any] | None) -> list[Dict[str, Any]]:
+    if not isinstance(totals, Mapping):
+        return []
+
+    rows: list[Dict[str, Any]] = []
+    for day, metrics in totals.items():
+        day_str = str(day)
+        mapping = metrics if isinstance(metrics, Mapping) else {}
+        pnl_raw = mapping.get("pnl", 0.0)
+        orders_raw = mapping.get("orders", 0)
+        try:
+            pnl_value = float(pnl_raw)
+        except (TypeError, ValueError):
+            pnl_value = 0.0
+        try:
+            orders_value = int(orders_raw)
+        except (TypeError, ValueError):
+            try:
+                orders_value = int(float(orders_raw))
+            except (TypeError, ValueError):
+                orders_value = 0
+        rows.append({"date": day_str, "pnl": pnl_value, "orders": orders_value})
+
+    rows.sort(key=lambda item: item["date"], reverse=True)
+    return rows
+
+
+async def _load_daily_summary_cache() -> Tuple[list[Dict[str, Any]], Optional[Dict[str, Any]], Dict[str, Any]]:
+    totals = await load_all_daily_totals()
+    net_liq_payload = await read_net_liquidation_snapshot()
+
+    rows = _normalise_daily_summary_rows(totals if isinstance(totals, Mapping) else None)
+
+    metadata: Dict[str, Any] = {
+        "source": "daily-summary-cache",
+        "snapshot_updated_at": None,
+        "stale": False,
+        "stale_reason": None,
+        "from_cache": True,
+    }
+
+    net_liq: Optional[Dict[str, Any]] = None
+    if isinstance(net_liq_payload, Mapping):
+        net_liq = dict(net_liq_payload)
+        metadata["source"] = net_liq.get("source") or metadata["source"]
+        timestamp = net_liq.get("timestamp")
+        if isinstance(timestamp, str) and timestamp:
+            metadata["snapshot_updated_at"] = timestamp
+    elif net_liq_payload is not None:
+        metadata["stale"] = True
+        metadata["stale_reason"] = "net-liq-invalid"
+
+    if totals is None:
+        metadata["stale"] = True
+        metadata["stale_reason"] = "daily-summary-unavailable"
+
+    if not rows and not net_liq:
+        metadata["stale"] = True
+        metadata.setdefault("stale_reason", "daily-summary-missing")
+
+    return rows, net_liq, metadata
+
+
+async def _publish_account_metrics() -> None:
+    redis_client = await _ensure_redis_client()
+    if redis_client is None:
+        return
+
+    try:
+        info_snapshot, positions_snapshot = await _collect_snapshots()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to collect account snapshots for metrics update: %s", exc)
+        info_snapshot = None
+        positions_snapshot = None
+
+    metrics = _state.as_metrics(info=info_snapshot, positions=positions_snapshot)
+
+    try:
+        await update_service_health(
+            redis_client,
+            ACCOUNT_SERVICE_NAME,
+            healthy=None,
+            last_error=_state.last_refresh_error or "",
+            metrics=metrics,
+            logger=logger,
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to publish account service metrics: %s", exc)
+
+
+async def _record_orders_metrics(
+    *,
+    source: str,
+    updated_at: Optional[str],
+    from_cache: bool,
+    stale: bool,
+    stale_reason: Optional[str],
+    error: Optional[str],
+) -> None:
+    _state.orders_source = source
+    _state.orders_last_refreshed_at = updated_at
+    _state.orders_from_cache = from_cache
+    _state.orders_stale = stale
+    _state.orders_stale_reason = stale_reason
+    _state.orders_last_error = error
+    await _publish_account_metrics()
+
+
+async def _record_daily_summary_metrics(
+    *,
+    source: str,
+    updated_at: Optional[str],
+    from_cache: bool,
+    stale: bool,
+    stale_reason: Optional[str],
+    error: Optional[str],
+) -> None:
+    _state.daily_summary_source = source
+    _state.daily_summary_last_refreshed_at = updated_at
+    _state.daily_summary_from_cache = from_cache
+    _state.daily_summary_stale = stale
+    _state.daily_summary_stale_reason = stale_reason
+    _state.daily_summary_last_error = error
+    await _publish_account_metrics()
 
 def _parse_bool(value: Optional[bool | str], *, default: bool = False) -> bool:
     """Return a normalised boolean from FastAPI query parameters."""
@@ -290,6 +638,18 @@ async def _startup() -> None:
     _state.last_refresh_error = None
     _state.snapshot_updated_at = None
     _state.stale_reason = None
+    _state.orders_last_refreshed_at = None
+    _state.orders_source = None
+    _state.orders_from_cache = None
+    _state.orders_stale = None
+    _state.orders_stale_reason = None
+    _state.orders_last_error = None
+    _state.daily_summary_last_refreshed_at = None
+    _state.daily_summary_source = None
+    _state.daily_summary_from_cache = None
+    _state.daily_summary_stale = None
+    _state.daily_summary_stale_reason = None
+    _state.daily_summary_last_error = None
     try:
         _state.redis = await get_redis_client()
     except Exception as exc:  # pragma: no cover - redis optional for local tests
@@ -559,6 +919,7 @@ async def _load_orders_fast(
         "stale": False,
         "stale_reason": None,
         "stale_at": None,
+        "from_cache": True,
     }
 
     client = _state.redis
@@ -571,6 +932,7 @@ async def _load_orders_fast(
                     "source": "fast-cache-unavailable",
                     "stale": True,
                     "stale_reason": str(exc),
+                    "from_cache": False,
                 }
             )
             return [], 0, metadata
@@ -584,12 +946,14 @@ async def _load_orders_fast(
                 "source": "fast-cache-error",
                 "stale": True,
                 "stale_reason": str(exc),
+                "from_cache": False,
             }
         )
         return [], 0, metadata
 
     if not raw_payload:
         metadata["source"] = "fast-cache-miss"
+        metadata["from_cache"] = True
         return [], 0, metadata
 
     try:
@@ -601,6 +965,7 @@ async def _load_orders_fast(
                 "source": "fast-cache-invalid",
                 "stale": True,
                 "stale_reason": "invalid-payload",
+                "from_cache": False,
             }
         )
         return [], 0, metadata
@@ -637,6 +1002,7 @@ def _orders_response(
 ) -> Dict[str, Any]:
     returned = len(orders)
     has_more = total > page * limit
+    from_cache_flag = bool(metadata.get("from_cache", True))
     payload: Dict[str, Any] = {
         "success": True,
         "orders": orders,
@@ -647,7 +1013,7 @@ def _orders_response(
             "returned": returned,
             "has_more": has_more,
         },
-        "from_cache": True,
+        "from_cache": from_cache_flag,
     }
     payload.update(metadata)
     return payload
@@ -705,34 +1071,289 @@ async def get_account_orders(
 
     offset = (page - 1) * limit
 
-    orders: list[Dict[str, Any]]
-    total: int
-    metadata: Dict[str, Any]
+    orders_payload, metadata = await _load_orders_snapshot_payload()
+    metadata = dict(metadata)
+    orders_snapshot = orders_payload
+    fast_result: Tuple[list[Dict[str, Any]], int, Dict[str, Any]] | None = None
 
-    if fast_flag:
-        orders, total, metadata = await _load_orders_fast(limit=limit, offset=offset)
-    else:
-        orders, total, metadata = await _load_orders_fast(limit=limit, offset=offset)
-        metadata = dict(metadata)
-        metadata.setdefault("stale_reason", "fast-path-disabled")
-        metadata["source"] = f"{metadata.get('source', 'fast-cache')}-bypass"
+    if orders_snapshot is None and fast_flag:
+        fast_result = await _load_orders_fast(limit=limit, offset=offset)
 
-    # Guard against offsets beyond the available totals.
+    if orders_snapshot is None:
+        client = await _ensure_redis_client()
+
+        if client is None:
+            error_message = "Redis client unavailable for orders snapshot"
+            metadata.setdefault("error", error_message)
+            await _record_orders_metrics(
+                source=str(metadata.get("source") or "orders-snapshot-unavailable"),
+                updated_at=metadata.get("snapshot_updated_at"),
+                from_cache=bool(metadata.get("from_cache", False)),
+                stale=bool(metadata.get("stale", True)),
+                stale_reason=metadata.get("stale_reason"),
+                error=error_message,
+            )
+            if fast_result is not None:
+                orders, total, fast_metadata = fast_result
+                response_metadata = dict(fast_metadata)
+                response_metadata.setdefault("error", error_message)
+            else:
+                orders, total = [], 0
+                response_metadata = dict(metadata)
+            if offset >= total:
+                orders = []
+            return _orders_response(
+                orders,
+                total=total,
+                page=page,
+                limit=limit,
+                metadata=response_metadata,
+            )
+
+        method = _resolve_orders_command_method()
+        timeout = _resolve_orders_command_timeout()
+        try:
+            command_result = await request_ib_command(method, redis=client, timeout=timeout)
+        except IBCommandTimeout as exc:
+            detail = "Timed out while requesting orders snapshot"
+            await _record_orders_metrics(
+                source=f"ib-command:{method}",
+                updated_at=None,
+                from_cache=False,
+                stale=True,
+                stale_reason="orders-command-timeout",
+                error=detail,
+            )
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=detail) from exc
+        except IBCommandError as exc:
+            detail = f"Orders command {method} failed: {exc}"
+            await _record_orders_metrics(
+                source=f"ib-command:{method}",
+                updated_at=None,
+                from_cache=False,
+                stale=True,
+                stale_reason="orders-command-error",
+                error=detail,
+            )
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+        except Exception as exc:
+            detail = f"Failed to execute orders command {method}: {exc}"
+            await _record_orders_metrics(
+                source=f"ib-command:{method}",
+                updated_at=None,
+                from_cache=False,
+                stale=True,
+                stale_reason="orders-command-error",
+                error=detail,
+            )
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+
+        command_source = str(command_result.get("source") or f"ib-command:{method}")
+        command_payload = _normalise_orders_command_result(command_result.get("result"))
+
+        if command_payload is not None:
+            orders_snapshot = command_payload
+            metadata = _orders_metadata(command_payload)
+            metadata["source"] = command_source
+            metadata["from_cache"] = False
+            updated_at = command_result.get("updated_at") or command_result.get("timestamp")
+            if isinstance(updated_at, str) and updated_at:
+                metadata.setdefault("snapshot_updated_at", updated_at)
+        else:
+            refreshed_payload, refreshed_metadata = await _load_orders_snapshot_payload()
+            if refreshed_payload is not None:
+                orders_snapshot = refreshed_payload
+                metadata = dict(refreshed_metadata)
+                metadata["from_cache"] = False
+                metadata["source"] = command_source
+            else:
+                metadata = dict(refreshed_metadata)
+                metadata["from_cache"] = False
+                metadata["source"] = command_source
+                metadata.setdefault("stale", True)
+                metadata.setdefault("stale_reason", "orders-snapshot-missing")
+                metadata.setdefault("error", "Orders snapshot unavailable after refresh")
+
+    if orders_snapshot is None:
+        fallback_metadata = dict(metadata)
+        fallback_metadata.setdefault("stale", True)
+        fallback_metadata.setdefault("from_cache", False)
+        fallback_metadata.setdefault("stale_reason", fallback_metadata.get("stale_reason") or "orders-snapshot-missing")
+        fallback_metadata.setdefault("error", fallback_metadata.get("error") or "Orders snapshot unavailable")
+
+        if fast_result is not None:
+            orders, total, fast_metadata = fast_result
+            response_metadata = dict(fast_metadata)
+            response_metadata.setdefault("stale", True)
+            response_metadata.setdefault("stale_reason", fallback_metadata.get("stale_reason"))
+            if fallback_metadata.get("error") and "error" not in response_metadata:
+                response_metadata["error"] = fallback_metadata["error"]
+        else:
+            orders, total = [], 0
+            response_metadata = fallback_metadata
+
+        if offset >= total:
+            orders = []
+
+        await _record_orders_metrics(
+            source=str(response_metadata.get("source") or fallback_metadata.get("source") or "orders-snapshot-miss"),
+            updated_at=response_metadata.get("snapshot_updated_at"),
+            from_cache=bool(response_metadata.get("from_cache", False)),
+            stale=bool(response_metadata.get("stale", True)),
+            stale_reason=response_metadata.get("stale_reason"),
+            error=response_metadata.get("error"),
+        )
+
+        return _orders_response(
+            orders,
+            total=total,
+            page=page,
+            limit=limit,
+            metadata=response_metadata,
+        )
+
+    response_orders, total, response_metadata = _orders_payload_to_response(
+        orders_snapshot,
+        limit=limit,
+        offset=offset,
+        from_cache=bool(metadata.get("from_cache", True)),
+        source_override=metadata.get("source"),
+    )
+
+    # Merge supplementary metadata gathered while fetching the snapshot.
+    if metadata.get("snapshot_updated_at") and not response_metadata.get("snapshot_updated_at"):
+        response_metadata["snapshot_updated_at"] = metadata["snapshot_updated_at"]
+    for key in ("stale", "stale_reason", "stale_at", "error"):
+        if key in metadata and key not in response_metadata:
+            response_metadata[key] = metadata[key]
+
     if offset >= total:
-        orders = []
+        response_orders = []
+
+    await _record_orders_metrics(
+        source=str(response_metadata.get("source") or metadata.get("source") or "orders-snapshot"),
+        updated_at=response_metadata.get("snapshot_updated_at"),
+        from_cache=bool(response_metadata.get("from_cache", True)),
+        stale=bool(response_metadata.get("stale", False)),
+        stale_reason=response_metadata.get("stale_reason"),
+        error=None,
+    )
 
     return _orders_response(
-        orders,
+        response_orders,
         total=total,
         page=page,
         limit=limit,
-        metadata=metadata,
+        metadata=response_metadata,
     )
 
 
 @app.get("/account/daily-summary")
 async def get_daily_summary() -> Dict[str, Any]:
-    return {"success": True, "daily_summary": [], "from_cache": True}
+    rows, net_liq, metadata = await _load_daily_summary_cache()
+    metadata = dict(metadata)
+
+    has_data = bool(rows) or bool(net_liq)
+
+    if not has_data:
+        client = await _ensure_redis_client()
+        if client is None:
+            detail = "Daily summary unavailable: Redis client unavailable"
+            metadata.setdefault("error", detail)
+            await _record_daily_summary_metrics(
+                source=str(metadata.get("source") or "daily-summary-unavailable"),
+                updated_at=metadata.get("snapshot_updated_at"),
+                from_cache=bool(metadata.get("from_cache", False)),
+                stale=bool(metadata.get("stale", True)),
+                stale_reason=metadata.get("stale_reason"),
+                error=detail,
+            )
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+
+        method = _resolve_daily_summary_command_method()
+        timeout = _resolve_daily_summary_timeout()
+        try:
+            command_result = await request_ib_command(method, redis=client, timeout=timeout)
+        except IBCommandTimeout as exc:
+            detail = "Timed out while requesting daily summary refresh"
+            await _record_daily_summary_metrics(
+                source=f"ib-command:{method}",
+                updated_at=None,
+                from_cache=False,
+                stale=True,
+                stale_reason="daily-summary-timeout",
+                error=detail,
+            )
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=detail) from exc
+        except IBCommandError as exc:
+            detail = f"Daily summary command {method} failed: {exc}"
+            await _record_daily_summary_metrics(
+                source=f"ib-command:{method}",
+                updated_at=None,
+                from_cache=False,
+                stale=True,
+                stale_reason="daily-summary-error",
+                error=detail,
+            )
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+        except Exception as exc:
+            detail = f"Failed to execute daily summary command {method}: {exc}"
+            await _record_daily_summary_metrics(
+                source=f"ib-command:{method}",
+                updated_at=None,
+                from_cache=False,
+                stale=True,
+                stale_reason="daily-summary-error",
+                error=detail,
+            )
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+
+        command_source = str(command_result.get("source") or f"ib-command:{method}")
+        rows, net_liq, refreshed_metadata = await _load_daily_summary_cache()
+        if rows or net_liq:
+            metadata = dict(refreshed_metadata)
+            metadata["from_cache"] = False
+            metadata["source"] = command_source
+        else:
+            detail = "Daily summary data unavailable after refresh"
+            metadata = dict(refreshed_metadata)
+            metadata["from_cache"] = False
+            metadata["source"] = command_source
+            metadata.setdefault("stale", True)
+            metadata.setdefault("stale_reason", metadata.get("stale_reason") or "daily-summary-missing")
+            metadata["error"] = detail
+            await _record_daily_summary_metrics(
+                source=metadata.get("source", command_source),
+                updated_at=metadata.get("snapshot_updated_at"),
+                from_cache=False,
+                stale=bool(metadata.get("stale", True)),
+                stale_reason=metadata.get("stale_reason"),
+                error=detail,
+            )
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+
+    response_metadata = dict(metadata)
+    from_cache_flag = bool(response_metadata.pop("from_cache", True))
+    response_metadata.setdefault("stale", False)
+
+    payload: Dict[str, Any] = {
+        "success": True,
+        "daily_summary": rows,
+        "net_liquidation": net_liq,
+        "from_cache": from_cache_flag,
+    }
+    payload.update(response_metadata)
+
+    await _record_daily_summary_metrics(
+        source=str(payload.get("source") or "daily-summary-cache"),
+        updated_at=payload.get("snapshot_updated_at"),
+        from_cache=from_cache_flag,
+        stale=bool(payload.get("stale", False)),
+        stale_reason=payload.get("stale_reason"),
+        error=None,
+    )
+
+    return payload
 
 
 @app.post("/account/refresh")
