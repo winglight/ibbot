@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,13 @@ from zoneinfo import ZoneInfo
 from fastapi.testclient import TestClient
 
 from services.market_data import MarketDataRuntime, create_app
+from src.data_layer import bootstrap
+from src.data_layer.cache import RedisCacheBackend
+from src.data_layer.data_source_manager import DataSubscriptionRequest
+from src.data_layer.quote_feed import InMemoryQuoteFeed
+from src.ibbot.redis import DEFAULT_REDIS_URL
 from src.utils import to_local_iso
+import pytest
 
 
 class FakeRedis:
@@ -197,6 +204,198 @@ def test_market_websocket_broadcasts_updates() -> None:
             snapshot = update["data"]
             assert snapshot["symbol"] == "ES"
             assert snapshot["dom"]["bids"][0]["price"] == 4300.25
+
+
+def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) -> None:
+    try:  # pragma: no cover - prefer fakeredis when available
+        import fakeredis  # type: ignore
+    except Exception:  # pragma: no cover - fallback stub when fakeredis missing
+        fakeredis = None  # type: ignore
+
+    try:  # pragma: no cover - prefer fakeredis when available
+        import fakeredis.aioredis as fakeredis_async  # type: ignore
+    except Exception:  # pragma: no cover - fallback stub when fakeredis missing
+        fakeredis_async = None  # type: ignore
+
+    if fakeredis is not None and fakeredis_async is not None:
+        server = fakeredis.FakeServer()
+        sync_client = fakeredis.FakeStrictRedis(server=server, decode_responses=True)
+        async_client = fakeredis_async.FakeRedis(server=server, decode_responses=True)
+    else:
+        class _SharedRedisStore:
+            def __init__(self) -> None:
+                self.values: dict[str, str] = {}
+                self.lists: dict[str, list[str]] = {}
+                self.expiry: dict[str, int] = {}
+
+        shared_store = _SharedRedisStore()
+
+        class _SyncRedisPipeline:
+            def __init__(self, client: "_SyncRedisClient") -> None:
+                self._client = client
+                self._ops: list[tuple[str, tuple[Any, ...]]] = []
+
+            def set(self, key: str, value: str) -> "_SyncRedisPipeline":
+                self._ops.append(("set", (key, value)))
+                return self
+
+            def expire(self, key: str, ttl: int) -> "_SyncRedisPipeline":
+                self._ops.append(("expire", (key, ttl)))
+                return self
+
+            def rpush(self, key: str, value: str) -> "_SyncRedisPipeline":
+                self._ops.append(("rpush", (key, value)))
+                return self
+
+            def ltrim(self, key: str, start: int, end: int) -> "_SyncRedisPipeline":
+                self._ops.append(("ltrim", (key, start, end)))
+                return self
+
+            def execute(self) -> list[Any]:
+                results: list[Any] = []
+                for name, args in self._ops:
+                    method = getattr(self._client, name)
+                    results.append(method(*args))
+                self._ops.clear()
+                return results
+
+        class _SyncRedisClient:
+            def __init__(self, store: _SharedRedisStore) -> None:
+                self._store = store
+
+            def pipeline(self) -> _SyncRedisPipeline:
+                return _SyncRedisPipeline(self)
+
+            def set(self, key: str, value: str) -> bool:
+                self._store.values[key] = value
+                return True
+
+            def expire(self, key: str, ttl: int) -> bool:
+                self._store.expiry[key] = ttl
+                return True
+
+            def rpush(self, key: str, value: str) -> int:
+                series = self._store.lists.setdefault(key, [])
+                series.append(value)
+                return len(series)
+
+            def ltrim(self, key: str, start: int, end: int) -> None:
+                series = self._store.lists.get(key)
+                if series is None:
+                    return
+                length = len(series)
+                if length == 0:
+                    return
+                if start < 0:
+                    start += length
+                if end < 0:
+                    end += length
+                start = max(start, 0)
+                end = min(end, length - 1)
+                if end < start:
+                    self._store.lists[key] = []
+                else:
+                    self._store.lists[key] = series[start : end + 1]
+
+            def lrange(self, key: str, start: int, end: int) -> list[str]:
+                series = list(self._store.lists.get(key, []))
+                length = len(series)
+                if length == 0:
+                    return []
+                if start < 0:
+                    start += length
+                if end < 0:
+                    end += length
+                start = max(start, 0)
+                end = min(end, length - 1)
+                if end < start:
+                    return []
+                return series[start : end + 1]
+
+            def get(self, key: str) -> str | None:
+                return self._store.values.get(key)
+
+        class _AsyncRedisClient:
+            def __init__(self, store: _SharedRedisStore) -> None:
+                self._store = store
+
+            async def lrange(self, key: str, start: int, end: int) -> list[str]:
+                sync = _SyncRedisClient(self._store)
+                return sync.lrange(key, start, end)
+
+        sync_client = _SyncRedisClient(shared_store)
+        async_client = _AsyncRedisClient(shared_store)
+
+    class _FakeRedisCacheBackend(RedisCacheBackend):
+        def __init__(self, url: str, *, prefix: str = "market-data", snapshot_ttl: int | None = None) -> None:
+            assert url == DEFAULT_REDIS_URL
+            self._client = sync_client
+            self._prefix = prefix.rstrip(":")
+            self._snapshot_ttl = snapshot_ttl
+
+    feed = InMemoryQuoteFeed()
+
+    monkeypatch.setattr(bootstrap, "RedisCacheBackend", _FakeRedisCacheBackend)
+    monkeypatch.setattr(bootstrap, "resolve_default_quote_feed", lambda: feed)
+    monkeypatch.setattr(bootstrap, "_cache_backend", None)
+    monkeypatch.setattr(bootstrap, "_manager", None)
+    monkeypatch.setattr(bootstrap, "_quote_feed", None)
+
+    monkeypatch.delenv("DATA_LAYER_REDIS_URL", raising=False)
+    monkeypatch.delenv("IBBOT_REDIS_URL", raising=False)
+    monkeypatch.setenv("DATA_LAYER_REDIS_PREFIX", "market-data")
+
+    async def _produce_candles() -> None:
+        manager = bootstrap.get_data_source_manager()
+        request = DataSubscriptionRequest(channel="market.tick", symbol="AAPL")
+        token = await manager.subscribe(request)
+        try:
+            now_ns = time.time_ns()
+            await feed.publish_tick(
+                "AAPL",
+                {"last": 100.0, "bid": 99.5, "ask": 100.5, "volume": 1.0, "ts_ns": now_ns},
+            )
+            await asyncio.sleep(0)
+            await feed.publish_tick(
+                "AAPL",
+                {
+                    "last": 101.0,
+                    "bid": 100.5,
+                    "ask": 101.5,
+                    "volume": 1.5,
+                    "ts_ns": now_ns + 1_000_000_000,
+                },
+            )
+            await asyncio.sleep(0)
+        finally:
+            await manager.unsubscribe(token)
+
+    asyncio.run(_produce_candles())
+
+    series_key = "market-data:series:market.candle.1s:AAPL"
+    stored_entries = sync_client.lrange(series_key, 0, -1)
+    assert stored_entries, "Expected candle series to be written to Redis"
+
+    async def _redis_factory() -> Any:
+        return async_client
+
+    runtime = MarketDataRuntime(redis_factory=_redis_factory, pubsub_listener=FakePubSubListener(), subscriptions=[])
+
+    with _start_client(runtime) as client:
+        response = client.post(
+            "/chart_data",
+            json={
+                "symbol": "AAPL",
+                "duration": "1 D",
+                "barSize": "1 sec",
+                "exchange": "SMART",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["symbol"] == "AAPL"
+        assert payload["data"], "Expected chart data to be returned"
 
 
 def test_unknown_symbol_returns_404() -> None:
