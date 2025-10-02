@@ -853,9 +853,7 @@ class TradingApp {
 
                 const candlestickRegistered = this.callMonitoringManager('registerCandlestickControllers');
                 if (!candlestickRegistered) {
-                    this.callMonitoringManager('ensureCandlestickPlugin').catch((err) => {
-                        console.warn('[Monitor] candlestick plugin load deferred:', err?.message || err);
-                    });
+                    console.warn('[Monitor] candlestick plugin unavailable during initialization; candlestick charts will fall back to line charts.');
                 }
             }
         } catch (e) {
@@ -3628,7 +3626,6 @@ class TradingApp {
         const state = this.getStrategyChartState();
         if (!name) return;
         state.currentStrategy = name;
-        state.pendingCandlestickUpgradeToken = null;
         if (options.symbol) {
             const normalizedSymbol = String(options.symbol).trim().toUpperCase();
             if (normalizedSymbol) {
@@ -3685,8 +3682,10 @@ class TradingApp {
         const forceExecutions = options.forceExecutions === true;
 
         try {
-            await this.callMonitoringManager('ensureDateAdapter');
-            const pluginPromise = this.callMonitoringManager('ensureCandlestickPlugin');
+            const dateAdapterReady = this.callMonitoringManager('isDateAdapterReady');
+            if (!dateAdapterReady) {
+                console.warn('[StrategyChart] Date adapter not detected; time axes may not format correctly.');
+            }
 
             let executions = Array.isArray(options.executions) ? options.executions : null;
             if (!executions || forceExecutions) {
@@ -3740,35 +3739,15 @@ class TradingApp {
                 return;
             }
 
-            const pluginStatus = await this.callMonitoringManager('waitForCandlestickPlugin', { promise: pluginPromise });
-            const pluginReady = pluginStatus.ready;
-            console.log('[StrategyChart] 蜡烛图插件状态', { pluginReady, timedOut: pluginStatus.timedOut });
+            const pluginReady = this.callMonitoringManager('registerCandlestickControllers');
+            console.log('[StrategyChart] 蜡烛图插件状态', { pluginReady });
             state.useCandlestick = Boolean(pluginReady);
             if (!pluginReady) {
                 if (!this.strategyChartFallbackNotified) {
                     console.warn('[StrategyChart] Candlestick plugin unavailable, falling back to line chart.');
                     this.strategyChartFallbackNotified = true;
                 }
-                if (pluginStatus.timedOut && pluginStatus.promise) {
-                    const upgradeToken = Symbol('strategy-candlestick-upgrade');
-                    state.pendingCandlestickUpgradeToken = upgradeToken;
-                    pluginStatus.promise
-                        .then((result) => {
-                            if (!result || state.pendingCandlestickUpgradeToken !== upgradeToken) {
-                                return;
-                            }
-                            state.pendingCandlestickUpgradeToken = null;
-                            state.useCandlestick = true;
-                            this.strategyChartFallbackNotified = false;
-                            if (state.fullBars && state.fullBars.length) {
-                                console.log('[StrategyChart] Candlestick plugin became available after timeout, upgrading chart.');
-                                this.renderStrategyChart({ redraw: true });
-                            }
-                        })
-                        .catch(() => {});
-                }
             } else {
-                state.pendingCandlestickUpgradeToken = null;
                 this.strategyChartFallbackNotified = false;
             }
 
