@@ -10,6 +10,7 @@ from typing import Any, Mapping, MutableMapping, Sequence
 
 from loguru import logger
 
+from src.account_service_readiness import refresh_account_service_status
 from src.ib_command_health import (
     IB_COMMAND_HEALTH_KEY,
     IB_COMMAND_HEALTH_STALE_AFTER_SEC,
@@ -322,6 +323,36 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
                 service="ib_command",
                 status="unhealthy",
                 detail=f"无法加载健康信息: {exc}",
+            )
+        )
+
+    try:
+        readiness = await refresh_account_service_status(max_age=60.0, log_failure=False)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to refresh account service readiness: %s", exc)
+        statuses.append(
+            ServiceStatus(
+                service="account-service",
+                status="unhealthy",
+                detail=f"无法刷新账户服务状态: {exc}",
+            )
+        )
+    else:
+        readiness_payload = readiness.as_payload()
+        checked_at = readiness_payload.get("checked_at")
+        if readiness.ready:
+            detail = "账户服务可用"
+        elif readiness.checked_at is None:
+            detail = "账户服务尚未执行连通性检查"
+        else:
+            detail = f"无法连接账户服务: {readiness.error or '未知错误'}"
+        statuses.append(
+            ServiceStatus(
+                service="account-service",
+                status="running" if readiness.ready else "unhealthy",
+                detail=detail,
+                last_reported=checked_at,
+                payload=readiness_payload,
             )
         )
 
