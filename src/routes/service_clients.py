@@ -241,6 +241,23 @@ class AccountServiceClient(ServiceClient):
                     return list(value)
         return None
 
+    async def fetch_orders(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        start_date: str | None = None,
+    ) -> Mapping[str, Any] | list[Any] | None:
+        params: Dict[str, Any] = {"limit": int(limit), "offset": int(offset)}
+        if start_date:
+            params["start_date"] = start_date
+
+        return await self.request(
+            "GET",
+            "/account/orders",
+            params=params,
+        )
+
 
 class RiskServiceClient(ServiceClient):
     service_name = "risk"
