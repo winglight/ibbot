@@ -95,6 +95,7 @@ cp .env.example .env.local  # 本地覆写，保存凭据与私有配置
 | `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING` | IBKR 连接主机、端口、客户端 ID 与交易环境 | 连接管理、`ib_command` |
 | `AUTO_CONNECT` / `IBBOT_DISABLE_TRADING` | 控制启动时是否自动连接 IBKR、是否禁用交易 | Web API、策略/订单模块 |
 | `IBBOT_REDIS_URL` | 全局 Redis 连接串，未单独指定时供各服务共用 | 全部后台服务 |
+| `ACCOUNT_SERVICE_URL` / `ACCOUNT_SERVICE_TIMEOUT` | 账户服务 HTTP 接入点，默认 `http://localhost:8020` | `services/account` |
 | `IB_COMMAND_REDIS_URL` / `IB_FEED_REDIS_URL` / `STRATEGY_REDIS_URL` 等 | 覆盖对应微服务的 Redis 连接 | `ib_command`、`ib_feed`、`strategy`、`notification` 等 |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | 当使用分散配置时拼接 Redis 地址 | Redis 客户端封装 |
 | `IB_COMMAND_HEALTH_POLL_INTERVAL_SEC` / `IB_COMMAND_HEALTH_STALE_AFTER_SEC` | 控制 ib-command 健康检查的轮询频率与过期阈值 | 主进程、`ib_command` |
@@ -134,12 +135,15 @@ python scripts/run_all.py ib_feed strategy --dry-run
 python scripts/run_all.py --dry-run ib_command
 ```
 
+> ⚠️ 主进程依赖 `services/account` 提供账户/订单接口，请优先启动该服务（`python scripts/run_service.py account`）。Docker Compose 与部署脚本已调整为在启动 `ibbot` 之前拉起 `account` 服务。
+
 上述命令无需额外设置 `PYTHONPATH`，直接使用 `python scripts/run_all.py ...` 即可完成导入检测与服务启动。
 
 常见服务的外部依赖如下表所示：
 
 | 服务模块 | 启动命令 | 主要依赖 | 说明 |
 | --- | --- | --- | --- |
+| `account` | `python scripts/run_service.py account` | Redis（账户快照缓存） | 提供账户/订单/持仓 REST 接口，默认监听 `8020` 端口，请在主进程前启动。 |
 | `ib_command` | `python scripts/run_service.py ib_command` | Redis（任务队列） | 可选对接 IB Gateway/TWS，使用 `--dry-run` 可跳过连接。 |
 | `ib_feed` | `python scripts/run_service.py ib_feed` | Redis（行情缓存） | 连接 IBKR 抓取实时/历史行情。 |
 | `strategy` | `python scripts/run_service.py strategy` | Redis（策略调度） | 负责策略生命周期与任务入队。 |

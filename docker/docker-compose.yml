@@ -56,12 +56,14 @@ services:
       - DOM_AUTOMATION_DEFAULT_APPLY_UPDATES=true
       - DOM_AUTOMATION_DEFAULT_SYMBOL=MNQ
       - DOM_AUTOMATION_DEFAULT_LIMIT=500
+      - ACCOUNT_SERVICE_URL=http://account:8020
 
     volumes:
       - ../data/logs:/app/logs
       - ../data:/app/data
       - ../src/strategies:/app/src/strategies
     depends_on:
+      - account
       - ib-gateway
     networks:
       - ibbot-network
@@ -90,6 +92,25 @@ services:
       - ../src/strategies:/app/src/strategies
     depends_on:
       - ibbot
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
+  account:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-account
+    command:
+      ["python", "-m", "uvicorn", "services.account.main:app", "--host", "0.0.0.0", "--port", "8020"]
+    ports:
+      - "8020:8020"
+    env_file:
+      - ./.env
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
     networks:
       - ibbot-network
       - stack

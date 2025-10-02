@@ -53,6 +53,7 @@ services:
     environment:
       AUTO_CONNECT: ${AUTO_CONNECT:-true}
       IBKR_PAPER_TRADING: ${IBKR_PAPER_TRADING:-False}
+      ACCOUNT_SERVICE_URL: http://account:8020
     ports:
       - "${IBBOT_WEB_PORT:-8000}:8000"
     volumes:
@@ -68,3 +69,9 @@ services:
       - "${OPTIMIZER_UI_PORT:-4173}:80"
   cloudflared:
     profiles: null
+  account:
+    ports:
+      - "${ACCOUNT_SERVICE_PORT:-8020}:8020"
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data

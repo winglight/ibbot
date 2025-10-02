@@ -31,6 +31,7 @@ services:
       # IBKR 实盘/纸交易连接（视环境修改）
       - IBKR_HOST=ib-gateway
       - IBKR_PORT=4002
+      - ACCOUNT_SERVICE_URL=http://account:8020
 
       # 认证与安全（务必覆盖默认值）
       - ADMIN_USERNAME=${ADMIN_USERNAME}
@@ -54,6 +55,7 @@ services:
     networks:
       - ibbot-network
     depends_on:
+      - account
       - ib-gateway
     restart: unless-stopped
     healthcheck:
@@ -77,6 +79,19 @@ services:
       - ibbot
     networks:
       - ibbot-network
+
+  account:
+    image: ghcr.io/<owner>/ibbot:v1.0.0
+    container_name: ibbot-account
+    env_file:
+      - ./.env
+    command:
+      ["python", "-m", "uvicorn", "services.account.main:app", "--host", "0.0.0.0", "--port", "8020"]
+    ports:
+      - "8020:8020"
+    networks:
+      - ibbot-network
+    restart: unless-stopped
 
 networks:
   ibbot-network:
