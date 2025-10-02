@@ -1,67 +1,42 @@
+"""Command-line entrypoint for the risk FastAPI gateway."""
+
 from __future__ import annotations
 
-import asyncio
-import signal
-from contextlib import AsyncExitStack
-from typing import Any, Mapping
+import argparse
+import os
+from typing import Sequence
 
-from services.risk import RiskRuntime
-from src.ibbot.config import ConfigProvider
-from src.ibbot.logging import get_logger
-from src.ibbot.redis import close_global_client, get_redis_client
+from services.risk.http import create_app
 
-SERVICE_NAME = "risk-service"
+DEFAULT_HOST = os.getenv("RISK_SERVICE_HOST", "0.0.0.0")
+DEFAULT_PORT = int(os.getenv("RISK_SERVICE_PORT", "8030"))
+
+app = create_app()
 
 
-async def run_service() -> None:
-    logger = get_logger("risk-service")
-    redis = await get_redis_client()
-
-    provider = ConfigProvider(redis_client=redis, hash_prefix="hash:config")
-    await provider.start()
-
-    initial_config = await provider.get_module(SERVICE_NAME)
-
-    async def redis_factory() -> Any:
-        return redis
-
-    runtime = RiskRuntime(
-        redis_factory=redis_factory,
-        logger_name="risk-service",
-        service_name=SERVICE_NAME,
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the risk service HTTP gateway")
+    parser.add_argument("--host", default=DEFAULT_HOST, help="Service bind host (default: %(default)s)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Service port (default: %(default)s)",
     )
-    await runtime.update_config(initial_config)
-
-    async def _config_listener(_: str, payload: Mapping[str, Any]) -> None:
-        await runtime.update_config(payload)
-        logger.info("Risk configuration updated")
-
-    provider.subscribe(SERVICE_NAME, _config_listener)
-
-    stop_event = asyncio.Event()
-
-    def _handle_stop(*_: Any) -> None:
-        logger.info("Received stop signal; shutting down")
-        stop_event.set()
-
-    loop = asyncio.get_running_loop()
-    for signame in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(signame, _handle_stop)
-        except NotImplementedError:  # pragma: no cover - platform dependent
-            signal.signal(signame, lambda *_: stop_event.set())
-
-    async with AsyncExitStack() as stack:
-        stack.push_async_callback(runtime.stop)
-        stack.push_async_callback(provider.close)
-        stack.push_async_callback(close_global_client)
-
-        await runtime.start()
-        await stop_event.wait()
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable auto-reload. Only use in development.",
+    )
+    return parser.parse_args(list(argv) if argv is not None else None)
 
 
-def main() -> None:
-    asyncio.run(run_service())
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+
+    import uvicorn
+
+    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual execution path

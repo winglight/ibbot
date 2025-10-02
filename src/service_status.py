@@ -30,13 +30,34 @@ __all__ = [
 SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
     (
         "risk_service_probe",
-        "risk-service",
-        os.getenv("RISK_SERVICE_HEALTH_KEY", "hash:service:health:risk-service"),
+        "risk",
+        os.getenv("RISK_SERVICE_HEALTH_KEY", "hash:service:health:risk"),
     ),
     (
         "strategy_service_probe",
         "strategy",
         os.getenv("STRATEGY_SERVICE_HEALTH_KEY", "hash:service:health:strategy"),
+    ),
+    (
+        "orders_service_probe",
+        "orders",
+        os.getenv("ORDERS_SERVICE_HEALTH_KEY", "hash:service:health:orders"),
+    ),
+    (
+        "market_data_service_probe",
+        "market_data",
+        os.getenv(
+            "MARKET_DATA_SERVICE_HEALTH_KEY",
+            "hash:service:health:market_data",
+        ),
+    ),
+    (
+        "connection_control_service_probe",
+        "connection_control",
+        os.getenv(
+            "CONNECTION_CONTROL_SERVICE_HEALTH_KEY",
+            "hash:service:health:connection_control",
+        ),
     ),
     (
         "account_snapshot_probe",
@@ -48,7 +69,7 @@ SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "queue_worker_probe",
-        "queue-monitor",
+        "queue",
         os.getenv("QUEUE_SERVICE_HEALTH_KEY", "hash:service:health:queue"),
     ),
 )
@@ -111,11 +132,10 @@ _PLACEHOLDER_SERVICES: dict[str, str] = {
     "optimizer": "Optimizer Engine 未提供健康接口，默认显示运行中。",
     "cloudflared": "Cloudflare Tunnel 状态未接入健康检查，默认显示运行中。",
     "notification": "通知服务未集成统一健康检查，默认显示运行中。",
-    "market_data": "行情落地服务未接入健康检查，默认显示运行中。",
 }
 
 _SERVICE_ALIASES: dict[str, str] = {
-    "queue-monitor": "queue_monitor",
+    "queue": "queue_monitor",
 }
 
 
@@ -430,7 +450,10 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
             )
         )
 
+    seen_services = {status.service for status in statuses}
     for service, message in _PLACEHOLDER_SERVICES.items():
+        if service in seen_services:
+            continue
         statuses.append(
             ServiceStatus(
                 service=service,

@@ -622,10 +622,10 @@
                                 </div>
                             </div>
                             <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
-                                 data-service="risk-service" data-service-label="Risk Manager (risk-service)">
+                                 data-service="risk" data-service-label="Risk Manager (risk)">
                                 <div class="service-status-meta">
                                     <div class="fw-semibold service-name">Risk Manager</div>
-                                    <div class="service-description small text-muted">风险控制服务 (risk-service)</div>
+                                    <div class="service-description small text-muted">风险控制服务 (risk)</div>
                                     <div class="service-status-text small text-muted" data-role="status-text">等待状态更新</div>
                                 </div>
                                 <div class="service-status-actions d-flex align-items-center gap-2">
@@ -643,6 +643,23 @@
                                 <div class="service-status-meta">
                                     <div class="fw-semibold service-name">Strategy Scheduler</div>
                                     <div class="service-description small text-muted">策略调度服务 (strategy)</div>
+                                    <div class="service-status-text small text-muted" data-role="status-text">等待状态更新</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">已下线</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="restart-label">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="orders" data-service-label="Order Dispatcher (orders)">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold service-name">Order Dispatcher</div>
+                                    <div class="service-description small text-muted">订单指令服务 (orders)</div>
                                     <div class="service-status-text small text-muted" data-role="status-text">等待状态更新</div>
                                 </div>
                                 <div class="service-status-actions d-flex align-items-center gap-2">
@@ -728,6 +745,23 @@
                                 <div class="service-status-meta">
                                     <div class="fw-semibold service-name">Market Data Sync</div>
                                     <div class="service-description small text-muted">行情落地服务 (market_data)</div>
+                                    <div class="service-status-text small text-muted" data-role="status-text">等待状态更新</div>
+                                </div>
+                                <div class="service-status-actions d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary" data-role="status-badge">已下线</span>
+                                    <button class="btn btn-outline-warning btn-sm d-flex align-items-center gap-2"
+                                            type="button" data-action="restart">
+                                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                                        <i class="fas fa-rotate-right"></i>
+                                        <span class="restart-label">重启</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3"
+                                 data-service="connection_control" data-service-label="Connection Control (connection_control)">
+                                <div class="service-status-meta">
+                                    <div class="fw-semibold service-name">Connection Control</div>
+                                    <div class="service-description small text-muted">IB 连接管理服务 (connection_control)</div>
                                     <div class="service-status-text small text-muted" data-role="status-text">等待状态更新</div>
                                 </div>
                                 <div class="service-status-actions d-flex align-items-center gap-2">

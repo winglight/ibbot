@@ -31,13 +31,26 @@ def test_gather_service_statuses_normalises_payloads():
                 "last_error": "",
                 "last_error_code": "",
             },
-            "hash:service:health:risk-service": {
+            "hash:service:health:risk": {
                 "status": "running",
                 "last_seen": recent,
             },
             "hash:service:health:strategy": {
                 "healthy": "false",
                 "last_error": "boom",
+                "last_seen": recent,
+            },
+            "hash:service:health:orders": {
+                "status": "running",
+                "last_seen": recent,
+            },
+            "hash:service:health:market_data": {
+                "status": "running",
+                "last_seen": recent,
+            },
+            "hash:service:health:connection_control": {
+                "status": "unhealthy",
+                "last_error": "offline",
                 "last_seen": recent,
             },
             "hash:service:health:account-snapshot": None,
@@ -54,8 +67,11 @@ def test_gather_service_statuses_normalises_payloads():
         status_map = {status.service: status for status in statuses}
 
         assert status_map["ibbot"].status == "running"
-        assert status_map["risk-service"].status == "running"
+        assert status_map["risk"].status == "running"
         assert status_map["strategy"].status == "unhealthy"
+        assert status_map["orders"].status == "running"
+        assert status_map["market_data"].status == "running"
+        assert status_map["connection_control"].status == "unhealthy"
         assert status_map["queue_monitor"].status == "running"
         assert status_map["ib-gateway"].status == "running"
         assert status_map["account-snapshot"].status == "unhealthy"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import inspect
@@ -28,6 +29,8 @@ DOM_CHANNEL_TEMPLATE = "pubsub:ib:dom:{symbol}"
 STREAM_KEY = "stream:market-service"
 CACHE_PREFIX_ENV = "DATA_LAYER_REDIS_PREFIX"
 DEFAULT_CACHE_PREFIX = "market-data"
+DEFAULT_HOST = os.getenv("MARKET_DATA_SERVICE_HOST", "0.0.0.0")
+DEFAULT_PORT = int(os.getenv("MARKET_DATA_SERVICE_PORT", "8010"))
 
 _BAR_SIZE_TO_INTERVAL = {
     "1 sec": "1s",
@@ -697,3 +700,32 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
 
 
 app = create_app()
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the market data service HTTP server")
+    parser.add_argument("--host", default=DEFAULT_HOST, help="Bind host (default: %(default)s)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Service port (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable uvicorn reload (development only)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+
+    import uvicorn
+
+    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info")
+
+
+if __name__ == "__main__":  # pragma: no cover - manual execution path
+    main()

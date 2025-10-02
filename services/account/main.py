@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator, Dict, Optional, Tuple
@@ -24,6 +25,8 @@ from src.utils import now_local, parse_local_datetime, to_local_iso
 
 ACCOUNT_SERVICE_NAME = "account-service"
 DEFAULT_HEALTH_INTERVAL = 30.0
+DEFAULT_HOST = os.getenv("ACCOUNT_SERVICE_HOST", "0.0.0.0")
+DEFAULT_PORT = int(os.getenv("ACCOUNT_SERVICE_PORT", "8020"))
 
 
 @dataclass
@@ -384,6 +387,35 @@ async def post_refresh_request() -> JSONResponse:
     if error:
         payload["error"] = error
     return JSONResponse(status_code=status.HTTP_200_OK, content=payload)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the account service HTTP server")
+    parser.add_argument("--host", default=DEFAULT_HOST, help="Bind host (default: %(default)s)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Service port (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable uvicorn reload (development only)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+
+    import uvicorn
+
+    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info")
+
+
+if __name__ == "__main__":  # pragma: no cover - manual execution path
+    main()
 
 
 __all__ = ["app"]

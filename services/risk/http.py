@@ -18,7 +18,7 @@ from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import close_global_client, get_redis_client
 
-SERVICE_NAME = "risk-service"
+SERVICE_NAME = "risk"
 DEFAULT_HEALTH_INTERVAL = 30.0
 
 
@@ -152,6 +152,14 @@ async def _lifespan(
             except Exception as exc:
                 logger.warning("Failed to load initial risk config: %s", exc)
                 config_payload = {}
+            if not config_payload and SERVICE_NAME != "risk-service":
+                try:
+                    legacy_payload = await provider.get_module("risk-service")
+                except Exception:
+                    legacy_payload = None
+                if legacy_payload:
+                    logger.info("Loaded legacy risk-service configuration module")
+                    config_payload = dict(legacy_payload)
 
         runtime = runtime_factory(redis)
         await runtime.update_config(config_payload)

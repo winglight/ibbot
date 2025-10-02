@@ -1,6 +1,8 @@
+import argparse
 import asyncio
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -11,6 +13,9 @@ from pydantic import BaseModel, ConfigDict
 
 from src.ibbot import update_service_health
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, get_redis_client
+
+DEFAULT_HOST = os.getenv("ORDERS_SERVICE_HOST", "0.0.0.0")
+DEFAULT_PORT = int(os.getenv("ORDERS_SERVICE_PORT", "8050"))
 
 LOGGER = logging.getLogger("ibbot.services.orders")
 
@@ -491,3 +496,32 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
 
 
 app = create_app()
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the orders service HTTP server")
+    parser.add_argument("--host", default=DEFAULT_HOST, help="Bind host (default: %(default)s)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Service port (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable uvicorn reload (development only)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+
+    import uvicorn
+
+    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info")
+
+
+if __name__ == "__main__":  # pragma: no cover - manual execution path
+    main()

@@ -26,11 +26,14 @@ from src.ibbot.redis import DEFAULT_REDIS_URL, DEFAULT_REDIS_URL_ENV
 
 DEFAULT_SERVICES: tuple[str, ...] = (
     "account",
+    "orders",
     "ib_command",
     "ib_feed",
+    "market_data",
     "strategy",
     "risk",
     "notification",
+    "connection_control",
 )
 
 # Mapping of service name -> dedicated Redis URL override environment variable.
@@ -183,8 +186,8 @@ def run_services(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "按需批量启动多个后台服务。默认启动 ib_command、ib_feed、"
-            "strategy、risk 与 notification。"
+            "按需批量启动多个后台服务。默认启动 account、orders、ib_command、"
+            "ib_feed、market_data、strategy、risk、notification 与 connection_control。"
         )
     )
     parser.add_argument(

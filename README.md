@@ -156,8 +156,11 @@ python scripts/run_all.py --dry-run ib_command
 | Redis 键 | 默认来源 | 主要字段 |
 | --- | --- | --- |
 | `hash:service:health:ib-command` | `ib_command` 服务（可由 `IB_COMMAND_HEALTH_KEY` 覆写） | `queue_depth`、`last_seen`、`last_error`、`last_error_code`、`stale` |
-| `hash:service:health:risk-service` | `risk` 服务（`RISK_SERVICE_HEALTH_KEY`） | `status`、`last_seen`、`last_error` |
+| `hash:service:health:risk` | `risk` 服务（`RISK_SERVICE_HEALTH_KEY`） | `status`、`last_seen`、`last_error` |
 | `hash:service:health:strategy` | `strategy` 服务（`STRATEGY_SERVICE_HEALTH_KEY`） | `status`/`healthy`、`last_error`、`last_seen` |
+| `hash:service:health:orders` | `orders` 服务（`ORDERS_SERVICE_HEALTH_KEY`） | `status`、`last_seen`、`last_error` |
+| `hash:service:health:market_data` | `market_data` 服务（`MARKET_DATA_SERVICE_HEALTH_KEY`） | `status`、`last_seen`、`last_error` |
+| `hash:service:health:connection_control` | `connection_control` 服务（`CONNECTION_CONTROL_SERVICE_HEALTH_KEY`） | `status`、`last_seen`、`last_error` |
 | `hash:service:health:account-snapshot` | 账户快照服务（`ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY`） | `status`、`healthy`、`last_error` |
 | `hash:service:health:queue` | 队列监控守护进程（`QUEUE_SERVICE_HEALTH_KEY`） | `status`、`last_seen` |
 | `hash:service:queue-monitor` | `queue_monitor` 服务 | `timestamp`、队列统计字段 |

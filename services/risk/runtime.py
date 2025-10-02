@@ -44,8 +44,8 @@ class RiskRuntime:
 
     redis_factory: Callable[[], Awaitable[Redis]]
     write_fn: Callable[[Iterable[Mapping[str, Any]]], Awaitable[int] | int] = write_points
-    logger_name: str = "risk-service"
-    service_name: str = "risk-service"
+    logger_name: str = "risk"
+    service_name: str = "risk"
     market_stream_key: str = "stream:market-service"
     market_group: str = "group:risk:market"
     results_stream_key: str = "stream:ib:results"
@@ -57,7 +57,7 @@ class RiskRuntime:
     reconnect_delay: float = 1.0
     config_cache_key: str = "json:risk:config"
     rules_cache_key: str = "json:risk:rules"
-    cache_source: str = "risk-service"
+    cache_source: str = "risk"
     config_measurement: str = "risk_config_snapshot"
     rules_measurement: str = "risk_rule_snapshot"
 
