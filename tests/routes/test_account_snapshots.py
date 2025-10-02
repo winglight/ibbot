@@ -170,9 +170,6 @@ async def test_websocket_emits_snapshot_status_when_cache_stale(
         websocket_module, "read_positions_snapshot", fake_read_positions_snapshot
     )
     monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
-    monkeypatch.setattr(
-        websocket_module, "get_dom_optimization_orchestrator", lambda: None
-    )
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:

@@ -151,7 +151,6 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
         )
 
     monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
-    monkeypatch.setattr(websocket_module, "get_dom_optimization_orchestrator", lambda: None)
 
     return app, account_client
 
