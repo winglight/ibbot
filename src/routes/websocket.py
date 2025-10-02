@@ -22,10 +22,6 @@ from src.account_snapshot_cache import (
     read_positions_snapshot,
 )
 from src.connection_manager import connection_manager
-from src.dom_optimizer import (
-    DOMOptimizationUnavailable,
-    get_dom_optimization_orchestrator,
-)
 from src.dom_service import get_dom_service
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
@@ -888,7 +884,6 @@ async def websocket_endpoint(websocket: WebSocket):
     request_tracker: Dict[str, float] = {}
     last_responses: Dict[str, Dict[str, Any]] = {}
     dom_service = get_dom_service()
-    orchestrator = None
     try:
         while True:
             data = await websocket.receive_text()
@@ -1348,57 +1343,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         error_payload["details"] = str(exc)
                         await websocket.send_text(json.dumps(error_payload))
             elif msg_type == "request_dom_automation_status":
-                if orchestrator is None:
-                    try:
-                        orchestrator = get_dom_optimization_orchestrator()
-                    except DOMOptimizationUnavailable as exc:
-                        logger.info("DOM optimisation orchestrator unavailable: {}", exc)
-                        orchestrator = None
-                    except Exception as exc:
-                        logger.warning(f"Failed to init DOM orchestrator: {exc}")
-                        orchestrator = None
-                if orchestrator is None:
-                    await websocket.send_text(json.dumps({
-                        "type": "dom_automation_status",
-                        "success": False,
-                        "error": "DOM orchestrator unavailable",
-                    }))
-                    continue
-
-                force = bool(message.get("force"))
-                key = "dom_automation_status"
-                if not _allow_request(request_tracker, key, force=force):
-                    cached = last_responses.get(key)
-                    if cached:
-                        cached_payload = dict(cached)
-                        cached_payload["cached"] = True
-                        await websocket.send_text(json.dumps(cached_payload))
-                    else:
-                        await websocket.send_text(json.dumps({
-                            "type": "dom_automation_status",
-                            "success": False,
-                            "error": "Rate limited",
-                        }))
-                    continue
-
-                try:
-                    status = await asyncio.to_thread(orchestrator.get_status)
-                    payload = {
-                        "type": "dom_automation_status",
-                        "success": True,
-                        "status": status,
-                    }
-                    if isinstance(status, dict):
-                        payload.update(status)
-                    last_responses[key] = payload
-                    await websocket.send_text(json.dumps(payload))
-                except Exception as exc:
-                    logger.warning(f"Failed to fetch DOM automation status: {exc}")
-                    await websocket.send_text(json.dumps({
-                        "type": "dom_automation_status",
-                        "success": False,
-                        "error": str(exc),
-                    }))
+                await websocket.send_text(json.dumps({
+                    "type": "dom_automation_status",
+                    "success": False,
+                    "error": "DOM automation is disabled",
+                }))
+                continue
             elif msg_type == "request_dom_stats":
                 symbol = (message.get("symbol") or "").strip().upper()
                 if not symbol:
