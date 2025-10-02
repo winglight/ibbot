@@ -34,6 +34,7 @@ from src.ib_command_health import (
 from src.routes.service_clients import (
     AccountServiceClient,
     MarketDataServiceClient,
+    OrdersServiceClient,
     RiskServiceClient,
     StrategyServiceClient,
     ServiceClientError,
@@ -48,6 +49,7 @@ RISK_RULES_CACHE_KEY = "json:risk:rules"
 
 _ACCOUNT_CLIENT = AccountServiceClient()
 _MARKET_CLIENT = MarketDataServiceClient()
+_ORDERS_CLIENT = OrdersServiceClient()
 _RISK_CLIENT = RiskServiceClient()
 _STRATEGY_CLIENT = StrategyServiceClient()
 
@@ -155,16 +157,16 @@ async def _fetch_orders(
     start_date: Optional[str] = None,
 ) -> Optional[Tuple[List[Dict[str, Any]], Optional[int]]]:
     try:
-        payload = await _ACCOUNT_CLIENT.fetch_orders(
+        payload = await _ORDERS_CLIENT.list_orders(
             limit=limit,
             offset=offset,
             start_date=start_date,
         )
     except ServiceUnavailableError as exc:
-        logger.debug("Account service unavailable for orders: %s", exc)
+        logger.debug("Orders service unavailable for orders: %s", exc)
         return None
     except ServiceClientError as exc:
-        logger.warning("Account service error fetching orders: %s", exc)
+        logger.warning("Orders service error fetching orders: %s", exc)
         return None
 
     orders_list: List[Dict[str, Any]] = []
@@ -195,8 +197,24 @@ async def _fetch_orders(
         except (TypeError, ValueError):
             total_count = None
 
+    if not orders_list and isinstance(payload, Mapping):
+        extra_orders = payload.get("orders")
+        if isinstance(extra_orders, list):
+            orders_list = [
+                dict(item) if isinstance(item, Mapping) else {"raw": item}
+                for item in extra_orders
+            ]
+
     if not orders_list:
         return None
+
+    if total_count is None:
+        total_count = payload.get("total") if isinstance(payload, Mapping) else None
+        try:
+            if total_count is not None:
+                total_count = int(total_count)
+        except (TypeError, ValueError):
+            total_count = None
 
     return orders_list, total_count
 

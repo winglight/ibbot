@@ -12,24 +12,28 @@ from src.routes import strategy as strategy_module
 from src.routes import market_data as market_data_module
 
 
+class StubOrdersClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.should_fail = False
+
+    async def list_orders(self, **_: Any) -> dict[str, Any]:
+        return {"orders": []}
+
+    async def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("place_order", dict(payload)))
+        if self.should_fail:
+            raise orders_module.ServiceUnavailableError("orders", "offline")
+        return {"command_id": "cmd-001", "status": "accepted"}
+
+
 @pytest.fixture()
-def orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+def orders_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, StubOrdersClient]:
     app = FastAPI()
     app.include_router(orders_module.router)
     orders_module.set_websocket_broadcast_override(None)
 
-    async def healthy_ib_command() -> dict[str, Any]:
-        return {
-            "connected": True,
-            "queue_depth": 0,
-            "last_error": None,
-            "error_code": None,
-            "stale": False,
-        }
-
-    monkeypatch.setattr(
-        orders_module, "_ensure_ib_command_available", healthy_ib_command
-    )
+    client = StubOrdersClient()
 
     async def allow_user(request: Request) -> str:
         request.state.is_read_only = False
@@ -38,32 +42,21 @@ def orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
         return "tester"
 
     app.dependency_overrides[orders_module.get_current_user] = allow_user
-    return app
+    app.dependency_overrides[orders_module.get_orders_service_client] = lambda: client
+
+    async def noop_audit(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(orders_module, "audit_log_success", noop_audit)
+    monkeypatch.setattr(orders_module, "audit_log_failure", noop_audit)
+
+    return app, client
 
 
-def test_place_order_enqueues_command_and_returns_id(orders_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
-    recorded: dict[str, Any] = {}
+def test_place_order_calls_orders_service(orders_app: tuple[FastAPI, StubOrdersClient]) -> None:
+    app, client_stub = orders_app
 
-    async def fake_enqueue(payload: dict[str, Any]) -> None:
-        recorded["payload"] = payload
-
-    class DummyWebSocketManager:
-        def __init__(self) -> None:
-            self.messages: list[dict[str, Any]] = []
-
-        async def broadcast(self, message: dict[str, Any]) -> None:
-            self.messages.append(message)
-
-    class FakeUUID:
-        hex = "cmd-001"
-
-    dummy_manager = DummyWebSocketManager()
-
-    monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
-    orders_module.set_websocket_broadcast_override(dummy_manager.broadcast)
-    monkeypatch.setattr(orders_module.uuid, "uuid4", lambda: FakeUUID())
-
-    with TestClient(orders_app) as client:
+    with TestClient(app) as client:
         response = client.post(
             "/api/place_order",
             json={
@@ -77,21 +70,18 @@ def test_place_order_enqueues_command_and_returns_id(orders_app: FastAPI, monkey
         )
 
     assert response.status_code == 200
-    payload = recorded["payload"]
+    payload = response.json()
     assert payload["command_id"] == "cmd-001"
-    assert payload["method"] == "place_market_order"
-    assert payload["kwargs"]["symbol"] == "ES"
-    assert dummy_manager.messages and dummy_manager.messages[0]["command_id"] == "cmd-001"
+    assert client_stub.calls and client_stub.calls[0][0] == "place_order"
 
 
-def test_place_order_enqueue_failure_returns_service_unavailable(orders_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def failing_enqueue(payload: dict[str, Any]) -> None:  # pragma: no cover - triggered in test
-        raise RuntimeError("boom")
+def test_place_order_returns_503_when_service_offline(
+    orders_app: tuple[FastAPI, StubOrdersClient]
+) -> None:
+    app, client_stub = orders_app
+    client_stub.should_fail = True
 
-    monkeypatch.setattr(orders_module, "_enqueue_command", failing_enqueue)
-    orders_module.set_websocket_broadcast_override(lambda message: None)
-
-    with TestClient(orders_app) as client:
+    with TestClient(app) as client:
         response = client.post(
             "/api/place_order",
             json={
@@ -105,32 +95,7 @@ def test_place_order_enqueue_failure_returns_service_unavailable(orders_app: Fas
         )
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "Failed to enqueue order command"
-
-
-def test_enqueue_command_uses_config_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorded: dict[str, Any] = {}
-
-    async def fake_enqueue(payload: dict[str, Any], *, queue_key: str) -> None:
-        recorded["payload"] = dict(payload)
-        recorded["queue_key"] = queue_key
-
-    class DummyProvider:
-        async def get(self, module: str, key: str, *, default: Any | None = None) -> str:
-            assert module == "ib-command"
-            assert key == "queue_key"
-            return "queue:test:configured"
-
-    class DummyContainer:
-        config_provider = DummyProvider()
-
-    monkeypatch.setattr(orders_module, "enqueue_ib_command", fake_enqueue)
-    monkeypatch.setattr(orders_module.core, "get_container", lambda: DummyContainer())
-
-    asyncio.run(orders_module._enqueue_command({"foo": "bar"}))
-
-    assert recorded["payload"] == {"foo": "bar"}
-    assert recorded["queue_key"] == "queue:test:configured"
+    assert response.json()["detail"] == "Orders service unavailable"
 
 
 @pytest.fixture()
