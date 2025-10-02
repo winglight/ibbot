@@ -78,6 +78,7 @@
 阶段 2 及以后可进一步核对：
 
 - `services/queue_monitor` 写入的 Redis 快照 `hash:service:queue-monitor`（确认队列长度/滞留时间指标）。
+- `services/queue_monitor` 同步的健康哈希 `hash:service:health:queue`（供 `/api/services/status` 及外部仪表板读取聚合指标）。
 - 主服务 `/api/monitoring/influx/write-rate` 接口返回的 `service_metrics` 写入速率，用于验证 `services/ib_feed`、`services/market_data` 等服务上报是否正常。
 
 若 InfluxDB 使用全新凭据，请确保 `.env.local` 中的 `INFLUX_TOKEN`、`INFLUX_ORG`、`INFLUX_BUCKET` 与初始化参数一致。

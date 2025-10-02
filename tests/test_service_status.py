@@ -73,6 +73,12 @@ def test_build_service_status_payload_structure():
                 "last_error": "",
                 "last_error_code": "",
             },
+            "hash:service:health:queue": {
+                "status": "running",
+                "last_seen": now,
+                "total_queue_length": "0",
+                "total_stream_pending": "0",
+            },
             "hash:service:queue-monitor": {"timestamp": now},
         }
 
@@ -82,5 +88,42 @@ def test_build_service_status_payload_structure():
         services = payload.get("services")
         assert isinstance(services, list)
         assert any(entry.get("service") == "ibbot" for entry in services)
+
+    asyncio.run(_run())
+
+
+def test_build_service_status_payload_includes_queue_metrics():
+    async def _run() -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        redis_data = {
+            "hash:service:health:ib-command": {
+                "last_seen": now,
+                "queue_depth": "2",
+                "last_error": "",
+                "last_error_code": "",
+            },
+            "hash:service:health:queue": {
+                "status": "running",
+                "last_seen": now,
+                "total_queue_length": "5",
+                "total_stream_pending": "3",
+            },
+            "hash:service:queue-monitor": {
+                "timestamp": now,
+                "queue:ib-commands": "{}",
+            },
+        }
+
+        payload = await build_service_status_payload(redis=StubRedis(redis_data))
+        services = payload.get("services")
+        assert isinstance(services, list)
+
+        queue_entries = [entry for entry in services if entry.get("service") == "queue_monitor"]
+        assert queue_entries, "queue monitor service status should be present"
+        assert any(
+            entry.get("payload", {}).get("total_queue_length") == "5"
+            and entry.get("payload", {}).get("total_stream_pending") == "3"
+            for entry in queue_entries
+        )
 
     asyncio.run(_run())
