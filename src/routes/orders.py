@@ -343,3 +343,49 @@ async def list_orders(
     response.setdefault("page", page)
     response.setdefault("start_date", start_date)
     return response
+
+
+@router.get("/api/orders/{order_id}")
+async def get_order(
+    order_id: str,
+    client: OrdersServiceClient = Depends(get_orders_service_client),
+    user: Optional[str] = Depends(get_current_user),
+):
+    identifier = str(order_id or "").strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="order_id is required")
+
+    payload = await _call_orders_service(client.get_order, identifier)
+    if not isinstance(payload, Mapping):
+        return {"success": True, "order": payload}
+
+    response = dict(payload)
+    order_payload = response.get("order")
+    if isinstance(order_payload, Mapping):
+        response["order"] = dict(order_payload)
+    response.setdefault("success", True)
+    response.setdefault("order_id", identifier)
+    return response
+
+
+@router.get("/api/orders/{order_id}/events")
+async def get_order_events(
+    order_id: str,
+    client: OrdersServiceClient = Depends(get_orders_service_client),
+    user: Optional[str] = Depends(get_current_user),
+):
+    identifier = str(order_id or "").strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="order_id is required")
+
+    payload = await _call_orders_service(client.get_order_events, identifier)
+    if not isinstance(payload, Mapping):
+        return {"success": True, "order_id": identifier, "events": payload}
+
+    response = dict(payload)
+    response.setdefault("success", True)
+    response.setdefault("order_id", identifier)
+    events = response.get("events")
+    if isinstance(events, list):
+        response["events"] = [dict(evt) if isinstance(evt, Mapping) else evt for evt in events]
+    return response
