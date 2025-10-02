@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -8,14 +9,11 @@ from typing import Any, AsyncIterator, Dict, Optional, Tuple
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from src.account_snapshot_cache import (
-    read_account_info_snapshot,
-    read_positions_snapshot,
-)
+from src.account_snapshot_cache import read_account_info_snapshot, read_positions_snapshot
 from src.account_snapshot_service import AccountSnapshotService
 from src.ibbot import update_service_health
 from src.ibbot.redis import get_redis_client, request_ib_command
@@ -24,6 +22,8 @@ from src.utils import now_local, parse_local_datetime, to_local_iso
 
 ACCOUNT_SERVICE_NAME = "account-service"
 DEFAULT_HEALTH_INTERVAL = 30.0
+RECENT_ORDERS_CACHE_KEY = "account:orders:recent"
+DEFAULT_ORDER_LIMIT = 50
 
 
 @dataclass
@@ -96,6 +96,42 @@ async def _collect_snapshots() -> tuple[Optional[Dict[str, Any]], Optional[Dict[
     info_snapshot = await read_account_info_snapshot()
     positions_snapshot = await read_positions_snapshot()
     return info_snapshot, positions_snapshot
+
+
+def _parse_bool(value: Optional[bool | str], *, default: bool = False) -> bool:
+    """Return a normalised boolean from FastAPI query parameters."""
+
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalised = value.strip().lower()
+        if normalised in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if normalised in {"0", "false", "f", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _snapshot_is_stale(snapshot: Optional[Dict[str, Any]]) -> bool:
+    if not snapshot or "data" not in snapshot:
+        return True
+    if snapshot.get("stale"):
+        return True
+    if snapshot.get("updated_at") is None:
+        return True
+    return False
+
+
+def _snapshot_metadata(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "source": snapshot.get("source"),
+        "snapshot_updated_at": snapshot.get("updated_at"),
+        "stale": snapshot.get("stale", False),
+        "stale_reason": snapshot.get("stale_reason"),
+        "stale_at": snapshot.get("stale_at"),
+    }
 
 
 def _evaluate_snapshot_freshness(
@@ -332,16 +368,159 @@ async def _shutdown() -> None:
 
 
 def _snapshot_response(snapshot: Dict[str, Any], *, data_key: str) -> Dict[str, Any]:
-    return {
+    payload = {
         "success": True,
         data_key: snapshot.get("data"),
         "from_cache": True,
-        "cache_updated_at": snapshot.get("updated_at"),
-        "cache_source": snapshot.get("source"),
-        "stale": snapshot.get("stale", False),
-        "stale_reason": snapshot.get("stale_reason"),
-        "stale_at": snapshot.get("stale_at"),
     }
+    payload.update(_snapshot_metadata(snapshot))
+    return payload
+
+
+async def _refresh_account_info(
+    *,
+    force_refresh: bool,
+) -> Dict[str, Any]:
+    snapshot = await read_account_info_snapshot()
+    needs_refresh = force_refresh or _snapshot_is_stale(snapshot)
+
+    if needs_refresh:
+        service = _state.snapshot_service
+        if service is not None:
+            reason = "api-force-refresh" if force_refresh else "api-stale"
+            try:
+                await service.refresh_account_info(reason=reason)
+            except Exception as exc:
+                logger.warning("Account info refresh failed: %s", exc)
+        snapshot = await read_account_info_snapshot()
+
+    return await _ensure_snapshot(snapshot, kind="Account info")
+
+
+async def _refresh_positions(
+    *,
+    force_refresh: bool,
+    fast: bool,
+) -> Dict[str, Any]:
+    snapshot = await read_positions_snapshot()
+    needs_refresh = force_refresh or _snapshot_is_stale(snapshot)
+
+    if needs_refresh:
+        service = _state.snapshot_service
+        if service is not None:
+            reason = "api-force-refresh" if force_refresh else "api-stale"
+            try:
+                await service.refresh_positions(reason=reason, fast=fast)
+            except Exception as exc:
+                logger.warning("Positions refresh failed: %s", exc)
+        snapshot = await read_positions_snapshot()
+
+    return await _ensure_snapshot(snapshot, kind="Positions")
+
+
+async def _load_orders_fast(
+    *,
+    limit: int,
+    offset: int,
+) -> Tuple[list[Dict[str, Any]], int, Dict[str, Any]]:
+    metadata: Dict[str, Any] = {
+        "source": "fast-cache",
+        "snapshot_updated_at": None,
+        "stale": False,
+        "stale_reason": None,
+        "stale_at": None,
+    }
+
+    client = _state.redis
+    if client is None:
+        try:
+            client = await get_redis_client()
+        except Exception as exc:
+            metadata.update(
+                {
+                    "source": "fast-cache-unavailable",
+                    "stale": True,
+                    "stale_reason": str(exc),
+                }
+            )
+            return [], 0, metadata
+
+    try:
+        raw_payload = await client.get(RECENT_ORDERS_CACHE_KEY)
+    except Exception as exc:
+        logger.warning("Failed to read fast orders cache: %s", exc)
+        metadata.update(
+            {
+                "source": "fast-cache-error",
+                "stale": True,
+                "stale_reason": str(exc),
+            }
+        )
+        return [], 0, metadata
+
+    if not raw_payload:
+        metadata["source"] = "fast-cache-miss"
+        return [], 0, metadata
+
+    try:
+        payload = json.loads(raw_payload)
+    except Exception as exc:
+        logger.warning("Invalid fast orders cache payload: %s", exc)
+        metadata.update(
+            {
+                "source": "fast-cache-invalid",
+                "stale": True,
+                "stale_reason": "invalid-payload",
+            }
+        )
+        return [], 0, metadata
+
+    orders = payload.get("orders") if isinstance(payload, dict) else None
+    if not isinstance(orders, list):
+        orders = []
+
+    metadata.update(
+        {
+            "source": payload.get("source") or metadata["source"],
+            "snapshot_updated_at": payload.get("updated_at"),
+            "stale": bool(payload.get("stale", False)),
+            "stale_reason": payload.get("stale_reason"),
+            "stale_at": payload.get("stale_at"),
+        }
+    )
+
+    total = payload.get("total") if isinstance(payload, dict) else None
+    if not isinstance(total, int):
+        total = len(orders)
+
+    sliced = orders[offset : offset + limit]
+    return sliced, total, metadata
+
+
+def _orders_response(
+    orders: list[Dict[str, Any]],
+    *,
+    total: int,
+    page: int,
+    limit: int,
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    returned = len(orders)
+    has_more = total > page * limit
+    payload: Dict[str, Any] = {
+        "success": True,
+        "orders": orders,
+        "meta": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "returned": returned,
+            "has_more": has_more,
+        },
+        "from_cache": True,
+    }
+    payload.update(metadata)
+    return payload
 
 
 async def _ensure_snapshot(snapshot: Optional[Dict[str, Any]], *, kind: str) -> Dict[str, Any]:
@@ -352,26 +531,73 @@ async def _ensure_snapshot(snapshot: Optional[Dict[str, Any]], *, kind: str) -> 
 
 
 @app.get("/account/info")
-async def get_account_info() -> Dict[str, Any]:
-    snapshot = await _ensure_snapshot(
-        await read_account_info_snapshot(),
-        kind="Account info",
-    )
+async def get_account_info(
+    force_refresh: str | None = Query(None),
+    fast: str | None = Query(None),
+) -> Dict[str, Any]:
+    refresh = _parse_bool(force_refresh, default=False)
+    _ = _parse_bool(fast, default=False)  # parsed for parity with other endpoints
+    snapshot = await _refresh_account_info(force_refresh=refresh)
     return _snapshot_response(snapshot, data_key="account_info")
 
 
 @app.get("/account/positions")
-async def get_account_positions() -> Dict[str, Any]:
-    snapshot = await _ensure_snapshot(
-        await read_positions_snapshot(),
-        kind="Positions",
-    )
+async def get_account_positions(
+    force_refresh: str | None = Query(None),
+    fast: str | None = Query(None),
+) -> Dict[str, Any]:
+    refresh = _parse_bool(force_refresh, default=False)
+    fast_flag = _parse_bool(fast, default=True)
+    snapshot = await _refresh_positions(force_refresh=refresh, fast=fast_flag)
     return _snapshot_response(snapshot, data_key="positions")
 
 
 @app.get("/account/orders")
-async def get_account_orders() -> Dict[str, Any]:
-    return {"success": True, "orders": [], "from_cache": True}
+async def get_account_orders(
+    force_refresh: str | None = Query(None),
+    fast: str | None = Query(None),
+    limit: int = Query(DEFAULT_ORDER_LIMIT, ge=1, le=500),
+    page: int = Query(1, ge=1),
+) -> Dict[str, Any]:
+    refresh = _parse_bool(force_refresh, default=False)
+    fast_flag = _parse_bool(fast, default=True)
+
+    if refresh:
+        service = _state.snapshot_service
+        if service is not None:
+            try:
+                await service.refresh_both(
+                    reason="api-orders-force-refresh",
+                    fast_positions=fast_flag,
+                )
+            except Exception as exc:
+                logger.warning("Orders force refresh failed: %s", exc)
+
+    offset = (page - 1) * limit
+
+    orders: list[Dict[str, Any]]
+    total: int
+    metadata: Dict[str, Any]
+
+    if fast_flag:
+        orders, total, metadata = await _load_orders_fast(limit=limit, offset=offset)
+    else:
+        orders, total, metadata = await _load_orders_fast(limit=limit, offset=offset)
+        metadata = dict(metadata)
+        metadata.setdefault("stale_reason", "fast-path-disabled")
+        metadata["source"] = f"{metadata.get('source', 'fast-cache')}-bypass"
+
+    # Guard against offsets beyond the available totals.
+    if offset >= total:
+        orders = []
+
+    return _orders_response(
+        orders,
+        total=total,
+        page=page,
+        limit=limit,
+        metadata=metadata,
+    )
 
 
 @app.get("/account/daily-summary")
