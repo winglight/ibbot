@@ -13,6 +13,7 @@ from services.ib_command import (
     ResultPublisher,
     RetryableIBCommandError,
 )
+from src.ibkr_client import IBKRClient
 
 
 class _InMemoryRedis:
@@ -188,3 +189,89 @@ async def _run_flow_test(redis_client: "fakeredis.aioredis.FakeRedis") -> None: 
     assert health["queue_depth"] == "0"
     assert "boom" in health["last_error"]
     assert health.get("last_error_code") == "9001"
+
+
+async def _wait_for_hash(redis_client: Any, key: str, timeout: float = 2.0) -> dict[str, str]:
+    deadline = time.monotonic() + timeout
+    while True:
+        payload = await redis_client.hgetall(key)
+        if payload:
+            return payload
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"Timed out waiting for Redis hash {key}")
+        await asyncio.sleep(0.05)
+
+
+async def _run_place_order_flow(redis_client: Any) -> None:
+    await redis_client.flushall()
+    client = IBKRClient()
+    queue_key = "queue:test:commands:place-order"
+    stream_key = "stream:test:results:place-order"
+    hash_prefix = "hash:test:result:place-order"
+
+    executor = IBCommandExecutor(client, logger_name="tests.ib_command.executor.place_order")
+    publisher = ResultPublisher(
+        redis_client,
+        stream_key=stream_key,
+        hash_prefix=hash_prefix,
+        logger_name="tests.ib_command.results.place_order",
+    )
+    consumer = CommandConsumer(
+        redis_client,
+        executor,
+        publisher,
+        queue_key=queue_key,
+        poll_timeout=0.05,
+        default_max_retries=0,
+        retry_delay=0.05,
+        health_key="hash:service:health:test-place-order",
+        logger_name="tests.ib_command.consumer.place_order",
+    )
+
+    command_id = "cmd-place-order"
+    order_payload = {
+        "command_id": command_id,
+        "method": "place_order",
+        "kwargs": {
+            "symbol": "ES",
+            "quantity": 1,
+            "action": "BUY",
+            "order_type": "LIMIT",
+            "limit_price": 4450.25,
+            "exchange": "CME",
+            "sec_type": "FUT",
+        },
+    }
+    await redis_client.rpush(queue_key, json.dumps(order_payload))
+
+    task = asyncio.create_task(consumer.consume_forever())
+    result_hash_key = f"{hash_prefix}:{command_id}"
+    try:
+        result_entry = await _wait_for_hash(redis_client, result_hash_key, timeout=2.0)
+    finally:
+        consumer.stop()
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except asyncio.CancelledError:
+            pass
+        client.disconnect()
+
+    assert result_entry.get("status") == "success"
+    assert "result" in result_entry
+    order_result = json.loads(result_entry["result"])
+    assert isinstance(order_result, dict)
+    assert order_result.get("order_id")
+    assert order_result.get("status") == "Simulated"
+    assert order_result.get("symbol") == "ES"
+    assert order_result.get("exchange") == "CME"
+    assert order_result.get("sec_type") == "FUT"
+    assert order_result.get("order_type") == "LIMIT"
+    assert pytest.approx(order_result.get("limit_price") or 0.0, rel=1e-6) == 4450.25
+    assert pytest.approx(order_result.get("quantity") or 0.0, rel=1e-6) == 1.0
+    assert pytest.approx(order_result.get("remaining") or 0.0, rel=1e-6) == 1.0
+    assert order_result.get("filled") in (0, 0.0, None)
+    assert order_result.get("avg_fill_price") is None
+
+
+def test_place_order_command_returns_mapping(redis_client):
+    asyncio.run(_run_place_order_flow(redis_client))
