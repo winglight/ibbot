@@ -29,6 +29,7 @@ from src.ib_command_health import (
     IB_COMMAND_HEALTH_KEY,
     IB_COMMAND_HEALTH_STALE_AFTER_SEC,
     build_ib_connection_health_payload,
+    resolve_ib_account_type,
 )
 from src.routes.service_clients import (
     AccountServiceClient,
@@ -580,8 +581,16 @@ async def websocket_endpoint(websocket: WebSocket):
         redis_connected = bool(data.get("connected")) if redis_fresh else None
 
         connected_flag = bool(redis_connected)
-        account_type = str(data.get("account_type") or "Unknown")
+        account_type_raw = data.get("account_type") if data else None
+        account_type = (
+            str(account_type_raw)
+            if account_type_raw
+            else resolve_ib_account_type()
+        )
         last_error = data.get("last_error") or None
+        error_code_value = data.get("error_code") if data else None
+        if isinstance(error_code_value, str) and not error_code_value.strip():
+            error_code_value = None
 
         error_message = None
         if not data:
@@ -596,6 +605,7 @@ async def websocket_endpoint(websocket: WebSocket):
             redis_connected,
             redis_fresh,
             error_message,
+            error_code_value,
         )
 
     health_payload: Optional[Dict[str, Any]]
@@ -607,6 +617,7 @@ async def websocket_endpoint(websocket: WebSocket):
         _,
         _,
         health_error,
+        error_code_value,
     ) = await _resolve_connection_context(refresh=True)
 
     # 新连接建立后，立即向该客户端单播当前连接状态
@@ -616,6 +627,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "success": health_payload is not None,
             "connected": bool(connected_flag),
             "account_type": account_type_label,
+            "error_code": error_code_value,
         }
         if last_error_value:
             payload["last_error"] = last_error_value

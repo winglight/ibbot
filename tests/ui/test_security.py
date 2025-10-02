@@ -36,6 +36,18 @@ def secured_orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
         pass
 
     monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
+    async def healthy_ib_health() -> dict[str, Any]:
+        return {
+            "connected": True,
+            "queue_depth": 0,
+            "last_error": None,
+            "error_code": None,
+            "stale": False,
+        }
+
+    monkeypatch.setattr(
+        orders_module, "_ensure_ib_command_available", healthy_ib_health
+    )
     monkeypatch.setattr(orders_module, "websocket_manager", DummyWebSocketManager())
     app.dependency_overrides[orders_module.get_current_user] = operator
     return app

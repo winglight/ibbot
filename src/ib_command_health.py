@@ -62,6 +62,7 @@ class IBCommandHealth:
     last_seen: str | None
     queue_depth: int | None
     last_error: str | None
+    error_code: int | None
     stale: bool
     source: str = "redis"
 
@@ -74,6 +75,7 @@ class IBCommandHealth:
             "last_seen": self.last_seen,
             "queue_depth": self.queue_depth,
             "last_error": self.last_error,
+            "error_code": self.error_code,
             "stale": self.stale,
             "source": self.source,
         }
@@ -120,9 +122,19 @@ def build_ib_connection_health_payload(
     if not last_error:
         last_error = None
 
+    error_code_raw = raw.get("last_error_code")
+    error_code: int | None = None
+    if error_code_raw not in (None, ""):
+        try:
+            error_code = int(error_code_raw)
+        except (TypeError, ValueError):
+            error_code = None
+
+    has_error = last_error is not None or error_code is not None
+
     connected = (
         not stale
-        and last_error is None
+        and not has_error
         and queue_depth is not None
         and queue_depth >= 0
     )
@@ -133,6 +145,7 @@ def build_ib_connection_health_payload(
         last_seen=last_seen_dt.isoformat() if last_seen_dt else None,
         queue_depth=queue_depth,
         last_error=last_error,
+        error_code=error_code,
         stale=stale,
     )
     return payload.as_mapping()

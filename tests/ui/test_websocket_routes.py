@@ -29,7 +29,12 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
     monkeypatch.setattr(websocket_module, "_websocket_manager", lambda: stub_manager)
 
     async def fake_health() -> dict[str, Any]:
-        return {"connected": True, "account_type": "Paper"}
+        return {
+            "connected": True,
+            "account_type": "Paper",
+            "error_code": None,
+            "stale": False,
+        }
 
     monkeypatch.setattr(websocket_module, "_load_ib_command_health", fake_health)
 
@@ -122,6 +127,7 @@ def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any]
                 "position_update",
             ]
             assert messages[0]["success"] is True
+            assert messages[0].get("error_code") is None
             assert messages[1]["account_info"]["equity"] == 1000
             assert messages[2]["orders"][0]["order_id"] == "1"
             assert messages[3]["positions"][0]["symbol"] == "ES"

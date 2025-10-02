@@ -37,7 +37,21 @@ def test_project_env_file_is_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_redis_config_uses_code_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """When Redis variables are absent, code defaults should be applied."""
 
-    for key in ["REDIS_URL", "REDIS_HOST", "REDIS_PORT", "REDIS_DB", "REDIS_PASSWORD", "REDIS_SSL"]:
+    for key in [
+        "REDIS_URL",
+        "IBBOT_REDIS_URL",
+        "ACCOUNT_CACHE_REDIS_URL",
+        "IB_COMMAND_REDIS_URL",
+        "IB_FEED_REDIS_URL",
+        "STRATEGY_REDIS_URL",
+        "NOTIFICATION_REDIS_URL",
+        "DATA_LAYER_REDIS_URL",
+        "REDIS_HOST",
+        "REDIS_PORT",
+        "REDIS_DB",
+        "REDIS_PASSWORD",
+        "REDIS_SSL",
+    ]:
         monkeypatch.delenv(key, raising=False)
 
     config = _load_config()

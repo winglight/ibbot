@@ -336,8 +336,9 @@ async def get_connection_status(user: Optional[str] = Depends(get_current_user))
             "last_seen": None,
             "queue_depth": None,
             "last_error": "ib-command health unavailable",
+            "error_code": None,
             "stale": True,
-            "source": "redis",
+            "source": "http",
         }
     except Exception as exc:
         logger.error("Failed to get connection status: {}", exc)

@@ -120,7 +120,7 @@ class MockIB:
 
     async def fatal(self, payload: Any) -> None:
         self._record("fatal", payload)
-        raise IBCommandExecutionError("boom")
+        raise IBCommandExecutionError("boom", error_code=9001)
 
 
 def test_command_flow_sequential_retry_and_failure(redis_client):
@@ -182,7 +182,9 @@ async def _run_flow_test(redis_client: "fakeredis.aioredis.FakeRedis") -> None: 
     failure_payload = await redis_client.hgetall("hash:test:result:cmd-3")
     assert failure_payload["status"] == "failed"
     assert "boom" in failure_payload["error"]
+    assert failure_payload.get("error_code") == "9001"
 
     health = await redis_client.hgetall("hash:service:health:test")
     assert health["queue_depth"] == "0"
     assert "boom" in health["last_error"]
+    assert health.get("last_error_code") == "9001"
