@@ -309,6 +309,7 @@ def test_build_service_status_payload_includes_queue_metrics(monkeypatch: pytest
             for entry in queue_entries
         )
         assert queue_entries[0].get("port") == "8011"
+        assert queue_entries[0].get("service_name") == "queue-monitor"
         assert queue_entries[0].get("display_name") in {"Queue Monitor", "queue_monitor"}
 
     asyncio.run(_run())
