@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.account_service_readiness import AccountServiceReadiness
+from src.routes.service_registry import SERVICE_REGISTRY
 from src.service_status import gather_service_statuses, build_service_status_payload
 
 
@@ -87,6 +88,12 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert status_map["ib-gateway"].status == "external"
         assert status_map["cloudflared"].status == "external"
         assert status_map["account_snapshot"].status == "unhealthy"
+        assert status_map["ib_feed"].status == "unhealthy"
+        assert status_map["market_data"].status == "unhealthy"
+        assert status_map["optimizer"].status == "unhealthy"
+        assert "未上报" in (status_map["ib_feed"].detail or "")
+        assert "未上报" in (status_map["market_data"].detail or "")
+        assert "未上报" in (status_map["optimizer"].detail or "")
 
         account_payload = status_map["account"].payload or {}
         assert "readiness" in account_payload
@@ -177,6 +184,20 @@ def test_build_service_status_payload_structure(monkeypatch: pytest.MonkeyPatch)
         assert isinstance(services, list)
         assert any(entry.get("service") == "ibbot" for entry in services)
         assert any(entry.get("service") == "account" for entry in services)
+        ordered_services = [entry.get("service") for entry in services]
+        expected_order = [service.slug for service in SERVICE_REGISTRY]
+        assert ordered_services[: len(expected_order)] == expected_order
+
+        ibbot_entry = next(entry for entry in services if entry.get("service") == "ibbot")
+        assert ibbot_entry.get("display_name") == "Trading Core"
+        assert ibbot_entry.get("internal") is True
+        assert ibbot_entry.get("health_key")
+        assert ibbot_entry.get("implementation_status")
+
+        market_entry = next(entry for entry in services if entry.get("service") == "market_data")
+        assert market_entry.get("display_name") == "Market Data Sync"
+        assert market_entry.get("status") == "unhealthy"
+        assert "未上报" in (market_entry.get("detail") or "")
 
     asyncio.run(_run())
 
@@ -234,5 +255,7 @@ def test_build_service_status_payload_includes_queue_metrics(monkeypatch: pytest
             "metrics_snapshot" in (entry.get("payload") or {})
             for entry in queue_entries
         )
+        assert queue_entries[0].get("port") == "8011"
+        assert queue_entries[0].get("display_name") == "Queue Monitor"
 
     asyncio.run(_run())

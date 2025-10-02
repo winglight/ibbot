@@ -17,6 +17,7 @@ from src.ib_command_health import (
     build_ib_connection_health_payload,
 )
 from src.ibbot.redis import get_redis_client
+from src.routes.service_registry import SERVICE_REGISTRY
 
 
 __all__ = [
@@ -54,55 +55,31 @@ class ServiceProbe:
         slug = self.service_name.replace("-", "_")
         return f"{slug}_probe"
 
+def _build_service_probes() -> tuple[ServiceProbe, ...]:
+    probes: list[ServiceProbe] = []
+    for service in SERVICE_REGISTRY:
+        if not service.internal:
+            continue
+        if service.slug in {"ibbot", "ib_command", "queue_monitor"}:
+            continue
+        default_key = service.default_health_key()
+        if not default_key:
+            continue
+        missing_detail = service.missing_detail or f"{service.display_name} 未上报健康数据"
+        probes.append(
+            ServiceProbe(
+                ui_service=service.slug,
+                service_name=service.service_name or service.slug,
+                default_key=default_key,
+                env_var=service.health_env_var,
+                missing_detail=missing_detail,
+                module_name=service.module_name,
+            )
+        )
+    return tuple(probes)
 
-SERVICE_HEALTH_PROBES: tuple[ServiceProbe, ...] = (
-    ServiceProbe(
-        ui_service="account",
-        service_name="account-service",
-        default_key="hash:service:health:account-service",
-        env_var="ACCOUNT_SERVICE_HEALTH_KEY",
-        missing_detail="账户服务未上报健康数据",
-        module_name="account_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="orders",
-        service_name="orders",
-        default_key="hash:service:health:orders",
-        env_var="ORDERS_SERVICE_HEALTH_KEY",
-        missing_detail="订单服务未上报健康数据",
-        module_name="orders_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="risk",
-        service_name="risk-service",
-        default_key="hash:service:health:risk-service",
-        env_var="RISK_SERVICE_HEALTH_KEY",
-        module_name="risk_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="strategy",
-        service_name="strategy",
-        default_key="hash:service:health:strategy",
-        env_var="STRATEGY_SERVICE_HEALTH_KEY",
-        module_name="strategy_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="notification",
-        service_name="notification",
-        default_key="hash:service:health:notification",
-        env_var="NOTIFICATION_SERVICE_HEALTH_KEY",
-        missing_detail="通知服务未上报健康数据",
-        module_name="notification_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="account_snapshot",
-        service_name="account-snapshot",
-        default_key="hash:service:health:account-snapshot",
-        env_var="ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY",
-        missing_detail="账户快照服务未上报健康数据",
-        module_name="account_snapshot_probe",
-    ),
-)
+
+SERVICE_HEALTH_PROBES: tuple[ServiceProbe, ...] = _build_service_probes()
 
 DOM_SERVICE_NAME = os.getenv("DOM_SERVICE_NAME", "dom-service")
 DOM_SERVICE_HEALTH_KEY = (os.getenv("DOM_SERVICE_HEALTH_KEY", "") or "").strip()
@@ -163,8 +140,9 @@ _STATUS_NORMALISATION = {
 
 
 EXTERNAL_SERVICES: dict[str, str] = {
-    "ib-gateway": "IB Gateway 由外部部署提供，需手动确认运行状态。",
-    "cloudflared": "Cloudflared 隧道为外部依赖，请使用独立监控确认状态。",
+    service.slug: service.description
+    for service in SERVICE_REGISTRY
+    if not service.internal
 }
 
 
@@ -525,7 +503,45 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
 
 async def build_service_status_payload(redis: Any | None = None) -> Mapping[str, Any]:
     statuses = await gather_service_statuses(redis=redis)
+    status_map = {status.service: status for status in statuses}
+    services_payload: list[MutableMapping[str, Any]] = []
+    seen: set[str] = set()
+
+    for service in SERVICE_REGISTRY:
+        seen.add(service.slug)
+        status_obj = status_map.get(service.slug)
+        if status_obj is None:
+            detail = service.missing_detail or f"{service.display_name} 未上报健康数据"
+            status_obj = ServiceStatus(
+                service=service.slug,
+                status="unhealthy" if service.internal else "external",
+                detail=detail if service.internal else service.description,
+            )
+        data = status_obj.as_mapping()
+        data["display_name"] = service.display_name
+        data["description"] = service.description
+        data["internal"] = service.internal
+        data["service_name"] = service.service_name
+        default_health_key = service.default_health_key()
+        resolved_health_key = service.resolved_health_key()
+        if default_health_key:
+            data["default_health_key"] = default_health_key
+        if resolved_health_key:
+            data["health_key"] = resolved_health_key
+        if service.port:
+            data["port"] = service.port
+        data["implementation_status"] = service.implementation_status
+        services_payload.append(data)
+
+    for status_obj in statuses:
+        if status_obj.service in seen:
+            continue
+        data = status_obj.as_mapping()
+        data.setdefault("display_name", status_obj.service)
+        data.setdefault("internal", True)
+        services_payload.append(data)
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "services": [status.as_mapping() for status in statuses],
+        "services": services_payload,
     }

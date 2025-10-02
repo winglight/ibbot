@@ -915,59 +915,80 @@ class TradingApp {
         if (!this.serviceRestartController && serviceRestartModules?.createListController) {
             const listContainer = document.getElementById('serviceStatusList');
             if (listContainer) {
-                const controller = serviceRestartModules.createListController({
-                    document,
-                    container: listContainer,
-                    fetcher: (payload) => this.apiCall('/services/restart', {
-                        method: 'POST',
-                        body: JSON.stringify(payload),
-                    }),
-                    describeService: (serviceName, element) => {
-                        if (element?.dataset?.serviceLabel) {
-                            return element.dataset.serviceLabel;
+                const statusModule = window.appModules?.serviceStatus;
+                const prepareList = statusModule?.ensureList
+                    ? statusModule.ensureList({
+                        document,
+                        container: listContainer,
+                        fetcher: (endpoint, options = {}) => this.apiCall(endpoint, options),
+                    }).catch((error) => {
+                        console.warn('Failed to build service status list', error);
+                        return null;
+                    })
+                    : Promise.resolve(null);
+
+                prepareList.then((initialPayload) => {
+                    const controller = serviceRestartModules.createListController({
+                        document,
+                        container: listContainer,
+                        fetcher: (payload) => this.apiCall('/services/restart', {
+                            method: 'POST',
+                            body: JSON.stringify(payload),
+                        }),
+                        describeService: (serviceName, element) => {
+                            if (element?.dataset?.serviceLabel) {
+                                return element.dataset.serviceLabel;
+                            }
+                            const title = element?.querySelector('.fw-semibold');
+                            return title?.textContent?.trim() || serviceName;
+                        },
+                        readOnlyMessage: '访客模式无法执行重启操作',
+                        runningMessage: '正在重启 {service}...',
+                        successMessage: '已重启 {services}',
+                        dependencySuccessMessage: '{service} 已随依赖重启',
+                        errorMessage: '重启失败，请稍后重试',
+                        initialMessage: '点击重启以重新启动 {service}。',
+                        badgeLabels: {
+                            idle: '已下线',
+                            running: '重启中',
+                            success: '运行中',
+                            error: '不健康',
+                        },
+                        onStatusChange: (info) => {
+                            if (info.meta?.trigger !== 'restart') {
+                                return;
+                            }
+                            if (info.state === 'success') {
+                                this.showAlert('success', info.message);
+                            } else if (info.state === 'error') {
+                                const errorObj = info.payload?.error;
+                                const level = errorObj?.isReadOnly ? 'warning' : 'danger';
+                                this.showAlert(level, info.message);
+                            }
+                        },
+                    });
+                    if (controller) {
+                        this.serviceRestartController = controller;
+                        if (this.isReadOnly && typeof controller.setReadOnly === 'function') {
+                            controller.setReadOnly(true);
                         }
-                        const title = element?.querySelector('.fw-semibold');
-                        return title?.textContent?.trim() || serviceName;
-                    },
-                    readOnlyMessage: '访客模式无法执行重启操作',
-                    runningMessage: '正在重启 {service}...',
-                    successMessage: '已重启 {services}',
-                    dependencySuccessMessage: '{service} 已随依赖重启',
-                    errorMessage: '重启失败，请稍后重试',
-                    initialMessage: '点击重启以重新启动 {service}。',
-                    badgeLabels: {
-                        idle: '已下线',
-                        running: '重启中',
-                        success: '运行中',
-                        error: '不健康',
-                    },
-                    onStatusChange: (info) => {
-                        if (info.meta?.trigger !== 'restart') {
-                            return;
+                        if (initialPayload && typeof this.applyServiceStatusesPayload === 'function') {
+                            try {
+                                this.applyServiceStatusesPayload(initialPayload, { silent: true, source: 'init' });
+                            } catch (error) {
+                                console.warn('Failed to apply initial service statuses', error);
+                            }
                         }
-                        if (info.state === 'success') {
-                            this.showAlert('success', info.message);
-                        } else if (info.state === 'error') {
-                            const errorObj = info.payload?.error;
-                            const level = errorObj?.isReadOnly ? 'warning' : 'danger';
-                            this.showAlert(level, info.message);
+                        const wsResult = this.ibkrManager?.requestServiceStatuses
+                            ? this.ibkrManager.requestServiceStatuses({ force: true })
+                            : 'failed';
+                        if (wsResult === 'failed') {
+                            this.loadServiceStatuses({ silent: true, preferSocket: false }).catch((error) => {
+                                console.warn('Failed to load initial service statuses', error);
+                            });
                         }
-                    },
+                    }
                 });
-                if (controller) {
-                    this.serviceRestartController = controller;
-                    if (this.isReadOnly && typeof controller.setReadOnly === 'function') {
-                        controller.setReadOnly(true);
-                    }
-                    const wsResult = this.ibkrManager?.requestServiceStatuses
-                        ? this.ibkrManager.requestServiceStatuses({ force: true })
-                        : 'failed';
-                    if (wsResult === 'failed') {
-                        this.loadServiceStatuses({ silent: true, preferSocket: false }).catch((error) => {
-                            console.warn('Failed to load initial service statuses', error);
-                        });
-                    }
-                }
             }
         }
 
