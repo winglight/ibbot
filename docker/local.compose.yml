@@ -19,6 +19,8 @@ x-app-env: &app-environment
     ORDERS_SERVICE_URL: http://orders:8050
     RISK_SERVICE_URL: http://risk:8030
     STRATEGY_SERVICE_URL: http://strategy:8045
+    NOTIFICATION_SERVICE_URL: http://notification:8055
+    NOTIFICATION_SERVICE_TIMEOUT: 10
 
 services:
   redis:
@@ -188,6 +190,33 @@ services:
     profiles:
       - risk
 
+  notification:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      ["python", "-m", "uvicorn", "services.notification.main:app", "--host", "0.0.0.0", "--port", "8055"]
+    container_name: ibbot-notification
+    ports:
+      - "8055:8055"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://notification:8055/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   strategy:
     <<: *app-environment
     build:
@@ -326,6 +355,8 @@ services:
       risk:
         condition: service_started
       strategy:
+        condition: service_started
+      notification:
         condition: service_started
       ib-gateway:
         condition: service_started

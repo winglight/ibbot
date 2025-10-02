@@ -60,16 +60,20 @@ services:
       - ORDERS_SERVICE_URL=http://orders:8050
       - RISK_SERVICE_URL=http://risk:8030
       - STRATEGY_SERVICE_URL=http://strategy:8045
+      - NOTIFICATION_SERVICE_URL=http://notification:8055
+      - NOTIFICATION_SERVICE_TIMEOUT=10
 
     volumes:
       - ../data/logs:/app/logs
       - ../data:/app/data
       - ../src/strategies:/app/src/strategies
     depends_on:
+      - redis
       - account
       - orders
       - risk
       - strategy
+      - notification
       - ib-gateway
     networks:
       - ibbot-network
@@ -102,6 +106,25 @@ services:
       - ibbot-network
       - stack
     restart: unless-stopped
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: ibbot-redis
+    command: ["redis-server", "--save", "", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ../data/redis:/data
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   account:
     build:
@@ -159,6 +182,33 @@ services:
       - ibbot-network
       - stack
     restart: unless-stopped
+
+  notification:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-notification
+    command:
+      ["python", "-m", "uvicorn", "services.notification.main:app", "--host", "0.0.0.0", "--port", "8055"]
+    ports:
+      - "8055:8055"
+    env_file:
+      - ./.env
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+    depends_on:
+      - redis
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://notification:8055/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   strategy:
     build:

@@ -55,12 +55,19 @@
 | Market Data Sync (`market_data`) | 8010 | `docker compose restart market_data` | `python scripts/run_service.py market_data` |
 | Risk Manager (`risk`) | 8030 | `docker compose restart risk` | `python scripts/run_service.py risk` |
 | Strategy Scheduler (`strategy`) | 8045 | `docker compose restart strategy` | `python scripts/run_service.py strategy` |
+| Notification Dispatcher (`notification`) | 8055 | `docker compose restart notification` | `python scripts/run_service.py notification` |
 | Market Data Feed (`market_data_feed`) | — | `docker compose restart market_data_feed` | `python scripts/run_service.py market_data_feed` |
 | Queue Monitor (`queue_monitor`) | 8011 | `docker compose restart queue_monitor` | `python scripts/run_service.py queue_monitor` |
 
 > ℹ️ **依赖顺序提示**：控制台会自动按依赖顺序重启服务，例如 `market_data` 会先重启 `market_data_feed`，
 > `ibbot` 会在 `account` 与 `orders` 成功后再启动。`queue_monitor` 独立运行，可单独重启。历史组件
 > `connection_control` 仍可手动触发，但默认计划已不再包含。
+
+`services/notification/main.py` 是通知管道的常驻进程，负责将 Redis 队列中的事件转发至 Telegram/邮件等渠道。
+无论采用 Docker 还是 `scripts/run_service.py notification` 方式，都需要确保该脚本与主服务同机运行，
+并在主程序环境变量中配置 `NOTIFICATION_SERVICE_URL`（Docker 模式默认指向 `http://notification:8055`）。
+如果在本地单机调试时仅启动主程序与通知脚本，可在 `.env.local` 中设置
+`NOTIFICATION_SERVICE_URL=http://127.0.0.1:8055` 与 `NOTIFICATION_SERVICE_TIMEOUT`，以便跳过容器网络解析。
 
 关闭所有容器：
 
