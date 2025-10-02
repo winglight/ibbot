@@ -24,6 +24,7 @@ class CoreContainer:
     influx_config: InfluxConfig | None
     config_provider: ConfigProvider | None
     websocket_manager: WebSocketManager
+    order_manager: OrderManager
 
 
 _container: CoreContainer | None = None

@@ -26,6 +26,12 @@ FORBIDDEN_RULES = {
         "pattern": re.compile(r"(?m)^\s*import\s+sqlite3"),
         "allowed": set(),
     },
+    "get_db_manager": {
+        "pattern": re.compile(
+            r"(?m)^\s*(?:from\s+[^\s]+\s+import\s+.*\bget_db_manager\b|import\s+[^\n]*\bget_db_manager\b)"
+        ),
+        "allowed": set(),
+    },
 }
 
 
