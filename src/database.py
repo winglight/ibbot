@@ -130,8 +130,10 @@ class DatabaseManager:
                 cursor.close()
 
     # ------------------------------------------------------------------
-    # Public helpers for external modules (e.g., order_manager) needing
-    # serialized access to the shared SQLite connection.
+    # Public helpers for external modules needing serialized access to the
+    # shared SQLite connection. Historic consumers such as the legacy
+    # order_manager have been replaced by the orders service, but other
+    # components still rely on these helpers for transactional work.
 
     @contextmanager
     def transaction(self):

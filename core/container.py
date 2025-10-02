@@ -25,7 +25,6 @@ class CoreContainer:
     websocket_manager: WebSocketManager
     telegram_notifier: Any | None = None
     notification_manager: Any | None = None
-    order_manager: Any | None = None
     risk_manager: Any | None = None
     strategy_risk_manager: Any | None = None
     strategy_manager: Any | None = None

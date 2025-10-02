@@ -47,7 +47,6 @@ from src.cache import hgetall
 from src.account_service_readiness import refresh_account_service_status
 from src.database import get_db_manager
 from src.notification_manager import NotificationManager
-from src.order_manager import get_order_manager
 from src.ib_command_health import (
     IB_COMMAND_HEALTH_KEY,
     IB_COMMAND_HEALTH_POLL_INTERVAL_SEC,
@@ -286,7 +285,6 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
         db_manager=db_manager,
     )
 
-    order_manager = get_order_manager()
     risk_manager: RiskManager | None = None
     if embedded_risk_manager_enabled():
         risk_manager = RiskManager(notification_manager=notification_manager)
@@ -303,17 +301,11 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
         db_manager=db_manager,
     )
     if risk_manager is not None:
-        risk_manager.set_dependencies(order_manager=order_manager)
-    order_manager.set_dependencies(
-        websocket_manager=container.websocket_manager,
-        notification_manager=notification_manager,
-        risk_manager=risk_manager,
-    )
+        risk_manager.set_dependencies()
     queue_manager.set_dependencies(
         risk_manager=risk_manager,
         strategy_manager=strategy_manager,
         websocket_manager=container.websocket_manager,
-        order_manager=order_manager,
         notification_manager=notification_manager,
     )
     strategy_manager.set_dependencies(
@@ -330,7 +322,6 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
 
     container.telegram_notifier = telegram_notifier
     container.notification_manager = notification_manager
-    container.order_manager = order_manager
     container.risk_manager = risk_manager
     container.strategy_risk_manager = strategy_risk_manager
     container.strategy_manager = strategy_manager

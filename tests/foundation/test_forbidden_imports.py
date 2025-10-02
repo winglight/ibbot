@@ -29,7 +29,6 @@ FORBIDDEN_RULES = {
             "services/risk/runtime.py",
             "src/dom_service.py",
             "src/ibkr_client.py",
-            "src/order_manager.py",
             "src/optimizer_service/routes.py",
             "src/risk_manager.py",
             "src/routes/notifications.py",
@@ -41,7 +40,6 @@ FORBIDDEN_RULES = {
         "allowed": {
             "scripts/migrate_risk_rule_type.py",
             "src/database.py",
-            "src/order_manager.py",
             "src/optimizer_service/db.py",
         },
     },

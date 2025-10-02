@@ -55,12 +55,6 @@ def get_websocket_manager(
     return container.websocket_manager
 
 
-def get_order_manager(
-    container: CoreContainer = Depends(get_core_container),
-):
-    return container.order_manager
-
-
 def get_account_snapshot_service(
     container: CoreContainer = Depends(get_core_container),
 ):

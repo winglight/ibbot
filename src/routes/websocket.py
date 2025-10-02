@@ -68,13 +68,6 @@ def _websocket_manager():
     return _services().websocket_manager
 
 
-def _order_manager():
-    container = core.get_container()
-    if container is None:
-        return None
-    return getattr(container, "order_manager", None)
-
-
 def _service_unavailable_payload(payload_type: str, **fields: Any) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "type": payload_type,

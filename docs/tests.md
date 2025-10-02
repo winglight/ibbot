@@ -43,7 +43,7 @@
   - 界面弹出成功提示并显示订单ID；订单状态从 Submitted -> Filled（或 Pending -> Filled）
 - 验证：
   - 界面：订单列表出现该笔，状态与成交价格显示
-  - 日志：模块 order_manager/ibkr_client 记录下单与成交；等级≥info
+  - 日志：订单微服务与 ibkr_client 记录下单与成交；等级≥info
   - DB：orders 表新增记录（symbol=AAPL, action=BUY, order_type=MKT, status=Filled 或 Submitted）
 
 2) Web UI 下单-限价开空（STK）
@@ -73,7 +73,7 @@
   - 成交后仓位=-10
 - 验证：
   - 界面持仓为 -10；订单面板有两条成交（或一条总量）
-  - 日志记录反转逻辑说明（可能由 order_manager 拼接）
+  - 日志记录反转逻辑说明（由订单服务或 ibkr_client 拼接）
   - DB orders 有本次 SELL 20 记录
 
 5) 批量取消与单笔取消
