@@ -6,13 +6,17 @@ import logging
 import os
 import uuid
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set
 
-import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status, Query
 from fastapi.responses import JSONResponse
 
-from src.database import Strategy as DatabaseStrategy, get_db_manager
+from src.routes.service_clients import (
+    ServiceClientError,
+    ServiceResponseError,
+    ServiceUnavailableError,
+    StrategyServiceClient,
+)
 
 from .schemas import (
     ErrorResponse,
@@ -57,45 +61,28 @@ from .reporting import (
 router = APIRouter(prefix="/api/optimize", tags=["optimizer"])
 logger = logging.getLogger(__name__)
 
+_STRATEGY_CLIENT = StrategyServiceClient()
 
-async def _notify_strategy_manager_of_new_strategy(strategy: DatabaseStrategy) -> None:
-    """Post the newly generated strategy to the main service.
 
-    Any failure is logged but swallowed so the optimizer response
-    remains successful even if the notification fails.
-    """
-
-    base_url = os.getenv("IBBOT_API_URL")
-    if not base_url:
-        logger.info("IBBOT_API_URL not set; skipping strategy manager notification")
-        return
-
-    url = f"{base_url.rstrip('/')}/api/strategies"
-    payload = {
-        "name": strategy.name,
-        "strategy_type": strategy.strategy_type,
-        "enabled": strategy.enabled,
-        "api_endpoint": strategy.api_endpoint,
-        "file_path": strategy.file_path,
-        "description": strategy.description,
-    }
-
+async def _persist_generated_strategy(record: Mapping[str, Any]) -> None:
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(url, json=payload)
-        if response.status_code >= 400:
-            logger.error(
-                "Failed to notify main service about strategy {}: {} {}",
-                strategy.name,
-                response.status_code,
-                response.text,
-            )
-    except httpx.HTTPError as exc:
-        logger.error(
-            "Error notifying main service about strategy {}: {}",
-            strategy.name,
-            exc,
-        )
+        await _STRATEGY_CLIENT.create_strategy(record)
+    except ServiceUnavailableError as exc:
+        logger.error("Strategy service unavailable for generated strategy", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Strategy service unavailable",
+        ) from exc
+    except ServiceResponseError as exc:
+        detail = exc.detail or "Strategy service error"
+        logger.error("Strategy service rejected generated strategy", detail=detail)
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+    except ServiceClientError as exc:
+        logger.error("Failed to persist generated strategy", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to persist strategy",
+        ) from exc
 
 
 def _normalize_fail_reason(reason: str) -> str:
@@ -465,23 +452,15 @@ async def generate_strategy(payload: StrategyGenerationRequest) -> StrategyGener
         description_parts.append(f"（{'，'.join(metadata)}）")
     description = "".join(description_parts)
 
-    db_manager = get_db_manager()
-    db_record = DatabaseStrategy(
-        name=payload.strategy_name,
-        strategy_type="internal",
-        enabled=True,
-        api_endpoint=None,
-        file_path=normalized_path,
-        description=description,
-    )
-    try:
-        db_manager.save_strategy(db_record)
-    except Exception as exc:  # pragma: no cover - safety net
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"failed to persist strategy: {exc}",
-        )
+    record = {
+        "name": payload.strategy_name,
+        "strategy_type": "internal",
+        "enabled": True,
+        "api_endpoint": None,
+        "file_path": normalized_path,
+        "description": description,
+    }
 
-    await _notify_strategy_manager_of_new_strategy(db_record)
+    await _persist_generated_strategy(record)
 
     return StrategyGenerationResponse(file_path=normalized_path, class_name=class_name)

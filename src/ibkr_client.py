@@ -39,12 +39,14 @@ from .connection_manager import connection_manager, connection_logger
 from .restart_utils import restart_program
 from src.routes.service_clients import (
     MarketDataServiceClient,
+    OrdersServiceClient,
     ServiceClientError,
     ServiceResponseError,
     ServiceUnavailableError,
 )
 
 _MARKET_DATA_SERVICE_CLIENT: Optional[MarketDataServiceClient] = None
+_ORDERS_SERVICE_CLIENT: Optional[OrdersServiceClient] = None
 _MARKET_DATA_INGEST_PATH = "/market/historical/ingest"
 
 
@@ -53,6 +55,13 @@ def _get_market_data_service_client() -> MarketDataServiceClient:
     if _MARKET_DATA_SERVICE_CLIENT is None:
         _MARKET_DATA_SERVICE_CLIENT = MarketDataServiceClient()
     return _MARKET_DATA_SERVICE_CLIENT
+
+
+def _get_orders_service_client() -> OrdersServiceClient:
+    global _ORDERS_SERVICE_CLIENT
+    if _ORDERS_SERVICE_CLIENT is None:
+        _ORDERS_SERVICE_CLIENT = OrdersServiceClient()
+    return _ORDERS_SERVICE_CLIENT
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -2458,21 +2467,30 @@ class IBKRClient:
     
     async def _update_order_commission_pnl(self, order_id, commission, pnl):
         """更新订单的佣金和PnL到数据库。"""
+        oid = str(order_id)
+        payload = {"commission": commission, "realized_pnl": pnl}
+        client = _get_orders_service_client()
         try:
-            from .database import get_db_manager
-
-            db = get_db_manager()
-            oid = str(order_id)
-            await db.update_order_commission_pnl(oid, commission, pnl)
+            await client.update_order_fill_metrics(oid, payload)
             connection_logger.info(
-                "Updated order %s commission=%s, pnl=%s in database",
+                "Updated order %s commission=%s, pnl=%s via orders service",
                 oid,
                 commission,
                 pnl,
             )
-
-        except Exception as e:
-            connection_logger.error(f"Failed to update order commission/pnl: {e}")
+        except ServiceUnavailableError as exc:
+            connection_logger.error(
+                "Orders service unavailable for commission update", error=str(exc)
+            )
+        except ServiceResponseError as exc:
+            detail = exc.detail or ""
+            connection_logger.error(
+                "Orders service rejected commission update", detail=detail
+            )
+        except ServiceClientError as exc:
+            connection_logger.error(
+                "Failed to update order commission/pnl via service", error=str(exc)
+            )
     async def backfill_commissions(self, days: int = 7) -> int:
         """Backfill commission and PnL for recent executions by requesting executions from IBKR.
         This will not override existing non-null commission/pnl in DB thanks to COALESCE guards.

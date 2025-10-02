@@ -329,6 +329,15 @@ class OrdersServiceClient(ServiceClient):
             expected_status=202,
         )
 
+    async def update_order_fill_metrics(
+        self, order_id: str, payload: Mapping[str, Any]
+    ) -> Any:
+        return await self.request(
+            "PATCH",
+            f"/orders/{order_id}/fills",
+            json=dict(payload),
+        )
+
 
 class RiskServiceClient(ServiceClient):
     """HTTP client for the Risk microservice."""

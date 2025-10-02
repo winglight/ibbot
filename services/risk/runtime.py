@@ -12,13 +12,13 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
 
 from services.risk.engine import RiskEngine, RiskEvent
 from src.ibbot import update_service_health
-from src.database import get_db_manager
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
     ack_stream,
     enqueue_ib_command,
     read_stream,
     ResponseError,
+    get_redis_client,
 )
 from src.ibbot.influx import write_points
 
@@ -30,6 +30,9 @@ except Exception:  # pragma: no cover - redis might be unavailable in CI
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+SIZING_HISTORY_KEY = os.getenv("RISK_SIZING_HISTORY_KEY", "list:risk:sizing_history")
 
 
 async def _maybe_await(result: Awaitable[Any] | Any) -> Any:
@@ -604,16 +607,56 @@ class RiskRuntime:
         since: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
-        """Load persisted sizing recommendations from the database."""
+        """Load persisted sizing recommendations from Redis."""
 
         limit_clamped = max(1, min(int(limit or 1), 500))
+        symbol_key = (symbol or "").strip().upper()
+        since_dt = None
+        if since:
+            try:
+                since_dt = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+            except Exception:
+                since_dt = None
 
-        def _load_history() -> list[dict[str, Any]]:
-            db = get_db_manager()
-            return db.load_sizing_history(symbol=symbol, since=since, limit=limit_clamped)
+        try:
+            client = await get_redis_client()
+            # Fetch a few extra entries to allow filtering.
+            entries = await client.lrange(SIZING_HISTORY_KEY, 0, limit_clamped * 4)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            if self._logger:
+                self._logger.debug("Failed to read sizing history", error=str(exc))
+            entries = []
 
-        items = await asyncio.to_thread(_load_history)
-        return {"success": True, "items": items, "count": len(items)}
+        results: list[dict[str, Any]] = []
+        for raw in entries:
+            try:
+                item = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(item, Mapping):
+                continue
+
+            payload = dict(item)
+            item_symbol = str(payload.get("symbol") or "").strip().upper()
+            if symbol_key and item_symbol != symbol_key:
+                continue
+
+            if since_dt is not None:
+                ts_raw = payload.get("timestamp") or payload.get("created_at")
+                ts_value = None
+                if isinstance(ts_raw, str) and ts_raw:
+                    try:
+                        ts_value = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    except Exception:
+                        ts_value = None
+                if ts_value is not None and ts_value < since_dt:
+                    continue
+
+            results.append(payload)
+            if len(results) >= limit_clamped:
+                break
+
+        return {"success": True, "items": results, "count": len(results)}
 
     async def position_sizing(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Estimate a contract count for the provided payload."""

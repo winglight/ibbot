@@ -45,8 +45,6 @@ sys.path.append(str(Path(__file__).parent))
 import core
 from src.cache import hgetall
 from src.account_service_readiness import refresh_account_service_status
-from src.database import get_db_manager
-from src.notification_manager import NotificationManager
 from src.ib_command_health import (
     IB_COMMAND_HEALTH_KEY,
     IB_COMMAND_HEALTH_POLL_INTERVAL_SEC,
@@ -55,8 +53,6 @@ from src.ib_command_health import (
 )
 from src.ibbot.redis import get_redis_client
 from src.service_status import SERVICE_HEALTH_PROBES
-from src.queue_manager import QueueManager
-from src.risk_manager import RiskManager
 from src.models import (
     HistoricalDataRequest,
     ChartDataRequest,
@@ -69,9 +65,6 @@ from src.models import (
     PositionSizingRequest,
     CurrentPriceRequest,
 )
-from src.strategy_manager import StrategyManager
-from src.strategy_risk import StrategyRiskManager
-from src.telegram_notifier import TelegramNotifier
 
 # Authentication and routers
 from src.routes.api_docs import router as api_docs_router
@@ -117,12 +110,6 @@ def _env_flag(name: str, default: bool = True) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
-
-
-def embedded_risk_manager_enabled() -> bool:
-    """Return True when the in-process risk manager should be started."""
-
-    return _env_flag("ENABLE_EMBEDDED_RISK_MANAGER", False)
 
 
 def dom_auto_start_enabled() -> bool:
@@ -270,82 +257,6 @@ class ModuleRegistry:
                     )
 
         self._handles.clear()
-
-
-async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
-    handle = ModuleHandle(name=context.module_name)
-
-    container = core.require_container()
-    db_manager = get_db_manager()
-
-    telegram_notifier = TelegramNotifier()
-    notification_manager = NotificationManager(
-        telegram_notifier=telegram_notifier,
-        websocket_manager=container.websocket_manager,
-    )
-
-    risk_manager: RiskManager | None = None
-    if embedded_risk_manager_enabled():
-        risk_manager = RiskManager(notification_manager=notification_manager)
-    queue_manager = QueueManager()
-    strategy_manager = StrategyManager()
-    strategy_risk_manager = StrategyRiskManager(
-        db_manager=db_manager,
-        notification_manager=notification_manager,
-    )
-
-    notification_manager.set_dependencies(
-        telegram_notifier=telegram_notifier,
-        websocket_manager=container.websocket_manager,
-    )
-    if risk_manager is not None:
-        risk_manager.set_dependencies()
-    queue_manager.set_dependencies(
-        risk_manager=risk_manager,
-        strategy_manager=strategy_manager,
-        websocket_manager=container.websocket_manager,
-        notification_manager=notification_manager,
-    )
-    strategy_manager.set_dependencies(
-        risk_manager=risk_manager,
-        queue_manager=queue_manager,
-        notification_manager=notification_manager,
-        strategy_risk_manager=strategy_risk_manager,
-    )
-    strategy_risk_manager.set_dependencies(
-        strategy_manager=strategy_manager,
-        queue_manager=queue_manager,
-        notification_manager=notification_manager,
-    )
-
-    container.telegram_notifier = telegram_notifier
-    container.notification_manager = notification_manager
-    container.risk_manager = risk_manager
-    container.strategy_risk_manager = strategy_risk_manager
-    container.strategy_manager = strategy_manager
-    container.queue_manager = queue_manager
-
-    if risk_manager is not None:
-        risk_manager.start()
-        handle.finalizers.append(risk_manager.stop)
-    else:
-        context.logger.info(
-            "Embedded risk manager disabled; skipping initialisation",
-            env_var="ENABLE_EMBEDDED_RISK_MANAGER",
-        )
-
-    strategy_manager.start()
-    handle.finalizers.append(strategy_manager.stop)
-
-    strategy_risk_manager.start()
-    handle.finalizers.append(strategy_risk_manager.stop)
-
-    await queue_manager.start_worker()
-    handle.finalizers.append(queue_manager.stop_worker)
-
-    context.logger.info("Core service managers initialised")
-
-    return handle
 
 
 async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHandle:
@@ -577,13 +488,6 @@ async def _module_service_health_monitor(
 
 def _build_module_registry(main_logger) -> ModuleRegistry:
     registry = ModuleRegistry(main_logger)
-    registry.register(
-        ModuleDefinition(
-            name="core_managers",
-            start=_module_core_managers,
-            description="Initialise core risk, strategy, queue, and notification managers.",
-        )
-    )
     registry.register(
         ModuleDefinition(
             name="data_subscriptions",
