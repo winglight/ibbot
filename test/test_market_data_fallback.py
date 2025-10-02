@@ -81,8 +81,19 @@ def test_chart_data_relies_on_service(client, admin_headers, fake_market_service
     assert fake_market_service.calls and fake_market_service.calls[0][0] == "chart"
 
 
-def test_chart_data_returns_404_when_service_empty(client, admin_headers, fake_market_service: FakeMarketDataClient):
+def test_chart_data_returns_fallback_when_service_empty(
+    client, admin_headers, fake_market_service: FakeMarketDataClient
+):
     fake_market_service.chart_payload = {"data": None}
+    fake_market_service.historical_payload = {
+        "success": False,
+        "data": [],
+        "error": "No chart data available",
+        "symbol": "EMPTY",
+        "duration": "1 D",
+        "bar_size": "1 min",
+        "source": "market_data_service",
+    }
 
     response = client.post(
         "/api/chart_data",
@@ -95,5 +106,9 @@ def test_chart_data_returns_404_when_service_empty(client, admin_headers, fake_m
         headers=admin_headers,
     )
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "No chart data found"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["data"] == []
+    assert payload["error"] == "No chart data available"
+    assert fake_market_service.calls[-1][0] == "historical"

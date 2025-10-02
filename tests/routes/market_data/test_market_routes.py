@@ -121,6 +121,38 @@ def test_chart_data_returns_service_payload(
     assert payload["symbol"] == "ES"
 
 
+def test_chart_data_falls_back_to_historical_when_empty(
+    market_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StubClient:
+        async def request_chart_data(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+            return {"data": None}
+
+        async def request_historical_data(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+            return {
+                "success": False,
+                "data": [],
+                "error": "No chart data available",
+                "symbol": payload["symbol"],
+                "duration": payload["duration"],
+                "bar_size": payload["bar_size"],
+            }
+
+    _override_market_service(monkeypatch, StubClient())
+
+    with TestClient(market_app) as client:
+        response = client.post(
+            "/api/chart_data",
+            json={"symbol": "ES", "duration": "1 D", "bar_size": "1 min", "exchange": "CME"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["data"] == []
+    assert payload["error"] == "No chart data available"
+
+
 def test_chart_data_service_unavailable(
     market_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:

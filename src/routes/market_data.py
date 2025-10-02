@@ -221,10 +221,44 @@ async def get_chart_data(
 
         response_payload = dict(service_result)
         data = response_payload.get("data")
-        if not data:
-            raise HTTPException(status_code=404, detail="No chart data available")
 
-        if use_cache:
+        if not data:
+            logger.info(
+                "Chart data missing for %s, attempting historical fallback", request.symbol
+            )
+            try:
+                fallback_result = await client.request_historical_data(service_payload)
+            except ServiceUnavailableError as exc:
+                raise HTTPException(
+                    status_code=503, detail="Market data service unavailable"
+                ) from exc
+            except ServiceResponseError as exc:
+                if 500 <= exc.status_code < 600:
+                    raise HTTPException(
+                        status_code=502, detail="Market data service error"
+                    ) from exc
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=exc.detail or "Market data service error",
+                ) from exc
+            except ServiceClientError as exc:
+                logger.error(
+                    "Historical fallback failed for {}: {}", request.symbol, exc
+                )
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+            if not isinstance(fallback_result, Mapping):
+                raise HTTPException(
+                    status_code=502,
+                    detail="Unexpected response from market data service",
+                )
+
+            response_payload = dict(fallback_result)
+            data = response_payload.get("data")
+
+        success = bool(data)
+
+        if success and use_cache:
             historical_data_cache[cache_key] = {
                 "payload": dict(response_payload),
                 "timestamp": now,
@@ -232,11 +266,24 @@ async def get_chart_data(
                 "source": response_payload.get("source", "market_data_service"),
             }
 
-        response_payload.setdefault("success", True)
+        rows = len(data) if isinstance(data, list) else 0
+        if not success:
+            response_payload.setdefault("data", [])
+            error_detail = (
+                response_payload.get("error")
+                or response_payload.get("detail")
+                or "No chart data available"
+            )
+            response_payload.setdefault("error", error_detail)
+            response_payload.setdefault("detail", error_detail)
+
+        response_payload.setdefault("success", success)
         response_payload.setdefault("symbol", request.symbol)
         response_payload.setdefault("duration", request.duration)
         response_payload.setdefault("bar_size", request.bar_size)
+        response_payload.setdefault("rows", rows)
         response_payload.setdefault("source", "market_data_service")
+        response_payload.setdefault("exchange", request.exchange)
         return response_payload
 
     except HTTPException as http_exc:
