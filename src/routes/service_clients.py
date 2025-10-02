@@ -29,6 +29,7 @@ __all__ = [
     "RiskServiceClient",
     "StrategyServiceClient",
     "MarketDataServiceClient",
+    "NotificationServiceClient",
     "ConnectionControlClient",
 ]
 
@@ -324,6 +325,18 @@ class MarketDataServiceClient(ServiceClient):
             "/market/historical",
             json=dict(payload),
         )
+
+
+class NotificationServiceClient(ServiceClient):
+    service_name = "notification"
+    env_prefix = "NOTIFICATION"
+    default_base_url = "http://localhost:8055"
+
+    async def dispatch(self, payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        return await self.request("POST", "/notifications/dispatch", json=dict(payload))
+
+    async def test(self, payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        return await self.request("POST", "/notifications/test", json=dict(payload))
 
 
 class ConnectionControlClient(ServiceClient):

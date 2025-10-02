@@ -350,7 +350,7 @@
         async populateBasicSettings() {
             try {
                 const response = await this.app.apiCall('/notifications/settings');
-                const settings = response.settings || {};
+                const settings = (response && response.data) || response.settings || {};
                 
                 // Telegram设置
                 const telegram = settings.telegram || {};
@@ -380,7 +380,7 @@
         async populateModuleSettings() {
             try {
                 const response = await this.app.apiCall('/notifications/settings');
-                const settings = response.settings || {};
+                const settings = (response && response.data) || response.settings || {};
                 
                 const chrome = settings.chrome || {};
                 const telegram = settings.telegram || {};
@@ -541,7 +541,8 @@
                 });
                 
                 if (response.success) {
-                    this.app.showAlert('success', 'Notification settings saved successfully');
+                    const message = response.message || 'Notification settings saved successfully';
+                    this.app.showAlert('success', message);
                     
                     // Update trading reminder schedules if enabled
                     if (settings.trading_reminder && settings.trading_reminder.enabled) {
@@ -551,7 +552,8 @@
                     const modal = bootstrap.Modal.getInstance(document.getElementById('notificationSettingsModal'));
                     modal.hide();
                 } else {
-                    this.app.showAlert('danger', 'Failed to save notification settings: ' + (response.error || 'Unknown error'));
+                    const errorMessage = response.message || response.error || 'Unknown error';
+                    this.app.showAlert('danger', 'Failed to save notification settings: ' + errorMessage);
                 }
             } catch (error) {
                 console.error('Failed to save notification settings:', error);
@@ -653,9 +655,11 @@
                 });
                 
                 if (response.success) {
-                    this.app.showAlert('success', 'Test notification sent successfully');
+                    const message = response.message || 'Test notification sent successfully';
+                    this.app.showAlert('success', message);
                 } else {
-                    this.app.showAlert('warning', 'Test notification sent but may have failed: ' + (response.error || 'Check your settings'));
+                    const warningMessage = response.message || response.error || 'Check your settings';
+                    this.app.showAlert('warning', 'Test notification sent but may have failed: ' + warningMessage);
                 }
             } catch (error) {
                 console.error('Failed to send test notification:', error);
