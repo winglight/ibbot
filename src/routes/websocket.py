@@ -91,6 +91,27 @@ def _service_unavailable_payload(payload_type: str, **fields: Any) -> Dict[str, 
     return payload
 
 
+def _extract_service_unavailable_payload(
+    value: Any, payload_type: str
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        return None
+
+    try:
+        payload = dict(value)
+    except Exception:
+        return None
+
+    if (
+        payload.get("type") == payload_type
+        and payload.get("error") == SERVICE_UNAVAILABLE_MESSAGE
+        and payload.get("success") is False
+    ):
+        return payload
+
+    return None
+
+
 class ConnectionContext(NamedTuple):
     health_payload: Optional[Dict[str, Any]]
     connected: bool
@@ -122,7 +143,9 @@ async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str,
         payload = await _ACCOUNT_CLIENT.fetch_info(force_refresh=force_refresh)
     except ServiceUnavailableError as exc:
         logger.debug("Account service unavailable: %s", exc)
-        return None
+        error_payload = _service_unavailable_payload("account_update")
+        error_payload["details"] = str(exc)
+        return error_payload
     except ServiceClientError as exc:
         logger.warning("Account service error: %s", exc)
         return None
@@ -153,7 +176,9 @@ async def _fetch_positions(
         )
     except ServiceUnavailableError as exc:
         logger.debug("Account service unavailable for positions: %s", exc)
-        return None
+        error_payload = _service_unavailable_payload("position_update")
+        error_payload["details"] = str(exc)
+        return error_payload
     except ServiceClientError as exc:
         logger.warning("Account service error fetching positions: %s", exc)
         return None
@@ -183,7 +208,9 @@ async def _fetch_orders(
         )
     except ServiceUnavailableError as exc:
         logger.debug("Orders service unavailable for orders: %s", exc)
-        return None
+        error_payload = _service_unavailable_payload("orders_snapshot")
+        error_payload["details"] = str(exc)
+        return error_payload
     except ServiceClientError as exc:
         logger.warning("Orders service error fetching orders: %s", exc)
         return None
@@ -721,6 +748,9 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         snapshot = await read_account_info_snapshot()
         info = await _fetch_account_info()
+        unavailable_payload = _extract_service_unavailable_payload(
+            info, "account_update"
+        )
         info_source = "service"
         snapshot_source = None
         stale_flag = False
@@ -735,60 +765,80 @@ async def websocket_endpoint(websocket: WebSocket):
             stale_reason = snapshot.get("stale_reason")
             stale_at = snapshot.get("stale_at")
 
-        if info is None and isinstance(snapshot, dict):
-            info = snapshot.get("data")
-            info_source = snapshot_source or "redis"
+        if unavailable_payload is not None:
+            account_info_payload: Dict[str, Any] = {}
+            if isinstance(unavailable_payload.get("account_info"), Mapping):
+                account_info_payload = dict(unavailable_payload["account_info"])
+            account_info_payload.setdefault("connected", bool(connected_flag))
+            if account_type_label:
+                account_info_payload.setdefault("account_type", account_type_label)
+            if last_error_value:
+                account_info_payload.setdefault("last_error", last_error_value)
+            unavailable_payload["account_info"] = account_info_payload
+            unavailable_payload.setdefault("source", "service")
+            if snapshot_updated_at and "snapshot_updated_at" not in unavailable_payload:
+                unavailable_payload["snapshot_updated_at"] = snapshot_updated_at
+            if stale_reason and "stale_reason" not in unavailable_payload:
+                unavailable_payload["stale_reason"] = stale_reason
+            if stale_at and "stale_at" not in unavailable_payload:
+                unavailable_payload["stale_at"] = stale_at
+            unavailable_payload.setdefault("stale", stale_flag)
+            await websocket.send_text(json.dumps(unavailable_payload))
+        else:
+            if info is None and isinstance(snapshot, dict):
+                info = snapshot.get("data")
+                info_source = snapshot_source or "redis"
 
-        if info is not None:
-            payload_info = info
-            if isinstance(info, dict):
-                payload_info = dict(info)
-                payload_info.setdefault("connected", bool(connected_flag))
-                if account_type_label:
-                    payload_info.setdefault("account_type", account_type_label)
-            response_payload: Dict[str, Any] = {
-                "type": "account_update",
-                "success": True,
-                "account_info": payload_info,
-                "source": info_source,
-            }
-            if snapshot_updated_at:
-                response_payload["snapshot_updated_at"] = snapshot_updated_at
-            response_payload["stale"] = stale_flag
-            if stale_reason:
-                response_payload["stale_reason"] = stale_reason
-            if stale_at:
-                response_payload["stale_at"] = stale_at
-            await websocket.send_text(json.dumps(response_payload))
-            if stale_flag:
-                status_payload: Dict[str, Any] = {
-                    "type": "account_snapshot_status",
-                    "snapshot": "account_info",
-                    "stale": True,
-                    "refresh_in_progress": True,
+            if info is not None:
+                payload_info = info
+                if isinstance(info, dict):
+                    payload_info = dict(info)
+                    payload_info.setdefault("connected", bool(connected_flag))
+                    if account_type_label:
+                        payload_info.setdefault("account_type", account_type_label)
+                response_payload: Dict[str, Any] = {
+                    "type": "account_update",
+                    "success": True,
+                    "account_info": payload_info,
+                    "source": info_source,
                 }
                 if snapshot_updated_at:
-                    status_payload["snapshot_updated_at"] = snapshot_updated_at
+                    response_payload["snapshot_updated_at"] = snapshot_updated_at
+                response_payload["stale"] = stale_flag
                 if stale_reason:
-                    status_payload["stale_reason"] = stale_reason
+                    response_payload["stale_reason"] = stale_reason
                 if stale_at:
-                    status_payload["stale_at"] = stale_at
-                await websocket.send_text(json.dumps(status_payload))
-        else:
-            await websocket.send_text(
-                json.dumps(
-                    _service_unavailable_payload(
-                        "account_update",
-                        account_info={
-                            "connected": bool(connected_flag),
-                            "account_type": account_type_label,
-                            "last_error": last_error_value,
-                        },
-                        stale=stale_flag,
-                        snapshot_updated_at=snapshot_updated_at,
+                    response_payload["stale_at"] = stale_at
+                await websocket.send_text(json.dumps(response_payload))
+                if stale_flag:
+                    status_payload: Dict[str, Any] = {
+                        "type": "account_snapshot_status",
+                        "snapshot": "account_info",
+                        "stale": True,
+                        "refresh_in_progress": True,
+                    }
+                    if snapshot_updated_at:
+                        status_payload["snapshot_updated_at"] = snapshot_updated_at
+                    if stale_reason:
+                        status_payload["stale_reason"] = stale_reason
+                    if stale_at:
+                        status_payload["stale_at"] = stale_at
+                    await websocket.send_text(json.dumps(status_payload))
+            else:
+                await websocket.send_text(
+                    json.dumps(
+                        _service_unavailable_payload(
+                            "account_update",
+                            account_info={
+                                "connected": bool(connected_flag),
+                                "account_type": account_type_label,
+                                "last_error": last_error_value,
+                            },
+                            stale=stale_flag,
+                            snapshot_updated_at=snapshot_updated_at,
+                        )
                     )
                 )
-            )
     except Exception as e:
         logger.debug(f"Failed to send initial account_update: {e}")
 
@@ -796,7 +846,14 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         initial_limit = 10
         orders_result = await _fetch_orders(limit=initial_limit, offset=0)
-        if orders_result is None:
+        unavailable_orders = _extract_service_unavailable_payload(
+            orders_result, "orders_snapshot"
+        )
+        if unavailable_orders is not None:
+            _log_account_service_outage("initial orders snapshot")
+            unavailable_orders.setdefault("meta", {"limit": initial_limit, "page": 1})
+            payload = unavailable_orders
+        elif orders_result is None:
             _log_account_service_outage("initial orders snapshot")
             payload = _service_unavailable_payload(
                 "orders_snapshot",
@@ -823,6 +880,9 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         positions_snapshot = await read_positions_snapshot()
         positions = await _fetch_positions(force_refresh=False, fast=True)
+        unavailable_positions = _extract_service_unavailable_payload(
+            positions, "position_update"
+        )
         positions_source = "service"
         positions_snapshot_source = None
         positions_updated_at = None
@@ -838,18 +898,30 @@ async def websocket_endpoint(websocket: WebSocket):
             positions_stale_reason = positions_snapshot.get("stale_reason")
             positions_stale_at = positions_snapshot.get("stale_at")
 
-        if positions is None and isinstance(positions_snapshot, dict):
-            data = positions_snapshot.get("data")
-            if isinstance(data, list):
-                positions = data
-                positions_source = positions_snapshot_source or "redis"
+        if unavailable_positions is not None:
+            unavailable_positions.setdefault("positions", [])
+            unavailable_positions.setdefault("source", "service")
+            if positions_updated_at and "snapshot_updated_at" not in unavailable_positions:
+                unavailable_positions["snapshot_updated_at"] = positions_updated_at
+            if positions_stale_reason and "stale_reason" not in unavailable_positions:
+                unavailable_positions["stale_reason"] = positions_stale_reason
+            if positions_stale_at and "stale_at" not in unavailable_positions:
+                unavailable_positions["stale_at"] = positions_stale_at
+            unavailable_positions.setdefault("stale", positions_stale)
+            await websocket.send_text(json.dumps(unavailable_positions))
+        else:
+            if positions is None and isinstance(positions_snapshot, dict):
+                data = positions_snapshot.get("data")
+                if isinstance(data, list):
+                    positions = data
+                    positions_source = positions_snapshot_source or "redis"
 
-        if positions is not None:
-            response_payload = {
-                "type": "position_update",
-                "success": True,
-                "positions": positions,
-                "source": positions_source,
+            if positions is not None:
+                response_payload = {
+                    "type": "position_update",
+                    "success": True,
+                    "positions": positions,
+                    "source": positions_source,
                 "stale": positions_stale,
             }
             if positions_updated_at:
@@ -873,18 +945,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 if positions_stale_at:
                     status_payload["stale_at"] = positions_stale_at
                 await websocket.send_text(json.dumps(status_payload))
-        else:
-            await websocket.send_text(
-                json.dumps(
-                    _service_unavailable_payload(
-                        "position_update",
-                        positions=[],
-                        source="service",
-                        stale=positions_stale,
-                        snapshot_updated_at=positions_updated_at,
+            else:
+                await websocket.send_text(
+                    json.dumps(
+                        _service_unavailable_payload(
+                            "position_update",
+                            positions=[],
+                            source="service",
+                            stale=positions_stale,
+                            snapshot_updated_at=positions_updated_at,
+                        )
                     )
                 )
-            )
     except Exception as e:
         logger.debug(f"Failed to send initial positions snapshot: {e}")
     
@@ -1059,7 +1131,21 @@ async def websocket_endpoint(websocket: WebSocket):
                         offset=offset,
                         start_date=start_dt.isoformat() if start_dt else None,
                     )
-                    if result is None:
+                    unavailable_orders = _extract_service_unavailable_payload(
+                        result, "orders_snapshot"
+                    )
+                    if unavailable_orders is not None:
+                        _log_account_service_outage("orders snapshot request")
+                        unavailable_orders.setdefault(
+                            "meta",
+                            {
+                                "limit": limit,
+                                "page": page,
+                                "start_date": start_date_raw,
+                            },
+                        )
+                        payload = unavailable_orders
+                    elif result is None:
                         _log_account_service_outage("orders snapshot request")
                         payload = _service_unavailable_payload(
                             "orders_snapshot",
@@ -1274,7 +1360,19 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 try:
                     positions = await _fetch_positions(force_refresh=force, fast=fast)
+                    unavailable_positions = _extract_service_unavailable_payload(
+                        positions, "position_update"
+                    )
                     source = "service"
+                    if unavailable_positions is not None:
+                        unavailable_positions.setdefault("positions", [])
+                        unavailable_positions.setdefault("source", "service")
+                        unavailable_positions["fast"] = fast
+                        unavailable_positions["connected"] = bool(connected_flag)
+                        unavailable_positions["fresh"] = bool(redis_fresh)
+                        last_responses[key] = unavailable_positions
+                        await websocket.send_text(json.dumps(unavailable_positions))
+                        continue
                     if positions is None:
                         snapshot = await read_positions_snapshot()
                         if isinstance(snapshot, dict):
