@@ -7,12 +7,16 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from loguru import logger
 
 from src.dom_cache import DomCacheManager
 from src.dom_parameter_tuner import DOMParameterTuner
+from src.dom_persistence import (
+    load_dom_automation_state,
+    save_dom_automation_state,
+)
 from src.dom_service import DOMService, get_dom_service
 from src.dom_settings import get_automation_defaults
 
@@ -36,18 +40,26 @@ class DOMOptimizationUnavailable(RuntimeError):
 class DOMOptimizationOrchestrator:
     """Coordinate optimisation runs and automation schedule."""
 
-    STATE_CONFIG_KEY = "dom_automation_state"
+    STATE_CONFIG_KEY = os.getenv(
+        "DOM_AUTOMATION_STATE_KEY", "json:dom:automation_state"
+    )
 
     def __init__(
         self,
         service: Optional[DOMService] = None,
         *,
         cache: Optional[DomCacheManager] = None,
-        db_manager: Optional[Any] = None,
+        state_loader: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+        state_persister: Optional[Callable[[Mapping[str, Any]], None]] = None,
     ) -> None:
         self.service = service or get_dom_service()
         self._cache = cache
-        self.db_manager = db_manager or getattr(self.service, "db_manager", None)
+        self._state_loader: Callable[[], Optional[Dict[str, Any]]] = (
+            state_loader or (lambda: load_dom_automation_state(self.STATE_CONFIG_KEY))
+        )
+        self._state_persister: Callable[[Mapping[str, Any]], None] = state_persister or (
+            lambda payload: save_dom_automation_state(payload, self.STATE_CONFIG_KEY)
+        )
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
@@ -144,21 +156,26 @@ class DOMOptimizationOrchestrator:
 
     # ------------------------------------------------------------------
     def _load_state(self) -> None:
-        if not self.db_manager:
-            return
         try:
-            payload = self.db_manager.get_config(self.STATE_CONFIG_KEY, None)
+            payload = self._state_loader()
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.warning("Failed to load DOM automation state: {}", exc)
+            logger.warning(
+                "Failed to load DOM automation state",
+                storage_key=self.STATE_CONFIG_KEY,
+                error=str(exc),
+            )
             return
-        if isinstance(payload, dict) and payload:
+
+        if isinstance(payload, Mapping) and payload:
+            snapshot = dict(payload)
             with self._lock:
-                self._state.update(payload)
+                self._state.update(snapshot)
                 self._ensure_state_defaults_locked()
             logger.info(
                 "Loaded persisted DOM automation state",
-                schedule=payload.get("schedule"),
-                plan=payload.get("plan"),
+                storage_key=self.STATE_CONFIG_KEY,
+                schedule=snapshot.get("schedule"),
+                plan=snapshot.get("plan"),
             )
 
     # ------------------------------------------------------------------
@@ -177,21 +194,20 @@ class DOMOptimizationOrchestrator:
 
     # ------------------------------------------------------------------
     def _persist_state_locked(self) -> None:
-        if not self.db_manager:
-            return
         try:
-            self.db_manager.save_config(
-                self.STATE_CONFIG_KEY,
-                self._state,
-                "DOM optimisation automation state",
-            )
+            self._state_persister(copy.deepcopy(self._state))
             logger.debug(
                 "Persisted DOM automation state",
+                storage_key=self.STATE_CONFIG_KEY,
                 schedule=self._state.get("schedule"),
                 next_run=self._state.get("next_run_at"),
             )
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.warning("Failed to persist DOM automation state: {}", exc)
+            logger.warning(
+                "Failed to persist DOM automation state",
+                storage_key=self.STATE_CONFIG_KEY,
+                error=str(exc),
+            )
 
     # ------------------------------------------------------------------
     def get_status(self) -> Dict[str, Any]:
