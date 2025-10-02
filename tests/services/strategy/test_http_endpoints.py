@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from services.strategy.discovery import sync_strategy_metadata
-from services.strategy.http import StrategyRuntime, create_app
+from services.strategy.http import (
+    DEFAULT_SETTINGS,
+    StrategyRuntime,
+    create_app,
+    persist_strategy_settings,
+)
 from tests.services.redis_utils import InMemoryRedis
 
 
@@ -222,3 +228,110 @@ def test_strategy_settings_endpoints(redis_client: InMemoryRedis) -> None:
         response = client.get("/strategy/settings")
         persisted = response.json()["settings"]
         assert persisted["auth_token"] == token_payload["token"]
+
+
+def test_strategy_toggle_aliases(redis_client: InMemoryRedis) -> None:
+    client = _build_client(redis_client)
+
+    payload = {
+        "name": "switch",
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"window": 5},
+        "metadata": {"file": "switch.py"},
+        "enabled": True,
+    }
+
+    with client:
+        assert client.post("/strategy", json=payload).status_code == 201
+
+        toggle_resp = client.post("/strategies/switch/toggle?enabled=false")
+        assert toggle_resp.status_code == 200
+        data = toggle_resp.json()
+        assert data["success"] is True
+        assert data["strategy"]["enabled"] is False
+
+        stored = _read_metadata(redis_client, "switch")
+        assert stored["enabled"] is False
+
+        toggle_resp = client.post("/strategy/switch/toggle", json={"enabled": True})
+        assert toggle_resp.status_code == 200
+        data = toggle_resp.json()
+        assert data["strategy"]["enabled"] is True
+
+        stored = _read_metadata(redis_client, "switch")
+        assert stored["enabled"] is True
+
+        bad_resp = client.post("/strategy/switch/toggle")
+        assert bad_resp.status_code == 400
+
+
+def test_strategy_reset_aliases(redis_client: InMemoryRedis) -> None:
+    client = _build_client(redis_client)
+
+    payload = {
+        "name": "resetme",
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "ES", "size": 3},
+        "metadata": {"file": "resetme.py", "owner": "qa"},
+        "enabled": False,
+    }
+
+    with client:
+        assert client.post("/strategy", json=payload).status_code == 201
+
+        resp = client.post("/strategies/resetme/reset")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["strategy"]["enabled"] is True
+        assert data["strategy"]["params"] == {}
+        assert data["strategy"]["metadata"] == {}
+
+        stored = _read_metadata(redis_client, "resetme")
+        assert stored["enabled"] is True
+        assert stored["params"] == {}
+        assert stored["metadata"] == {}
+
+        legacy_resp = client.post("/strategy/resetme/reset")
+        assert legacy_resp.status_code == 200
+
+        missing_resp = client.post("/strategy/unknown/reset")
+        assert missing_resp.status_code == 404
+
+
+def test_strategy_files_endpoint_merges_sources(
+    redis_client: InMemoryRedis, tmp_path: Path
+) -> None:
+    client = _build_client(redis_client)
+
+    strategy_root = tmp_path / "strategies"
+    (strategy_root / "nested").mkdir(parents=True)
+    (strategy_root / "alpha.py").write_text("# alpha\n")
+    (strategy_root / "nested" / "beta.py").write_text("# beta\n")
+    (strategy_root / "notes.txt").write_text("ignore")
+
+    settings = {**DEFAULT_SETTINGS, "strategy_path": str(strategy_root)}
+    asyncio.run(persist_strategy_settings(redis_client, settings))
+
+    payload = {
+        "name": "manual",
+        "factory": "tests.services.strategy.sample:factory",
+        "metadata": {"file": "legacy.py"},
+    }
+
+    with client:
+        assert client.post("/strategy", json=payload).status_code == 201
+
+        response = client.get("/strategy/files")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        files = data["files"]
+        assert "alpha.py" in files
+        assert "nested/beta.py" in files
+        assert "legacy.py" in files
+
+        (strategy_root / "gamma.py").write_text("# gamma\n")
+        response = client.get("/strategy/files")
+        files = response.json()["files"]
+        assert "gamma.py" in files

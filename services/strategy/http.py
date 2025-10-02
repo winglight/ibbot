@@ -9,9 +9,10 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import secrets
+from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError, validator
 
 from services.strategy import StrategyTaskConsumer
@@ -103,8 +104,66 @@ class StrategySettingsPayload(BaseModel):
     pause_data_push_on_holidays: bool | None = None
 
 
+class StrategyTogglePayload(BaseModel):
+    """Request payload for toggling strategy availability."""
+
+    enabled: bool
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def load_strategy_settings(redis_client: Any) -> dict[str, Any]:
+    try:
+        raw = await redis_client.get(DEFAULT_SETTINGS_KEY)
+    except Exception:
+        raw = None
+
+    payload: dict[str, Any] | None = None
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            payload = decoded
+    elif isinstance(raw, Mapping):
+        payload = dict(raw)
+
+    settings = {**DEFAULT_SETTINGS}
+    if payload:
+        for key, value in payload.items():
+            if value is None:
+                continue
+            settings[key] = value
+    if not isinstance(settings.get("api_payload_template"), dict):
+        settings["api_payload_template"] = dict(DEFAULT_SETTINGS["api_payload_template"])
+    settings["enable_auth"] = bool(settings.get("enable_auth"))
+    settings["pause_data_push_on_holidays"] = bool(settings.get("pause_data_push_on_holidays", True))
+    return settings
+
+
+async def persist_strategy_settings(redis_client: Any, settings: dict[str, Any]) -> None:
+    payload = json.dumps(settings, ensure_ascii=False)
+    updated_at = _utc_now().isoformat()
+    try:
+        await redis_client.set(DEFAULT_SETTINGS_KEY, payload)
+    except Exception:  # pragma: no cover - defensive guard
+        logger = get_logger("ibbot.services.strategy.http")
+        logger.warning("Failed to persist strategy settings", exc_info=True)
+        return
+
+    try:
+        await update_service_health(
+            redis_client,
+            SERVICE_NAME,
+            healthy=True,
+            metrics={"settings_updated_at": updated_at},
+        )
+    except Exception:  # pragma: no cover - defensive guard
+        logger = get_logger("ibbot.services.strategy.http")
+        logger.debug("Failed to update strategy settings health metrics", exc_info=True)
 
 
 def _normalise_json_payload(data: Any) -> dict[str, Any]:
@@ -124,6 +183,9 @@ def _normalise_json_payload(data: Any) -> dict[str, Any]:
 
 class StrategyRuntime:
     """Runtime container coordinating strategy metadata and task queue state."""
+
+    _FILE_METADATA_KEYS = ("file", "file_path", "filepath", "path", "script", "scripts", "files", "paths")
+    _STRATEGY_FILE_SUFFIXES = {".py", ".json", ".yaml", ".yml"}
 
     def __init__(
         self,
@@ -236,6 +298,52 @@ class StrategyRuntime:
         self._health_signal.set()
         return True
 
+    async def set_strategy_enabled(self, name: str, *, enabled: bool) -> StrategyDocument:
+        async with self._lock:
+            document = self._strategies.get(name)
+            if document is None:
+                raise StrategyNotRegistered(name)
+            updated = document.copy(update={"enabled": bool(enabled), "updated_at": _utc_now().isoformat()})
+            self._strategies[name] = updated
+            await self._persist_document(updated)
+        self._health_signal.set()
+        return updated
+
+    async def reset_strategy(self, name: str) -> StrategyDocument:
+        async with self._lock:
+            document = self._strategies.get(name)
+            if document is None:
+                raise StrategyNotRegistered(name)
+            updated = document.copy(
+                update={
+                    "params": {},
+                    "metadata": {},
+                    "enabled": True,
+                    "updated_at": _utc_now().isoformat(),
+                }
+            )
+            self._strategies[name] = updated
+            await self._persist_document(updated)
+        self._health_signal.set()
+        return updated
+
+    async def list_strategy_files(self) -> list[str]:
+        try:
+            settings = await load_strategy_settings(self._redis)
+        except Exception:  # pragma: no cover - defensive guard
+            settings = dict(DEFAULT_SETTINGS)
+        strategy_path = settings.get("strategy_path") or DEFAULT_SETTINGS.get("strategy_path")
+
+        entries: set[str] = set()
+        async with self._lock:
+            for document in self._strategies.values():
+                entries.update(self._extract_metadata_files(document.metadata))
+
+        for candidate in self._scan_strategy_path(strategy_path):
+            entries.add(candidate)
+
+        return sorted(entries)
+
     async def enqueue_task(self, name: str, payload: StrategyRunRequest) -> StrategyRunResponse:
         strategy = await self.get_strategy(name)
         if strategy is None:
@@ -270,6 +378,71 @@ class StrategyRuntime:
 
     def _metadata_key(self, name: str) -> str:
         return f"{self._metadata_prefix}:{name}"
+
+    @classmethod
+    def _extract_metadata_files(cls, metadata: Mapping[str, Any]) -> set[str]:
+        entries: set[str] = set()
+        if not isinstance(metadata, Mapping):
+            return entries
+        for key in cls._FILE_METADATA_KEYS:
+            value = metadata.get(key)
+            cls._collect_file_values(value, entries)
+        return entries
+
+    @classmethod
+    def _collect_file_values(cls, value: Any, entries: set[str]) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate:
+                entries.add(candidate)
+            return
+        if isinstance(value, Mapping):
+            for sub_value in value.values():
+                cls._collect_file_values(sub_value, entries)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                cls._collect_file_values(item, entries)
+
+    @classmethod
+    def _scan_strategy_path(cls, path_value: Any) -> set[str]:
+        resolved = cls._resolve_strategy_path(path_value)
+        if resolved is None:
+            return set()
+        entries: set[str] = set()
+        try:
+            if resolved.is_dir():
+                base = resolved
+                for candidate in base.rglob("*"):
+                    if not candidate.is_file():
+                        continue
+                    if candidate.suffix.lower() not in cls._STRATEGY_FILE_SUFFIXES:
+                        continue
+                    try:
+                        relative = candidate.relative_to(base).as_posix()
+                    except ValueError:
+                        relative = candidate.name
+                    entries.add(relative)
+            elif resolved.is_file():
+                if resolved.suffix.lower() in cls._STRATEGY_FILE_SUFFIXES:
+                    entries.add(resolved.name)
+        except OSError:  # pragma: no cover - filesystem access guard
+            return set()
+        return entries
+
+    @staticmethod
+    def _resolve_strategy_path(path_value: Any) -> Path | None:
+        if not path_value or not isinstance(path_value, str):
+            return None
+        candidate = Path(path_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        try:
+            return candidate.resolve()
+        except OSError:
+            return candidate
 
     async def _load_metadata(self) -> None:
         raw_index = await self._redis.get(self._metadata_index_key)
@@ -456,55 +629,6 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="strategy redis unavailable")
         return redis_client
 
-    async def _load_settings(redis_client: Any) -> dict[str, Any]:
-        try:
-            raw = await redis_client.get(DEFAULT_SETTINGS_KEY)
-        except Exception:
-            raw = None
-        payload: dict[str, Any] | None = None
-        if isinstance(raw, str):
-            try:
-                decoded = json.loads(raw)
-            except json.JSONDecodeError:
-                decoded = None
-            if isinstance(decoded, dict):
-                payload = decoded
-        elif isinstance(raw, Mapping):
-            payload = dict(raw)
-
-        settings = {**DEFAULT_SETTINGS}
-        if payload:
-            for key, value in payload.items():
-                if value is None:
-                    continue
-                settings[key] = value
-        if not isinstance(settings.get("api_payload_template"), dict):
-            settings["api_payload_template"] = dict(DEFAULT_SETTINGS["api_payload_template"])
-        settings["enable_auth"] = bool(settings.get("enable_auth"))
-        settings["pause_data_push_on_holidays"] = bool(settings.get("pause_data_push_on_holidays", True))
-        return settings
-
-    async def _persist_settings(redis_client: Any, settings: dict[str, Any]) -> None:
-        payload = json.dumps(settings, ensure_ascii=False)
-        updated_at = _utc_now().isoformat()
-        try:
-            await redis_client.set(DEFAULT_SETTINGS_KEY, payload)
-        except Exception:  # pragma: no cover - defensive guard
-            logger = get_logger("ibbot.services.strategy.http")
-            logger.warning("Failed to persist strategy settings", exc_info=True)
-            return
-
-        try:
-            await update_service_health(
-                redis_client,
-                SERVICE_NAME,
-                healthy=True,
-                metrics={"settings_updated_at": updated_at},
-            )
-        except Exception:  # pragma: no cover - defensive guard
-            logger = get_logger("ibbot.services.strategy.http")
-            logger.debug("Failed to update strategy settings health metrics", exc_info=True)
-
     @app.get("/strategy", response_model=list[StrategyDocument])
     @app.get("/strategies", response_model=list[StrategyDocument])
     async def list_strategies(runtime: StrategyRuntime = Depends(_get_runtime)) -> list[StrategyDocument]:
@@ -513,7 +637,7 @@ def create_app(
     @app.get("/strategy/settings")
     async def get_strategy_settings(request: Request) -> dict[str, Any]:
         redis_client = await _get_redis(request)
-        settings = await _load_settings(redis_client)
+        settings = await load_strategy_settings(redis_client)
         return {"success": True, "settings": settings}
 
     @app.post("/strategy/settings")
@@ -522,7 +646,7 @@ def create_app(
         request: Request,
     ) -> dict[str, Any]:
         redis_client = await _get_redis(request)
-        settings = await _load_settings(redis_client)
+        settings = await load_strategy_settings(redis_client)
         updates = payload.dict(exclude_none=True)
         if "api_payload_template" in updates and not isinstance(updates["api_payload_template"], dict):
             updates.pop("api_payload_template")
@@ -531,18 +655,23 @@ def create_app(
         settings["pause_data_push_on_holidays"] = bool(settings.get("pause_data_push_on_holidays", True))
         if "auth_token" not in settings:
             settings["auth_token"] = None
-        await _persist_settings(redis_client, settings)
+        await persist_strategy_settings(redis_client, settings)
         return {"success": True, "settings": settings}
 
     @app.post("/strategy/settings/generate-token")
     async def generate_strategy_token(request: Request) -> dict[str, Any]:
         redis_client = await _get_redis(request)
-        settings = await _load_settings(redis_client)
+        settings = await load_strategy_settings(redis_client)
         token = secrets.token_urlsafe(24)
         settings["auth_token"] = token
         settings["enable_auth"] = True
-        await _persist_settings(redis_client, settings)
+        await persist_strategy_settings(redis_client, settings)
         return {"success": True, "token": token, "settings": settings}
+
+    @app.get("/strategy/files")
+    async def list_strategy_files(runtime: StrategyRuntime = Depends(_get_runtime)) -> dict[str, Any]:
+        files = await runtime.list_strategy_files()
+        return {"success": True, "files": files}
 
     @app.post("/strategy", response_model=StrategyDocument, status_code=status.HTTP_201_CREATED)
     @app.post("/strategies", response_model=StrategyDocument, status_code=status.HTTP_201_CREATED)
@@ -589,6 +718,36 @@ def create_app(
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
 
+    @app.post("/strategy/{name}/toggle")
+    @app.post("/strategies/{name}/toggle")
+    async def toggle_strategy(
+        name: str,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+        enabled: bool | None = Query(None),
+        payload: StrategyTogglePayload | None = None,
+    ) -> dict[str, Any]:
+        target: bool | None = None
+        if payload is not None:
+            target = payload.enabled
+        elif enabled is not None:
+            target = bool(enabled)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="enabled flag required")
+        try:
+            document = await runtime.set_strategy_enabled(name, enabled=target)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return {"success": True, "strategy": document}
+
+    @app.post("/strategy/{name}/reset")
+    @app.post("/strategies/{name}/reset")
+    async def reset_strategy(name: str, runtime: StrategyRuntime = Depends(_get_runtime)) -> dict[str, Any]:
+        try:
+            document = await runtime.reset_strategy(name)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return {"success": True, "strategy": document}
+
     @app.post("/strategy/{name}/run", response_model=StrategyRunResponse, status_code=status.HTTP_202_ACCEPTED)
     async def run_strategy(
         name: str,
@@ -614,6 +773,9 @@ __all__ = [
     "StrategyUpsertRequest",
     "StrategyRunRequest",
     "StrategyRunResponse",
+    "StrategyTogglePayload",
+    "load_strategy_settings",
+    "persist_strategy_settings",
     "create_app",
     "app",
 ]
