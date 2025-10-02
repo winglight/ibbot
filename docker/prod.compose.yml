@@ -57,6 +57,8 @@ services:
       ORDERS_SERVICE_URL: http://orders:8050
       RISK_SERVICE_URL: http://risk:8030
       STRATEGY_SERVICE_URL: http://strategy:8045
+      NOTIFICATION_SERVICE_URL: http://notification:8055
+      NOTIFICATION_SERVICE_TIMEOUT: ${NOTIFICATION_SERVICE_TIMEOUT:-10}
     ports:
       - "${IBBOT_WEB_PORT:-8000}:8000"
     volumes:
