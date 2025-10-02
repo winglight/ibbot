@@ -24,6 +24,8 @@ strategy
 !tests/services/strategy/**
 !tests/routes/strategy/
 !tests/routes/strategy/**
+!tests/strategy/
+!tests/strategy/**
 test/src
 test/data
 test/strategy

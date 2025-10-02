@@ -470,30 +470,60 @@ class RiskServiceClient(ServiceClient):
     env_prefix = "RISK"
     default_base_url = "http://localhost:8030"
 
-    async def fetch_rules(self) -> Any:
+    async def list_rules(self) -> Any:
         """Return the latest snapshot of configured risk rules."""
 
         return await self.request("GET", "/risk/rules")
 
-    async def post_rule(self, payload: Mapping[str, Any]) -> Any:
+    async def fetch_rules(self) -> Any:
+        """Backward compatible alias for :meth:`list_rules`."""
+
+        return await self.list_rules()
+
+    async def create_rule(self, payload: Mapping[str, Any]) -> Any:
         """Create a new risk rule."""
 
         return await self.request("POST", "/risk/rules", json=dict(payload))
 
-    async def update_rule(self, symbol: str, payload: Mapping[str, Any]) -> Any:
+    async def post_rule(self, payload: Mapping[str, Any]) -> Any:
+        """Backward compatible alias for :meth:`create_rule`."""
+
+        return await self.create_rule(payload)
+
+    async def update_rule(
+        self,
+        symbol: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        enabled: bool | None = None,
+    ) -> Any:
         """Update an existing risk rule identified by *symbol*."""
 
-        return await self.request("PUT", f"/risk/rules/{symbol}", json=dict(payload))
+        params: dict[str, Any] = {}
+        if enabled is not None:
+            params["enabled"] = "true" if enabled else "false"
+        body = dict(payload or {})
+        return await self.request(
+            "PUT",
+            f"/risk/rules/{symbol}",
+            json=body or None,
+            params=params or None,
+        )
 
     async def delete_rule(self, symbol: str) -> Any:
         """Delete the rule for *symbol*."""
 
         return await self.request("DELETE", f"/risk/rules/{symbol}")
 
-    async def fetch_config(self) -> Any:
+    async def get_config(self) -> Any:
         """Retrieve the persisted risk configuration."""
 
         return await self.request("GET", "/risk/config")
+
+    async def fetch_config(self) -> Any:
+        """Backward compatible alias for :meth:`get_config`."""
+
+        return await self.get_config()
 
     async def update_config(self, payload: Mapping[str, Any]) -> Any:
         """Apply updates to the risk configuration."""
@@ -510,10 +540,38 @@ class RiskServiceClient(ServiceClient):
 
         return await self.request("POST", "/position-sizing", json=dict(payload))
 
-    async def fetch_sizing_history(self, params: Mapping[str, Any]) -> Any:
+    async def fetch_sizing_history(
+        self,
+        *,
+        symbol: str | None = None,
+        since: str | None = None,
+        limit: int | None = None,
+    ) -> Any:
         """Return historical sizing recommendations."""
 
-        return await self.request("GET", "/sizing/history", params=dict(params))
+        params: dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+        if since:
+            params["since"] = since
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self.request("GET", "/sizing/history", params=params or None)
+
+    async def fetch_rules_history(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int | None = None,
+    ) -> Any:
+        """Return change history entries for configured rules."""
+
+        params: dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self.request("GET", "/risk/rules/history", params=params or None)
 
     async def fetch_config_rules(self) -> Any:
         """Retrieve the S-rule configuration payload."""

@@ -1869,11 +1869,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 try:
                     response = await _RISK_CLIENT.fetch_sizing_history(
-                        {
-                            "limit": limit,
-                            "symbol": symbol,
-                            "since": since_raw,
-                        }
+                        symbol=symbol,
+                        since=since_raw,
+                        limit=limit,
                     )
                 except ServiceUnavailableError as exc:
                     logger.debug(f"Risk service unavailable for sizing history: {exc}")

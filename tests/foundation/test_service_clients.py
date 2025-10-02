@@ -129,7 +129,7 @@ async def test_account_service_omits_false_flags(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.anyio("asyncio")
-async def test_risk_service_post_rule_invokes_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_risk_service_create_rule_invokes_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RISK_SERVICE_URL", raising=False)
     captured: Dict[str, Any] = {}
 
@@ -141,7 +141,7 @@ async def test_risk_service_post_rule_invokes_endpoint(monkeypatch: pytest.Monke
 
     client = RiskServiceClient(transport=httpx.MockTransport(handler), base_url="http://risk")
 
-    result = await client.post_rule({"symbol": "ES"})
+    result = await client.create_rule({"symbol": "ES"})
 
     assert captured == {
         "method": "POST",
@@ -149,6 +149,28 @@ async def test_risk_service_post_rule_invokes_endpoint(monkeypatch: pytest.Monke
         "payload": {"symbol": "ES"},
     }
     assert result == {"success": True}
+
+
+@pytest.mark.anyio("asyncio")
+async def test_risk_service_history_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RISK_SERVICE_URL", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/sizing/history"):
+            assert request.url.params["symbol"] == "ES"
+            assert request.url.params["limit"] == "50"
+        elif request.url.path.endswith("/risk/rules/history"):
+            assert request.url.params["limit"] == "10"
+            assert request.url.params["symbol"] == "NQ"
+        return httpx.Response(200, json={"success": True})
+
+    client = RiskServiceClient(transport=httpx.MockTransport(handler), base_url="http://risk")
+
+    sizing = await client.fetch_sizing_history(symbol="ES", limit=50)
+    rules = await client.fetch_rules_history(symbol="NQ", limit=10)
+
+    assert sizing == {"success": True}
+    assert rules == {"success": True}
 
 
 @pytest.mark.anyio("asyncio")
