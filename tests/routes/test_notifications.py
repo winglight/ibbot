@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+from src.notification_history import DEFAULT_HISTORY_KEY
 from src.routes import notifications as notifications_module
 from src.routes.service_clients import NotificationServiceClient, ServiceUnavailableError
 
@@ -18,6 +19,7 @@ class RedisStub:
         self.string_store: dict[str, Any] = {}
         self.hash_store: dict[str, dict[str, str]] = {}
         self.set_store: set[str] = set()
+        self.list_store: dict[str, list[str]] = {}
         self.published: list[tuple[str, str]] = []
 
     class _JsonCommands:
@@ -40,6 +42,20 @@ class RedisStub:
         self.string_store[key] = value
         return True
 
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        data = self.list_store.get(key, [])
+        if not data:
+            return []
+        size = len(data)
+        if end < 0:
+            end = size + end
+        end = min(end, size - 1)
+        if start < 0:
+            start = max(size + start, 0)
+        if start >= size or start > end:
+            return []
+        return list(data[start : end + 1])
+
     async def hset(self, key: str, *, mapping: Mapping[str, Any]) -> int:
         bucket = self.hash_store.setdefault(key, {})
         for field, value in mapping.items():
@@ -54,6 +70,17 @@ class RedisStub:
     async def publish(self, channel: str, message: str) -> int:
         self.published.append((channel, message))
         return len(self.published)
+
+    async def delete(self, key: str) -> int:
+        removed = 0
+        for store in (self.list_store, self.json_store, self.string_store, self.hash_store):
+            if key in store:
+                del store[key]  # type: ignore[index]
+                removed = 1
+        if key in self.set_store:
+            self.set_store.discard(key)
+            removed = 1
+        return removed
 
 
 @pytest.fixture()
@@ -233,3 +260,107 @@ def test_clear_notification_history_calls_service(notifications_app: SimpleNames
 
     assert response.status_code == 200
     assert response.json()["cleared"] == 42
+
+
+def test_notification_history_route_falls_back_to_redis_when_client_missing(
+    notifications_app: SimpleNamespace,
+) -> None:
+    redis: RedisStub = notifications_app.redis
+    redis.list_store[DEFAULT_HISTORY_KEY] = [
+        json.dumps(
+            {
+                "channel": "websocket",
+                "status": "sent",
+                "timestamp": "2024-06-05T12:00:00Z",
+                "message": "hello",
+            }
+        )
+    ]
+
+    with TestClient(notifications_app.app) as client:
+        response = client.get("/api/notifications/history", params={"limit": 5})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["history"][0]["message"] == "hello"
+
+
+def test_notification_history_route_falls_back_when_service_unavailable(
+    notifications_app: SimpleNamespace,
+) -> None:
+    redis: RedisStub = notifications_app.redis
+    redis.list_store[DEFAULT_HISTORY_KEY] = [
+        json.dumps({"channel": "telegram", "status": "failed", "timestamp": "2024-06-05T12:00:00Z"})
+    ]
+
+    class UnavailableClient(NotificationServiceClient):
+        async def history(  # type: ignore[override]
+            self,
+            *,
+            channel: str | None = None,
+            status: str | None = None,
+            since: str | None = None,
+            limit: int | None = None,
+        ) -> Mapping[str, Any]:
+            raise ServiceUnavailableError("notification", "offline")
+
+    notifications_module.set_notification_service_client(UnavailableClient())
+
+    with TestClient(notifications_app.app) as client:
+        response = client.get("/api/notifications/history", params={"channel": "telegram"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["history"][0]["channel"] == "telegram"
+
+
+def test_notification_history_route_returns_503_when_redis_unavailable(
+    notifications_app: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def offline_redis() -> None:
+        return None
+
+    monkeypatch.setattr(notifications_module, "ensure_redis", offline_redis)
+
+    with TestClient(notifications_app.app) as client:
+        response = client.get("/api/notifications/history")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Notification service not available"
+
+
+def test_clear_notification_history_falls_back_when_service_unavailable(
+    notifications_app: SimpleNamespace,
+) -> None:
+    redis: RedisStub = notifications_app.redis
+    redis.list_store[DEFAULT_HISTORY_KEY] = [
+        json.dumps({"channel": "websocket", "status": "sent", "timestamp": "2024-06-05T12:00:00Z"})
+    ]
+
+    class UnavailableClient(NotificationServiceClient):
+        async def clear_history(self) -> Mapping[str, Any]:  # type: ignore[override]
+            raise ServiceUnavailableError("notification", "offline")
+
+    notifications_module.set_notification_service_client(UnavailableClient())
+
+    with TestClient(notifications_app.app) as client:
+        response = client.delete("/api/notifications/history")
+
+    assert response.status_code == 200
+    assert response.json()["cleared"] == 1
+
+
+def test_clear_notification_history_returns_503_when_redis_unavailable(
+    notifications_app: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def offline_redis() -> None:
+        return None
+
+    monkeypatch.setattr(notifications_module, "ensure_redis", offline_redis)
+
+    with TestClient(notifications_app.app) as client:
+        response = client.delete("/api/notifications/history")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Notification service not available"
