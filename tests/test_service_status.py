@@ -63,8 +63,21 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
                 "last_error": "boom",
                 "last_seen": recent,
             },
-            "hash:service:health:market-data": None,
-            "hash:service:health:ib-feed": None,
+            "hash:service:health:market-data": {
+                "status": "running",
+                "last_seen": recent,
+                "price_updates": "12",
+                "price_throughput": "3.5",
+                "price_latency_avg_ms": "18.2",
+            },
+            "hash:service:health:ib-feed": {
+                "status": "running",
+                "last_seen": recent,
+                "price_updates_total": "24",
+                "price_updates_delta": "6",
+                "subscriptions": "3",
+                "active": "true",
+            },
             "hash:service:health:connection_control": None,
             "hash:service:health:notification": {
                 "healthy": "true",
@@ -93,13 +106,18 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert status_map["strategy"].status == "unhealthy"
         assert status_map["connection_control"].status == "unhealthy"
         assert status_map["ib_command"].status == "running"
-        assert status_map["market_data_feed"].status == "unhealthy"
-        assert status_map["market_data"].status == "unhealthy"
+        assert status_map["market_data_feed"].status == "running"
+        assert status_map["market_data"].status == "running"
         assert "未上报" in (status_map["connection_control"].detail or "")
-        assert "未上报" in (status_map["market_data_feed"].detail or "")
-        assert "未上报" in (status_map["market_data"].detail or "")
-        assert status_map["notification"].status == "running"
-        assert status_map["notification"].payload is not None
+
+        market_payload = status_map["market_data"].payload or {}
+        assert market_payload.get("price_updates") == "12"
+        assert market_payload.get("price_latency_avg_ms") == "18.2"
+
+        feed_payload = status_map["market_data_feed"].payload or {}
+        assert feed_payload.get("price_updates_total") == "24"
+        assert feed_payload.get("price_updates_delta") == "6"
+        assert feed_payload.get("subscriptions") == "3"
 
         account_payload = status_map["account"].payload or {}
         assert "readiness" in account_payload
@@ -290,7 +308,7 @@ def test_build_service_status_payload_includes_queue_metrics(monkeypatch: pytest
             "metrics_snapshot" in (entry.get("payload") or {})
             for entry in queue_entries
         )
-        assert queue_entries[0].get("port") is None
+        assert queue_entries[0].get("port") == "8011"
         assert queue_entries[0].get("display_name") in {"Queue Monitor", "queue_monitor"}
 
     asyncio.run(_run())

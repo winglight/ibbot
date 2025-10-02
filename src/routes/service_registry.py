@@ -145,6 +145,18 @@ def _registry() -> Tuple[RegisteredService, ...]:
             module_name="ib_feed_service_probe",
             implementation_status="Beta",
         ),
+        RegisteredService(
+            slug="queue_monitor",
+            service_name="queue-monitor",
+            display_name="Queue Monitor",
+            description="队列监控服务 (queue_monitor)",
+            internal=True,
+            health_key="hash:service:health:queue",
+            health_env_var="QUEUE_MONITOR_HEALTH_KEY",
+            module_name="queue_monitor_probe",
+            missing_detail="队列监控服务未上报健康数据",
+            port="8011",
+        ),
     )
 
 

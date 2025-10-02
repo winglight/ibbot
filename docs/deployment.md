@@ -49,13 +49,18 @@
 | --- | --- | --- | --- |
 | Trading Core (`ibbot`) | 8000 | `docker compose restart ibbot` | `python scripts/run_service.py ibbot` |
 | Command Dispatcher (`ib_command`) | — | `docker compose restart ib_command` | `python scripts/run_service.py ib_command` |
-| Connection Control (`connection_control`) | 8056 | `docker compose restart connection_control` | `python scripts/run_service.py connection_control` |
+| Connection Control (`connection_control`, legacy) | 8056 | `docker compose restart connection_control` | `python scripts/run_service.py connection_control` |
 | Account Service (`account`) | 8020 | `docker compose restart account` | `python scripts/run_service.py account` |
 | Order Gateway (`orders`) | 8050 | `docker compose restart orders` | `python scripts/run_service.py orders` |
 | Market Data Sync (`market_data`) | 8010 | `docker compose restart market_data` | `python scripts/run_service.py market_data` |
 | Risk Manager (`risk`) | 8030 | `docker compose restart risk` | `python scripts/run_service.py risk` |
 | Strategy Scheduler (`strategy`) | 8045 | `docker compose restart strategy` | `python scripts/run_service.py strategy` |
 | Market Data Feed (`market_data_feed`) | — | `docker compose restart market_data_feed` | `python scripts/run_service.py market_data_feed` |
+| Queue Monitor (`queue_monitor`) | 8011 | `docker compose restart queue_monitor` | `python scripts/run_service.py queue_monitor` |
+
+> ℹ️ **依赖顺序提示**：控制台会自动按依赖顺序重启服务，例如 `market_data` 会先重启 `market_data_feed`，
+> `ibbot` 会在 `account` 与 `orders` 成功后再启动。`queue_monitor` 独立运行，可单独重启。历史组件
+> `connection_control` 仍可手动触发，但默认计划已不再包含。
 
 关闭所有容器：
 

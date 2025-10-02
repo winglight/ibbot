@@ -217,16 +217,16 @@ class LocalSupervisorController:
 
 
 DEFAULT_SERVICE_DEPENDENCIES: Mapping[str, Sequence[str]] = {
-    "connection_control": (),
-    "ib_command": ("connection_control",),
-    "account": ("connection_control",),
-    "orders": ("connection_control", "account"),
-    "market_data": ("connection_control",),
-    "market_data_feed": ("connection_control",),
+    "queue_monitor": (),
+    "ib_command": (),
+    "account": (),
+    "orders": ("account",),
+    "market_data_feed": (),
+    "market_data": ("market_data_feed",),
     "risk": ("orders",),
     "notification": ("connection_control",),
     "strategy": ("orders",),
-    "ibbot": ("connection_control", "account", "orders"),
+    "ibbot": ("account", "orders"),
 }
 
 

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
+from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
 from src.ibbot.influx import write_points
 from src.ibbot.logging import get_logger
@@ -49,6 +50,9 @@ class MarketDataFeedService:
     write_fn: Callable[[Iterable[Mapping[str, Any]]], Awaitable[int] | int] = write_points
     logger_name: str = "ibbot.services.ib_feed"
     reconnect_delay: float = 1.0
+    health_service_name: str = SERVICE_NAME
+    health_key: str | None = None
+    health_interval: float = 5.0
 
     price_updates: int = 0
     dom_updates: int = 0
@@ -60,6 +64,10 @@ class MarketDataFeedService:
     _dom_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _logger: Any = field(default=None, init=False, repr=False)
     _active: bool = field(default=False, init=False, repr=False)
+    _stop_health: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+    _health_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _last_price_updates: int = field(default=0, init=False, repr=False)
+    _last_dom_updates: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._logger = get_logger(self.logger_name)
@@ -68,6 +76,12 @@ class MarketDataFeedService:
         """Start the service by connecting and subscribing to symbols."""
 
         self._loop = asyncio.get_running_loop()
+        self._stopping.clear()
+        self._stop_health.clear()
+        self._last_price_updates = self.price_updates
+        self._last_dom_updates = self.dom_updates
+        self._health_task = asyncio.create_task(self._health_loop(), name="ib-feed-health")
+        await self._publish_health(status="running", healthy=True)
         if not self.subscriptions:
             self._logger.info(
                 "No market data subscriptions configured; IB feed service running idle",
@@ -82,6 +96,11 @@ class MarketDataFeedService:
         """Stop the service and cancel background tasks."""
 
         self._stopping.set()
+        self._stop_health.set()
+        if self._health_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._health_task
+            self._health_task = None
         if self._reconnect_task is not None:
             self._reconnect_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -91,6 +110,7 @@ class MarketDataFeedService:
             if disconnect is not None:
                 await _ensure_awaitable(disconnect())
         self._active = False
+        await self._publish_health(status="offline", healthy=False)
 
     def _bind_client_events(self) -> None:
         price_handler = getattr(self.ib_client, "add_price_listener", None)
@@ -171,6 +191,57 @@ class MarketDataFeedService:
                 return
             except Exception:  # pragma: no cover - depends on IB client behaviour
                 self._logger.warning("Reconnect attempt failed", exc_info=True)
+
+    async def _health_loop(self) -> None:
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(self._stop_health.wait(), timeout=self.health_interval)
+                    break
+                except asyncio.TimeoutError:
+                    metrics = self._collect_health_metrics()
+                    await self._publish_health(status="running", healthy=True, metrics=metrics)
+        finally:
+            metrics = self._collect_health_metrics()
+            metrics["final"] = True
+            await self._publish_health(status="running", healthy=True, metrics=metrics)
+
+    def _collect_health_metrics(self) -> dict[str, Any]:
+        metrics = {
+            "price_updates_total": int(self.price_updates),
+            "dom_updates_total": int(self.dom_updates),
+            "price_updates_delta": int(self.price_updates - self._last_price_updates),
+            "dom_updates_delta": int(self.dom_updates - self._last_dom_updates),
+            "subscriptions": len(self.subscriptions),
+            "active": self._active,
+        }
+        self._last_price_updates = self.price_updates
+        self._last_dom_updates = self.dom_updates
+        return metrics
+
+    async def _publish_health(
+        self,
+        *,
+        status: str | None = None,
+        healthy: bool | None = None,
+        metrics: Mapping[str, Any] | None = None,
+    ) -> None:
+        redis = getattr(self, "redis", None)
+        if redis is None:
+            return
+        try:
+            await update_service_health(
+                redis,
+                self.health_service_name,
+                status=status,
+                healthy=healthy,
+                metrics=metrics,
+                key=self.health_key,
+                logger=self._logger,
+            )
+        except Exception:
+            if self._logger:
+                self._logger.warning("Failed to publish IB feed health", exc_info=True)
 
     async def process_price_update(self, symbol: str, update: Mapping[str, Any]) -> None:
         self.price_updates += 1
