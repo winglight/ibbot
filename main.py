@@ -84,6 +84,7 @@ from src.routes.config import router as config_router
 from src.routes.websocket import router as websocket_router
 from src.routes.dom import router as dom_router
 from src.data_layer import get_data_source_manager
+from src.startup_checks import detect_open_sqlite_handles, record_sqlite_handle_check
 
 
 # Global variables
@@ -548,6 +549,22 @@ async def lifespan(app: FastAPI):
         await refresh_account_service_status(max_age=None)
     except Exception as exc:  # pragma: no cover - defensive guard
         main_logger.warning("Account service readiness probe raised an exception: {}", exc)
+
+    sqlite_handles = detect_open_sqlite_handles()
+    record_sqlite_handle_check(sqlite_handles)
+    if sqlite_handles:
+        detail = ", ".join(sqlite_handles)
+        message = f"SQLite file handles detected during startup: {detail}"
+        if _env_flag("IGNORE_SQLITE_HANDLE_CHECK", False):
+            main_logger.warning(
+                "%s (IGNORED due to IGNORE_SQLITE_HANDLE_CHECK)",
+                message,
+            )
+        else:
+            main_logger.error(message)
+            raise RuntimeError(message)
+    else:
+        main_logger.info("Startup check passed: no SQLite file handles detected.")
 
     try:
         yield

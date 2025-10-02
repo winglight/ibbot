@@ -8,6 +8,7 @@ import pytest
 from src.account_service_readiness import AccountServiceReadiness
 from src.routes.service_registry import SERVICE_REGISTRY
 from src.service_status import gather_service_statuses, build_service_status_payload
+from src.startup_checks import record_sqlite_handle_check, reset_startup_checks
 
 
 class StubRedis:
@@ -24,6 +25,7 @@ class StubRedis:
 
 def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyPatch):
     async def _run() -> None:
+        reset_startup_checks()
         now = datetime.now(timezone.utc)
         recent = now.isoformat()
         async def _fake_readiness(**_: object) -> AccountServiceReadiness:
@@ -108,6 +110,7 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
 
 def test_account_service_status_falls_back_to_readiness(monkeypatch: pytest.MonkeyPatch):
     async def _run() -> None:
+        reset_startup_checks()
         now = datetime.now(timezone.utc)
 
         async def _fake_readiness(**_: object) -> AccountServiceReadiness:
@@ -145,6 +148,7 @@ def test_account_service_status_falls_back_to_readiness(monkeypatch: pytest.Monk
 
 def test_build_service_status_payload_structure(monkeypatch: pytest.MonkeyPatch):
     async def _run() -> None:
+        reset_startup_checks()
         now = datetime.now(timezone.utc).isoformat()
 
         async def _fake_readiness(**_: object) -> AccountServiceReadiness:
@@ -224,6 +228,7 @@ def test_build_service_status_payload_structure(monkeypatch: pytest.MonkeyPatch)
 
 def test_build_service_status_payload_includes_queue_metrics(monkeypatch: pytest.MonkeyPatch):
     async def _run() -> None:
+        reset_startup_checks()
         now = datetime.now(timezone.utc).isoformat()
         async def _fake_readiness(**_: object) -> AccountServiceReadiness:
             return AccountServiceReadiness(ready=True, checked_at=datetime.now(timezone.utc), error=None)
@@ -280,5 +285,38 @@ def test_build_service_status_payload_includes_queue_metrics(monkeypatch: pytest
         )
         assert queue_entries[0].get("port") is None
         assert queue_entries[0].get("display_name") in {"Queue Monitor", "queue_monitor"}
+
+    asyncio.run(_run())
+
+
+def test_service_status_payload_includes_startup_checks(monkeypatch: pytest.MonkeyPatch):
+    async def _run() -> None:
+        reset_startup_checks()
+        record_sqlite_handle_check([])
+
+        async def _fake_readiness(**_: object) -> AccountServiceReadiness:
+            return AccountServiceReadiness(ready=True, checked_at=datetime.now(timezone.utc), error=None)
+
+        monkeypatch.setattr(
+            "src.service_status.refresh_account_service_status",
+            _fake_readiness,
+        )
+
+        now = datetime.now(timezone.utc).isoformat()
+        redis_data = {
+            "hash:service:health:ib-command": {
+                "last_seen": now,
+                "queue_depth": "0",
+            },
+            "hash:service:queue-monitor": {"timestamp": now},
+        }
+
+        payload = await build_service_status_payload(redis=StubRedis(redis_data))
+        checks = payload.get("startup_checks")
+        assert isinstance(checks, list)
+        assert any(
+            check.get("name") == "sqlite_handles" and check.get("healthy") is True
+            for check in checks
+        )
 
     asyncio.run(_run())
