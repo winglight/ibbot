@@ -156,10 +156,13 @@ python scripts/run_all.py --dry-run ib_command
 | Redis 键 | 默认来源 | 主要字段 |
 | --- | --- | --- |
 | `hash:service:health:ib-command` | `ib_command` 服务（可由 `IB_COMMAND_HEALTH_KEY` 覆写） | `queue_depth`、`last_seen`、`last_error`、`last_error_code`、`stale` |
+| `hash:service:health:account-service` | 账户服务（`ACCOUNT_SERVICE_HEALTH_KEY`） | `healthy`、`last_error`、`last_seen`、快照时间戳 |
+| `hash:service:health:orders` | 订单服务（`ORDERS_SERVICE_HEALTH_KEY`） | `healthy`、`last_seen`、`active_orders` |
 | `hash:service:health:risk-service` | `risk` 服务（`RISK_SERVICE_HEALTH_KEY`） | `status`、`last_seen`、`last_error` |
 | `hash:service:health:strategy` | `strategy` 服务（`STRATEGY_SERVICE_HEALTH_KEY`） | `status`/`healthy`、`last_error`、`last_seen` |
+| `hash:service:health:notification` | 通知服务（`NOTIFICATION_SERVICE_HEALTH_KEY`） | `healthy`、`last_error`、`pending_retries` |
 | `hash:service:health:account-snapshot` | 账户快照服务（`ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY`） | `status`、`healthy`、`last_error` |
-| `hash:service:health:queue` | 队列监控守护进程（`QUEUE_SERVICE_HEALTH_KEY`） | `status`、`last_seen` |
+| `hash:service:health:queue` | 队列监控守护进程（`QUEUE_MONITOR_HEALTH_KEY`） | `status`、`last_seen`、聚合队列指标 |
 | `hash:service:queue-monitor` | `queue_monitor` 服务 | `timestamp`、队列统计字段 |
 
 这些健康键由 `src/service_status.py` 汇总，前端“Service Health”与连接状态接口均依赖其结构。新增的 `last_error_code` 字段会出现在 ib-command 健康记录与 `/api/connection_status` 响应中，用于暴露最新的 IBKR 错误码。

@@ -7,6 +7,7 @@ import contextlib
 import inspect
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
@@ -141,6 +142,12 @@ def _normalise_stream_targets(
 
 
 @dataclass(slots=True)
+QUEUE_MONITOR_METRICS_HASH_KEY = os.getenv("QUEUE_MONITOR_METRICS_HASH_KEY", "hash:service:queue-monitor")
+QUEUE_MONITOR_HEALTH_HASH_KEY = os.getenv("QUEUE_MONITOR_HEALTH_HASH_KEY", "hash:service:health:queue")
+QUEUE_MONITOR_PUBSUB_CHANNEL = os.getenv("QUEUE_MONITOR_PUBSUB_CHANNEL", "pubsub:service:queue-monitor")
+QUEUE_MONITOR_SERVICE_NAME = os.getenv("QUEUE_MONITOR_SERVICE_NAME", "queue-monitor")
+
+
 class QueueMonitorRuntime:
     """Monitor Redis queue metrics and expose them for dashboards."""
 
@@ -151,9 +158,10 @@ class QueueMonitorRuntime:
     redis_factory: Callable[[], Awaitable[Any]] = get_redis_client
     write_fn: Callable[[Iterable[Any]], Awaitable[int] | int] = write_points
     metrics_interval: float = 5.0
-    hash_key: str = "hash:service:queue-monitor"
-    pubsub_channel: str | None = "pubsub:service:queue-monitor"
-    service_name: str = "queue-monitor"
+    hash_key: str = QUEUE_MONITOR_METRICS_HASH_KEY
+    pubsub_channel: str | None = QUEUE_MONITOR_PUBSUB_CHANNEL or None
+    service_name: str = QUEUE_MONITOR_SERVICE_NAME
+    health_hash_key: str = QUEUE_MONITOR_HEALTH_HASH_KEY
     logger_name: str = "ibbot.services.queue_monitor"
 
     _queue_targets: tuple[QueueTarget, ...] = field(init=False, repr=False)
@@ -256,7 +264,7 @@ class QueueMonitorRuntime:
             self.service_name,
             healthy=True,
             metrics=metrics,
-            key="hash:service:health:queue",
+            key=self.health_hash_key,
             logger=self._logger,
         )
 

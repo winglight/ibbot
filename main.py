@@ -601,16 +601,19 @@ def _build_module_registry(main_logger) -> ModuleRegistry:
             description="Initialise unified data subscriptions and DOM auto-start.",
         )
     )
-    for module_name, service_name, redis_key in SERVICE_HEALTH_PROBES:
+    for probe in SERVICE_HEALTH_PROBES:
+        redis_key = probe.redis_key
+        if not redis_key:
+            continue
         registry.register(
             ModuleDefinition(
-                name=module_name,
-                start=lambda ctx, s=service_name, k=redis_key: _module_service_health_probe(
+                name=probe.module_id,
+                start=lambda ctx, s=probe.service_name, k=redis_key: _module_service_health_probe(
                     ctx,
                     service_name=s,
                     redis_key=k,
                 ),
-                description=f"Load {service_name} health snapshot from Redis.",
+                description=f"Load {probe.service_name} health snapshot from Redis.",
             )
         )
     registry.register(

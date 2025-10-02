@@ -21,40 +21,97 @@ from src.ibbot.redis import get_redis_client
 
 __all__ = [
     "SERVICE_HEALTH_PROBES",
+    "ServiceProbe",
     "ServiceStatus",
     "gather_service_statuses",
     "build_service_status_payload",
 ]
 
 
-SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
-    (
-        "risk_service_probe",
-        "risk-service",
-        os.getenv("RISK_SERVICE_HEALTH_KEY", "hash:service:health:risk-service"),
+@dataclass(frozen=True, slots=True)
+class ServiceProbe:
+    """Describe how to map a Redis health hash to a UI service card."""
+
+    ui_service: str
+    service_name: str
+    default_key: str
+    env_var: str | None = None
+    missing_detail: str = "未上报健康数据"
+    module_name: str | None = None
+
+    @property
+    def redis_key(self) -> str:
+        if self.env_var:
+            override = os.getenv(self.env_var, "").strip()
+            if override:
+                return override
+        return self.default_key
+
+    @property
+    def module_id(self) -> str:
+        if self.module_name:
+            return self.module_name
+        slug = self.service_name.replace("-", "_")
+        return f"{slug}_probe"
+
+
+SERVICE_HEALTH_PROBES: tuple[ServiceProbe, ...] = (
+    ServiceProbe(
+        ui_service="account",
+        service_name="account-service",
+        default_key="hash:service:health:account-service",
+        env_var="ACCOUNT_SERVICE_HEALTH_KEY",
+        missing_detail="账户服务未上报健康数据",
+        module_name="account_service_probe",
     ),
-    (
-        "strategy_service_probe",
-        "strategy",
-        os.getenv("STRATEGY_SERVICE_HEALTH_KEY", "hash:service:health:strategy"),
+    ServiceProbe(
+        ui_service="orders",
+        service_name="orders",
+        default_key="hash:service:health:orders",
+        env_var="ORDERS_SERVICE_HEALTH_KEY",
+        missing_detail="订单服务未上报健康数据",
+        module_name="orders_service_probe",
     ),
-    (
-        "account_snapshot_probe",
-        "account-snapshot",
-        os.getenv(
-            "ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY",
-            "hash:service:health:account-snapshot",
-        ),
+    ServiceProbe(
+        ui_service="risk",
+        service_name="risk-service",
+        default_key="hash:service:health:risk-service",
+        env_var="RISK_SERVICE_HEALTH_KEY",
+        module_name="risk_service_probe",
     ),
-    (
-        "queue_worker_probe",
-        "queue-monitor",
-        os.getenv("QUEUE_SERVICE_HEALTH_KEY", "hash:service:health:queue"),
+    ServiceProbe(
+        ui_service="strategy",
+        service_name="strategy",
+        default_key="hash:service:health:strategy",
+        env_var="STRATEGY_SERVICE_HEALTH_KEY",
+        module_name="strategy_service_probe",
+    ),
+    ServiceProbe(
+        ui_service="notification",
+        service_name="notification",
+        default_key="hash:service:health:notification",
+        env_var="NOTIFICATION_SERVICE_HEALTH_KEY",
+        missing_detail="通知服务未上报健康数据",
+        module_name="notification_service_probe",
+    ),
+    ServiceProbe(
+        ui_service="account_snapshot",
+        service_name="account-snapshot",
+        default_key="hash:service:health:account-snapshot",
+        env_var="ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY",
+        missing_detail="账户快照服务未上报健康数据",
+        module_name="account_snapshot_probe",
     ),
 )
 
 DOM_SERVICE_NAME = os.getenv("DOM_SERVICE_NAME", "dom-service")
 DOM_SERVICE_HEALTH_KEY = (os.getenv("DOM_SERVICE_HEALTH_KEY", "") or "").strip()
+QUEUE_MONITOR_HEALTH_HASH_KEY = os.getenv(
+    "QUEUE_MONITOR_HEALTH_KEY", "hash:service:health:queue"
+)
+QUEUE_MONITOR_METRICS_HASH_KEY = os.getenv(
+    "QUEUE_MONITOR_METRICS_HASH_KEY", "hash:service:queue-monitor"
+)
 
 
 @dataclass(slots=True)
@@ -105,17 +162,9 @@ _STATUS_NORMALISATION = {
 }
 
 
-_PLACEHOLDER_SERVICES: dict[str, str] = {
-    "ib-gateway": "IB Gateway 状态未接入健康检查，假定运行中。",
-    "ib_feed": "行情订阅服务未上报健康信息，默认显示运行中。",
-    "optimizer": "Optimizer Engine 未提供健康接口，默认显示运行中。",
-    "cloudflared": "Cloudflare Tunnel 状态未接入健康检查，默认显示运行中。",
-    "notification": "通知服务未集成统一健康检查，默认显示运行中。",
-    "market_data": "行情落地服务未接入健康检查，默认显示运行中。",
-}
-
-_SERVICE_ALIASES: dict[str, str] = {
-    "queue-monitor": "queue_monitor",
+EXTERNAL_SERVICES: dict[str, str] = {
+    "ib-gateway": "IB Gateway 由外部部署提供，需手动确认运行状态。",
+    "cloudflared": "Cloudflared 隧道为外部依赖，请使用独立监控确认状态。",
 }
 
 
@@ -262,8 +311,10 @@ async def _build_ib_command_status(redis: Any) -> ServiceStatus:
 
 
 async def _build_queue_monitor_status(redis: Any) -> ServiceStatus:
-    payload = await _load_hash(redis, "hash:service:queue-monitor")
-    if not payload:
+    health_payload = await _load_hash(redis, QUEUE_MONITOR_HEALTH_HASH_KEY)
+    snapshot_payload = await _load_hash(redis, QUEUE_MONITOR_METRICS_HASH_KEY)
+
+    if not health_payload and not snapshot_payload:
         return ServiceStatus(
             service="queue_monitor",
             status="unhealthy",
@@ -272,11 +323,21 @@ async def _build_queue_monitor_status(redis: Any) -> ServiceStatus:
             payload=None,
         )
 
-    timestamp = _normalise_timestamp(payload.get("timestamp"))
+    combined_payload: dict[str, Any] = {}
+    if health_payload:
+        combined_payload.update(dict(health_payload))
+    if snapshot_payload:
+        combined_payload.setdefault("metrics_snapshot", dict(snapshot_payload))
+
+    last_reported = _normalise_timestamp(
+        (health_payload or {}).get("last_seen")
+        or (snapshot_payload or {}).get("timestamp")
+    )
     detail = "队列指标已更新"
-    if timestamp:
+    snapshot_timestamp = _normalise_timestamp((snapshot_payload or {}).get("timestamp"))
+    if snapshot_timestamp:
         try:
-            ts_dt = datetime.fromisoformat(timestamp)
+            ts_dt = datetime.fromisoformat(snapshot_timestamp)
         except ValueError:
             ts_dt = None
         else:
@@ -287,15 +348,16 @@ async def _build_queue_monitor_status(redis: Any) -> ServiceStatus:
                     service="queue_monitor",
                     status="unhealthy",
                     detail=detail,
-                    last_reported=timestamp,
-                    payload=payload,
+                    last_reported=snapshot_timestamp,
+                    payload=combined_payload or None,
                 )
+
     return ServiceStatus(
         service="queue_monitor",
         status="running",
         detail=detail,
-        last_reported=timestamp,
-        payload=payload,
+        last_reported=last_reported,
+        payload=combined_payload or None,
     )
 
 
@@ -360,51 +422,67 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
             )
         )
 
+    account_readiness_payload: Mapping[str, Any] | None = None
+    account_readiness_status: str | None = None
+    account_readiness_detail: str | None = None
+
     try:
         readiness = await refresh_account_service_status(max_age=60.0, log_failure=False)
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Failed to refresh account service readiness: %s", exc)
-        statuses.append(
-            ServiceStatus(
-                service="account-service",
-                status="unhealthy",
-                detail=f"无法刷新账户服务状态: {exc}",
-            )
-        )
+        account_readiness_status = "unhealthy"
+        account_readiness_detail = f"无法刷新账户服务状态: {exc}"
+        account_readiness_payload = {"error": str(exc)}
     else:
         readiness_payload = readiness.as_payload()
-        checked_at = readiness_payload.get("checked_at")
+        account_readiness_payload = readiness_payload
         if readiness.ready:
-            detail = "账户服务可用"
+            account_readiness_status = "running"
+            account_readiness_detail = "账户服务可用"
         elif readiness.checked_at is None:
-            detail = "账户服务尚未执行连通性检查"
+            account_readiness_status = "unhealthy"
+            account_readiness_detail = "账户服务尚未执行连通性检查"
         else:
-            detail = f"无法连接账户服务: {readiness.error or '未知错误'}"
-        statuses.append(
-            ServiceStatus(
-                service="account-service",
-                status="running" if readiness.ready else "unhealthy",
-                detail=detail,
-                last_reported=checked_at,
-                payload=readiness_payload,
-            )
-        )
+            account_readiness_status = "unhealthy"
+            account_readiness_detail = f"无法连接账户服务: {readiness.error or '未知错误'}"
 
-    for _, service_name, redis_key in SERVICE_HEALTH_PROBES:
+    for probe in SERVICE_HEALTH_PROBES:
+        redis_key = probe.redis_key
         if not redis_key:
             continue
-        ui_service = _SERVICE_ALIASES.get(service_name, service_name)
         payload = await _load_hash(client, redis_key)
         if not payload:
-            statuses.append(
-                ServiceStatus(
-                    service=ui_service,
-                    status="unhealthy",
-                    detail="未上报健康数据",
+            if probe.ui_service == "account" and account_readiness_payload is not None:
+                statuses.append(
+                    ServiceStatus(
+                        service=probe.ui_service,
+                        status=account_readiness_status or "unhealthy",
+                        detail=account_readiness_detail or probe.missing_detail,
+                        payload={"readiness": account_readiness_payload},
+                    )
                 )
-            )
+            else:
+                statuses.append(
+                    ServiceStatus(
+                        service=probe.ui_service,
+                        status="unhealthy",
+                        detail=probe.missing_detail,
+                    )
+                )
             continue
-        statuses.append(_build_status_from_payload(ui_service, payload))
+
+        status_obj = _build_status_from_payload(probe.ui_service, payload)
+        if probe.ui_service == "account":
+            combined_payload: dict[str, Any] = dict(payload)
+            if account_readiness_payload is not None:
+                combined_payload["readiness"] = account_readiness_payload
+                status_obj.payload = combined_payload
+            if account_readiness_status and account_readiness_status != "running":
+                status_obj.status = account_readiness_status
+                status_obj.detail = account_readiness_detail or status_obj.detail
+            elif account_readiness_detail and not status_obj.detail:
+                status_obj.detail = account_readiness_detail
+        statuses.append(status_obj)
 
     try:
         statuses.append(await _build_queue_monitor_status(client))
@@ -430,11 +508,11 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
             )
         )
 
-    for service, message in _PLACEHOLDER_SERVICES.items():
+    for service, message in EXTERNAL_SERVICES.items():
         statuses.append(
             ServiceStatus(
                 service=service,
-                status="running",
+                status="external",
                 detail=message,
             )
         )
