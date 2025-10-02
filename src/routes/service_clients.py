@@ -242,8 +242,10 @@ class AccountServiceClient(ServiceClient):
         return False
 
     @staticmethod
-    def _bool_param(value: bool) -> Optional[str]:
-        return "true" if value else None
+    def _bool_param(value: bool | None) -> Optional[str]:
+        if value is None:
+            return None
+        return "true" if value else "false"
 
     @classmethod
     def _extract_metadata(cls, payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -306,10 +308,15 @@ class AccountServiceClient(ServiceClient):
         self,
         *,
         force_refresh: bool = False,
+        fast: bool = False,
     ) -> AccountServiceResult | None:
         params: Dict[str, str] = {}
-        if force_refresh:
-            params["force_refresh"] = "true"
+        force_refresh_param = self._bool_param(True if force_refresh else None)
+        fast_param = self._bool_param(True if fast else None)
+        if fast_param:
+            params["fast"] = fast_param
+        if force_refresh_param:
+            params["force_refresh"] = force_refresh_param
 
         payload = await self.request(
             "GET",
@@ -329,10 +336,12 @@ class AccountServiceClient(ServiceClient):
         force_refresh: bool = False,
     ) -> AccountServiceResult | None:
         params: Dict[str, str] = {}
-        if fast:
-            params["fast"] = "true"
-        if force_refresh:
-            params["force_refresh"] = "true"
+        fast_param = self._bool_param(True if fast else None)
+        force_refresh_param = self._bool_param(True if force_refresh else None)
+        if fast_param:
+            params["fast"] = fast_param
+        if force_refresh_param:
+            params["force_refresh"] = force_refresh_param
 
         payload = await self.request(
             "GET",
@@ -359,15 +368,49 @@ class AccountServiceClient(ServiceClient):
         limit: int,
         offset: int,
         start_date: str | None = None,
+        fast: bool = False,
+        force_refresh: bool = False,
     ) -> Mapping[str, Any] | list[Any] | None:
         params: Dict[str, Any] = {"limit": int(limit), "offset": int(offset)}
         if start_date:
             params["start_date"] = start_date
+        fast_param = self._bool_param(True if fast else None)
+        force_refresh_param = self._bool_param(True if force_refresh else None)
+        if fast_param:
+            params["fast"] = fast_param
+        if force_refresh_param:
+            params["force_refresh"] = force_refresh_param
 
         return await self.request(
             "GET",
             "/account/orders",
             params=params,
+        )
+
+    async def fetch_daily_summary(
+        self,
+        *,
+        days: int,
+        fast: bool = False,
+        force_refresh: bool = False,
+    ) -> AccountServiceResult | None:
+        params: Dict[str, Any] = {"days": int(days)}
+        fast_param = self._bool_param(True if fast else None)
+        force_refresh_param = self._bool_param(True if force_refresh else None)
+        if fast_param:
+            params["fast"] = fast_param
+        if force_refresh_param:
+            params["force_refresh"] = force_refresh_param
+
+        payload = await self.request(
+            "GET",
+            "/account/daily-summary",
+            params=params,
+        )
+
+        return self._wrap_result(
+            payload,
+            data_keys=("daily_summary", "data", "result"),
         )
 
     async def request_refresh(self, *, reason: str | None = None) -> None:

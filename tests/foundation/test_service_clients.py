@@ -129,6 +129,78 @@ async def test_account_service_omits_false_flags(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.anyio("asyncio")
+async def test_account_service_fetch_info_supports_fast_and_force(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ACCOUNT_SERVICE_URL", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["fast"] == "true"
+        assert request.url.params["force_refresh"] == "true"
+        return httpx.Response(200, json={"account_info": {"balance": 1}})
+
+    client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
+
+    result = await client.fetch_info(force_refresh=True, fast=True)
+
+    assert isinstance(result, AccountServiceResult)
+    assert result.data == {"balance": 1}
+
+
+@pytest.mark.anyio("asyncio")
+async def test_account_service_fetch_orders_includes_optional_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ACCOUNT_SERVICE_URL", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        assert params["limit"] == "25"
+        assert params["offset"] == "0"
+        assert params["fast"] == "true"
+        assert params["force_refresh"] == "true"
+        return httpx.Response(200, json=[])
+
+    client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
+
+    payload = await client.fetch_orders(
+        limit=25,
+        offset=0,
+        fast=True,
+        force_refresh=True,
+    )
+
+    assert isinstance(payload, list)
+    assert payload == []
+
+
+@pytest.mark.anyio("asyncio")
+async def test_account_service_fetch_daily_summary_with_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ACCOUNT_SERVICE_URL", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        assert params["days"] == "7"
+        assert params["fast"] == "true"
+        assert params["force_refresh"] == "true"
+        return httpx.Response(
+            200,
+            json={
+                "daily_summary": [{"pnl": 1.0}],
+                "metadata": {"from_cache": False, "snapshot_updated_at": "2024-01-01T00:00:00"},
+            },
+        )
+
+    client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
+
+    result = await client.fetch_daily_summary(days=7, fast=True, force_refresh=True)
+
+    assert isinstance(result, AccountServiceResult)
+    assert result.data == [{"pnl": 1.0}]
+    assert result.metadata.get("from_cache") is False
+
+
+@pytest.mark.anyio("asyncio")
 async def test_risk_service_create_rule_invokes_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RISK_SERVICE_URL", raising=False)
     captured: Dict[str, Any] = {}

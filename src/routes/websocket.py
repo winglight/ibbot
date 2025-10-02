@@ -203,10 +203,15 @@ async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
 
 
 async def _fetch_account_info(
+    *,
     force_refresh: bool = False,
+    fast: bool = False,
 ) -> AccountServiceResult | Dict[str, Any] | None:
     try:
-        payload = await _ACCOUNT_CLIENT.fetch_info(force_refresh=force_refresh)
+        payload = await _ACCOUNT_CLIENT.fetch_info(
+            force_refresh=force_refresh,
+            fast=fast,
+        )
     except ServiceUnavailableError as exc:
         logger.debug("Account service unavailable: %s", exc)
         error_payload = _service_unavailable_payload("account_update")
@@ -796,16 +801,17 @@ async def websocket_endpoint(websocket: WebSocket):
     # 初次连接后，向该连接单播账户信息快照
     try:
         snapshot = await read_account_info_snapshot()
-        info_result = await _fetch_account_info()
+        snapshot_metadata = (
+            _merge_metadata(snapshot) if isinstance(snapshot, Mapping) else {}
+        )
+        stale_snapshot = AccountServiceClient.is_metadata_stale(snapshot_metadata)
+        info_result = await _fetch_account_info(force_refresh=stale_snapshot)
         unavailable_payload = (
             _extract_service_unavailable_payload(info_result, "account_update")
             if isinstance(info_result, Mapping)
             else None
         )
 
-        snapshot_metadata = (
-            _merge_metadata(snapshot) if isinstance(snapshot, Mapping) else {}
-        )
         if isinstance(snapshot, Mapping):
             if "source" not in snapshot_metadata or not snapshot_metadata.get("source"):
                 snapshot_metadata["source"] = snapshot.get("source") or "redis"
@@ -834,6 +840,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload["stale_reason"] = combined_meta["stale_reason"]
             if combined_meta.get("stale_at") and "stale_at" not in payload:
                 payload["stale_at"] = combined_meta["stale_at"]
+            if "from_cache" not in payload and "from_cache" in combined_meta:
+                payload["from_cache"] = bool(combined_meta.get("from_cache"))
             payload.setdefault(
                 "stale", AccountServiceClient.is_metadata_stale(combined_meta)
             )
@@ -883,6 +891,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "account_info": info_payload,
                     "source": source_value or "service",
                     "stale": stale_flag,
+                    "from_cache": bool(combined_meta.get("from_cache")),
                 }
                 if combined_meta.get("snapshot_updated_at"):
                     response_payload["snapshot_updated_at"] = combined_meta[
@@ -969,18 +978,24 @@ async def websocket_endpoint(websocket: WebSocket):
     # 初次连接后，向该连接单播发送positions快照
     try:
         positions_snapshot = await read_positions_snapshot()
-        positions_result = await _fetch_positions(force_refresh=False, fast=True)
+        positions_snapshot_metadata = (
+            _merge_metadata(positions_snapshot)
+            if isinstance(positions_snapshot, Mapping)
+            else {}
+        )
+        stale_positions = AccountServiceClient.is_metadata_stale(
+            positions_snapshot_metadata
+        )
+        positions_result = await _fetch_positions(
+            force_refresh=stale_positions,
+            fast=True,
+        )
         unavailable_positions = (
             _extract_service_unavailable_payload(positions_result, "position_update")
             if isinstance(positions_result, Mapping)
             else None
         )
 
-        positions_snapshot_metadata = (
-            _merge_metadata(positions_snapshot)
-            if isinstance(positions_snapshot, Mapping)
-            else {}
-        )
         if isinstance(positions_snapshot, Mapping):
             if not positions_snapshot_metadata.get("source"):
                 positions_snapshot_metadata["source"] = (
@@ -1004,6 +1019,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload["stale_reason"] = combined_meta["stale_reason"]
             if combined_meta.get("stale_at") and "stale_at" not in payload:
                 payload["stale_at"] = combined_meta["stale_at"]
+            if "from_cache" not in payload and "from_cache" in combined_meta:
+                payload["from_cache"] = bool(combined_meta.get("from_cache"))
             payload.setdefault(
                 "stale", AccountServiceClient.is_metadata_stale(combined_meta)
             )
@@ -1058,6 +1075,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "positions": positions_payload,
                     "source": source_value or "service",
                     "stale": stale_flag,
+                    "from_cache": bool(combined_meta.get("from_cache")),
                 }
                 if combined_meta.get("snapshot_updated_at"):
                     response_payload["snapshot_updated_at"] = combined_meta[
@@ -1503,8 +1521,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 fast = bool(fast_flag) if fast_flag is not None else False
 
                 try:
+                    snapshot = await read_positions_snapshot()
+                    snapshot_metadata = (
+                        _merge_metadata(snapshot)
+                        if isinstance(snapshot, Mapping)
+                        else {}
+                    )
+                    stale_snapshot = AccountServiceClient.is_metadata_stale(
+                        snapshot_metadata
+                    )
+                    effective_force = force or stale_snapshot
                     positions_result = await _fetch_positions(
-                        force_refresh=force, fast=fast
+                        force_refresh=effective_force,
+                        fast=fast,
                     )
                     unavailable_positions = (
                         _extract_service_unavailable_payload(
@@ -1528,13 +1557,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         positions_result
                     )
 
-                    snapshot_metadata: Dict[str, Any] = {}
                     source_value = positions_metadata.get("source")
 
                     if positions_payload is None:
-                        snapshot = await read_positions_snapshot()
                         if isinstance(snapshot, Mapping):
-                            snapshot_metadata = _merge_metadata(snapshot)
+                            if not snapshot_metadata:
+                                snapshot_metadata = _merge_metadata(snapshot)
                             if not source_value:
                                 source_value = snapshot.get("source") or "redis"
                             data = snapshot.get("data")
@@ -1557,6 +1585,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             connected=bool(connected_flag),
                             fresh=bool(redis_fresh),
                         )
+                        if combined_meta.get("from_cache") is not None:
+                            unavailable_payload["from_cache"] = bool(
+                                combined_meta.get("from_cache")
+                            )
                         unavailable_payload.setdefault(
                             "details",
                             "Positions data unavailable from service or cache",
@@ -1579,6 +1611,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "connected": bool(connected_flag),
                         "fresh": bool(redis_fresh),
                         "stale": stale_flag,
+                        "from_cache": bool(combined_meta.get("from_cache")),
                     }
 
                     if combined_meta.get("snapshot_updated_at"):
