@@ -120,6 +120,12 @@ def test_queue_monitor_aggregates_metrics() -> None:
     payload = json.loads(hash_state["queue:commands"])
     assert payload["length"] == 7
 
+    health_key = f"hash:service:health:{runtime.service_name}"
+    assert health_key in hash_state_all
+    health_payload = hash_state_all[health_key]
+    assert health_payload.get("total_queue_length") == "7"
+    assert health_payload.get("total_stream_pending") == "3"
+
     assert recorded_points, "Expected service metrics to be recorded"
     metric_names = {point.get("tags", {}).get("metric") for point in recorded_points}
     assert "commands-queue-length" in metric_names
