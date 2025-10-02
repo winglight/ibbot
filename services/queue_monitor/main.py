@@ -146,7 +146,7 @@ QUEUE_MONITOR_METRICS_HASH_KEY = os.getenv(
     "QUEUE_MONITOR_METRICS_HASH_KEY", "hash:service:queue-monitor"
 )
 QUEUE_MONITOR_HEALTH_HASH_KEY = os.getenv(
-    "QUEUE_MONITOR_HEALTH_HASH_KEY", "hash:service:health:queue-monitor"
+    "QUEUE_MONITOR_HEALTH_HASH_KEY", "hash:service:health:queue"
 )
 QUEUE_MONITOR_PUBSUB_CHANNEL = os.getenv(
     "QUEUE_MONITOR_PUBSUB_CHANNEL", "pubsub:service:queue-monitor"
