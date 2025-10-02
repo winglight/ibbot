@@ -269,6 +269,28 @@ async def _startup() -> None:
         _state.watchdog_task.cancel()
 
     _state.watchdog_task = asyncio.create_task(_snapshot_watchdog_loop())
+
+    if _state.redis is not None:
+        try:
+            info_snapshot, positions_snapshot = await _collect_snapshots()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Failed to collect account snapshots for initial health: %s", exc)
+            info_snapshot = None
+            positions_snapshot = None
+        metrics = _state.as_metrics(info=info_snapshot, positions=positions_snapshot)
+        healthy = any((info_snapshot, positions_snapshot)) and not _state.stale
+        try:
+            await update_service_health(
+                _state.redis,
+                ACCOUNT_SERVICE_NAME,
+                healthy=healthy,
+                last_error=_state.last_refresh_error,
+                metrics=metrics,
+                logger=logger,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Failed to publish initial account service health: %s", exc)
+
     logger.info("Account service startup complete")
 
 
