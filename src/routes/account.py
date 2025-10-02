@@ -1,5 +1,5 @@
 from datetime import date, datetime, timedelta
-from typing import Optional, Dict, List, Any, Mapping
+from typing import Optional, Dict, List, Any, Mapping, Awaitable, Callable
 
 import os
 import uuid
@@ -23,6 +23,7 @@ import core
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
 from src.routes.service_clients import (
     AccountServiceClient,
+    AccountServiceResult,
     ServiceClientError,
     ServiceResponseError,
     ServiceUnavailableError,
@@ -60,6 +61,7 @@ def _snapshot_response(
     warning: Optional[str] = None,
     data_override: Any = None,
     default: Any = None,
+    metadata: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     data = default
     if data_override is not None:
@@ -67,24 +69,52 @@ def _snapshot_response(
     elif snapshot is not None and "data" in snapshot:
         data = snapshot.get("data")
 
+    metadata_map: Dict[str, Any] = {}
+    if isinstance(snapshot, Mapping):
+        metadata_map.update(
+            {
+                "updated_at": snapshot.get("updated_at"),
+                "source": snapshot.get("source"),
+                "stale": snapshot.get("stale"),
+                "stale_reason": snapshot.get("stale_reason"),
+                "stale_at": snapshot.get("stale_at"),
+            }
+        )
+    if isinstance(metadata, Mapping):
+        for key, value in metadata.items():
+            if value is None:
+                continue
+            metadata_map[key] = value
+
+    snapshot_updated_at = metadata_map.get("snapshot_updated_at") or metadata_map.get(
+        "updated_at"
+    )
+    source = metadata_map.get("source")
+    stale_reason = metadata_map.get("stale_reason")
+    stale_flag = metadata_map.get("stale")
+    if isinstance(stale_flag, bool):
+        stale_value = stale_flag
+    else:
+        stale_value = bool(stale_reason)
+
     response: Dict[str, Any] = {
         "success": True,
         data_key: data if data is not None else default,
         "from_cache": from_cache,
         "connected": connected,
-        "cache_updated_at": snapshot.get("updated_at") if snapshot else None,
-        "snapshot_updated_at": snapshot.get("updated_at") if snapshot else None,
-        "cache_age_seconds": _compute_cache_age(
-            snapshot.get("updated_at") if snapshot else None
-        ),
-        "cache_source": snapshot.get("source") if snapshot else None,
-        "stale": snapshot.get("stale", False) if snapshot else False,
+        "cache_updated_at": snapshot.get("updated_at") if snapshot else snapshot_updated_at,
+        "snapshot_updated_at": snapshot_updated_at,
+        "cache_age_seconds": _compute_cache_age(snapshot_updated_at),
+        "cache_source": source,
+        "source": source,
+        "stale": stale_value,
     }
 
-    if snapshot and snapshot.get("stale_reason"):
-        response["stale_reason"] = snapshot.get("stale_reason")
-    if snapshot and snapshot.get("stale_at"):
-        response["stale_at"] = snapshot.get("stale_at")
+    if stale_reason:
+        response["stale_reason"] = stale_reason
+    stale_at = metadata_map.get("stale_at")
+    if stale_at:
+        response["stale_at"] = stale_at
     if warning:
         response["warning"] = warning
 
@@ -196,6 +226,35 @@ def _service_unavailable_response(
     )
 
 
+async def _fallback_snapshot_response(
+    snapshot: Optional[Dict[str, Any]],
+    reader: Callable[[], Awaitable[Optional[Dict[str, Any]]]],
+    *,
+    data_key: str,
+    default: Any,
+    message: str,
+) -> Optional[Dict[str, Any]]:
+    candidate = snapshot
+    if not candidate:
+        try:
+            candidate = await reader()
+        except Exception:  # pragma: no cover - redis read failure
+            candidate = None
+
+    if not isinstance(candidate, dict):
+        return None
+
+    connected = _determine_connection_state(candidate.get("data"), candidate)
+    return _snapshot_response(
+        candidate,
+        data_key=data_key,
+        connected=connected,
+        from_cache=True,
+        default=default,
+        warning=message,
+    )
+
+
 @router.post("/api/orders/backfill_commissions")
 async def backfill_commissions(
     days: int = 7, user: Optional[str] = Depends(get_current_user)
@@ -253,9 +312,18 @@ async def get_account_info(
 
     client = _get_account_service_client()
     try:
-        info = await client.fetch_info(force_refresh=force_refresh)
+        info_result = await client.fetch_info(force_refresh=force_refresh)
     except ServiceUnavailableError as exc:
         logger.warning("Account service unavailable for account_info: {}", exc)
+        cached = await _fallback_snapshot_response(
+            snapshot,
+            read_account_info_snapshot,
+            data_key="account_info",
+            default={},
+            message="Account service unavailable",
+        )
+        if cached is not None:
+            return cached
         return _service_unavailable_response(
             snapshot,
             data_key="account_info",
@@ -266,6 +334,15 @@ async def get_account_info(
         raise HTTPException(status_code=exc.status_code, detail=str(exc.detail)) from exc
     except ServiceClientError as exc:
         logger.error("Account service error while fetching account info", exc_info=True)
+        cached = await _fallback_snapshot_response(
+            snapshot,
+            read_account_info_snapshot,
+            data_key="account_info",
+            default={},
+            message="Account service unavailable",
+        )
+        if cached is not None:
+            return cached
         return _service_unavailable_response(
             snapshot,
             data_key="account_info",
@@ -273,8 +350,17 @@ async def get_account_info(
             message="Account service unavailable",
         )
 
-    if info is None:
-        logger.warning("Account service returned no account_info payload")
+    if not isinstance(info_result, AccountServiceResult):
+        logger.warning("Account service returned unexpected account_info payload")
+        cached = await _fallback_snapshot_response(
+            snapshot,
+            read_account_info_snapshot,
+            data_key="account_info",
+            default={},
+            message="Account service unavailable",
+        )
+        if cached is not None:
+            return cached
         return _service_unavailable_response(
             snapshot,
             data_key="account_info",
@@ -286,15 +372,26 @@ async def get_account_info(
     refreshed_data = (
         refreshed_snapshot.get("data") if isinstance(refreshed_snapshot, dict) else None
     )
-    connected = _determine_connection_state(info, refreshed_data, refreshed_snapshot)
+    metadata = dict(info_result.metadata)
+    if "snapshot_updated_at" not in metadata and isinstance(refreshed_snapshot, dict):
+        updated_at = refreshed_snapshot.get("updated_at")
+        if updated_at:
+            metadata["snapshot_updated_at"] = updated_at
+    connected = _determine_connection_state(
+        info_result.data,
+        refreshed_data,
+        refreshed_snapshot,
+    )
+    from_cache_flag = bool(metadata.get("from_cache"))
 
     return _snapshot_response(
         refreshed_snapshot,
         data_key="account_info",
         connected=connected,
-        from_cache=False,
+        from_cache=from_cache_flag,
         default={},
-        data_override=info,
+        data_override=info_result.data,
+        metadata=metadata,
     )
 
 @router.get("/api/positions")
@@ -322,12 +419,21 @@ async def get_positions(
 
     client = _get_account_service_client()
     try:
-        positions = await client.fetch_positions(
+        positions_result = await client.fetch_positions(
             fast=fast,
             force_refresh=force_refresh,
         )
     except ServiceUnavailableError as exc:
         logger.warning("Account service unavailable for positions: {}", exc)
+        cached = await _fallback_snapshot_response(
+            snapshot,
+            read_positions_snapshot,
+            data_key="positions",
+            default=[],
+            message="Account service unavailable",
+        )
+        if cached is not None:
+            return cached
         return _service_unavailable_response(
             snapshot,
             data_key="positions",
@@ -338,6 +444,15 @@ async def get_positions(
         raise HTTPException(status_code=exc.status_code, detail=str(exc.detail)) from exc
     except ServiceClientError:
         logger.error("Account service error while fetching positions", exc_info=True)
+        cached = await _fallback_snapshot_response(
+            snapshot,
+            read_positions_snapshot,
+            data_key="positions",
+            default=[],
+            message="Account service unavailable",
+        )
+        if cached is not None:
+            return cached
         return _service_unavailable_response(
             snapshot,
             data_key="positions",
@@ -345,8 +460,17 @@ async def get_positions(
             message="Account service unavailable",
         )
 
-    if positions is None:
+    if not isinstance(positions_result, AccountServiceResult):
         logger.warning("Account service returned no positions payload")
+        cached = await _fallback_snapshot_response(
+            snapshot,
+            read_positions_snapshot,
+            data_key="positions",
+            default=[],
+            message="Account service unavailable",
+        )
+        if cached is not None:
+            return cached
         return _service_unavailable_response(
             snapshot,
             data_key="positions",
@@ -358,15 +482,42 @@ async def get_positions(
     refreshed_data = (
         refreshed_snapshot.get("data") if isinstance(refreshed_snapshot, dict) else None
     )
-    connected = _determine_connection_state(refreshed_data, refreshed_snapshot, positions)
+    metadata = dict(positions_result.metadata)
+    if "snapshot_updated_at" not in metadata and isinstance(refreshed_snapshot, dict):
+        updated_at = refreshed_snapshot.get("updated_at")
+        if updated_at:
+            metadata["snapshot_updated_at"] = updated_at
+
+    positions_payload = positions_result.data
+    if not isinstance(positions_payload, list):
+        logger.warning("Account service returned malformed positions payload")
+        cached = await _fallback_snapshot_response(
+            snapshot,
+            read_positions_snapshot,
+            data_key="positions",
+            default=[],
+            message="Account service unavailable",
+        )
+        if cached is not None:
+            return cached
+        return _service_unavailable_response(
+            snapshot,
+            data_key="positions",
+            default=[],
+            message="Account service unavailable",
+        )
+
+    connected = _determine_connection_state(refreshed_data, refreshed_snapshot, positions_payload)
+    from_cache_flag = bool(metadata.get("from_cache"))
 
     return _snapshot_response(
         refreshed_snapshot,
         data_key="positions",
         connected=connected,
-        from_cache=False,
+        from_cache=from_cache_flag,
         default=[],
-        data_override=positions,
+        data_override=positions_payload,
+        metadata=metadata,
     )
 
 @router.get("/api/account/daily-summary")

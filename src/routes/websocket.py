@@ -22,6 +22,7 @@ from src.account_snapshot_cache import (
     read_positions_snapshot,
 )
 from src.connection_manager import connection_manager
+from src.websocket_manager import websocket_manager as global_websocket_manager
 from src.dom_service import get_dom_service
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
@@ -35,6 +36,7 @@ from src.ib_command_health import (
 )
 from src.routes.service_clients import (
     AccountServiceClient,
+    AccountServiceResult,
     MarketDataServiceClient,
     OrdersServiceClient,
     RiskServiceClient,
@@ -59,7 +61,7 @@ _STRATEGY_CLIENT = StrategyServiceClient()
 
 
 def _services():
-    return core.require_container()
+    return core.get_container()
 
 
 def _connection_manager():
@@ -67,7 +69,11 @@ def _connection_manager():
 
 
 def _websocket_manager():
-    return _services().websocket_manager
+    services = _services()
+    manager = getattr(services, "websocket_manager", None) if services else None
+    if manager:
+        return manager
+    return global_websocket_manager
 
 
 def _service_unavailable_payload(payload_type: str, **fields: Any) -> Dict[str, Any]:
@@ -112,6 +118,32 @@ class ConnectionContext(NamedTuple):
     error_code: Optional[str]
 
 
+_METADATA_KEYS = (
+    "source",
+    "snapshot_updated_at",
+    "updated_at",
+    "stale",
+    "stale_reason",
+    "stale_at",
+    "from_cache",
+)
+
+
+def _merge_metadata(*sources: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key in _METADATA_KEYS:
+            value = source.get(key)
+            if value is None:
+                continue
+            merged[key] = value
+    if "snapshot_updated_at" not in merged and isinstance(merged.get("updated_at"), str):
+        merged["snapshot_updated_at"] = merged["updated_at"]
+    return merged
+
+
 async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         payload = await _MARKET_CLIENT.fetch_current_price(symbol)
@@ -127,7 +159,9 @@ async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str, Any]]:
+async def _fetch_account_info(
+    force_refresh: bool = False,
+) -> AccountServiceResult | Dict[str, Any] | None:
     try:
         payload = await _ACCOUNT_CLIENT.fetch_info(force_refresh=force_refresh)
     except ServiceUnavailableError as exc:
@@ -138,26 +172,12 @@ async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str,
     except ServiceClientError as exc:
         logger.warning("Account service error: %s", exc)
         return None
-
-    if isinstance(payload, Mapping):
-        if isinstance(payload.get("account_info"), Mapping):
-            return dict(payload["account_info"])
-        if isinstance(payload.get("data"), Mapping):
-            return dict(payload["data"])
-        if isinstance(payload.get("result"), Mapping):
-            return dict(payload["result"])
-        extracted = {
-            key: value
-            for key, value in payload.items()
-            if key not in {"success", "from_cache"}
-        }
-        return dict(extracted) if extracted else None
-    return None
+    return payload
 
 
 async def _fetch_positions(
     *, force_refresh: bool = False, fast: bool = True
-) -> Optional[List[Dict[str, Any]]]:
+) -> AccountServiceResult | Dict[str, Any] | None:
     try:
         payload = await _ACCOUNT_CLIENT.fetch_positions(
             force_refresh=force_refresh,
@@ -172,14 +192,23 @@ async def _fetch_positions(
         logger.warning("Account service error fetching positions: %s", exc)
         return None
 
+    if isinstance(payload, AccountServiceResult):
+        return payload
     if isinstance(payload, list):
-        return [dict(item) if isinstance(item, Mapping) else item for item in payload]
+        return AccountServiceResult(
+            data=[dict(item) if isinstance(item, Mapping) else item for item in payload],
+            metadata={},
+        )
     if isinstance(payload, Mapping):
         items = payload.get("positions")
         if items is None:
             items = payload.get("data")
         if isinstance(items, list):
-            return [dict(item) if isinstance(item, Mapping) else item for item in items]
+            return AccountServiceResult(
+                data=[dict(item) if isinstance(item, Mapping) else item for item in items],
+                metadata={},
+                raw=dict(payload),
+            )
     return None
 
 
@@ -724,69 +753,105 @@ async def websocket_endpoint(websocket: WebSocket):
     # 初次连接后，向该连接单播账户信息快照
     try:
         snapshot = await read_account_info_snapshot()
-        info = await _fetch_account_info()
-        unavailable_payload = _extract_service_unavailable_payload(
-            info, "account_update"
+        info_result = await _fetch_account_info()
+        unavailable_payload = (
+            _extract_service_unavailable_payload(info_result, "account_update")
+            if isinstance(info_result, Mapping)
+            else None
         )
-        info_source = "service"
-        snapshot_source = None
-        stale_flag = False
-        snapshot_updated_at = None
-        stale_reason = None
-        stale_at = None
 
-        if isinstance(snapshot, dict):
-            snapshot_source = snapshot.get("source", "redis") or "redis"
-            stale_flag = bool(snapshot.get("stale"))
-            snapshot_updated_at = snapshot.get("updated_at")
-            stale_reason = snapshot.get("stale_reason")
-            stale_at = snapshot.get("stale_at")
+        snapshot_metadata = (
+            _merge_metadata(snapshot) if isinstance(snapshot, Mapping) else {}
+        )
+        if isinstance(snapshot, Mapping):
+            if "source" not in snapshot_metadata or not snapshot_metadata.get("source"):
+                snapshot_metadata["source"] = snapshot.get("source") or "redis"
+        snapshot_data = snapshot.get("data") if isinstance(snapshot, Mapping) else None
 
         if unavailable_payload is not None:
+            payload = dict(unavailable_payload)
             account_info_payload: Dict[str, Any] = {}
-            if isinstance(unavailable_payload.get("account_info"), Mapping):
-                account_info_payload = dict(unavailable_payload["account_info"])
+            if isinstance(payload.get("account_info"), Mapping):
+                account_info_payload = dict(payload["account_info"])
+            if isinstance(snapshot_data, Mapping):
+                account_info_payload.update(dict(snapshot_data))
             account_info_payload.setdefault("connected", bool(connected_flag))
             if account_type_label:
                 account_info_payload.setdefault("account_type", account_type_label)
-            if last_error_value:
-                account_info_payload.setdefault("last_error", last_error_value)
-            unavailable_payload["account_info"] = account_info_payload
-            unavailable_payload.setdefault("source", "service")
-            if snapshot_updated_at and "snapshot_updated_at" not in unavailable_payload:
-                unavailable_payload["snapshot_updated_at"] = snapshot_updated_at
-            if stale_reason and "stale_reason" not in unavailable_payload:
-                unavailable_payload["stale_reason"] = stale_reason
-            if stale_at and "stale_at" not in unavailable_payload:
-                unavailable_payload["stale_at"] = stale_at
-            unavailable_payload.setdefault("stale", stale_flag)
-            await websocket.send_text(json.dumps(unavailable_payload))
-        else:
-            if info is None and isinstance(snapshot, dict):
-                info = snapshot.get("data")
-                info_source = snapshot_source or "redis"
+            if last_error_value and "last_error" not in account_info_payload:
+                account_info_payload["last_error"] = last_error_value
+            payload["account_info"] = account_info_payload
 
-            if info is not None:
-                payload_info = info
-                if isinstance(info, dict):
-                    payload_info = dict(info)
-                    payload_info.setdefault("connected", bool(connected_flag))
+            combined_meta = _merge_metadata(payload, snapshot_metadata)
+            if not payload.get("source"):
+                payload["source"] = combined_meta.get("source") or "redis"
+            if combined_meta.get("snapshot_updated_at") and "snapshot_updated_at" not in payload:
+                payload["snapshot_updated_at"] = combined_meta["snapshot_updated_at"]
+            if combined_meta.get("stale_reason") and "stale_reason" not in payload:
+                payload["stale_reason"] = combined_meta["stale_reason"]
+            if combined_meta.get("stale_at") and "stale_at" not in payload:
+                payload["stale_at"] = combined_meta["stale_at"]
+            payload.setdefault(
+                "stale", AccountServiceClient.is_metadata_stale(combined_meta)
+            )
+            await websocket.send_text(json.dumps(payload))
+        else:
+            combined_meta = dict(snapshot_metadata)
+            info_payload: Any = None
+            if isinstance(info_result, AccountServiceResult):
+                info_payload = info_result.data
+                for key, value in info_result.metadata.items():
+                    if value is None:
+                        continue
+                    combined_meta[key] = value
+            elif isinstance(info_result, Mapping):
+                info_payload = dict(info_result)
+                combined_meta.update(
+                    {
+                        key: value
+                        for key, value in info_result.items()
+                        if key in _METADATA_KEYS and value is not None
+                    }
+                )
+
+            if info_payload is None and isinstance(snapshot_data, Mapping):
+                info_payload = dict(snapshot_data)
+
+            if info_payload is not None:
+                if isinstance(info_payload, Mapping):
+                    info_payload = dict(info_payload)
+                    info_payload.setdefault("connected", bool(connected_flag))
                     if account_type_label:
-                        payload_info.setdefault("account_type", account_type_label)
+                        info_payload.setdefault("account_type", account_type_label)
+                    if last_error_value and "last_error" not in info_payload:
+                        info_payload["last_error"] = last_error_value
+
+                source_value = combined_meta.get("source")
+                if not source_value:
+                    if isinstance(info_result, AccountServiceResult):
+                        source_value = info_result.metadata.get("source") or "service"
+                    else:
+                        source_value = snapshot_metadata.get("source") or "redis"
+
+                stale_flag = AccountServiceClient.is_metadata_stale(combined_meta)
                 response_payload: Dict[str, Any] = {
                     "type": "account_update",
                     "success": True,
-                    "account_info": payload_info,
-                    "source": info_source,
+                    "account_info": info_payload,
+                    "source": source_value or "service",
+                    "stale": stale_flag,
                 }
-                if snapshot_updated_at:
-                    response_payload["snapshot_updated_at"] = snapshot_updated_at
-                response_payload["stale"] = stale_flag
-                if stale_reason:
-                    response_payload["stale_reason"] = stale_reason
-                if stale_at:
-                    response_payload["stale_at"] = stale_at
+                if combined_meta.get("snapshot_updated_at"):
+                    response_payload["snapshot_updated_at"] = combined_meta[
+                        "snapshot_updated_at"
+                    ]
+                if combined_meta.get("stale_reason"):
+                    response_payload["stale_reason"] = combined_meta["stale_reason"]
+                if combined_meta.get("stale_at"):
+                    response_payload["stale_at"] = combined_meta["stale_at"]
+
                 await websocket.send_text(json.dumps(response_payload))
+
                 if stale_flag:
                     status_payload: Dict[str, Any] = {
                         "type": "account_snapshot_status",
@@ -794,28 +859,33 @@ async def websocket_endpoint(websocket: WebSocket):
                         "stale": True,
                         "refresh_in_progress": True,
                     }
-                    if snapshot_updated_at:
-                        status_payload["snapshot_updated_at"] = snapshot_updated_at
-                    if stale_reason:
-                        status_payload["stale_reason"] = stale_reason
-                    if stale_at:
-                        status_payload["stale_at"] = stale_at
+                    if combined_meta.get("snapshot_updated_at"):
+                        status_payload["snapshot_updated_at"] = combined_meta[
+                            "snapshot_updated_at"
+                        ]
+                    if combined_meta.get("stale_reason"):
+                        status_payload["stale_reason"] = combined_meta["stale_reason"]
+                    if combined_meta.get("stale_at"):
+                        status_payload["stale_at"] = combined_meta["stale_at"]
                     await websocket.send_text(json.dumps(status_payload))
             else:
-                await websocket.send_text(
-                    json.dumps(
-                        _service_unavailable_payload(
-                            "account_update",
-                            account_info={
-                                "connected": bool(connected_flag),
-                                "account_type": account_type_label,
-                                "last_error": last_error_value,
-                            },
-                            stale=stale_flag,
-                            snapshot_updated_at=snapshot_updated_at,
-                        )
-                    )
+                combined_meta.setdefault("source", snapshot_metadata.get("source") or "redis")
+                fallback_payload = _service_unavailable_payload(
+                    "account_update",
+                    account_info={
+                        "connected": bool(connected_flag),
+                        "account_type": account_type_label,
+                        "last_error": last_error_value,
+                    },
+                    stale=AccountServiceClient.is_metadata_stale(combined_meta),
+                    snapshot_updated_at=combined_meta.get("snapshot_updated_at"),
                 )
+                if combined_meta.get("stale_reason"):
+                    fallback_payload["stale_reason"] = combined_meta["stale_reason"]
+                if combined_meta.get("stale_at"):
+                    fallback_payload["stale_at"] = combined_meta["stale_at"]
+                fallback_payload["source"] = combined_meta.get("source") or "redis"
+                await websocket.send_text(json.dumps(fallback_payload))
     except Exception as e:
         logger.debug(f"Failed to send initial account_update: {e}")
 
@@ -856,84 +926,139 @@ async def websocket_endpoint(websocket: WebSocket):
     # 初次连接后，向该连接单播发送positions快照
     try:
         positions_snapshot = await read_positions_snapshot()
-        positions = await _fetch_positions(force_refresh=False, fast=True)
-        unavailable_positions = _extract_service_unavailable_payload(
-            positions, "position_update"
+        positions_result = await _fetch_positions(force_refresh=False, fast=True)
+        unavailable_positions = (
+            _extract_service_unavailable_payload(positions_result, "position_update")
+            if isinstance(positions_result, Mapping)
+            else None
         )
-        positions_source = "service"
-        positions_snapshot_source = None
-        positions_updated_at = None
-        positions_stale = False
-        positions_stale_reason = None
-        positions_stale_at = None
-        if isinstance(positions_snapshot, dict):
-            positions_updated_at = positions_snapshot.get("updated_at")
-            positions_snapshot_source = (
-                positions_snapshot.get("source", "redis") or "redis"
-            )
-            positions_stale = bool(positions_snapshot.get("stale"))
-            positions_stale_reason = positions_snapshot.get("stale_reason")
-            positions_stale_at = positions_snapshot.get("stale_at")
+
+        positions_snapshot_metadata = (
+            _merge_metadata(positions_snapshot)
+            if isinstance(positions_snapshot, Mapping)
+            else {}
+        )
+        if isinstance(positions_snapshot, Mapping):
+            if not positions_snapshot_metadata.get("source"):
+                positions_snapshot_metadata["source"] = (
+                    positions_snapshot.get("source") or "redis"
+                )
+        positions_snapshot_data = (
+            positions_snapshot.get("data") if isinstance(positions_snapshot, Mapping) else None
+        )
 
         if unavailable_positions is not None:
-            unavailable_positions.setdefault("positions", [])
-            unavailable_positions.setdefault("source", "service")
-            if positions_updated_at and "snapshot_updated_at" not in unavailable_positions:
-                unavailable_positions["snapshot_updated_at"] = positions_updated_at
-            if positions_stale_reason and "stale_reason" not in unavailable_positions:
-                unavailable_positions["stale_reason"] = positions_stale_reason
-            if positions_stale_at and "stale_at" not in unavailable_positions:
-                unavailable_positions["stale_at"] = positions_stale_at
-            unavailable_positions.setdefault("stale", positions_stale)
-            await websocket.send_text(json.dumps(unavailable_positions))
+            payload = dict(unavailable_positions)
+            combined_meta = _merge_metadata(payload, positions_snapshot_metadata)
+            if isinstance(positions_snapshot_data, list) and not payload.get("positions"):
+                payload["positions"] = list(positions_snapshot_data)
+            payload.setdefault("positions", [])
+            if not payload.get("source"):
+                payload["source"] = combined_meta.get("source") or "redis"
+            if combined_meta.get("snapshot_updated_at") and "snapshot_updated_at" not in payload:
+                payload["snapshot_updated_at"] = combined_meta["snapshot_updated_at"]
+            if combined_meta.get("stale_reason") and "stale_reason" not in payload:
+                payload["stale_reason"] = combined_meta["stale_reason"]
+            if combined_meta.get("stale_at") and "stale_at" not in payload:
+                payload["stale_at"] = combined_meta["stale_at"]
+            payload.setdefault(
+                "stale", AccountServiceClient.is_metadata_stale(combined_meta)
+            )
+            await websocket.send_text(json.dumps(payload))
         else:
-            if positions is None and isinstance(positions_snapshot, dict):
-                data = positions_snapshot.get("data")
-                if isinstance(data, list):
-                    positions = data
-                    positions_source = positions_snapshot_source or "redis"
+            combined_meta = dict(positions_snapshot_metadata)
+            positions_payload: Optional[List[Dict[str, Any]]] = None
 
-            if positions is not None:
+            if isinstance(positions_result, AccountServiceResult):
+                data = positions_result.data
+                if isinstance(data, list):
+                    positions_payload = [
+                        dict(item) if isinstance(item, Mapping) else item for item in data
+                    ]
+                for key, value in positions_result.metadata.items():
+                    if value is None:
+                        continue
+                    combined_meta[key] = value
+            elif isinstance(positions_result, Mapping):
+                raw_positions = positions_result.get("positions") or positions_result.get("data")
+                if isinstance(raw_positions, list):
+                    positions_payload = [
+                        dict(item) if isinstance(item, Mapping) else item
+                        for item in raw_positions
+                    ]
+                combined_meta.update(
+                    {
+                        key: value
+                        for key, value in positions_result.items()
+                        if key in _METADATA_KEYS and value is not None
+                    }
+                )
+
+            if positions_payload is None and isinstance(positions_snapshot_data, list):
+                positions_payload = [
+                    dict(item) if isinstance(item, Mapping) else item
+                    for item in positions_snapshot_data
+                ]
+
+            if positions_payload is not None:
+                source_value = combined_meta.get("source")
+                if not source_value:
+                    if isinstance(positions_result, AccountServiceResult):
+                        source_value = positions_result.metadata.get("source") or "service"
+                    else:
+                        source_value = positions_snapshot_metadata.get("source") or "redis"
+
+                stale_flag = AccountServiceClient.is_metadata_stale(combined_meta)
                 response_payload = {
                     "type": "position_update",
                     "success": True,
-                    "positions": positions,
-                    "source": positions_source,
-                "stale": positions_stale,
-            }
-            if positions_updated_at:
-                response_payload["snapshot_updated_at"] = positions_updated_at
-            if positions_stale_reason:
-                response_payload["stale_reason"] = positions_stale_reason
-            if positions_stale_at:
-                response_payload["stale_at"] = positions_stale_at
-            await websocket.send_text(json.dumps(response_payload))
-            if positions_stale:
-                status_payload = {
-                    "type": "account_snapshot_status",
-                    "snapshot": "positions",
-                    "stale": True,
-                    "refresh_in_progress": True,
+                    "positions": positions_payload,
+                    "source": source_value or "service",
+                    "stale": stale_flag,
                 }
-                if positions_updated_at:
-                    status_payload["snapshot_updated_at"] = positions_updated_at
-                if positions_stale_reason:
-                    status_payload["stale_reason"] = positions_stale_reason
-                if positions_stale_at:
-                    status_payload["stale_at"] = positions_stale_at
-                await websocket.send_text(json.dumps(status_payload))
+                if combined_meta.get("snapshot_updated_at"):
+                    response_payload["snapshot_updated_at"] = combined_meta[
+                        "snapshot_updated_at"
+                    ]
+                if combined_meta.get("stale_reason"):
+                    response_payload["stale_reason"] = combined_meta["stale_reason"]
+                if combined_meta.get("stale_at"):
+                    response_payload["stale_at"] = combined_meta["stale_at"]
+
+                await websocket.send_text(json.dumps(response_payload))
+
+                if stale_flag:
+                    status_payload = {
+                        "type": "account_snapshot_status",
+                        "snapshot": "positions",
+                        "stale": True,
+                        "refresh_in_progress": True,
+                    }
+                    if combined_meta.get("snapshot_updated_at"):
+                        status_payload["snapshot_updated_at"] = combined_meta[
+                            "snapshot_updated_at"
+                        ]
+                    if combined_meta.get("stale_reason"):
+                        status_payload["stale_reason"] = combined_meta["stale_reason"]
+                    if combined_meta.get("stale_at"):
+                        status_payload["stale_at"] = combined_meta["stale_at"]
+                    await websocket.send_text(json.dumps(status_payload))
             else:
-                await websocket.send_text(
-                    json.dumps(
-                        _service_unavailable_payload(
-                            "position_update",
-                            positions=[],
-                            source="service",
-                            stale=positions_stale,
-                            snapshot_updated_at=positions_updated_at,
-                        )
-                    )
+                combined_meta.setdefault(
+                    "source", positions_snapshot_metadata.get("source") or "redis"
                 )
+                fallback_payload = _service_unavailable_payload(
+                    "position_update",
+                    positions=[],
+                    source=combined_meta.get("source"),
+                    stale=AccountServiceClient.is_metadata_stale(combined_meta),
+                    snapshot_updated_at=combined_meta.get("snapshot_updated_at"),
+                )
+                if combined_meta.get("stale_reason"):
+                    fallback_payload["stale_reason"] = combined_meta["stale_reason"]
+                if combined_meta.get("stale_at"):
+                    fallback_payload["stale_at"] = combined_meta["stale_at"]
+                await websocket.send_text(json.dumps(fallback_payload))
     except Exception as e:
         logger.debug(f"Failed to send initial positions snapshot: {e}")
     
