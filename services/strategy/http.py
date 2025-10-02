@@ -470,6 +470,9 @@ def create_app(
     return app
 
 
+app = create_app()
+
+
 __all__ = [
     "StrategyRuntime",
     "StrategyDocument",
@@ -477,4 +480,5 @@ __all__ = [
     "StrategyRunRequest",
     "StrategyRunResponse",
     "create_app",
+    "app",
 ]

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import socket
 import subprocess
@@ -27,6 +28,7 @@ from src.ibbot.redis import DEFAULT_REDIS_URL, DEFAULT_REDIS_URL_ENV
 DEFAULT_SERVICES: tuple[str, ...] = (
     "connection_control",
     "account",
+    "orders",
     "ib_command",
     "ib_feed",
     "strategy",
@@ -46,6 +48,74 @@ _SERVICE_REDIS_ENV: dict[str, str] = {
 }
 
 
+def _build_service_command(service: str) -> tuple[list[str], str]:
+    """Return the command used to start *service* and a descriptive label."""
+
+    host = os.getenv("SERVICE_HOST", "0.0.0.0")
+
+    if service == "account":
+        port = os.getenv("ACCOUNT_SERVICE_PORT", "8020")
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "services.account.main:app",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        return cmd, f"uvicorn services.account.main:app --port {port}"
+
+    if service == "orders":
+        port = os.getenv("ORDERS_SERVICE_PORT", "8050")
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "services.orders.main:app",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        return cmd, f"uvicorn services.orders.main:app --port {port}"
+
+    if service == "risk":
+        port = os.getenv("RISK_SERVICE_PORT", "8030")
+        app_path = os.getenv("RISK_SERVICE_APP", "services.risk.http:app")
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            app_path,
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        return cmd, f"uvicorn {app_path} --port {port}"
+
+    if service == "strategy":
+        port = os.getenv("STRATEGY_SERVICE_PORT", "8045")
+        app_path = os.getenv("STRATEGY_SERVICE_APP", "services.strategy.http:app")
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            app_path,
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        return cmd, f"uvicorn {app_path} --port {port}"
+
+    module = f"services.{service}.main"
+    cmd = [sys.executable, "-m", module]
+    return cmd, module
+
+
 def _load_env() -> Path | None:
     for candidate in (".env.local", ".env"):
         env_file = PROJECT_ROOT / candidate
@@ -55,12 +125,24 @@ def _load_env() -> Path | None:
     return None
 
 
+def _resolve_import_module(service: str) -> str:
+    if service == "risk":
+        app_path = os.getenv("RISK_SERVICE_APP", "services.risk.http:app")
+        return app_path.split(":", 1)[0]
+    if service == "strategy":
+        app_path = os.getenv("STRATEGY_SERVICE_APP", "services.strategy.http:app")
+        return app_path.split(":", 1)[0]
+    if service in {"account", "orders"}:
+        return f"services.{service}.main"
+    return f"services.{service}.main"
+
+
 def _check_service_imports(services: Iterable[str]) -> list[str]:
     missing: list[str] = []
     for service in services:
-        module_path = f"services.{service}.main"
+        module_path = _resolve_import_module(service)
         try:
-            __import__(module_path)
+            importlib.import_module(module_path)
         except ModuleNotFoundError:
             missing.append(service)
     return missing
@@ -155,9 +237,8 @@ def run_services(
 
     try:
         for service in services:
-            module = f"services.{service}.main"
-            cmd = [sys.executable, "-m", module]
-            print(f"[INFO] 启动 {module}...")
+            cmd, label = _build_service_command(service)
+            print(f"[INFO] 启动 {service}: {label}")
             process = subprocess.Popen(cmd, cwd=PROJECT_ROOT, env=env)
             processes.append((service, process))
 

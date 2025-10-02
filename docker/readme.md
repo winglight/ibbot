@@ -6,7 +6,7 @@
 ## 1. 前置条件
 
 - Docker Engine 20+ 与 docker compose 插件。
-- 宿主机开放端口：`8000`(Web)、`8020`(Account Service)、`5800`(noVNC)、`5900`(VNC，可选)、`4001/4002`(IB API)。
+- 宿主机开放端口：`8000`(Web)、`8020`(Account Service)、`8050`(Orders Service)、`8030`(Risk Service)、`8045`(Strategy Service)、`5800`(noVNC)、`5900`(VNC，可选)、`4001/4002`(IB API)。
 - 首次运行会自动创建持久化目录：`./data/logs`、`./data`、`./strategy`、`./data/ibgateway`。
 
 ## 2. 开发/测试环境（推荐）
@@ -28,8 +28,11 @@
 - **redis**：缓存与配置中心，默认对宿主机开放 `6379` 端口。
 - **influxdb**：行情写入与指标存储，默认开放 `8086`。
 - **ib-gateway**：集成 noVNC 的 IB Gateway，`http://localhost:5800/` 可进行登录与授权。
-- **account**：账户/订单 API 服务，默认映射 `8020`，必须在主进程之前启动。
+- **account**：账户 API 服务，默认映射 `8020`，必须在主进程之前启动。
+- **orders**：订单指令服务，默认映射 `8050`，负责下单/撤单操作。
 - **ibbot / optimizer**：主服务与策略优化器，端口分别为 `8000/8001`。
+- **risk**：风险控制 REST 服务，默认映射 `8030`。
+- **strategy**：策略管理 REST 服务，默认映射 `8045`。
 - **optimizer-ui**：静态部署的优化器前端，默认映射 `4173`。
 - **cloudflared**：可选的 Cloudflare Tunnel，仅在 `CF_TUNNEL_TOKEN` 存在时自动加入启动序列。
 
