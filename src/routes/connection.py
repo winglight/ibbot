@@ -243,45 +243,36 @@ async def connect_ibkr(
     client = _get_connection_control_client()
 
     try:
-        await client.update_config(payload)
+        result = await client.connect(payload)
     except ServiceClientError as exc:
-        logger.error("Failed to update connection config via service: {}", exc)
-        await audit_log_failure(request, detail="failed to persist connection config")
-        raise HTTPException(status_code=502, detail="Failed to persist connection config") from exc
-
-    command_id = uuid.uuid4().hex
-    command = {
-        "command_id": command_id,
-        "method": "connect",
-        "args": [],
-        "kwargs": payload,
-        "metadata": {
-            "source": "api.connect",
-            "submitted_by": user or "anonymous",
-        },
-    }
-
-    try:
-        await _enqueue_command(command)
-    except Exception as exc:
-        logger.error("Failed to enqueue connect command: {}", exc)
-        await audit_log_failure(request, detail="failed to enqueue connect command")
-        raise HTTPException(status_code=503, detail="Failed to enqueue connect command") from exc
+        logger.error("Failed to dispatch connect command via service: {}", exc)
+        await audit_log_failure(
+            request,
+            detail="failed to dispatch connect command",
+            extra={"service": "connection_control"},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to dispatch connect command",
+        ) from exc
 
     await audit_log_success(
         request,
-        detail="connect command enqueued",
+        detail="connect command dispatched via service",
         extra={
-            "command_id": command_id,
             "paper_trading": bool(config.paper_trading),
+            "service": "connection_control",
         },
     )
 
-    return {
+    response: Dict[str, Any] = {
         "success": True,
-        "status": "queued",
-        "command_id": command_id,
+        "status": "dispatched",
+        "service": "connection_control",
     }
+    if result is not None:
+        response["result"] = result
+    return response
 
 
 @router.post("/api/disconnect")

@@ -102,37 +102,22 @@ def test_get_connection_config_falls_back_to_env(connection_app, monkeypatch: py
     }
 
 
-def test_connect_enqueues_command_and_updates_config(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connect_dispatches_service_command(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
     app, _ = connection_app
 
     class StubClient:
         def __init__(self) -> None:
-            self.updated: list[dict[str, object]] = []
+            self.calls: list[dict[str, object]] = []
 
-        async def update_config(self, payload):
-            self.updated.append(dict(payload))
+        async def connect(self, payload):
+            self.calls.append(dict(payload))
+            return {"status": "queued", "command_id": "abc123"}
 
         async def fetch_config(self):  # pragma: no cover - not used here
             return {}
 
     stub_client = StubClient()
     monkeypatch.setattr(connection_module, "_get_connection_control_client", lambda: stub_client)
-
-    async def fixed_queue_key() -> str:
-        return "queue:test"
-
-    monkeypatch.setattr(connection_module, "_resolve_command_queue_key", fixed_queue_key)
-
-    enqueued: list[dict[str, object]] = []
-
-    async def fake_enqueue(command, *, redis=None, queue_key: str):
-        enqueued.append({
-            "queue": queue_key,
-            "command": dict(command),
-        })
-        return len(enqueued)
-
-    monkeypatch.setattr(connection_module, "enqueue_ib_command", fake_enqueue)
 
     payload = {
         "host": "1.2.3.4",
@@ -146,31 +131,24 @@ def test_connect_enqueues_command_and_updates_config(connection_app, monkeypatch
 
     assert response.status_code == 200
     body = response.json()
-    assert body["success"] is True
-    assert body["status"] == "queued"
-    assert isinstance(body["command_id"], str) and body["command_id"]
+    assert body == {
+        "success": True,
+        "status": "dispatched",
+        "service": "connection_control",
+        "result": {"status": "queued", "command_id": "abc123"},
+    }
 
-    assert stub_client.updated == [payload]
-    assert enqueued and enqueued[0]["queue"] == "queue:test"
-    command = enqueued[0]["command"]
-    assert command["method"] == "connect"
-    assert command["kwargs"] == payload
-    assert command["metadata"]["submitted_by"] == "tester"
+    assert stub_client.calls == [payload]
 
 
-def test_connect_returns_503_when_queue_fails(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connect_returns_502_when_service_fails(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
     app, _ = connection_app
 
     class StubClient:
-        async def update_config(self, payload):
-            return None
+        async def connect(self, payload):  # pragma: no cover - exercised in test
+            raise connection_module.ServiceClientError("connection_control", "offline")
 
     monkeypatch.setattr(connection_module, "_get_connection_control_client", lambda: StubClient())
-
-    async def failing_enqueue(payload):  # pragma: no cover - exercised in test
-        raise RuntimeError("queue down")
-
-    monkeypatch.setattr(connection_module, "_enqueue_command", failing_enqueue)
 
     with TestClient(app) as client:
         response = client.post(
@@ -183,8 +161,8 @@ def test_connect_returns_503_when_queue_fails(connection_app, monkeypatch: pytes
             },
         )
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Failed to enqueue connect command"
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Failed to dispatch connect command"
 
 
 def test_disconnect_enqueues_command(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
