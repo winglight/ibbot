@@ -41,6 +41,27 @@
         );
         item.dataset.service = entry.service;
         item.dataset.serviceLabel = entry.display_name || entry.service;
+        if (typeof entry.internal === 'boolean') {
+            item.dataset.internal = entry.internal ? 'true' : 'false';
+        }
+        if (entry.display_name) {
+            item.dataset.displayName = entry.display_name;
+        }
+        if (entry.description) {
+            item.dataset.description = entry.description;
+        }
+        if (entry.port) {
+            item.dataset.port = entry.port;
+        }
+        if (entry.health_key) {
+            item.dataset.healthKey = entry.health_key;
+        }
+        if (entry.default_health_key) {
+            item.dataset.defaultHealthKey = entry.default_health_key;
+        }
+        if (entry.implementation_status) {
+            item.dataset.implementationStatus = entry.implementation_status;
+        }
 
         const meta = createElement('div', 'service-status-meta');
         meta.appendChild(createElement('div', 'fw-semibold service-name', entry.display_name || entry.service));

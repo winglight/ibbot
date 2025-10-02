@@ -64,6 +64,15 @@ def _registry() -> Tuple[RegisteredService, ...]:
             implementation_status="Production",
         ),
         RegisteredService(
+            slug="connection_control",
+            service_name="connection_control",
+            display_name="Connection Control",
+            description="IB 连接控制服务 (connection_control)",
+            internal=True,
+            missing_detail="连接控制服务未上报健康数据",
+            port="8056",
+        ),
+        RegisteredService(
             slug="account",
             service_name="account-service",
             display_name="Account Service",
