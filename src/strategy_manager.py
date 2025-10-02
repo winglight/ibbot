@@ -1828,14 +1828,20 @@ class StrategyManager:
                 elif stored_subscription == "market_data":
                     try:
                         import core
+                        from src.connection_manager import (
+                            connection_manager as _connection_manager,
+                        )
+                        from src.ibkr_client import IBKRClient
 
-                        if not core.connection_manager.is_connected():
+                        if not _connection_manager.is_connected():
                             error = "IBKR connection required"
                             ok = False
                         else:
-                            if core.ibkr_client is None:
-                                core.ibkr_client = core.IBKRClient()
-                            data = await core.ibkr_client.get_real_time_data(target_symbol)
+                            client = getattr(core, "ibkr_client", None)
+                            if client is None:
+                                client = IBKRClient()
+                                setattr(core, "ibkr_client", client)
+                            data = await client.get_real_time_data(target_symbol)
                             ok = bool(data)
                     except Exception as exc:  # pragma: no cover - defensive guard
                         error = str(exc)
