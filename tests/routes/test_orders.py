@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.testclient import TestClient
 
 from src.routes import orders as orders_module
+from src.routes.service_clients import ServiceResponseError, ServiceUnavailableError
 
 
 class StubOrdersClient:
@@ -15,11 +16,30 @@ class StubOrdersClient:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, Mapping[str, Any] | None]] = []
+        self.get_order_response: Mapping[str, Any] | None = None
+        self.get_order_error: Exception | None = None
+        self.get_order_events_response: Mapping[str, Any] | None = None
+        self.get_order_events_error: Exception | None = None
 
     async def list_orders(self, **_: Any) -> Mapping[str, Any]:
         self.calls.append(("list_orders", {}))
         return {"orders": [], "updated_at": None}
 
+    async def get_order(self, order_id: str) -> Mapping[str, Any]:
+        self.calls.append(("get_order", {"order_id": order_id}))
+        if self.get_order_error:
+            raise self.get_order_error
+        if self.get_order_response is not None:
+            return self.get_order_response
+        return {"success": True, "order": {"id": order_id, "events": []}}
+
+    async def get_order_events(self, order_id: str) -> Mapping[str, Any]:
+        self.calls.append(("get_order_events", {"order_id": order_id}))
+        if self.get_order_events_error:
+            raise self.get_order_events_error
+        if self.get_order_events_response is not None:
+            return self.get_order_events_response
+        return {"success": True, "order_id": order_id, "events": []}
 
 @pytest.fixture()
 def orders_app(
@@ -177,3 +197,86 @@ def test_list_orders_uses_service_client(
 
     assert response.status_code == status.HTTP_200_OK
     assert client_stub.calls and client_stub.calls[-1][0] == "list_orders"
+
+
+def test_get_order_returns_payload(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+    client_stub.get_order_response = {
+        "success": True,
+        "order": {"id": "abc", "status": "pending", "events": []},
+        "updated_at": "2024-06-01T00:00:00+00:00",
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/api/orders/abc")
+
+    assert response.status_code == status.HTTP_200_OK
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["order"]["id"] == "abc"
+    assert client_stub.calls and client_stub.calls[-1][0] == "get_order"
+
+
+def test_get_order_propagates_404(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+    client_stub.get_order_error = ServiceResponseError(
+        "orders", status_code=404, detail="missing"
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/orders/missing")
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()["detail"] == "missing"
+
+
+def test_get_order_propagates_503(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+    client_stub.get_order_error = ServiceUnavailableError("orders", "down")
+
+    with TestClient(app) as client:
+        response = client.get("/api/orders/missing")
+
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert response.json()["detail"] == "Orders service unavailable"
+
+
+def test_get_order_events_returns_payload(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+    client_stub.get_order_events_response = {
+        "success": True,
+        "order_id": "abc",
+        "events": [{"type": "update", "timestamp": "2024-06-01T00:00:00+00:00"}],
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/api/orders/abc/events")
+
+    assert response.status_code == status.HTTP_200_OK
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["order_id"] == "abc"
+    assert payload["events"]
+
+
+def test_get_order_events_propagates_404(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+    client_stub.get_order_events_error = ServiceResponseError(
+        "orders", status_code=404, detail="not found"
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/orders/abc/events")
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()["detail"] == "not found"

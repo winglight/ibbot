@@ -208,6 +208,49 @@ def _clone_order_record(record: Mapping[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(dict(record))
 
 
+def _normalise_timestamp(value: Any) -> str | None:
+    if value is None:
+        return None
+    parsed = _parse_datetime(value)
+    if parsed is not None:
+        return _serialise_datetime(parsed)
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, datetime):
+        return _serialise_datetime(value)
+    return str(value)
+
+
+def _normalise_order_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    payload = _clone_order_record(record)
+    for key in (
+        "requested_at",
+        "updated_at",
+        "submitted_at",
+        "completed_at",
+        "timestamp",
+    ):
+        if key in payload:
+            payload[key] = _normalise_timestamp(payload.get(key))
+    events = payload.get("events")
+    if isinstance(events, list):
+        normalised_events: list[dict[str, Any]] = []
+        for item in events:
+            if not isinstance(item, Mapping):
+                continue
+            event_payload = dict(item)
+            if "timestamp" in event_payload:
+                event_payload["timestamp"] = _normalise_timestamp(
+                    event_payload.get("timestamp")
+                )
+            if isinstance(event_payload.get("payload"), Mapping):
+                event_payload["payload"] = dict(event_payload["payload"])
+            normalised_events.append(event_payload)
+        payload["events"] = normalised_events
+    return payload
+
+
 def _event_timestamp(payload: Mapping[str, Any]) -> str:
     for key in ("timestamp", "time", "created_at", "event_time", "updated_at"):
         value = payload.get(key)
@@ -429,24 +472,60 @@ class OrdersRuntime:
         }
 
     async def get_order(self, order_id: str) -> dict[str, Any]:
-        if not order_id:
+        identifier = str(order_id or "").strip()
+        if not identifier:
             raise KeyError(order_id)
         async with self._lock:
-            record = self._find_order_unlocked(order_id)
-            updated_at = _serialise_datetime(self._last_updated_at)
+            record = self._find_order_unlocked(identifier)
+            updated_at = _normalise_timestamp(self._last_updated_at)
             last_event_id = self._last_message_id or ""
         if record is None and self._redis is not None:
             await self._load_snapshot()
             async with self._lock:
-                record = self._find_order_unlocked(order_id)
-                updated_at = _serialise_datetime(self._last_updated_at)
+                record = self._find_order_unlocked(identifier)
+                updated_at = _normalise_timestamp(self._last_updated_at)
                 last_event_id = self._last_message_id or last_event_id
         if record is None:
             raise KeyError(order_id)
+        order_payload = _normalise_order_record(record)
         return {
-            "order": _clone_order_record(record),
+            "success": True,
+            "order": order_payload,
             "updated_at": updated_at,
             "last_event_id": last_event_id,
+        }
+
+    async def get_order_events(self, order_id: str) -> dict[str, Any]:
+        payload = await self.get_order(order_id)
+        order_payload = payload.get("order")
+        events: list[Mapping[str, Any]]
+        if isinstance(order_payload, Mapping) and isinstance(order_payload.get("events"), list):
+            events = [
+                event
+                for event in order_payload["events"]
+                if isinstance(event, Mapping)
+            ]
+        else:
+            events = []
+        normalised_events = [dict(event) for event in events]
+        for event in normalised_events:
+            if "timestamp" in event:
+                event["timestamp"] = _normalise_timestamp(event.get("timestamp"))
+            if isinstance(event.get("payload"), Mapping):
+                event["payload"] = dict(event["payload"])
+        order_identifier = None
+        if isinstance(order_payload, Mapping):
+            for key in ("order_id", "id", "command_id"):
+                value = order_payload.get(key)
+                if value:
+                    order_identifier = str(value)
+                    break
+        return {
+            "success": True,
+            "order_id": order_identifier or str(order_id),
+            "events": normalised_events,
+            "updated_at": payload.get("updated_at"),
+            "last_event_id": payload.get("last_event_id"),
         }
 
     def _find_order_unlocked(self, order_id: str) -> dict[str, Any] | None:
@@ -1062,6 +1141,16 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
     ) -> Mapping[str, Any]:
         try:
             return await runtime.get_order(order_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="order not found")
+
+    @app.get("/orders/{order_id}/events", status_code=status.HTTP_200_OK)
+    async def get_order_events(
+        order_id: str,
+        runtime: OrdersRuntime = Depends(get_runtime),
+    ) -> Mapping[str, Any]:
+        try:
+            return await runtime.get_order_events(order_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="order not found")
 

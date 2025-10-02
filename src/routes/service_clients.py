@@ -291,6 +291,12 @@ class OrdersServiceClient(ServiceClient):
             expected_status=202,
         )
 
+    async def get_order(self, order_id: str) -> Any:
+        return await self.request("GET", f"/orders/{order_id}")
+
+    async def get_order_events(self, order_id: str) -> Any:
+        return await self.request("GET", f"/orders/{order_id}/events")
+
     async def cancel_order(self, order_id: str) -> Mapping[str, Any]:
         return await self.request(
             "POST",

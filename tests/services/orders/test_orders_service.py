@@ -127,6 +127,7 @@ def test_cancel_order_enqueues_command_and_get_order_returns_active() -> None:
                 order_id = submit.json()["command_id"]
                 cancel = await client.post(f"/orders/{order_id}/cancel")
                 detail = await client.get(f"/orders/{order_id}")
+                events_response = await client.get(f"/orders/{order_id}/events")
             assert cancel.status_code == 202
             cancel_body = cancel.json()
             assert cancel_body["command_id"]
@@ -136,13 +137,16 @@ def test_cancel_order_enqueues_command_and_get_order_returns_active() -> None:
             assert queue_length == 2
 
             history_entries = await redis.lrange(runtime.history_key, 0, -1)
-            events = [json.loads(entry)["event"] for entry in history_entries]
-            assert "cancel_order" in events
+            event_names = [json.loads(entry)["event"] for entry in history_entries]
+            assert "cancel_order" in event_names
 
             detail_payload = detail.json()
             assert detail_payload["order"]["command_id"] == order_id
             assert detail_payload["order"]["symbol"] == "NQ"
             assert detail_payload["order"]["events"]
+            events_payload = events_response.json()
+            assert events_payload["success"] is True
+            assert events_payload["events"]
         finally:
             await runtime.stop()
 
@@ -179,6 +183,7 @@ def test_stream_updates_keep_filled_orders_in_history_and_detail() -> None:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.get("/orders")
                 detail = await client.get("/orders/IB123")
+                events_response = await client.get("/orders/IB123/events")
             assert response.status_code == 200
             payload: dict[str, Any] = response.json()
             assert payload["orders"]
@@ -191,6 +196,9 @@ def test_stream_updates_keep_filled_orders_in_history_and_detail() -> None:
             assert detail_payload["order"]["order_id"] == "IB123"
             assert detail_payload["order"]["avg_fill_price"] == 80.5
             assert any(evt["type"] == "event" for evt in detail_payload["order"]["events"])
+            events_payload = events_response.json()
+            assert events_payload["order_id"] in {"IB123", "cmd"}
+            assert any(evt.get("type") for evt in events_payload["events"])
 
             snapshot_raw = await redis.get(runtime.snapshot_key)
             assert snapshot_raw is not None
