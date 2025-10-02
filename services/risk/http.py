@@ -238,7 +238,7 @@ def create_app(
         config_updates: Mapping[str, Any] | None = None,
         rule_updates: dict[str, Mapping[str, Any]] | None = None,
         replace_rules: bool = False,
-    ) -> None:
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         config_snapshot = runtime_instance.get_config_snapshot()
         rules_snapshot = runtime_instance.get_rules_snapshot()
         if config_updates:
@@ -251,6 +251,9 @@ def create_app(
         payload = dict(config_snapshot)
         payload["rules"] = list(rules_snapshot.values())
         await runtime_instance.update_config(payload)
+        updated_config = runtime_instance.get_config_snapshot()
+        updated_rules = runtime_instance.get_rules_snapshot()
+        return dict(updated_config), {k: dict(v) for k, v in updated_rules.items()}
 
     @app.get("/risk/config", status_code=status.HTTP_200_OK)
     @app.get("/risk-config", status_code=status.HTTP_200_OK)
@@ -274,14 +277,15 @@ def create_app(
     ) -> dict[str, Any]:
         updates = {str(k): v for k, v in payload.items()}
         try:
-            await _refresh_runtime(runtime_instance, config_updates=updates)
+            config_snapshot, _ = await _refresh_runtime(
+                runtime_instance, config_updates=updates
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail="Failed to update risk config") from exc
-        config = runtime_instance.get_config_snapshot()
-        response: dict[str, Any] = {"success": True, "config": dict(config)}
-        response.update(config)
+        response: dict[str, Any] = {"success": True, "config": dict(config_snapshot)}
+        response.update(config_snapshot)
         return response
 
     @app.get("/risk/rules", status_code=status.HTTP_200_OK)
@@ -310,13 +314,16 @@ def create_app(
         symbol: str,
         updates: Mapping[str, Any],
         runtime_instance: RiskRuntime,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         symbol_normalised = _normalise_symbol(symbol)
         rules_snapshot = runtime_instance.get_rules_snapshot()
         existing = rules_snapshot.get(symbol_normalised, {"symbol": symbol_normalised})
         merged = _merge_rule(existing, updates)
-        await _refresh_runtime(runtime_instance, rule_updates={symbol_normalised: merged})
-        return merged
+        _, rules_snapshot = await _refresh_runtime(
+            runtime_instance, rule_updates={symbol_normalised: merged}
+        )
+        rule_payload = rules_snapshot.get(symbol_normalised, dict(merged))
+        return dict(rule_payload), rules_snapshot
 
     @app.post("/risk/rules", status_code=status.HTTP_200_OK)
     @app.post("/risk_rules", status_code=status.HTTP_200_OK)
@@ -325,13 +332,15 @@ def create_app(
         runtime_instance: RiskRuntime = Depends(_get_runtime),
     ) -> dict[str, Any]:
         try:
-            rule = await _upsert_rule(str(payload.get("symbol")), payload, runtime_instance)
+            rule, rules_snapshot = await _upsert_rule(
+                str(payload.get("symbol")), payload, runtime_instance
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
             "success": True,
             "rule": rule,
-            "rules": runtime_instance.get_rules_snapshot(),
+            "rules": rules_snapshot,
         }
 
     @app.put("/risk/rules/{symbol}", status_code=status.HTTP_200_OK)
@@ -349,13 +358,15 @@ def create_app(
         if enabled is not None:
             updates["enabled"] = enabled
         try:
-            rule = await _upsert_rule(symbol, updates, runtime_instance)
+            rule, rules_snapshot = await _upsert_rule(
+                symbol, updates, runtime_instance
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
             "success": True,
             "rule": rule,
-            "rules": runtime_instance.get_rules_snapshot(),
+            "rules": rules_snapshot,
         }
 
     @app.delete("/risk/rules/{symbol}", status_code=status.HTTP_200_OK)
@@ -369,11 +380,15 @@ def create_app(
         if symbol_normalised not in rules_snapshot:
             raise HTTPException(status_code=404, detail="risk rule not found")
         rules_snapshot.pop(symbol_normalised)
-        await _refresh_runtime(runtime_instance, rule_updates=rules_snapshot, replace_rules=True)
+        _, updated_rules = await _refresh_runtime(
+            runtime_instance,
+            rule_updates=rules_snapshot,
+            replace_rules=True,
+        )
         return {
             "success": True,
             "removed": symbol_normalised,
-            "rules": runtime_instance.get_rules_snapshot(),
+            "rules": updated_rules,
         }
 
     @app.post("/risk/position-sizing", status_code=status.HTTP_200_OK)
@@ -441,7 +456,7 @@ def create_app(
             merged = _merge_rule({"symbol": rule_payload.get("symbol")}, rule_payload)
             updates[merged["symbol"]] = merged
         try:
-            await _refresh_runtime(
+            _, rules_snapshot = await _refresh_runtime(
                 runtime_instance,
                 rule_updates=updates,
                 replace_rules=True,
@@ -450,7 +465,6 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail="Failed to update risk rules") from exc
-        rules_snapshot = runtime_instance.get_rules_snapshot()
         return {
             "success": True,
             "rules": rules_snapshot,

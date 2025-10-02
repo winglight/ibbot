@@ -57,6 +57,7 @@ class RiskRuntime:
     reconnect_delay: float = 1.0
     config_cache_key: str = "json:risk:config"
     rules_cache_key: str = "json:risk:rules"
+    rules_update_channel: str = "pubsub:risk:rules:update"
     cache_source: str = "risk-service"
     config_measurement: str = "risk_config_snapshot"
     rules_measurement: str = "risk_rule_snapshot"
@@ -134,13 +135,23 @@ class RiskRuntime:
         rules_payload: Mapping[str, Any],
         timestamp: str,
     ) -> None:
+        rules_snapshot = {
+            str(symbol): dict(payload)
+            for symbol, payload in rules_payload.items()
+            if isinstance(payload, Mapping)
+        }
         try:
-            await self._write_cache_snapshot(config_payload, rules_payload, timestamp)
+            await self._write_cache_snapshot(config_payload, rules_snapshot, timestamp)
         except Exception:
             logger = self._logger or get_logger(self.logger_name)
             logger.warning("Failed to update risk cache", exc_info=True)
         try:
-            await self._write_influx_snapshot(config_payload, rules_payload, timestamp)
+            await self._publish_rules_update_event(rules_snapshot, timestamp)
+        except Exception:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning("Failed to publish risk rules update", exc_info=True)
+        try:
+            await self._write_influx_snapshot(config_payload, rules_snapshot, timestamp)
         except Exception:
             logger = self._logger or get_logger(self.logger_name)
             logger.warning("Failed to persist risk snapshot to InfluxDB", exc_info=True)
@@ -158,7 +169,7 @@ class RiskRuntime:
     async def _write_cache_snapshot(
         self,
         config_payload: Mapping[str, Any],
-        rules_payload: Mapping[str, Any],
+        rules_payload: Mapping[str, Mapping[str, Any]],
         timestamp: str,
     ) -> None:
         redis = await self._get_cache_redis()
@@ -186,10 +197,33 @@ class RiskRuntime:
         pipeline.set(self.rules_cache_key, self._dump_json(rules_cache))
         await pipeline.execute()
 
+    async def _publish_rules_update_event(
+        self,
+        rules_payload: Mapping[str, Mapping[str, Any]],
+        timestamp: str,
+    ) -> None:
+        redis = await self._get_cache_redis()
+        if redis is None:
+            return
+
+        message: dict[str, Any] = {
+            "type": "risk_rules",
+            "success": True,
+            "rules": dict(rules_payload),
+            "updated_at": timestamp,
+            "source": self.cache_source,
+            "count": len(rules_payload),
+        }
+
+        await redis.publish(
+            self.rules_update_channel,
+            self._dump_json(message),
+        )
+
     async def _write_influx_snapshot(
         self,
         config_payload: Mapping[str, Any],
-        rules_payload: Mapping[str, Any],
+        rules_payload: Mapping[str, Mapping[str, Any]],
         timestamp: str,
     ) -> None:
         points: list[Mapping[str, Any]] = []

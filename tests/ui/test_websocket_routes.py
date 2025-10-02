@@ -1,3 +1,5 @@
+import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -17,6 +19,7 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
     class StubWebSocketManager:
         def __init__(self) -> None:
             self.connections: list[Any] = []
+            self.broadcasts: list[dict[str, Any]] = []
 
         async def connect(self, websocket) -> None:
             await websocket.accept()
@@ -26,8 +29,23 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
             if websocket in self.connections:
                 self.connections.remove(websocket)
 
+        async def broadcast(self, message: dict[str, Any]) -> None:
+            self.broadcasts.append(dict(message))
+            text = json.dumps(message)
+            for connection in list(self.connections):
+                await connection.send_text(text)
+
     stub_manager = StubWebSocketManager()
     monkeypatch.setattr(websocket_module, "_websocket_manager", lambda: stub_manager)
+
+    async def noop_risk_listener() -> None:
+        return None
+
+    monkeypatch.setattr(
+        websocket_module,
+        "_ensure_risk_rules_listener",
+        noop_risk_listener,
+    )
 
     async def fake_health() -> dict[str, Any]:
         return {
@@ -325,3 +343,29 @@ def test_websocket_strategy_requests(websocket_app: tuple[FastAPI, Any], monkeyp
             assert performance_payload["type"] == "strategy_performance"
             assert performance_payload["success"] is True
             assert performance_payload["metrics"]["pnl"] == 10
+
+
+def test_websocket_broadcasts_risk_rules_updates(
+    websocket_app: tuple[FastAPI, Any],
+) -> None:
+    app, _ = websocket_app
+    stub_manager = websocket_module._websocket_manager()
+    stub_manager.broadcasts.clear()
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            _drain_initial_messages(ws, 4)
+            payload = {
+                "rules": {"CL": {"symbol": "CL", "enabled": True}},
+                "updated_at": "2024-01-01T00:00:00+00:00",
+                "source": "test",
+            }
+            asyncio.get_event_loop().run_until_complete(
+                websocket_module._handle_risk_rules_pubsub(
+                    websocket_module.RISK_RULES_UPDATE_CHANNEL,
+                    json.dumps(payload),
+                )
+            )
+            message = _receive_until_type(ws, "risk_rules")
+            assert message["rules"] == payload["rules"]
+            assert stub_manager.broadcasts[-1]["rules"] == payload["rules"]
