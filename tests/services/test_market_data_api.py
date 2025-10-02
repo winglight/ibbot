@@ -199,6 +199,41 @@ def test_unknown_symbol_returns_404() -> None:
         assert response.json()["detail"] == "Symbol not found"
 
 
+def test_current_price_endpoint_returns_snapshot() -> None:
+    redis = FakeRedis()
+    writer = RecordingWriter()
+    runtime = _build_runtime(redis, writer, symbols=["MSFT"])
+
+    with _start_client(runtime) as client:
+        _emit_price(runtime, "MSFT", last=330.55, bid=330.4, ask=330.7)
+        response = client.get("/market/current_price", params={"symbol": "msft"})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["symbol"] == "MSFT"
+        assert payload["price"] == 330.55
+        assert payload["timestamp"]
+        assert payload["source"] == "market_data_service"
+        assert payload["data"]["bid"] == 330.4
+
+
+def test_current_price_endpoint_handles_missing_snapshot() -> None:
+    redis = FakeRedis()
+    writer = RecordingWriter()
+    runtime = _build_runtime(redis, writer, symbols=["MSFT"])
+
+    with _start_client(runtime) as client:
+        response = client.get("/market/current_price", params={"symbol": "UNKNOWN"})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is False
+        assert payload["symbol"] == "UNKNOWN"
+        assert payload["price"] is None
+        assert payload["error"] == "No market data available"
+
+
 def test_chart_data_returns_cached_series() -> None:
     redis = FakeRedis()
     writer = RecordingWriter()
@@ -301,3 +336,67 @@ def test_chart_data_returns_503_on_backend_error() -> None:
 
         assert response.status_code == 503
         assert response.json()["detail"] == "Market data cache unavailable"
+
+
+def test_market_historical_returns_series_payload() -> None:
+    redis = FakeRedis()
+    writer = RecordingWriter()
+    runtime = _build_runtime(redis, writer, symbols=["ES"])
+
+    interval = "1m"
+    symbol = "ES"
+    cache_key = f"market-data:series:market.candle.{interval}:{symbol}"
+    redis.set_series(
+        cache_key,
+        [
+            {
+                "interval_end_ns": int(datetime.now(timezone.utc).timestamp() * 1_000_000_000),
+                "open": 100,
+                "high": 110,
+                "low": 90,
+                "close": 95,
+                "volume": 500,
+            }
+        ],
+    )
+
+    with _start_client(runtime) as client:
+        response = client.post(
+            "/market/historical",
+            json={
+                "symbol": symbol,
+                "duration": "1 D",
+                "barSize": "1 min",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["rows"] == 1
+        assert payload["symbol"] == symbol
+        assert payload["metadata"]["interval"] == interval
+        assert payload["data"][0]["open"] == 100.0
+
+
+def test_market_historical_handles_missing_data() -> None:
+    redis = FakeRedis()
+    writer = RecordingWriter()
+    runtime = _build_runtime(redis, writer, symbols=["ES"])
+
+    with _start_client(runtime) as client:
+        response = client.post(
+            "/market/historical",
+            json={
+                "symbol": "ES",
+                "duration": "1 D",
+                "barSize": "1 min",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is False
+        assert payload["data"] == []
+        assert payload["rows"] == 0
+        assert payload["error"] == "No chart data available"
