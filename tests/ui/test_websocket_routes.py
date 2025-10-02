@@ -35,6 +35,8 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
             "account_type": "Paper",
             "error_code": None,
             "stale": False,
+            "ib_connected": True,
+            "ib_connection_error": "",
         }
 
     monkeypatch.setattr(websocket_module, "_load_ib_command_health", fake_health)

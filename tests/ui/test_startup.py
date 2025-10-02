@@ -241,6 +241,8 @@ async def test_connection_status_prefers_redis_when_fresh(
             "queue_depth": "0",
             "last_error": "",
             "last_error_code": "",
+            "ib_connected": "true",
+            "ib_connection_error": "",
         },
     )
 
@@ -262,6 +264,8 @@ async def test_connection_status_prefers_redis_when_fresh(
                 "queue_depth": "0",
                 "last_error": "",
                 "last_error_code": "",
+                "ib_connected": "true",
+                "ib_connection_error": "",
             },
         )
 

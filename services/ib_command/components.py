@@ -56,6 +56,72 @@ class IBCommandExecutor:
         self._ib_client = ib_client
         self._logger = get_logger(logger_name)
 
+    def describe_connectivity(self) -> tuple[bool | None, str | None]:
+        """Return the IB client's connectivity flag and last connection error."""
+
+        client = self._ib_client
+        if client is None:
+            return None, "ib client unavailable"
+
+        connected: bool | None = None
+        error: str | None = None
+
+        for attr_name in ("is_connected", "isConnected", "connected"):
+            if not hasattr(client, attr_name):
+                continue
+
+            attr = getattr(client, attr_name)
+            try:
+                if callable(attr):
+                    result = attr()
+                else:
+                    result = attr
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.debug(
+                    "Failed to query IB client connectivity via %s", attr_name, exc_info=exc
+                )
+                continue
+
+            if result is None:
+                continue
+
+            connected = bool(result)
+            break
+
+        # Prefer connection_manager if exposed on the client
+        connection_manager = getattr(client, "connection_manager", None)
+        if connection_manager is None and hasattr(client, "get_connection_manager"):
+            try:
+                connection_manager = client.get_connection_manager()
+            except Exception:  # pragma: no cover - defensive guard
+                connection_manager = None
+
+        if connection_manager is not None and hasattr(connection_manager, "get_last_connect_error"):
+            try:
+                raw_error = connection_manager.get_last_connect_error()
+            except Exception:  # pragma: no cover - defensive guard
+                raw_error = None
+        elif hasattr(client, "get_last_connect_error"):
+            try:
+                raw_error = client.get_last_connect_error()
+            except Exception:  # pragma: no cover - defensive guard
+                raw_error = None
+        else:
+            raw_error = None
+
+        if isinstance(raw_error, str):
+            error = raw_error.strip() or None
+        elif raw_error:
+            error = str(raw_error)
+
+        if connected:
+            error = None
+
+        if connected is None and error is not None:
+            connected = False
+
+        return connected, error
+
     async def execute(self, command: Mapping[str, Any], *, attempts: int) -> ExecutionResult:
         command_id = str(command.get("command_id") or "")
         method_name = command.get("method") or command.get("action")
@@ -194,6 +260,8 @@ class CommandConsumer:
         self._stopping = asyncio.Event()
         self._last_error: str = ""
         self._last_error_code: int | None = None
+        self._ib_connected: bool | None = None
+        self._ib_connection_error: str = ""
 
     async def consume_forever(self) -> None:
         self._stopping.clear()
@@ -302,6 +370,22 @@ class CommandConsumer:
         last_error_code: int | None = None,
     ) -> None:
         queue_depth = await self._safe_queue_depth()
+
+        ib_connected, ib_error = self._executor.describe_connectivity()
+        if ib_connected is not None:
+            self._ib_connected = bool(ib_connected)
+            if self._ib_connected:
+                self._ib_connection_error = ""
+        if self._ib_connected is False:
+            if ib_error:
+                self._ib_connection_error = ib_error.strip()
+            elif not self._ib_connection_error:
+                self._ib_connection_error = "ib connection unavailable"
+        elif ib_error:
+            # When we cannot determine connectivity but still receive an error,
+            # surface it via the dedicated field.
+            self._ib_connection_error = ib_error.strip()
+
         if last_error is not None:
             self._last_error = last_error or ""
         if last_error_code is not None:
@@ -309,14 +393,22 @@ class CommandConsumer:
                 self._last_error_code = int(last_error_code)
             except (TypeError, ValueError):
                 self._last_error_code = None
+
+        reported_last_error = self._last_error or self._ib_connection_error
         values = {
             "last_seen": datetime.now(timezone.utc).isoformat(),
             "queue_depth": str(queue_depth),
-            "last_error": self._last_error,
+            "last_error": reported_last_error,
             "last_error_code": ""
             if self._last_error_code is None
             else str(self._last_error_code),
         }
+        if self._ib_connected is not None:
+            values["ib_connected"] = "true" if self._ib_connected else "false"
+        if self._ib_connection_error:
+            values["ib_connection_error"] = self._ib_connection_error
+        else:
+            values["ib_connection_error"] = ""
         try:
             await self._redis.hset(self._health_key, mapping=values)
         except Exception:  # pragma: no cover - defensive guard
