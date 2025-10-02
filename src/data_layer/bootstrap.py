@@ -14,6 +14,7 @@ from .cache import InMemoryCacheBackend, RedisCacheBackend
 from .data_source_manager import DataSourceManager
 from .persistence import InfluxPersistenceBackend, NoopPersistenceBackend
 from .quote_feed import QuoteFeed, resolve_default_quote_feed
+from src.ibbot.redis import DEFAULT_REDIS_URL
 
 __all__ = ["get_data_source_manager", "get_quote_feed"]
 
@@ -60,28 +61,35 @@ def _get_cache_backend():
     if _cache_backend is not None:
         return _cache_backend
 
+    redis_url = None
     for key in ("DATA_LAYER_REDIS_URL", "IBBOT_REDIS_URL"):
-        redis_url = os.getenv(key, "").strip()
-        if not redis_url:
-            continue
+        candidate = os.getenv(key, "").strip()
+        if candidate:
+            redis_url = candidate
+            break
 
-        prefix = os.getenv("DATA_LAYER_REDIS_PREFIX", "market-data")
-        ttl_raw = os.getenv("DATA_LAYER_REDIS_SNAPSHOT_TTL")
-        ttl = None
-        if ttl_raw:
-            try:
-                ttl_value = int(ttl_raw.strip())
-            except ValueError:
-                ttl_value = None
-            else:
-                if ttl_value > 0:
-                    ttl = ttl_value
+    if not redis_url:
+        redis_url = DEFAULT_REDIS_URL
+
+    prefix = os.getenv("DATA_LAYER_REDIS_PREFIX", "market-data").strip() or "market-data"
+    prefix = prefix.rstrip(":")
+    ttl_raw = os.getenv("DATA_LAYER_REDIS_SNAPSHOT_TTL")
+    ttl = None
+    if ttl_raw:
         try:
-            _cache_backend = RedisCacheBackend(redis_url, prefix=prefix, snapshot_ttl=ttl)
-            logger.info("Using Redis cache backend at {}", redis_url)
-            return _cache_backend
-        except Exception as exc:
-            logger.warning("Failed to initialise Redis cache backend: {}", exc)
+            ttl_value = int(ttl_raw.strip())
+        except ValueError:
+            ttl_value = None
+        else:
+            if ttl_value > 0:
+                ttl = ttl_value
+
+    try:
+        _cache_backend = RedisCacheBackend(redis_url, prefix=prefix, snapshot_ttl=ttl)
+        logger.info("Using Redis cache backend at {}", redis_url)
+        return _cache_backend
+    except Exception as exc:
+        logger.warning("Failed to initialise Redis cache backend: {}", exc)
 
     _cache_backend = InMemoryCacheBackend()
     logger.info("Using in-memory cache backend")
