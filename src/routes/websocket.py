@@ -1381,7 +1381,21 @@ async def websocket_endpoint(websocket: WebSocket):
                                 positions = data
                                 source = snapshot.get("source", "redis") or "redis"
                     if positions is None:
-                        raise RuntimeError("Positions unavailable")
+                        unavailable_payload = _service_unavailable_payload(
+                            "position_update",
+                            positions=[],
+                            source=source,
+                            fast=fast,
+                            connected=bool(connected_flag),
+                            fresh=bool(redis_fresh),
+                        )
+                        unavailable_payload.setdefault(
+                            "details",
+                            "Positions data unavailable from service or cache",
+                        )
+                        last_responses[key] = unavailable_payload
+                        await websocket.send_text(json.dumps(unavailable_payload))
+                        continue
                     payload = {
                         "type": "position_update",
                         "success": True,

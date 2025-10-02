@@ -221,6 +221,8 @@ async def test_websocket_handles_service_unavailable(monkeypatch: pytest.MonkeyP
             assert positions_message["type"] == "position_update"
             assert positions_message["success"] is False
             assert positions_message["error"] == websocket_module.SERVICE_UNAVAILABLE_MESSAGE
+            assert positions_message.get("positions") == []
+            assert positions_message.get("details")
 
             websocket.send_json({"type": "ping"})
             pong = websocket.receive_json()

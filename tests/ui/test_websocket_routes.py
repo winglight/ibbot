@@ -57,21 +57,27 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
         async def fetch_info(self, *, force_refresh: bool = False) -> dict[str, Any]:
             return {"equity": 1000, "currency": "USD"}
 
-        async def fetch_positions(self, *, force_refresh: bool = False, fast: bool = True) -> list[dict[str, Any]]:
+        async def fetch_positions(
+            self, *, force_refresh: bool = False, fast: bool = True
+        ) -> list[dict[str, Any]]:
             return [{"symbol": "ES", "position": 1}]
 
-        async def fetch_orders(
+    account_client = StubAccountClient()
+    monkeypatch.setattr(websocket_module, "_ACCOUNT_CLIENT", account_client)
+
+    class StubOrdersClient:
+        async def list_orders(
             self,
             *,
             limit: int,
             offset: int,
             start_date: str | None = None,
         ) -> dict[str, Any]:
-            self.orders_calls.append((limit, offset, start_date))
+            account_client.orders_calls.append((limit, offset, start_date))
             return {"orders": [{"order_id": "1", "symbol": "ES"}], "total": 1}
 
-    account_client = StubAccountClient()
-    monkeypatch.setattr(websocket_module, "_ACCOUNT_CLIENT", account_client)
+    orders_client = StubOrdersClient()
+    monkeypatch.setattr(websocket_module, "_ORDERS_CLIENT", orders_client)
 
     class StubRiskClient:
         async def fetch_rules(self) -> dict[str, Any]:
@@ -107,6 +113,16 @@ def _drain_initial_messages(ws: WebSocketTestSession, count: int) -> list[dict[s
     return [ws.receive_json() for _ in range(count)]
 
 
+def _receive_until_type(
+    ws: WebSocketTestSession, expected_type: str, *, max_messages: int = 5
+) -> dict[str, Any]:
+    for _ in range(max_messages):
+        payload = ws.receive_json()
+        if payload.get("type") == expected_type:
+            return payload
+    raise AssertionError(f"Did not receive payload of type {expected_type!r}")
+
+
 def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     app, account_client = websocket_app
 
@@ -136,13 +152,13 @@ def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any]
             assert messages[3]["positions"][0]["symbol"] == "ES"
 
             ws.send_json({"type": "request_orders_snapshot", "limit": 5, "force": True})
-            orders_payload = ws.receive_json()
+            orders_payload = _receive_until_type(ws, "orders_snapshot")
             assert orders_payload["type"] == "orders_snapshot"
             assert orders_payload["success"] is True
             assert account_client.orders_calls[-1][:2] == (5, 0)
 
             ws.send_json({"type": "request_risk_rules", "force": True})
-            risk_payload = ws.receive_json()
+            risk_payload = _receive_until_type(ws, "risk_rules")
             assert risk_payload["type"] == "risk_rules"
             assert risk_payload["success"] is True
             assert isinstance(risk_payload["rules"], list)
@@ -153,13 +169,15 @@ def test_websocket_orders_service_unavailable(
 ) -> None:
     app, account_client = websocket_app
 
+    orders_client = websocket_module._ORDERS_CLIENT
+
     async def failing_fetch_orders(
         *, limit: int, offset: int, start_date: str | None = None
     ) -> dict[str, Any]:
         account_client.orders_calls.append((limit, offset, start_date))
-        raise ServiceUnavailableError("account", "offline")
+        raise ServiceUnavailableError("orders", "offline")
 
-    monkeypatch.setattr(account_client, "fetch_orders", failing_fetch_orders)
+    monkeypatch.setattr(orders_client, "list_orders", failing_fetch_orders)
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as ws:
@@ -181,7 +199,7 @@ def test_websocket_orders_service_unavailable(
             assert orders_payload.get("meta", {}).get("limit") == 10
 
             ws.send_json({"type": "ping"})
-            assert ws.receive_json() == {"type": "pong"}
+            assert _receive_until_type(ws, "pong") == {"type": "pong"}
 
 
 def test_websocket_strategy_requests(websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -201,13 +219,13 @@ def test_websocket_strategy_requests(websocket_app: tuple[FastAPI, Any], monkeyp
             _drain_initial_messages(ws, 4)
 
             ws.send_json({"type": "request_strategy_status", "name": "alpha", "force": True})
-            status_payload = ws.receive_json()
+            status_payload = _receive_until_type(ws, "strategy_status")
             assert status_payload["type"] == "strategy_status"
             assert status_payload["success"] is True
             assert status_payload["status"]["is_receiving_data"] is True
 
             ws.send_json({"type": "request_strategy_performance", "name": "alpha", "range": "1d", "force": True})
-            performance_payload = ws.receive_json()
+            performance_payload = _receive_until_type(ws, "strategy_performance")
             assert performance_payload["type"] == "strategy_performance"
             assert performance_payload["success"] is True
             assert performance_payload["metrics"]["pnl"] == 10
