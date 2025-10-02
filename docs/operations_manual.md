@@ -125,6 +125,7 @@
   `hash:service:health:notification`。若状态显示“未上报”，可通过 `/api/services/restart`
   触发对 `notification` 服务的重启（依赖 `connection_control`，默认监听 `8060` 端口）。
 - **恢复**：检查 `.env.local` 中的 `TELEGRAM_TOKEN/CHAT_ID`、浏览器通知配置；修复后重启通知服务。
+  - 若在裸机或自定义网络中运行，请确保 `NOTIFICATION_SERVICE_URL` 指向实际可访问的地址（Docker 默认 `http://notification:8055`，独立部署可改为 `http://127.0.0.1:8055`），必要时同步更新 `NOTIFICATION_SERVICE_TIMEOUT`。
 
 ### 3.5 性能阈值不达标
 

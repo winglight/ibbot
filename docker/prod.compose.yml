@@ -43,6 +43,8 @@ services:
     volumes:
       - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
       - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+    ports:
+      - "${NOTIFICATION_SERVICE_PORT:-8055}:8055"
   queue-monitor:
     ports:
       - "${QUEUE_MONITOR_PORT:-8011}:8011"

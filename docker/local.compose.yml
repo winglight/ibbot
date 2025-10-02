@@ -197,7 +197,16 @@ services:
       dockerfile: docker/Dockerfile
     image: ${IBBOT_IMAGE:-ibbot/local}
     command:
-      ["python", "-m", "uvicorn", "services.notification.main:app", "--host", "0.0.0.0", "--port", "8055"]
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "services.notification.main:create_app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8055",
+      ]
     container_name: ibbot-notification
     ports:
       - "8055:8055"
@@ -216,6 +225,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+    profiles:
+      - notifications
 
   strategy:
     <<: *app-environment
@@ -240,28 +251,6 @@ services:
     restart: unless-stopped
     profiles:
       - strategy
-
-  notification:
-    <<: *app-environment
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    image: ${IBBOT_IMAGE:-ibbot/local}
-    command: ["python", "-m", "services.notification.main"]
-    container_name: ibbot-notification
-    volumes:
-      - ./data/logs:/app/logs
-      - ./data:/app/data
-    depends_on:
-      redis:
-        condition: service_healthy
-      influxdb:
-        condition: service_healthy
-    networks:
-      - ibbot-network
-    restart: unless-stopped
-    profiles:
-      - notifications
 
   queue-monitor:
     <<: *app-environment
