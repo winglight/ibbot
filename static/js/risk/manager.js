@@ -886,6 +886,19 @@
                 document.getElementById('totalLoss').textContent = '$' + this.app.formatNumber(data.totalLoss);
 
                 const tbody = document.querySelector('#riskRuleOrdersTable tbody');
+                const escapeHtml = (value) => {
+                    if (this.app && typeof this.app.escapeHtml === 'function') {
+                        return this.app.escapeHtml(value);
+                    }
+                    if (value === null || value === undefined) return '';
+                    return String(value)
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#39;');
+                };
+
                 tbody.innerHTML = (data.orders || []).map(({ order, orderPnl }) => {
                     let triggerTypeText = '风险规则';
                     let triggerTypeClass = 'bg-warning';
@@ -907,9 +920,28 @@
                     const pnlText = `$${this.app.formatNumber(orderPnl)}`;
                     const executionPrice = order.avg_fill_price || 0;
 
+                    const rawOrderId = order?.order_id !== undefined && order?.order_id !== null
+                        ? String(order.order_id).trim()
+                        : '';
+                    const orderIdInfo = this.app?.formatOrderIdDisplay?.(rawOrderId);
+                    const orderIdCell = (() => {
+                        if (orderIdInfo && typeof orderIdInfo.html === 'string') {
+                            return orderIdInfo.html;
+                        }
+                        if (!rawOrderId) {
+                            return '<span class="order-id-display text-muted">—</span>';
+                        }
+                        const safeFull = escapeHtml(rawOrderId);
+                        const safeShort = escapeHtml(rawOrderId.slice(-3));
+                        return `<span class="order-id-display" title="${safeFull}" aria-label="${safeFull}" data-full-order-id="${safeFull}">${safeShort}</span>`;
+                    })();
+                    const rowAttr = orderIdInfo?.hasValue
+                        ? ` data-order-id="${orderIdInfo.escapedFull}"`
+                        : (rawOrderId ? ` data-order-id="${escapeHtml(rawOrderId)}"` : '');
+
                     return `
-                    <tr>
-                        <td>${order.order_id}</td>
+                    <tr${rowAttr}>
+                        <td>${orderIdCell}</td>
                         <td>${new Date(order.submit_time || order.created_at).toLocaleString()}</td>
                         <td>${order.symbol}</td>
                         <td><span class="badge bg-${order.action === 'BUY' ? 'success' : 'danger'}">${order.action}</span></td>

@@ -2544,7 +2544,19 @@
                                 });
 
                                 if (response.success) {
-                                    this.showAlert('success', `反向订单已提交: ${response.action} ${response.quantity} ${symbol} (订单ID: ${response.order_id})`);
+                                    let orderSuffix = '';
+                                    if (response?.order_id !== undefined && response?.order_id !== null) {
+                                        const idInfo = this.app?.formatOrderIdDisplay?.(response.order_id);
+                                        const rawId = String(response.order_id).trim();
+                                        const shortId = idInfo?.short || (rawId ? rawId.slice(-3) : '');
+                                        if (shortId) {
+                                            orderSuffix = ` (订单ID: ${shortId})`;
+                                        }
+                                        if (idInfo?.full && idInfo.full !== shortId) {
+                                            console.info('Reverse order submitted with full ID:', idInfo.full);
+                                        }
+                                    }
+                                    this.showAlert('success', `反向订单已提交: ${response.action} ${response.quantity} ${symbol}${orderSuffix}`);
                                     // 刷新持仓和订单数据
                                     await this.loadPortfolio();
                                     this.loadOrders();

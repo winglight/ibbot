@@ -97,6 +97,7 @@ const {
     escapeHtml: sharedEscapeHtml,
     formatDuration: sharedFormatDuration,
     isSameDay: sharedIsSameDay,
+    formatOrderIdDisplay: sharedFormatOrderIdDisplay,
 } = SharedUtils;
 
 if (!TrendSignalLabelPlugin || typeof TrendSignalLabelPlugin.afterDatasetsDraw !== 'function') {
@@ -116,6 +117,9 @@ if (typeof sharedFormatDuration !== 'function') {
 }
 if (typeof sharedIsSameDay !== 'function') {
     throw new Error('utils.isSameDay is required');
+}
+if (typeof sharedFormatOrderIdDisplay !== 'function') {
+    throw new Error('utils.formatOrderIdDisplay is required');
 }
 
 class TradingApp {
@@ -2126,172 +2130,236 @@ class TradingApp {
 
 
 
+    buildOrderDetailsHtml(orderData = {}) {
+        const formatDateTime = (dateStr) => {
+            if (!dateStr) return '—';
+            try {
+                return new Date(dateStr).toLocaleString('zh-CN');
+            } catch {
+                return String(dateStr);
+            }
+        };
+
+        const formatPrice = (price) => {
+            return price && price > 0 ? `$${this.formatNumber(price)}` : '—';
+        };
+
+        const escapeText = (value) => {
+            if (typeof this.escapeHtml === 'function') {
+                return this.escapeHtml(value);
+            }
+            if (value === null || value === undefined) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        };
+
+        const formatText = (value) => {
+            if (value === null || value === undefined) return '—';
+            const str = String(value).trim();
+            return str ? escapeText(str) : '—';
+        };
+
+        const formatTriggerType = (value) => {
+            if (!value && value !== 0) return '—';
+            const str = String(value).trim();
+            if (!str) return '—';
+            switch (str) {
+                case 'strategy':
+                    return 'Strategy';
+                case 'risk_rule':
+                    return 'Risk Control';
+                case 'manual':
+                    return 'Manual';
+                default:
+                    return escapeText(str);
+            }
+        };
+
+        const sourceHtml = (this.orderManager && typeof this.orderManager.formatOrderSource === 'function')
+            ? this.orderManager.formatOrderSource(orderData)
+            : (orderData.order_source ? escapeText(orderData.order_source) : '—');
+
+        const rawStrategyName = orderData.strategy_name ?? orderData.strategy;
+        const strategyHtml = formatText(rawStrategyName);
+
+        const notesHtml = (() => {
+            if (orderData.notes === null || orderData.notes === undefined) return '—';
+            const str = String(orderData.notes);
+            if (!str.trim()) return '—';
+            return escapeText(str).replace(/\n/g, '<br>');
+        })();
+
+        const orderIdDisplay = this.formatOrderIdDisplay(orderData.order_id, {
+            className: 'order-id-display fw-semibold',
+        });
+        const parentOrderDisplay = this.formatOrderIdDisplay(orderData.parent_order_id);
+        const orderIdCopyButton = orderIdDisplay.hasValue
+            ? `<button type="button" class="btn btn-link btn-sm text-decoration-none p-0 ms-2 align-baseline" data-action="copy-order-id" data-full-order-id="${orderIdDisplay.escapedFull}" title="Copy full order ID" aria-label="Copy full order ID" onclick="app.copyFullOrderId(this)">Copy</button>`
+            : '';
+
+        const statusValue = orderData.status;
+        const statusText = formatText(statusValue);
+        const statusColor = this.getStatusColor(statusValue);
+
+        return `
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <div class="card">
+                        <div class="card-header"><strong>Basic Information</strong></div>
+                        <div class="card-body">
+                            <p><strong>Order ID:</strong> ${orderIdDisplay.html}${orderIdCopyButton}</p>
+                            <p><strong>Symbol:</strong> ${formatText(orderData.symbol)}</p>
+                            <p><strong>Action:</strong> ${formatText(orderData.action)}</p>
+                            <p><strong>Quantity:</strong> ${formatText(orderData.quantity)}</p>
+                            <p><strong>Order Type:</strong> ${formatText(orderData.order_type)}</p>
+                            <p><strong>Status:</strong> <span class="badge bg-${statusColor}">${statusText}</span></p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card">
+                        <div class="card-header"><strong>Price Information</strong></div>
+                        <div class="card-body">
+                            <p><strong>Limit Price:</strong> ${formatPrice(orderData.limit_price)}</p>
+                            <p><strong>Average Fill Price:</strong> ${formatPrice(orderData.avg_fill_price)}</p>
+                            <p><strong>Filled:</strong> ${orderData.filled ?? 0}</p>
+                            <p><strong>Remaining:</strong> ${orderData.remaining ?? 0}</p>
+                            <p><strong>Commission:</strong> ${formatPrice(orderData.commission)}</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-header"><strong>Additional Information</strong></div>
+                        <div class="card-body">
+                            <div class="row row-cols-1 row-cols-md-2 g-2">
+                                <div class="col">
+                                    <p><strong>Submitted At:</strong> ${formatDateTime(orderData.submit_time)}</p>
+                                    <p><strong>Updated At:</strong> ${formatDateTime(orderData.updated_at)}</p>
+                                    <p><strong>Executed At:</strong> ${formatDateTime(orderData.executed_at)}</p>
+                                    <p><strong>Order Source:</strong> ${sourceHtml}</p>
+                                    <p><strong>Trigger Type:</strong> ${formatTriggerType(orderData.trigger_type)}</p>
+                                </div>
+                                <div class="col">
+                                    <p><strong>Strategy:</strong> ${strategyHtml}</p>
+                                    <p><strong>Rule ID:</strong> ${formatText(orderData.rule_id)}</p>
+                                    <p><strong>Parent Order ID:</strong> ${parentOrderDisplay.html}</p>
+                                    <p><strong>Exchange:</strong> ${formatText(orderData.exchange)}</p>
+                                    <p><strong>Security Type:</strong> ${formatText(orderData.sec_type)}</p>
+                                </div>
+                            </div>
+                            <p class="mt-3"><strong>Notes:</strong> ${notesHtml}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
     async openOrderDetails(orderId) {
         try {
             // 验证订单ID
-            if (!orderId || orderId.trim() === '') {
+            const normalizedId = orderId === null || orderId === undefined
+                ? ''
+                : String(orderId).trim();
+            if (!normalizedId) {
                 this.showAlert('warning', 'Order ID cannot be empty');
                 return;
             }
-            
+
             // 获取订单详情
-            let result = await this.apiCall(`/orders/${orderId}`);
-            
+            let result = await this.apiCall(`/orders/${encodeURIComponent(normalizedId)}`);
+
             if (!result || !result.order) {
-                this.showAlert('warning', `Order ${orderId} does not exist or has been deleted`);
+                const idInfo = this.formatOrderIdDisplay(normalizedId);
+                const shortId = idInfo.short || idInfo.full || normalizedId;
+                this.showAlert('warning', `Order ${shortId} does not exist or has been deleted`);
+                if (idInfo.full) {
+                    console.warn('Full order ID not found during detail lookup:', idInfo.full);
+                }
                 return;
             }
-            
+
             const orderData = result.order;
-            
+
             // 填充模态框内容
             const modalBody = document.getElementById('orderDetailsModalBody');
             if (!modalBody) {
                 this.showAlert('danger', 'Order details modal not found');
                 return;
             }
-            
-            // 格式化时间显示
-            const formatDateTime = (dateStr) => {
-                if (!dateStr) return '—';
-                try {
-                    return new Date(dateStr).toLocaleString('zh-CN');
-                } catch {
-                    return dateStr;
-                }
-            };
 
-            // 格式化价格显示
-            const formatPrice = (price) => {
-                return price && price > 0 ? `$${this.formatNumber(price)}` : '—';
-            };
+            modalBody.innerHTML = this.buildOrderDetailsHtml(orderData);
 
-            const escapeText = (value) => {
-                if (typeof this.escapeHtml === 'function') {
-                    return this.escapeHtml(value);
-                }
-                if (value === null || value === undefined) return '';
-                return String(value)
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&#39;');
-            };
-
-            const formatText = (value) => {
-                if (value === null || value === undefined) return '—';
-                const str = String(value).trim();
-                return str ? escapeText(str) : '—';
-            };
-
-            const formatTriggerType = (value) => {
-                if (!value && value !== 0) return '—';
-                const str = String(value).trim();
-                if (!str) return '—';
-                switch (str) {
-                    case 'strategy':
-                        return 'Strategy';
-                    case 'risk_rule':
-                        return 'Risk Control';
-                    case 'manual':
-                        return 'Manual';
-                    default:
-                        return escapeText(str);
-                }
-            };
-
-            const sourceHtml = (this.orderManager && typeof this.orderManager.formatOrderSource === 'function')
-                ? this.orderManager.formatOrderSource(orderData)
-                : (orderData.order_source ? escapeText(orderData.order_source) : '—');
-
-            const rawStrategyName = orderData.strategy_name ?? orderData.strategy;
-            const strategyHtml = formatText(rawStrategyName);
-
-            const notesHtml = (() => {
-                if (orderData.notes === null || orderData.notes === undefined) return '—';
-                const str = String(orderData.notes);
-                if (!str.trim()) return '—';
-                return escapeText(str).replace(/\n/g, '<br>');
-            })();
-
-            // 构建详情HTML
-            modalBody.innerHTML = `
-                <div class="row g-3">
-                    <div class="col-md-6">
-                        <div class="card">
-                            <div class="card-header"><strong>Basic Information</strong></div>
-                            <div class="card-body">
-                                <p><strong>Order ID:</strong> ${orderData.order_id}</p>
-                                <p><strong>Symbol:</strong> ${orderData.symbol}</p>
-                                <p><strong>Action:</strong> ${orderData.action}</p>
-                                <p><strong>Quantity:</strong> ${orderData.quantity}</p>
-                                <p><strong>Order Type:</strong> ${orderData.order_type}</p>
-                                <p><strong>Status:</strong> <span class="badge bg-${this.getStatusColor(orderData.status)}">${orderData.status}</span></p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-6">
-                        <div class="card">
-                            <div class="card-header"><strong>Price Information</strong></div>
-                            <div class="card-body">
-                                <p><strong>Limit Price:</strong> ${formatPrice(orderData.limit_price)}</p>
-                                <p><strong>Average Fill Price:</strong> ${formatPrice(orderData.avg_fill_price)}</p>
-                                <p><strong>Filled:</strong> ${orderData.filled || 0}</p>
-                                <p><strong>Remaining:</strong> ${orderData.remaining || 0}</p>
-                                <p><strong>Commission:</strong> ${formatPrice(orderData.commission)}</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-12">
-                        <div class="card">
-                            <div class="card-header"><strong>Additional Information</strong></div>
-                            <div class="card-body">
-                                <div class="row row-cols-1 row-cols-md-2 g-2">
-                                    <div class="col">
-                                        <p><strong>Submitted At:</strong> ${formatDateTime(orderData.submit_time)}</p>
-                                        <p><strong>Updated At:</strong> ${formatDateTime(orderData.updated_at)}</p>
-                                        <p><strong>Executed At:</strong> ${formatDateTime(orderData.executed_at)}</p>
-                                        <p><strong>Order Source:</strong> ${sourceHtml}</p>
-                                        <p><strong>Trigger Type:</strong> ${formatTriggerType(orderData.trigger_type)}</p>
-                                    </div>
-                                    <div class="col">
-                                        <p><strong>Strategy:</strong> ${strategyHtml}</p>
-                                        <p><strong>Rule ID:</strong> ${formatText(orderData.rule_id)}</p>
-                                        <p><strong>Parent Order ID:</strong> ${formatText(orderData.parent_order_id)}</p>
-                                        <p><strong>Exchange:</strong> ${formatText(orderData.exchange)}</p>
-                                        <p><strong>Security Type:</strong> ${formatText(orderData.sec_type)}</p>
-                                    </div>
-                                </div>
-                                <p class="mt-3"><strong>Notes:</strong> ${notesHtml}</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            
             // 显示模态框
             const modal = new bootstrap.Modal(document.getElementById('orderDetailsModal'));
             modal.show();
-            
+
         } catch (error) {
-            console.error('Failed to load order details:', error);
-            
+            const normalizedId = orderId === null || orderId === undefined
+                ? ''
+                : String(orderId).trim();
+            console.error('Failed to load order details:', normalizedId || '[empty id]', error);
+
             // 根据错误类型提供更友好的错误信息
             let errorMessage = 'Failed to get order details';
             if (error.message) {
+                const idInfo = this.formatOrderIdDisplay(normalizedId);
+                const shortId = idInfo.short || idInfo.full || normalizedId;
                 if (error.message.includes('404') || error.message.includes('not found')) {
-                    errorMessage = `Order ${orderId} does not exist`;
+                    errorMessage = `Order ${shortId} does not exist`;
                 } else if (error.message.includes('422') || error.message.includes('Unprocessable Entity')) {
-                    errorMessage = `Invalid order ID format: ${orderId}`;
+                    errorMessage = `Invalid order ID format: ${shortId}`;
                 } else if (error.message.includes('401') || error.message.includes('Authentication')) {
                     errorMessage = 'Please log in first';
                 } else {
                     errorMessage = `Failed to get order details: ${error.message}`;
                 }
             }
-            
+
             this.showAlert('danger', errorMessage);
+        }
+    }
+
+    async copyFullOrderId(trigger) {
+        const element = trigger?.currentTarget instanceof HTMLElement
+            ? trigger.currentTarget
+            : trigger;
+        const button = element instanceof HTMLElement ? element : null;
+        const fullId = button?.dataset?.fullOrderId || button?.getAttribute?.('data-full-order-id');
+        if (!fullId) {
+            this.showAlert('warning', 'Order ID unavailable to copy');
+            return false;
+        }
+
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(fullId);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = fullId;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'absolute';
+                textarea.style.left = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+            }
+
+            const display = this.formatOrderIdDisplay(fullId);
+            const shortId = display.short || display.full || fullId;
+            console.info('Copied full order ID to clipboard:', display.full || fullId);
+            this.showAlert('success', `Order ID ${shortId} copied`);
+            return true;
+        } catch (error) {
+            console.error('Failed to copy order ID:', error);
+            this.showAlert('danger', 'Failed to copy order ID');
+            return false;
         }
     }
 
@@ -2686,6 +2754,74 @@ class TradingApp {
 
     formatNumber(num) {
         return sharedFormatNumber(num);
+    }
+
+    formatOrderIdDisplay(fullId, options = {}) {
+        const escapeFn = (value) => {
+            if (typeof this.escapeHtml === 'function') {
+                return this.escapeHtml(value);
+            }
+            if (typeof sharedEscapeHtml === 'function') {
+                return sharedEscapeHtml(value);
+            }
+            if (value === null || value === undefined) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        };
+
+        const fallback = () => {
+            const {
+                element = 'span',
+                className = 'order-id-display',
+                includeTitle = true,
+                includeAriaLabel = true,
+                includeDataAttr = true,
+                dataAttributeName = 'data-full-order-id',
+                emptyText = '—',
+            } = options || {};
+
+            const raw = fullId === null || fullId === undefined ? '' : String(fullId).trim();
+            const hasValue = raw.length > 0;
+            const short = hasValue ? raw.slice(-3) : '';
+            const safeFull = hasValue ? escapeFn(raw) : '';
+            const safeShort = hasValue ? escapeFn(short) : escapeFn(emptyText);
+            const classAttr = className ? ` class="${escapeFn(className)}"` : '';
+            const attrs = [];
+            if (hasValue && includeTitle) {
+                attrs.push(`title="${safeFull}"`);
+            }
+            if (hasValue && includeAriaLabel) {
+                attrs.push(`aria-label="${safeFull}"`);
+            }
+            if (hasValue && includeDataAttr && dataAttributeName) {
+                attrs.push(`${dataAttributeName}="${safeFull}"`);
+            }
+            const attrStr = attrs.length ? ' ' + attrs.join(' ') : '';
+            const tag = typeof element === 'string' && element.trim() ? element.trim() : 'span';
+            const html = `<${tag}${classAttr}${attrStr}>${safeShort}</${tag}>`;
+            return {
+                html,
+                short,
+                full: raw,
+                escapedFull: safeFull,
+                hasValue,
+            };
+        };
+
+        try {
+            const result = sharedFormatOrderIdDisplay(fullId, { ...options, escapeHtmlFn: escapeFn });
+            if (result && typeof result === 'object') {
+                return result;
+            }
+        } catch (error) {
+            console.warn('Failed to format order ID with shared helper, falling back to inline formatter.', error);
+        }
+
+        return fallback();
     }
 
     escapeHtml(value) {

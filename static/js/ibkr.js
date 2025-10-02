@@ -1008,7 +1008,17 @@ class IBKRConnectionManager {
                     delete this.app.ordersCache['orders_main'];
                 }
                 this.requestOrdersSnapshot({ force: true, reason: 'order_placed' });
-                this.app.showAlert('success', `订单${data.order_id ? ' ' + data.order_id : ''} 下单成功`);
+                (() => {
+                    const idInfo = this.app?.formatOrderIdDisplay?.(data.order_id);
+                    const rawId = data?.order_id !== undefined && data?.order_id !== null
+                        ? String(data.order_id).trim()
+                        : '';
+                    const shortId = idInfo?.short || (rawId ? rawId.slice(-3) : '');
+                    this.app.showAlert('success', `订单${shortId ? ' ' + shortId : ''} 下单成功`);
+                    if (idInfo?.full && idInfo.full !== shortId) {
+                        console.info('Order placed with full ID:', idInfo.full);
+                    }
+                })();
                 break;
             case 'order_cancelled':
                 // 清除订单缓存以强制刷新
@@ -1016,7 +1026,17 @@ class IBKRConnectionManager {
                     delete this.app.ordersCache['orders_main'];
                 }
                 this.requestOrdersSnapshot({ force: true, reason: 'order_cancelled' });
-                this.app.showAlert('success', `订单 ${data.order_id} 已取消`);
+                (() => {
+                    const idInfo = this.app?.formatOrderIdDisplay?.(data.order_id);
+                    const rawId = data?.order_id !== undefined && data?.order_id !== null
+                        ? String(data.order_id).trim()
+                        : '';
+                    const shortId = idInfo?.short || (rawId ? rawId.slice(-3) : '');
+                    this.app.showAlert('success', `订单${shortId ? ' ' + shortId : ''} 已取消`);
+                    if (idInfo?.full && idInfo.full !== shortId) {
+                        console.info('Order cancellation full ID:', idInfo.full);
+                    }
+                })();
                 break;
             case 'all_orders_cancelled':
                 // 清除订单缓存以强制刷新

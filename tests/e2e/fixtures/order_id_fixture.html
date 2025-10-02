@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Order ID Fixture</title>
+</head>
+<body>
+  <div id="alertContainer"></div>
+  <div class="pagination-controls">
+    <button id="ordersPrevPageBtn" type="button"></button>
+    <span id="ordersPaginationInfo"></span>
+    <button id="ordersNextPageBtn" type="button"></button>
+  </div>
+  <table id="ordersTable" class="table">
+    <tbody></tbody>
+  </table>
+  <table id="internalOrdersTable" class="table">
+    <tbody></tbody>
+  </table>
+  <table id="executionsTable" class="table">
+    <thead><tr></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div id="riskRuleOrdersModal" class="modal" tabindex="-1" role="dialog">
+    <div class="modal-dialog" role="document">
+      <div class="modal-content">
+        <div id="riskRuleOrdersTable">
+          <table class="table"><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="ruleInfoText"></div>
+  <div id="totalOrdersCount"></div>
+  <div id="totalProfit"></div>
+  <div id="totalLoss"></div>
+  <div id="orderDetailsModalBody"></div>
+  <div id="orderDetailsModal" class="modal" tabindex="-1" role="dialog"></div>
+  <script>
+    window.bootstrap = {
+      Modal: class {
+        constructor() {}
+        show() {}
+        static getInstance() { return null; }
+      }
+    };
+    window.appModules = window.appModules || {};
+  </script>
+  <script src="/static/js/utils/index.js"></script>
+  <script src="/static/js/orders/manager.js"></script>
+  <script src="/static/js/risk/manager.js"></script>
+  <script>
+    (function() {
+      const utils = window.appModules.utils;
+      const app = window.app = {
+        formatNumber: (value) => {
+          const num = Number(value);
+          return Number.isFinite(num) ? num.toFixed(2) : '0.00';
+        },
+        escapeHtml: utils.escapeHtml,
+        getStatusColor: () => 'secondary',
+        formatOrderIdDisplay: (value, options) => utils.formatOrderIdDisplay(value, options),
+        showNotesTooltip: () => {},
+        hideNotesTooltip: () => {},
+        showAlert: (type, message) => {
+          const entry = document.createElement('div');
+          entry.dataset.type = type;
+          entry.textContent = message;
+          document.getElementById('alertContainer').appendChild(entry);
+        },
+        registerWebSocketHandler: () => () => {},
+        dataManager: {
+          getAllPositions: () => [],
+        },
+      };
+      app.orderManager = new window.appModules.orders.manager.OrderManager(app);
+      window.testHarness = { app };
+    })();
+  </script>
+</body>
+</html>
