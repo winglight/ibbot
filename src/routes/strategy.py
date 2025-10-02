@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+import core
 from .auth import get_current_user
 from src.models import (
     ExternalStrategyOrderRequest,
@@ -34,12 +35,117 @@ router = APIRouter()
 
 STRATEGY_QUEUE_KEY = os.getenv("STRATEGY_QUEUE_KEY", "list:queue:strategy")
 STRATEGY_EVENT_STREAM_KEY = os.getenv("STRATEGY_EVENT_STREAM_KEY", "stream:strategy:events")
+STRATEGY_CONFIG_HASH_KEY = os.getenv("STRATEGY_CONFIG_HASH_KEY", "hash:config:strategy")
+STRATEGY_CONFIG_MODULE = "strategy"
+
+_BOOLEAN_FIELDS = {"enable_auth", "pause_data_push_on_holidays"}
+_JSON_FIELDS = {"api_payload_template", "strategies"}
+
+_TRUE_TOKENS = {"1", "true", "yes", "on", "enabled"}
+_FALSE_TOKENS = {"0", "false", "no", "off", "disabled"}
 
 _STRATEGY_SERVICE_CLIENT = StrategyServiceClient()
 
 
 def _get_strategy_service_client() -> StrategyServiceClient:
     return _STRATEGY_SERVICE_CLIENT
+
+
+def _normalise_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="ignore")
+    text = str(value).strip()
+    return text or None
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = _normalise_text(value)
+    if text is None:
+        return None
+    lowered = text.lower()
+    if lowered in _TRUE_TOKENS:
+        return True
+    if lowered in _FALSE_TOKENS:
+        return False
+    return None
+
+
+def _parse_json_value(value: Any) -> Any | None:
+    if isinstance(value, (dict, list)):
+        return value
+    text = _normalise_text(value)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):  # pragma: no cover - defensive guard
+        logger.debug("Failed to parse cached strategy JSON field", value=text)
+        return None
+
+
+def _deserialise_cached_settings(values: Mapping[str, Any]) -> Dict[str, Any]:
+    settings: Dict[str, Any] = {}
+    for key, raw_value in values.items():
+        if key in _BOOLEAN_FIELDS:
+            coerced = _coerce_bool(raw_value)
+            if coerced is not None:
+                settings[key] = coerced
+            continue
+        if key in _JSON_FIELDS:
+            parsed = _parse_json_value(raw_value)
+            if parsed is not None:
+                settings[key] = parsed
+            continue
+        normalised = _normalise_text(raw_value)
+        if normalised is not None:
+            settings[key] = normalised
+    return settings
+
+
+async def _load_cached_strategy_settings() -> Dict[str, Any] | None:
+    container = core.get_container()
+    provider = getattr(container, "config_provider", None) if container else None
+    if provider is not None:
+        try:
+            values = await provider.get_module(STRATEGY_CONFIG_MODULE)
+        except Exception as exc:  # pragma: no cover - config lookup failures depend on runtime
+            logger.debug(
+                "Failed to load cached strategy settings from config provider",
+                error=str(exc),
+            )
+        else:
+            if values:
+                return _deserialise_cached_settings(values)
+            return {}
+
+    try:
+        redis = await get_redis_client()
+    except Exception as exc:  # pragma: no cover - redis initialisation failures are runtime specific
+        logger.debug("Failed to acquire Redis client for cached strategy settings", error=str(exc))
+        return None
+
+    try:
+        values = await redis.hgetall(STRATEGY_CONFIG_HASH_KEY)
+    except Exception as exc:  # pragma: no cover - redis access failures depend on runtime state
+        logger.debug(
+            "Failed to load cached strategy settings from Redis",
+            key=STRATEGY_CONFIG_HASH_KEY,
+            error=str(exc),
+        )
+        return None
+
+    if not values:
+        return {}
+
+    return _deserialise_cached_settings(values)
 
 
 def _raise_strategy_service_error(exc: ServiceClientError) -> None:
@@ -119,7 +225,20 @@ async def get_strategy_settings(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(client, "GET", "/strategy/settings")
+    try:
+        result = await client.request("GET", "/strategy/settings")
+    except ServiceUnavailableError as exc:
+        cached = await _load_cached_strategy_settings()
+        if cached is not None:
+            logger.warning(
+                "Strategy service unavailable; returning cached strategy settings",
+                from_cache=True,
+            )
+            return {"settings": cached, "from_cache": True}
+        raise HTTPException(status_code=503, detail="Strategy service unavailable") from exc
+    except ServiceClientError as exc:
+        _raise_strategy_service_error(exc)
+    return result if result is not None else {}
 
 
 @router.post("/api/strategy/settings")
