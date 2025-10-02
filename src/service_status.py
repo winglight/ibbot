@@ -53,6 +53,9 @@ SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
+DOM_SERVICE_NAME = os.getenv("DOM_SERVICE_NAME", "dom-service")
+DOM_SERVICE_HEALTH_KEY = (os.getenv("DOM_SERVICE_HEALTH_KEY", "") or "").strip()
+
 
 @dataclass(slots=True)
 class ServiceStatus:
@@ -296,6 +299,37 @@ async def _build_queue_monitor_status(redis: Any) -> ServiceStatus:
     )
 
 
+def _build_dom_placeholder_status() -> ServiceStatus:
+    detail = "DOM 服务由外部部署提供（external/not provisioned），界面不会尝试自动启动。"
+    return ServiceStatus(
+        service=DOM_SERVICE_NAME,
+        status="offline",
+        detail=detail,
+    )
+
+
+async def _build_dom_service_status(redis: Any | None) -> ServiceStatus:
+    if not DOM_SERVICE_HEALTH_KEY:
+        return _build_dom_placeholder_status()
+
+    if redis is None:
+        return ServiceStatus(
+            service=DOM_SERVICE_NAME,
+            status="unhealthy",
+            detail="未提供 Redis 连接，无法加载 DOM 服务健康状态。",
+        )
+
+    payload = await _load_hash(redis, DOM_SERVICE_HEALTH_KEY)
+    if not payload:
+        return ServiceStatus(
+            service=DOM_SERVICE_NAME,
+            status="unhealthy",
+            detail="未上报 DOM 服务健康数据，检查外部 DOM 服务。",
+        )
+
+    return _build_status_from_payload(DOM_SERVICE_NAME, payload)
+
+
 async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceStatus]:
     """Collect service statuses using Redis health hashes."""
 
@@ -381,6 +415,18 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
                 service="queue_monitor",
                 status="unhealthy",
                 detail=f"无法加载队列指标: {exc}",
+            )
+        )
+
+    try:
+        statuses.append(await _build_dom_service_status(client))
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to build DOM service status: %s", exc)
+        statuses.append(
+            ServiceStatus(
+                service=DOM_SERVICE_NAME,
+                status="unhealthy",
+                detail=f"无法加载 DOM 服务状态: {exc}",
             )
         )
 

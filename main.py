@@ -125,6 +125,12 @@ def embedded_risk_manager_enabled() -> bool:
     return _env_flag("ENABLE_EMBEDDED_RISK_MANAGER", False)
 
 
+def dom_auto_start_enabled() -> bool:
+    """Return True when the DOM auto-start worker should be scheduled."""
+
+    return _env_flag("ENABLE_DOM_AUTO_START", False)
+
+
 def resolve_module(path: str) -> str:
     """Simple mapping from request path to module name."""
 
@@ -361,6 +367,13 @@ async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHan
         context.logger.warning(f"Data subscription manager initialisation warning: {exc}")
     else:
         context.logger.info("Data source manager initialised for subscriptions")
+
+    if not dom_auto_start_enabled():
+        context.logger.info(
+            "DOM auto-start disabled; skipping worker scheduling",
+            env_var="ENABLE_DOM_AUTO_START",
+        )
+        return handle
 
     try:
         dom_service = core.get_dom_service()

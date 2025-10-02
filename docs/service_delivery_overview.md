@@ -27,6 +27,12 @@
 
 > 注：所有服务均通过 `ConfigProvider`（`src/ibbot/config/provider.py`）读取远程配置，若配置项未提供则回退到默认值。
 
+### DOM 服务部署说明
+
+- FastAPI 主进程不再在启动阶段尝试自动拉起 DOM Worker。若需要在单体部署中继续复用内置 `DOMService` 的自动启动逻辑，可显式设置环境变量 `ENABLE_DOM_AUTO_START=true`。
+- 微服务形态下，DOM 行情与指标由 `ib_feed`/`market_data` 服务负责采集与聚合。主应用通过 Redis 获取健康快照，所使用的键可通过 `DOM_SERVICE_HEALTH_KEY` 指定（默认为空，即表示此部署未提供内置 DOM 服务）。
+- 当未配置外部健康键时，`/api/services/status` 会返回 `dom-service`（可通过 `DOM_SERVICE_NAME` 覆盖）条目，状态为 `offline` 且 detail 为“external/not provisioned”，提示 UI 不再尝试自动启动。
+
 ## 阶段切换注意事项
 
 1. **阶段 1 → 阶段 2**：部署前确保 Redis/Influx 已通过 `scripts/diagnose_foundation.py` 验证；各服务的 `SERVICE_NAME` 需在配置中心写入订阅标的、队列键等参数。
