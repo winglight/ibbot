@@ -17,101 +17,19 @@ from src.ib_command_health import (
     build_ib_connection_health_payload,
 )
 from src.ibbot.redis import get_redis_client
+from src.routes.service_registry import (
+    DOM_SERVICE_NAME,
+    SERVICE_REGISTRY,
+    ServiceRegistryEntry,
+    registry_as_mappings,
+)
 
 
 __all__ = [
-    "SERVICE_HEALTH_PROBES",
-    "ServiceProbe",
     "ServiceStatus",
     "gather_service_statuses",
     "build_service_status_payload",
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class ServiceProbe:
-    """Describe how to map a Redis health hash to a UI service card."""
-
-    ui_service: str
-    service_name: str
-    default_key: str
-    env_var: str | None = None
-    missing_detail: str = "未上报健康数据"
-    module_name: str | None = None
-
-    @property
-    def redis_key(self) -> str:
-        if self.env_var:
-            override = os.getenv(self.env_var, "").strip()
-            if override:
-                return override
-        return self.default_key
-
-    @property
-    def module_id(self) -> str:
-        if self.module_name:
-            return self.module_name
-        slug = self.service_name.replace("-", "_")
-        return f"{slug}_probe"
-
-
-SERVICE_HEALTH_PROBES: tuple[ServiceProbe, ...] = (
-    ServiceProbe(
-        ui_service="account",
-        service_name="account-service",
-        default_key="hash:service:health:account-service",
-        env_var="ACCOUNT_SERVICE_HEALTH_KEY",
-        missing_detail="账户服务未上报健康数据",
-        module_name="account_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="orders",
-        service_name="orders",
-        default_key="hash:service:health:orders",
-        env_var="ORDERS_SERVICE_HEALTH_KEY",
-        missing_detail="订单服务未上报健康数据",
-        module_name="orders_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="risk",
-        service_name="risk-service",
-        default_key="hash:service:health:risk-service",
-        env_var="RISK_SERVICE_HEALTH_KEY",
-        module_name="risk_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="strategy",
-        service_name="strategy",
-        default_key="hash:service:health:strategy",
-        env_var="STRATEGY_SERVICE_HEALTH_KEY",
-        module_name="strategy_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="notification",
-        service_name="notification",
-        default_key="hash:service:health:notification",
-        env_var="NOTIFICATION_SERVICE_HEALTH_KEY",
-        missing_detail="通知服务未上报健康数据",
-        module_name="notification_service_probe",
-    ),
-    ServiceProbe(
-        ui_service="account_snapshot",
-        service_name="account-snapshot",
-        default_key="hash:service:health:account-snapshot",
-        env_var="ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY",
-        missing_detail="账户快照服务未上报健康数据",
-        module_name="account_snapshot_probe",
-    ),
-)
-
-DOM_SERVICE_NAME = os.getenv("DOM_SERVICE_NAME", "dom-service")
-DOM_SERVICE_HEALTH_KEY = (os.getenv("DOM_SERVICE_HEALTH_KEY", "") or "").strip()
-QUEUE_MONITOR_HEALTH_HASH_KEY = os.getenv(
-    "QUEUE_MONITOR_HEALTH_KEY", "hash:service:health:queue"
-)
-QUEUE_MONITOR_METRICS_HASH_KEY = os.getenv(
-    "QUEUE_MONITOR_METRICS_HASH_KEY", "hash:service:queue-monitor"
-)
 
 
 @dataclass(slots=True)
@@ -161,11 +79,19 @@ _STATUS_NORMALISATION = {
     "degraded": "unhealthy",
 }
 
-
-EXTERNAL_SERVICES: dict[str, str] = {
-    "ib-gateway": "IB Gateway 由外部部署提供，需手动确认运行状态。",
-    "cloudflared": "Cloudflared 隧道为外部依赖，请使用独立监控确认状态。",
+_REGISTRY_BY_ID: dict[str, ServiceRegistryEntry] = {
+    entry.service_id: entry for entry in SERVICE_REGISTRY
 }
+
+_QUEUE_REGISTRY_ENTRY = _REGISTRY_BY_ID.get("queue_monitor")
+QUEUE_MONITOR_HEALTH_HASH_KEY = (
+    _QUEUE_REGISTRY_ENTRY.health.resolved_key()
+    if _QUEUE_REGISTRY_ENTRY and _QUEUE_REGISTRY_ENTRY.health
+    else os.getenv("QUEUE_MONITOR_HEALTH_KEY", "hash:service:health:queue")
+)
+QUEUE_MONITOR_METRICS_HASH_KEY = os.getenv(
+    "QUEUE_MONITOR_METRICS_HASH_KEY", "hash:service:queue-monitor"
+)
 
 
 async def _close_redis(redis: Any) -> None:
@@ -229,6 +155,23 @@ async def _load_hash(redis: Any, key: str) -> MutableMapping[str, Any] | None:
     if not values:
         return None
     return dict(values)
+
+
+def _resolve_health_key(entry: ServiceRegistryEntry) -> str | None:
+    health_def = entry.health
+    if health_def is None:
+        return None
+    key = health_def.resolved_key()
+    if not key:
+        return None
+    return key
+
+
+def _missing_detail(entry: ServiceRegistryEntry, fallback: str = "未上报健康数据") -> str:
+    health_def = entry.health
+    if health_def and health_def.missing_detail:
+        return health_def.missing_detail
+    return fallback
 
 
 def _build_status_from_payload(
@@ -310,15 +253,34 @@ async def _build_ib_command_status(redis: Any) -> ServiceStatus:
     )
 
 
-async def _build_queue_monitor_status(redis: Any) -> ServiceStatus:
+async def _build_queue_monitor_status(
+    redis: Any | None, entry: ServiceRegistryEntry
+) -> ServiceStatus:
+    if redis is None:
+        detail = (
+            entry.external_detail
+            if not entry.internal and entry.external_detail
+            else "未提供 Redis 连接，无法加载队列指标。"
+        )
+        return ServiceStatus(
+            service=entry.service_id,
+            status="unhealthy",
+            detail=detail,
+        )
+
     health_payload = await _load_hash(redis, QUEUE_MONITOR_HEALTH_HASH_KEY)
     snapshot_payload = await _load_hash(redis, QUEUE_MONITOR_METRICS_HASH_KEY)
 
     if not health_payload and not snapshot_payload:
+        detail = (
+            entry.health.missing_detail
+            if entry.health and entry.health.missing_detail
+            else "未上报队列指标，检查 queue-monitor 服务。"
+        )
         return ServiceStatus(
-            service="queue_monitor",
+            service=entry.service_id,
             status="unhealthy",
-            detail="未上报队列指标，检查 queue-monitor 服务。",
+            detail=detail,
             last_reported=None,
             payload=None,
         )
@@ -353,7 +315,7 @@ async def _build_queue_monitor_status(redis: Any) -> ServiceStatus:
                 )
 
     return ServiceStatus(
-        service="queue_monitor",
+        service=entry.service_id,
         status="running",
         detail=detail,
         last_reported=last_reported,
@@ -361,35 +323,81 @@ async def _build_queue_monitor_status(redis: Any) -> ServiceStatus:
     )
 
 
-def _build_dom_placeholder_status() -> ServiceStatus:
-    detail = "DOM 服务由外部部署提供（external/not provisioned），界面不会尝试自动启动。"
+def _build_dom_placeholder_status(entry: ServiceRegistryEntry) -> ServiceStatus:
+    detail = entry.external_detail or "DOM 服务由外部部署提供（external/not provisioned）。"
     return ServiceStatus(
-        service=DOM_SERVICE_NAME,
+        service=entry.service_id,
         status="offline",
         detail=detail,
     )
 
 
-async def _build_dom_service_status(redis: Any | None) -> ServiceStatus:
-    if not DOM_SERVICE_HEALTH_KEY:
-        return _build_dom_placeholder_status()
+async def _build_dom_service_status(
+    redis: Any | None, entry: ServiceRegistryEntry
+) -> ServiceStatus:
+    health_def = entry.health
+    dom_key = health_def.resolved_key() if health_def else None
+    if not dom_key:
+        return _build_dom_placeholder_status(entry)
 
     if redis is None:
         return ServiceStatus(
-            service=DOM_SERVICE_NAME,
+            service=entry.service_id,
             status="unhealthy",
             detail="未提供 Redis 连接，无法加载 DOM 服务健康状态。",
         )
 
-    payload = await _load_hash(redis, DOM_SERVICE_HEALTH_KEY)
+    payload = await _load_hash(redis, dom_key)
     if not payload:
+        detail = (
+            health_def.missing_detail
+            if health_def and health_def.missing_detail
+            else entry.external_detail
+        )
         return ServiceStatus(
-            service=DOM_SERVICE_NAME,
+            service=entry.service_id,
             status="unhealthy",
-            detail="未上报 DOM 服务健康数据，检查外部 DOM 服务。",
+            detail=detail,
         )
 
-    return _build_status_from_payload(DOM_SERVICE_NAME, payload)
+    return _build_status_from_payload(entry.service_id, payload)
+
+
+async def _build_account_status(
+    redis: Any | None,
+    entry: ServiceRegistryEntry,
+    readiness_payload: Mapping[str, Any] | None,
+    readiness_status: str | None,
+    readiness_detail: str | None,
+) -> ServiceStatus:
+    redis_key = _resolve_health_key(entry)
+    payload = await _load_hash(redis, redis_key) if redis and redis_key else None
+    fallback_detail = _missing_detail(entry, "账户服务未上报健康数据")
+
+    if not payload:
+        status = readiness_status or "unhealthy"
+        detail = readiness_detail or fallback_detail
+        payload_data: dict[str, Any] | None = None
+        if readiness_payload is not None:
+            payload_data = {"readiness": readiness_payload}
+        return ServiceStatus(
+            service=entry.service_id,
+            status=status,
+            detail=detail,
+            payload=payload_data,
+        )
+
+    status_obj = _build_status_from_payload(entry.service_id, payload)
+    if readiness_payload is not None:
+        combined_payload: dict[str, Any] = dict(payload)
+        combined_payload["readiness"] = readiness_payload
+        status_obj.payload = combined_payload
+    if readiness_status and readiness_status != "running":
+        status_obj.status = readiness_status
+        status_obj.detail = readiness_detail or status_obj.detail or fallback_detail
+    elif readiness_detail and not status_obj.detail:
+        status_obj.detail = readiness_detail
+    return status_obj
 
 
 async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceStatus]:
@@ -400,27 +408,6 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
     if client is None:
         client = await get_redis_client()
         close_client = True
-
-    statuses: list[ServiceStatus] = [
-        ServiceStatus(
-            service="ibbot",
-            status="running",
-            detail="主程序运行中",
-            last_reported=datetime.now(timezone.utc).isoformat(),
-        )
-    ]
-
-    try:
-        statuses.append(await _build_ib_command_status(client))
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to build ib_command health payload: %s", exc)
-        statuses.append(
-            ServiceStatus(
-                service="ib_command",
-                status="unhealthy",
-                detail=f"无法加载健康信息: {exc}",
-            )
-        )
 
     account_readiness_payload: Mapping[str, Any] | None = None
     account_readiness_status: str | None = None
@@ -446,76 +433,114 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
             account_readiness_status = "unhealthy"
             account_readiness_detail = f"无法连接账户服务: {readiness.error or '未知错误'}"
 
-    for probe in SERVICE_HEALTH_PROBES:
-        redis_key = probe.redis_key
-        if not redis_key:
+    statuses: list[ServiceStatus] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for entry in SERVICE_REGISTRY:
+        service_id = entry.service_id
+
+        if service_id == "ibbot":
+            statuses.append(
+                ServiceStatus(
+                    service=service_id,
+                    status="running",
+                    detail="主程序运行中",
+                    last_reported=now_iso,
+                )
+            )
             continue
-        payload = await _load_hash(client, redis_key)
-        if not payload:
-            if probe.ui_service == "account" and account_readiness_payload is not None:
+
+        if service_id == "ib_command":
+            if client is None:
                 statuses.append(
                     ServiceStatus(
-                        service=probe.ui_service,
-                        status=account_readiness_status or "unhealthy",
-                        detail=account_readiness_detail or probe.missing_detail,
-                        payload={"readiness": account_readiness_payload},
+                        service=service_id,
+                        status="unhealthy",
+                        detail="未提供 Redis 连接，无法加载健康信息。",
                     )
                 )
             else:
+                try:
+                    statuses.append(await _build_ib_command_status(client))
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.warning("Failed to build ib_command health payload: %s", exc)
+                    statuses.append(
+                        ServiceStatus(
+                            service=service_id,
+                            status="unhealthy",
+                            detail=f"无法加载健康信息: {exc}",
+                        )
+                    )
+            continue
+
+        if service_id == "account":
+            statuses.append(
+                await _build_account_status(
+                    client,
+                    entry,
+                    account_readiness_payload,
+                    account_readiness_status,
+                    account_readiness_detail,
+                )
+            )
+            continue
+
+        if service_id == "queue_monitor":
+            if client is None:
+                statuses.append(await _build_queue_monitor_status(None, entry))
+            else:
+                try:
+                    statuses.append(await _build_queue_monitor_status(client, entry))
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.warning("Failed to build queue monitor status: %s", exc)
+                    statuses.append(
+                        ServiceStatus(
+                            service=service_id,
+                            status="unhealthy",
+                            detail=f"无法加载队列指标: {exc}",
+                        )
+                    )
+            continue
+
+        if service_id == DOM_SERVICE_NAME:
+            try:
+                statuses.append(await _build_dom_service_status(client, entry))
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning("Failed to build DOM service status: %s", exc)
                 statuses.append(
                     ServiceStatus(
-                        service=probe.ui_service,
+                        service=service_id,
                         status="unhealthy",
-                        detail=probe.missing_detail,
+                        detail=f"无法加载 DOM 服务状态: {exc}",
                     )
                 )
             continue
 
-        status_obj = _build_status_from_payload(probe.ui_service, payload)
-        if probe.ui_service == "account":
-            combined_payload: dict[str, Any] = dict(payload)
-            if account_readiness_payload is not None:
-                combined_payload["readiness"] = account_readiness_payload
-                status_obj.payload = combined_payload
-            if account_readiness_status and account_readiness_status != "running":
-                status_obj.status = account_readiness_status
-                status_obj.detail = account_readiness_detail or status_obj.detail
-            elif account_readiness_detail and not status_obj.detail:
-                status_obj.detail = account_readiness_detail
-        statuses.append(status_obj)
+        redis_key = _resolve_health_key(entry)
+        payload = await _load_hash(client, redis_key) if client and redis_key else None
 
-    try:
-        statuses.append(await _build_queue_monitor_status(client))
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to build queue monitor status: %s", exc)
-        statuses.append(
-            ServiceStatus(
-                service="queue_monitor",
-                status="unhealthy",
-                detail=f"无法加载队列指标: {exc}",
-            )
-        )
+        if payload:
+            statuses.append(_build_status_from_payload(service_id, payload))
+            continue
 
-    try:
-        statuses.append(await _build_dom_service_status(client))
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to build DOM service status: %s", exc)
-        statuses.append(
-            ServiceStatus(
-                service=DOM_SERVICE_NAME,
-                status="unhealthy",
-                detail=f"无法加载 DOM 服务状态: {exc}",
+        if entry.internal:
+            detail = _missing_detail(entry)
+            statuses.append(
+                ServiceStatus(
+                    service=service_id,
+                    status="unhealthy",
+                    detail=detail,
+                )
             )
-        )
-
-    for service, message in EXTERNAL_SERVICES.items():
-        statuses.append(
-            ServiceStatus(
-                service=service,
-                status="external",
-                detail=message,
+        else:
+            detail = entry.external_detail or "外部依赖"
+            statuses.append(
+                ServiceStatus(
+                    service=service_id,
+                    status="external" if service_id != DOM_SERVICE_NAME else "offline",
+                    detail=detail,
+                )
             )
-        )
 
     if close_client and client is not None:
         await _close_redis(client)
@@ -528,4 +553,5 @@ async def build_service_status_payload(redis: Any | None = None) -> Mapping[str,
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "services": [status.as_mapping() for status in statuses],
+        "registry": list(registry_as_mappings()),
     }
