@@ -27,7 +27,7 @@
 - 排错与验证通道
   - 界面：Web UI 各面板（交易/持仓/风险/策略/日志）
   - 日志：logs/trading_bot.log（前端“日志”面板支持按日期/模块/等级筛选；等级为包容式过滤）
-  - 数据库：data/trading_bot.db（表：orders、risk_rules、strategies、strategy_executions）。可使用 sqlite3 或 DB Browser
+  - 服务：orders / risk / strategy 微服务提供 `/api/...` 查询与事件流（详见各服务 README）；也可通过 Redis 订阅 `pubsub:orders` 等频道确认回执
   - 环境变量：核对 .env 与容器 env（docker compose config 或 docker inspect）
 
 ## 二、下单相关场景
@@ -44,7 +44,7 @@
 - 验证：
   - 界面：订单列表出现该笔，状态与成交价格显示
   - 日志：订单微服务与 ibkr_client 记录下单与成交；等级≥info
-  - DB：orders 表新增记录（symbol=AAPL, action=BUY, order_type=MKT, status=Filled 或 Submitted）
+  - 服务：orders 服务的 `/api/orders` 或事件流返回该记录（symbol=AAPL, action=BUY, order_type=MKT, status=Filled 或 Submitted）
 
 2) Web UI 下单-限价开空（STK）
 - 前置：账户允许卖空且有可借券（如不支持卖空，可改为 BUY 限价）
@@ -54,7 +54,7 @@
 - 验证：
   - 界面订单卡片状态更新；必要时取消订单验证取消流程
   - 日志包含限价参数与交易所路由
-  - DB orders 行包含 price 字段与状态更新轨迹（created_at/updated_at/filled）
+  - 服务：orders 服务详情接口展示 price 与状态更新轨迹（created_at/updated_at/filled）
 
 3) 平仓操作（从有持仓到零仓位）
 - 前置：已有 AAPL 多头 10 股
@@ -64,7 +64,7 @@
 - 验证：
   - 界面持仓面板该 symbol 清零
   - 日志出现持仓变动与订单成交记录
-  - DB orders 最新记录 action=SELL、对应 strategy_executions 若由策略触发
+  - 服务：orders 服务最新记录 action=SELL；若由策略触发，strategy 服务执行历史包含该事件
 
 4) 反转操作（多转空或空转多）
 - 前置：AAPL 多头 10 股
@@ -74,7 +74,7 @@
 - 验证：
   - 界面持仓为 -10；订单面板有两条成交（或一条总量）
   - 日志记录反转逻辑说明（由订单服务或 ibkr_client 拼接）
-  - DB orders 有本次 SELL 20 记录
+  - 服务：orders 服务记录 SELL 20 的成交，事件流包含反转说明
 
 5) 批量取消与单笔取消
 - 前置：挂多笔 LMT 订单
@@ -83,7 +83,7 @@
 - 验证：
   - 界面状态更新；取消按钮置灰
   - 日志含 cancel 请求与回报；WARNING 级别若遇状态回退保护
-  - DB orders updated_at 变化，status=Cancelled
+  - 服务：orders 服务订单状态更新为 Cancelled（可查询 `/api/orders/{id}`）
 
 6) 资金不足下单
 - 前置：设置数量为极大值触发不足
@@ -93,7 +93,7 @@
 - 验证：
   - 界面 toast/错误提示
   - 日志 risk_manager 或 ibkr_client 记录错误，等级≥warning
-  - DB 无新有效订单或记录为失败状态（若实现）
+  - 服务：orders 服务未新增有效委托，或返回失败状态记录（若实现）
 
 7) 订单被拒绝/网络异常/超时
 - 步骤：
@@ -102,7 +102,7 @@
   - 接口报错或重试；UI 显示失败；队列可能进入 failed
 - 验证：
   - 日志 error/critical 级别，包含异常堆栈或错误码
-  - DB 若产生任务记录，状态=failed 且带 error_message（如有队列任务）
+  - 服务：orders 服务或命令队列状态为 failed，并附带 error_message（如实现）
 
 8) 部分成交与取消剩余
 - 前置：提交较大 LMT，在部分成交后取消剩余
@@ -111,7 +111,7 @@
 - 验证：
   - 界面成交均价与数量反映部分填充
   - 日志包含多次回报
-  - DB orders filled_quantity/avg_fill_price（如有字段）或多条更新
+  - 服务：orders 服务中的 filled_quantity/avg_fill_price 更新，或事件流包含多次成交
 
 ## 三、风险规则相关场景
 
@@ -123,7 +123,7 @@
 - 验证：
   - 界面：风险规则面板显示已触发/订单面板出现平仓
   - 日志：risk_manager 记录触发与下单信息（≥info）
-  - DB：risk_rules 该 symbol 存在；orders 出现自动单，order_source=strategy/risk（实现而定）
+  - 服务：risk 服务规则列表存在该 symbol；orders 服务生成自动平仓单（order_source=strategy/risk，视实现而定）
 
 2) 固定价格止盈（多头）
 - 前置：take_profit_price=入场价+1.0
@@ -137,7 +137,7 @@
   - 浮动亏损≥5%触发
 - 验证：
   - 日志包含当前盈亏/阈值对比
-  - DB 无需新增 risk_rules 行变动，但 orders 生成平仓
+  - 服务：risk 服务无需新增规则记录，但 orders 服务生成平仓单
 
 4) 多级阈值（3%预警、8%强制平仓）
 - 前置：配置 LOSS_THRESHOLD_1=0.03, LOSS_THRESHOLD_2=0.08
@@ -153,8 +153,8 @@
   - 禁用规则 -> 价格触发不应下单
   - 修改规则参数 -> 新参数应生效
 - 验证：
-  - UI 规则状态与更新时间
-  - 日志与 DB 记录一致
+    - UI 规则状态与更新时间
+    - 日志与服务记录一致
 
 ## 四、策略相关场景
 
@@ -166,7 +166,7 @@
 - 验证：
   - UI 队列状态 pending->processing->completed
   - 日志 strategy_manager/queue_manager 记录状态迁移
-  - DB strategy_executions 新增执行记录；orders 有对应订单，order_source=strategy
+  - 服务：strategy 服务执行历史新增记录；orders 服务存在对应订单（order_source=strategy）
 
 2) 外部策略认证失败
 - 步骤：使用无效或过期 token 调用 /api/strategy
@@ -197,7 +197,7 @@
 2) IB 限流/拒单
 - 步骤：短时间重复提交多笔订单
 - 预期：部分被拒；系统记录错误并不中断
-- 验证：日志含错误码说明；UI/DB 可见失败
+  - 验证：日志含错误码说明；UI/服务可见失败
 
 3) 队列重试
 - 前置：让 /api/strategy 任务在 IB 未连接时触发
@@ -214,7 +214,7 @@
 ## 六、清理与回滚
 - 取消所有未成交订单并确认状态为 Cancelled
 - 如在 Paper 环境产生持仓，手动平仓并确认持仓归零
-- 可备份 data/trading_bot.db 与 logs 以存档
+- 可备份服务导出的 JSON（orders/risk/strategy）与 logs 以存档
 
 ---
 提示：前端“日志等级”筛选为包容式（warning=warning+error+critical），可用于验证异常阶段是否有期望的 WARNING/ERROR/CRITICAL 记录。

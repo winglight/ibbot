@@ -32,8 +32,8 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
        │                        │
        ▼                        ▼
 ┌──────────────┐      ┌────────────────────┐
-│ IBKR Client  │      │ Database / Cache   │
-│ (ib_insync)  │      │ SQLite + Redis(opt)│
+│ IBKR Client  │      │ Services / Cache   │
+│ (ib_insync)  │      │ HTTP APIs + Redis  │
 └──────────────┘      └────────────────────┘
 ```
 
@@ -216,7 +216,7 @@ pytest
 npm test
 ```
 
-`pytest` 会自动生成独立的 SQLite 文件并跳过真实 IBKR/Redis 依赖。`npm test` 运行 Playwright 端到端脚本（默认检查静态前端契约），首次使用前请执行 `npm install` 安装依赖。
+`pytest` 会注入隔离的服务桩并跳过真实 IBKR/Redis 依赖。`npm test` 运行 Playwright 端到端脚本（默认检查静态前端契约），首次使用前请执行 `npm install` 安装依赖。
 
 ## 🐳 Docker 与远程部署
 

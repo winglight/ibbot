@@ -1,9 +1,7 @@
 import importlib
 import os
-import shutil
 import asyncio
 import inspect
-from pathlib import Path
 from typing import Dict
 
 import pytest
@@ -16,9 +14,6 @@ os.environ.setdefault("VISITOR_USERNAME", "visitor")
 os.environ.setdefault("VISITOR_PASSWORD", "visitor123")
 os.environ.setdefault("JWT_SECRET", "unit-test-secret")
 os.environ.setdefault("AUTO_CONNECT", "false")
-
-DATABASE_BASENAME = "trading_bot.db"
-
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "asyncio: execute test within an event loop")
@@ -38,41 +33,8 @@ def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool:
     return False
 
 
-@pytest.fixture(scope="session", autouse=True)
-def isolate_database(tmp_path_factory):
-    """备份并重置 data/trading_bot.db，测试结束后恢复。"""
-
-    data_dir = Path("data")
-    data_dir.mkdir(exist_ok=True)
-    backup_dir = tmp_path_factory.mktemp("db-backup")
-    backups: list[tuple[Path, Path]] = []
-
-    def _copy_if_exists(filename: str) -> None:
-        src = data_dir / filename
-        if src.exists():
-            dst = backup_dir / filename
-            shutil.copy(src, dst)
-            backups.append((src, dst))
-            src.unlink()
-
-    for suffix in ("", "-wal", "-shm"):
-        _copy_if_exists(f"{DATABASE_BASENAME}{suffix}")
-
-    yield
-
-    # 清理测试产生的数据库文件
-    for suffix in ("", "-wal", "-shm"):
-        test_file = data_dir / f"{DATABASE_BASENAME}{suffix}"
-        if test_file.exists():
-            test_file.unlink()
-
-    # 还原原始数据库
-    for target, backup in backups:
-        shutil.copy(backup, target)
-
-
 @pytest.fixture(scope="session")
-def app(isolate_database):  # type: ignore[unused-ignore]
+def app():
     import main
 
     importlib.reload(main)

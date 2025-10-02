@@ -1,7 +1,7 @@
 # Redis 缓存化统计设计方案
 
 ## 背景
-策略面板、策略详情页以及账户概览目前都直接从 SQLite 或 IBKR API 拉取数据并实时聚合：
+策略面板、策略详情页以及账户概览最初直接从 SQLite 或 IBKR API 拉取数据并实时聚合。迁移到微服务架构后，读取路径已经改成通过订单/风控/策略服务的 HTTP 客户端，但缓存策略仍沿用“实时聚合”的旧假设：
 
 - `StrategyManager.get_strategy_performance`、`get_strategy_order_stats` 每次调用都会遍历大量订单并在内存中重新计算总盈亏、胜率、最大回撤和 Sharpe。
 - `/api/strategies/{name}/pnl/daily`、WebSocket `strategy_performance` 依赖同一条计算链路，命中频率高时容易阻塞。
@@ -51,7 +51,7 @@
 
 ### 回填与清理
 
-- 新增 `StrategyManager.rebuild_strategy_cache()`：遍历 `DatabaseManager.load_strategy_orders`，按时间顺序重放订单至缓存。应用启动时执行一次；在 `StrategyManager.reset_strategy_data`、策略删除/重命名时同时清理相关 Redis key。
+- 新增 `StrategyManager.rebuild_strategy_cache()`：通过 `OrdersServiceClient.list_orders` 按时间顺序重放订单至缓存。应用启动时执行一次；在 `StrategyManager.reset_strategy_data`、策略删除/重命名时同时清理相关 Redis key。
 - 若检测到缓存缺失（例如 Redis 重启），接口调用时可触发延迟回填（后台任务），保障用户看到的数据始终可用。
 
 ### 读取路径改造
