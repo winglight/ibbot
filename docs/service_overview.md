@@ -9,6 +9,7 @@ implementation status.
 | --- | --- | --- | --- | --- | --- |
 | Trading Core (`ibbot`) | ✅ | 8000 | `hash:service:health:ibbot` | Production | 主应用 (ibbot) |
 | Command Dispatcher (`ib_command`) | ✅ | — | `IB_COMMAND_HEALTH_KEY` (default `hash:service:health:ib-command`) | Production | 指令下发服务 (ib_command) |
+| Connection Control (`connection_control`) | ✅ | 8056 | `hash:service:health:connection_control` | Production | IB 连接控制服务 (connection_control) |
 | Account Service (`account`) | ✅ | 8020 | `ACCOUNT_SERVICE_HEALTH_KEY` (default `hash:service:health:account-service`) | Production | 账户服务 (account-service) |
 | Order Gateway (`orders`) | ✅ | — | `ORDERS_SERVICE_HEALTH_KEY` (default `hash:service:health:orders`) | Production | 订单服务 (orders) |
 | Market Data Feed (`ib_feed`) | ✅ | — | `hash:service:health:ib-feed` | In development | 行情订阅服务 (ib_feed) |

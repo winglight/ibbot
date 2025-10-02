@@ -88,9 +88,11 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert status_map["ib-gateway"].status == "external"
         assert status_map["cloudflared"].status == "external"
         assert status_map["account_snapshot"].status == "unhealthy"
+        assert status_map["connection_control"].status == "unhealthy"
         assert status_map["ib_feed"].status == "unhealthy"
         assert status_map["market_data"].status == "unhealthy"
         assert status_map["optimizer"].status == "unhealthy"
+        assert "未上报" in (status_map["connection_control"].detail or "")
         assert "未上报" in (status_map["ib_feed"].detail or "")
         assert "未上报" in (status_map["market_data"].detail or "")
         assert "未上报" in (status_map["optimizer"].detail or "")
@@ -198,6 +200,15 @@ def test_build_service_status_payload_structure(monkeypatch: pytest.MonkeyPatch)
         assert market_entry.get("display_name") == "Market Data Sync"
         assert market_entry.get("status") == "unhealthy"
         assert "未上报" in (market_entry.get("detail") or "")
+
+        connection_entry = next(entry for entry in services if entry.get("service") == "connection_control")
+        assert connection_entry.get("display_name") == "Connection Control"
+        assert connection_entry.get("internal") is True
+        assert connection_entry.get("port") == "8056"
+        assert connection_entry.get("default_health_key") == "hash:service:health:connection_control"
+        assert connection_entry.get("health_key") == "hash:service:health:connection_control"
+        assert connection_entry.get("status") == "unhealthy"
+        assert "未上报" in (connection_entry.get("detail") or "")
 
     asyncio.run(_run())
 

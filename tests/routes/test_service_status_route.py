@@ -63,8 +63,17 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     expected = [service.slug for service in SERVICE_REGISTRY]
     assert names[: len(expected)] == expected
 
-    for slug in ("ib_feed", "market_data", "optimizer"):
+    for slug in ("connection_control", "ib_feed", "market_data", "optimizer"):
         entry = next((item for item in services if item.get("service") == slug), None)
         assert entry, f"missing service entry for {slug}"
         assert entry.get("status") == "unhealthy"
         assert "未上报" in (entry.get("detail") or "")
+
+    connection_entry = next(
+        (item for item in services if item.get("service") == "connection_control"),
+        None,
+    )
+    assert connection_entry is not None
+    assert connection_entry.get("port") == "8056"
+    assert connection_entry.get("default_health_key") == "hash:service:health:connection_control"
+    assert connection_entry.get("health_key") == "hash:service:health:connection_control"
