@@ -72,9 +72,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, shlex.join(cmd)
-
-    if service == "orders":
+    elif service == "orders":
         port = os.getenv("ORDERS_SERVICE_PORT", "8050")
         cmd = [
             sys.executable,
@@ -86,9 +84,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, shlex.join(cmd)
-
-    if service == "risk":
+    elif service == "risk":
         port = os.getenv("RISK_SERVICE_PORT", "8030")
         app_path = os.getenv("RISK_SERVICE_APP", "services.risk.http:app")
         cmd = [
@@ -101,9 +97,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, shlex.join(cmd)
-
-    if service == "strategy":
+    elif service == "strategy":
         port = os.getenv("STRATEGY_SERVICE_PORT", "8045")
         app_path = os.getenv("STRATEGY_SERVICE_APP", "services.strategy.http:app")
         cmd = [
@@ -116,9 +110,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, shlex.join(cmd)
-
-    if service == "connection_control":
+    elif service == "connection_control":
         port = os.getenv("CONNECTION_CONTROL_PORT", "8056")
         app_path = "services.connection_control.main:create_app"
         cmd = [
@@ -132,9 +124,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, shlex.join(cmd)
-
-    if service == "market_data":
+    elif service == "market_data":
         port = os.getenv("MARKET_DATA_PORT", "8010")
         app_path = "services.market_data.main:create_app"
         cmd = [
@@ -148,9 +138,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, shlex.join(cmd)
-
-    if service == "queue_monitor":
+    elif service == "queue_monitor":
         port = os.getenv("QUEUE_MONITOR_PORT", "8011")
         app_path = "services.queue_monitor.main:create_app"
         cmd = [
@@ -164,9 +152,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, shlex.join(cmd)
-
-    if service == "notification":
+    elif service == "notification":
         port = os.getenv("NOTIFICATION_SERVICE_PORT", "8055")
         app_path = "services.notification.main:create_app"
         cmd = [
@@ -180,9 +166,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, shlex.join(cmd)
-
-    if service == "optimizer":
+    elif service == "optimizer":
         port = os.getenv("OPTIMIZER_PORT", "8001")
         app_path = "services.optimizer.main:create_app"
         cmd = [
@@ -196,19 +180,16 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, shlex.join(cmd)
-
-    if service == "ib_command":
+    elif service == "ib_command":
         module = "services.ib_command.main"
         cmd = [sys.executable, "-m", module]
-        return cmd, shlex.join(cmd)
-
-    if service == "ib_feed":
+    elif service == "ib_feed":
         module = "services.ib_feed.main"
         cmd = [sys.executable, "-m", module]
-        return cmd, shlex.join(cmd)
+    else:
+        raise ValueError(f"Unknown service: {service}")
 
-    raise ValueError(f"Unknown service: {service}")
+    return cmd, shlex.join(cmd)
 
 
 def _load_env() -> Path | None:
