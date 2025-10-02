@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -45,11 +45,13 @@ class SignalOutcomeTracker:
         *,
         evaluation_delay_seconds: float = DEFAULT_OUTCOME_DELAY_SECONDS,
         price_move_threshold: float = DEFAULT_OUTCOME_THRESHOLD,
+        risk_context_provider: Callable[[str], Tuple[Optional[Any], float]] | None = None,
     ) -> None:
         self.cache_manager = cache_manager
         self.evaluation_delay_ms = max(float(evaluation_delay_seconds), 1.0) * 1000.0
         self.price_move_threshold = max(float(price_move_threshold), 0.0)
         self._pending: Dict[str, PendingSignal] = {}
+        self._risk_context_provider = risk_context_provider
 
     # ------------------------------------------------------------------
     def register_signal(self, symbol: str, signal_type: str, metrics: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -209,38 +211,16 @@ class SignalOutcomeTracker:
 
     # ------------------------------------------------------------------
     def _fetch_risk_context(self, symbol: str) -> Tuple[Optional[Any], float]:
-        try:
-            import core  # type: ignore
-            risk_manager = getattr(core, 'risk_manager', None)
-        except Exception:
-            risk_manager = None
-
-        if not risk_manager:
+        provider = self._risk_context_provider
+        if provider is None:
             return None, 1.0
 
-        rule = None
-        sym = (symbol or '').upper()
         try:
-            rules = getattr(risk_manager, 'risk_rules', {}) or {}
-            if isinstance(rules, dict) and rules:
-                rule = rules.get(sym) or rules.get(symbol) or rules.get(sym.replace('.', ''))
-        except Exception:
-            rule = None
+            rule, point_value = provider(symbol)
+        except Exception:  # pragma: no cover - defensive guard
+            return None, 1.0
 
-        point_value = 1.0
-        try:
-            pv_map = getattr(risk_manager, 'point_value_map', {}) or {}
-            if isinstance(pv_map, dict) and pv_map:
-                pv = pv_map.get(sym)
-                if pv is None:
-                    pv = pv_map.get(symbol)
-                if pv is None:
-                    pv = pv_map.get(sym.replace('.', ''))
-                if pv is not None:
-                    point_value = float(pv)
-        except Exception:
-            point_value = 1.0
-
+        point_value = float(point_value or 1.0)
         return rule, max(point_value, 1e-9)
 
     def _derive_threshold_from_rule(
