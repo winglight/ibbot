@@ -65,6 +65,8 @@ class StubRuntime:
         self._redis = redis
         self._config: dict[str, Any] = {}
         self._rules: dict[str, dict[str, Any]] = {}
+        self._rules_history: list[dict[str, Any]] = []
+        self._sizing_history: list[dict[str, Any]] = []
         self.update_calls = 0
         self.start_calls = 0
         self.stop_calls = 0
@@ -77,6 +79,7 @@ class StubRuntime:
         rules_payload = config_map.pop("rules", [])
         timestamp = datetime.now(timezone.utc).isoformat()
         self._config = {str(k): v for k, v in config_map.items()}
+        self._config["updated_at"] = timestamp
 
         config_snapshot = dict(self._config)
         config_snapshot["updated_at"] = timestamp
@@ -125,6 +128,103 @@ class StubRuntime:
             ),
         )
 
+    async def load_risk_config(self) -> dict[str, Any]:
+        return dict(self._config)
+
+    async def save_risk_config(self, updates: Mapping[str, Any]) -> dict[str, Any]:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        for key, value in updates.items():
+            key_str = str(key)
+            if key_str in {"rules", "updated_at"}:
+                continue
+            if value is None:
+                self._config.pop(key_str, None)
+            else:
+                self._config[key_str] = value
+        self._config["updated_at"] = timestamp
+        return dict(self._config)
+
+    async def load_risk_rules(self) -> dict[str, dict[str, Any]]:
+        return {k: dict(v) for k, v in self._rules.items()}
+
+    async def save_risk_rule(self, symbol: str, updates: Mapping[str, Any]) -> dict[str, Any]:
+        symbol_str = str(symbol or updates.get("symbol") or "").strip().upper()
+        if not symbol_str:
+            raise ValueError("risk rule requires a symbol")
+        existing = dict(self._rules.get(symbol_str, {"symbol": symbol_str}))
+        merged = {k: v for k, v in existing.items() if k != "updated_at"}
+        for key, value in updates.items():
+            key_str = str(key)
+            if key_str in {"symbol", "updated_at"}:
+                continue
+            if value is None:
+                merged.pop(key_str, None)
+            else:
+                merged[key_str] = value
+        merged["symbol"] = symbol_str
+        timestamp = datetime.now(timezone.utc).isoformat()
+        merged["updated_at"] = timestamp
+        self._rules[symbol_str] = dict(merged)
+        self._rules_history.append(
+            {
+                "event": "upsert",
+                "symbol": symbol_str,
+                "updated_at": timestamp,
+                "payload": dict(merged),
+            }
+        )
+        return dict(merged)
+
+    async def delete_risk_rule(self, symbol: str) -> bool:
+        symbol_str = str(symbol or "").strip().upper()
+        if symbol_str in self._rules:
+            self._rules.pop(symbol_str, None)
+            timestamp = datetime.now(timezone.utc).isoformat()
+            self._rules_history.append(
+                {
+                    "event": "delete",
+                    "symbol": symbol_str,
+                    "updated_at": timestamp,
+                }
+            )
+            return True
+        return False
+
+    async def reload_from_storage(self) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        payload = {k: v for k, v in self._config.items() if k != "updated_at"}
+        payload["rules"] = list(self._rules.values())
+        await self.update_config(payload)
+        return self.get_config_snapshot(), self.get_rules_snapshot()
+
+    async def append_sizing_history(self, payload: Mapping[str, Any]) -> None:
+        self._sizing_history.append(dict(payload))
+
+    async def fetch_rules_history(self, *, symbol: str | None = None, limit: int = 100) -> dict[str, Any]:
+        symbol_key = str(symbol or "").strip().upper()
+        items = [
+            {"id": str(index), **entry}
+            for index, entry in enumerate(self._rules_history)
+            if not symbol_key or str(entry.get("symbol") or "").upper() == symbol_key
+        ]
+        items = items[-max(1, int(limit or 1)) :]
+        return {"success": True, "items": items, "count": len(items)}
+
+    async def fetch_sizing_history(
+        self,
+        *,
+        symbol: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        symbol_key = str(symbol or "").strip().upper()
+        items = [
+            dict(entry)
+            for entry in self._sizing_history
+            if not symbol_key or str(entry.get("symbol") or "").upper() == symbol_key
+        ]
+        items = items[-max(1, int(limit or 1)) :]
+        return {"success": True, "items": items, "count": len(items)}
+
     async def start(self) -> None:
         self.start_calls += 1
         self.started = True
@@ -142,6 +242,10 @@ class StubRuntime:
     def health_snapshot(self) -> dict[str, Any]:
         metrics = {
             "pending_commands": 0,
+            "config_snapshot_at": self._config.get("updated_at"),
+            "rules_snapshot_at": max((v.get("updated_at") for v in self._rules.values()), default=self._config.get("updated_at")),
+            "sizing_history_events": len(self._sizing_history),
+            "rules_history_events": len(self._rules_history),
         }
         if self.last_position_ts is not None:
             metrics["position_last_requested_at"] = self.last_position_ts.isoformat()
@@ -160,7 +264,7 @@ class StubRuntime:
         risk_capital = max(0.0, equity * risk_fraction)
         contracts = max(0, int(risk_capital / (point_value * stop_distance)))
         self.last_position_ts = datetime.now(timezone.utc)
-        return {
+        result = {
             "success": True,
             "symbol": symbol,
             "contracts": contracts,
@@ -168,6 +272,8 @@ class StubRuntime:
             "point_value": point_value,
             "stop_distance": stop_distance,
         }
+        self._sizing_history.append({**result, "timestamp": datetime.now(timezone.utc).isoformat()})
+        return result
 
 
 def _build_app(runtime: StubRuntime, *, initial_config: Mapping[str, Any] | None = None) -> TestClient:
