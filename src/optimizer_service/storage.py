@@ -15,7 +15,6 @@ from .schemas import (
     OptimizationRequest,
     TaskState,
 )
-from .db import OptimizerDatabase, optimizer_db
 
 
 @dataclass
@@ -42,11 +41,9 @@ class OptimizerTaskStore:
     (e.g. database) without changing route handlers.
     """
 
-    def __init__(self, database: OptimizerDatabase = optimizer_db) -> None:
+    def __init__(self) -> None:
         self._tasks: Dict[str, TaskRecord] = {}
         self._lock = Lock()
-        self._db = database
-        self._load_from_db()
 
     def create_task(
         self,
@@ -232,57 +229,11 @@ class OptimizerTaskStore:
             for task_id in list(self._tasks.keys()):
                 if self._tasks[task_id].plan_id == plan_id:
                     self._tasks.pop(task_id)
-                    self._db.delete_task(task_id)
 
     # ------------------------------------------------------------------ Helpers
-    def _load_from_db(self) -> None:
-        for row in self._db.load_tasks():
-            request = OptimizationRequest(**row["request"])
-            report_data = row["report"]
-            report = (
-                OptimizationReportData(**report_data)
-                if report_data
-                else None
-            )
-            record = TaskRecord(
-                request=request,
-                state=TaskState(row["state"]),
-                progress=row["progress"],
-                message=row.get("message"),
-                fail_reasons=row.get("fail_reasons", []),
-                report=report,
-                plan_id=row.get("plan_id"),
-                created_at=datetime.fromisoformat(row["created_at"]),
-                completed_at=datetime.fromisoformat(row["completed_at"])
-                if row.get("completed_at")
-                else None,
-                stop_requested=False,
-                resumed_at=datetime.fromisoformat(row["resumed_at"])
-                if row.get("resumed_at")
-                else None,
-                last_group_count=row.get("last_group_count"),
-            )
-            self._tasks[row["task_id"]] = record
 
     def _persist(self, task_id: str) -> None:
-        record = self._tasks.get(task_id)
-        if not record:
-            return
-        task_payload = {
-            "task_id": task_id,
-            "plan_id": record.plan_id,
-            "request": record.request.dict(),
-            "state": record.state.value,
-            "progress": record.progress,
-            "message": record.message,
-            "fail_reasons": record.fail_reasons,
-            "report": record.report.dict() if record.report else None,
-            "created_at": record.created_at.isoformat(),
-            "completed_at": record.completed_at.isoformat() if record.completed_at else None,
-            "resumed_at": record.resumed_at.isoformat() if record.resumed_at else None,
-            "last_group_count": record.last_group_count,
-        }
-        self._db.save_task(task_payload)
+        return None
 
     def _ensure_report_summary(self, task_id: str, record: TaskRecord) -> None:
         report = record.report
