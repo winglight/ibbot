@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
 
-from services.risk.engine import RiskEngine, RiskEvent
+from services.risk.engine import RiskEngine, RiskEvent, RiskRule
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
@@ -192,7 +192,9 @@ class RiskRuntime:
             if isinstance(data, Mapping):
                 payload_dict = {str(k): v for k, v in data.items()}
                 payload_dict.setdefault("symbol", symbol)
-                rules[self._normalise_symbol(symbol)] = payload_dict
+                normalised = RiskRule.normalise_payload(payload_dict)
+                normalised.setdefault("symbol", self._normalise_symbol(symbol))
+                rules[self._normalise_symbol(symbol)] = normalised
         return rules
 
     def _merge_rule_payload(
@@ -223,15 +225,18 @@ class RiskRuntime:
         merged = self._merge_rule_payload(existing, updates, symbol_normalised)
         timestamp = _utc_now().isoformat()
         merged["updated_at"] = timestamp
+        normalised = RiskRule.normalise_payload(merged)
+        normalised["symbol"] = symbol_normalised
+        normalised["updated_at"] = timestamp
 
         redis = await self._get_cache_redis()
         if redis is not None:
-            mapping = {symbol_normalised: self._encode_value(merged)}
+            mapping = {symbol_normalised: self._encode_value(normalised)}
             await redis.hset(self.rules_hash_key, mapping=mapping)
             history_payload = {
                 "event": "upsert",
                 "symbol": symbol_normalised,
-                "payload": self._encode_value(merged),
+                "payload": self._encode_value(normalised),
                 "updated_at": timestamp,
             }
             try:
@@ -246,7 +251,7 @@ class RiskRuntime:
                 )
             except Exception:
                 pass
-        return merged
+        return normalised
 
     async def delete_risk_rule(self, symbol: str) -> bool:
         symbol_normalised = self._normalise_symbol(symbol)

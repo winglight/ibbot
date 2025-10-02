@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import pytest
 from fastapi.testclient import TestClient
 
+from services.risk.engine import RiskRule
 from services.risk.http import SERVICE_NAME, create_app
 
 
@@ -100,7 +101,7 @@ class StubRuntime:
             data = dict(entry)
             data["symbol"] = symbol
             data.setdefault("updated_at", timestamp)
-            rules_map[symbol] = data
+            rules_map[symbol] = RiskRule.normalise_payload(data)
         self._rules = rules_map
         await self._redis.set(
             self.rules_cache_key,
@@ -164,16 +165,19 @@ class StubRuntime:
         merged["symbol"] = symbol_str
         timestamp = datetime.now(timezone.utc).isoformat()
         merged["updated_at"] = timestamp
-        self._rules[symbol_str] = dict(merged)
+        normalised = RiskRule.normalise_payload(merged)
+        normalised["symbol"] = symbol_str
+        normalised["updated_at"] = timestamp
+        self._rules[symbol_str] = dict(normalised)
         self._rules_history.append(
             {
                 "event": "upsert",
                 "symbol": symbol_str,
                 "updated_at": timestamp,
-                "payload": dict(merged),
+                "payload": dict(normalised),
             }
         )
-        return dict(merged)
+        return dict(normalised)
 
     async def delete_risk_rule(self, symbol: str) -> bool:
         symbol_str = str(symbol or "").strip().upper()
@@ -319,13 +323,29 @@ def test_config_endpoints_update_snapshots_and_health() -> None:
 def test_rule_crud_operations() -> None:
     redis = _FakeRedis()
     runtime = StubRuntime(redis)
-    initial_rules = [{"symbol": "MNQ", "stop_loss_price": 100.0}]
+    initial_rules = [
+        {
+            "symbol": "MNQ",
+            "stop_loss_price": 100.0,
+            "metadata": {
+                "rule_type": "trailing",
+                "atr_params": {"multiplier_sl": 1.5, "multiplier_tp": 2.5},
+            },
+        }
+    ]
     client = _build_app(runtime, initial_config={"rules": initial_rules})
 
     with client:
         response = client.get("/risk/rules")
         data = response.json()
         assert "MNQ" in data["rules"]
+        mnq_rule = data["rules"]["MNQ"]
+        assert mnq_rule["rule_type"] == "trailing"
+        assert mnq_rule["atr_params"] == {
+            "multiplier_sl": 1.5,
+            "multiplier_tp": 2.5,
+        }
+        assert "rule_type" not in (mnq_rule.get("metadata") or {})
 
         response = client.post("/risk/rules", json={"symbol": "ES", "stop_loss_price": 25.0})
         assert response.status_code == 200
