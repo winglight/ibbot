@@ -15,11 +15,10 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
-import core
 from .auth import get_current_user
 from src.dom_service import get_dom_service
 from src.dom_optimizer import get_dom_optimization_orchestrator
-from core import dom_config
+from src.dom_dependencies import dom_config
 from loguru import logger
 
 router = APIRouter()

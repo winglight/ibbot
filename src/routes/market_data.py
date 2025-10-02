@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List, Mapping
 
+import httpx
 import websockets
 
 import pandas as pd
@@ -12,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisco
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from core import get_db_manager
+from src.database import get_db_manager
 from .auth import get_current_user
 from src.models import (
     HistoricalDataRequest,
@@ -97,6 +98,22 @@ def _market_service_ws_url(client: Optional[MarketDataServiceClient] = None) -> 
     scheme, rest = base.split("://", 1)
     ws_scheme = "wss" if scheme == "https" else "ws"
     return f"{ws_scheme}://{rest.rstrip('/')}/ws/market"
+
+
+async def _market_service_get(
+    path: str,
+    *,
+    client: Optional[MarketDataServiceClient] = None,
+) -> httpx.Response | Any:
+    resolved = client or _get_market_data_service_client()
+    request = getattr(resolved, "request")
+    try:
+        return await request("GET", path, parse_json=False)
+    except TypeError as exc:
+        message = str(exc)
+        if "parse_json" not in message:
+            raise
+        return await request("GET", path)
 
 
 def _map_bar_size_to_interval(bar_size: str) -> Optional[str]:
@@ -643,7 +660,12 @@ async def get_realtime_data(
 ):
     """获取实时数据"""
     try:
-        payload = await client.request("GET", f"/market/{symbol}")
+        try:
+            result = await _market_service_get(f"/market/{symbol}", client=client)
+        except TypeError as exc:
+            if "client" not in str(exc):
+                raise
+            result = await _market_service_get(f"/market/{symbol}")
     except ServiceUnavailableError:
         raise HTTPException(status_code=503, detail="Market data service unavailable")
     except ServiceResponseError as exc:
@@ -658,6 +680,16 @@ async def get_realtime_data(
     except ServiceClientError as exc:
         logger.error("Market data realtime request failed for {}: {}", symbol, exc)
         raise HTTPException(status_code=502, detail=str(exc))
+
+    if isinstance(result, httpx.Response):
+        if result.status_code >= 400:
+            raise HTTPException(status_code=502, detail="Market data service error")
+        try:
+            payload = result.json()
+        except ValueError as exc:  # pragma: no cover - defensive guard
+            raise HTTPException(status_code=502, detail="Unexpected market data format") from exc
+    else:
+        payload = result
 
     if not isinstance(payload, Mapping):
         raise HTTPException(status_code=502, detail="Unexpected market data format")

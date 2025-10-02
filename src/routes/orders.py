@@ -9,7 +9,6 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from loguru import logger
 
 import core
-from core import connection_manager
 from .auth import (
     audit_log_failure,
     audit_log_success,
@@ -20,6 +19,7 @@ from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
 )
+from src.connection_manager import connection_manager
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, read_hash
 from src.models import OrderRequest
 from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
@@ -28,6 +28,7 @@ from src.ib_command_health import (
     IB_COMMAND_HEALTH_STALE_AFTER_SEC,
     build_ib_connection_health_payload,
 )
+from src.websocket_manager import websocket_manager
 
 router = APIRouter()
 
@@ -100,11 +101,7 @@ def _resolve_websocket_broadcaster() -> Optional[Callable[[Mapping[str, Any]], A
     if callable(broadcast):
         return broadcast
 
-    try:
-        manager = core.websocket_manager  # type: ignore[attr-defined]
-    except AttributeError:
-        return None
-
+    manager = websocket_manager
     broadcast = getattr(manager, "broadcast", None)
     if callable(broadcast):
         return broadcast

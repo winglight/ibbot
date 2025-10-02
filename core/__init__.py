@@ -4,21 +4,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from .container import CoreContainer, get_container, initialise, require_container, set_container, shutdown
-from src.connection_manager import connection_manager
-from src.database import get_db_manager
-from src.websocket_manager import websocket_manager
+from .container import (
+    CoreContainer,
+    get_container,
+    initialise,
+    require_container,
+    set_container,
+    shutdown,
+)
 
 __all__ = [
     "CoreContainer",
-    "connection_manager",
     "get_container",
-    "get_db_manager",
     "initialise",
     "require_container",
     "set_container",
     "shutdown",
-    "websocket_manager",
 ]
 
 

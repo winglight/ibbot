@@ -13,6 +13,7 @@ from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
 )
+from src.connection_manager import connection_manager
 from src.database import get_db_manager
 from src.dom_optimizer import get_dom_optimization_orchestrator
 from src.dom_service import get_dom_service
@@ -54,8 +55,19 @@ def _services():
     return core.require_container()
 
 
+def _connection_manager():
+    return connection_manager
+
+
 def _websocket_manager():
     return _services().websocket_manager
+
+
+def _order_manager():
+    container = core.get_container()
+    if container is None:
+        return None
+    return getattr(container, "order_manager", None)
 
 
 def _service_unavailable_payload(payload_type: str, **fields: Any) -> Dict[str, Any]:
