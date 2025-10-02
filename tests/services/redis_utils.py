@@ -81,3 +81,18 @@ class InMemoryRedis:
         if value is None:
             return None
         return json.loads(value)
+
+    async def delete(self, *keys: str) -> int:
+        removed = 0
+        kv = self._hashes.get("__kv__", {})
+        for key in keys:
+            if key in self._queues:
+                del self._queues[key]
+                removed += 1
+            if key in self._streams:
+                del self._streams[key]
+                removed += 1
+            if key in kv:
+                del kv[key]
+                removed += 1
+        return removed
