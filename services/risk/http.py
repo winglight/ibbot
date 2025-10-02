@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -49,6 +49,29 @@ def _merge_rule(existing: Mapping[str, Any], updates: Mapping[str, Any]) -> dict
         raise ValueError("risk rule requires a symbol")
     merged["symbol"] = symbol
     return merged
+
+
+def _iter_rule_payloads(payload: Any) -> Iterable[Mapping[str, Any]]:
+    if payload is None:
+        return []
+    if isinstance(payload, Mapping):
+        rules_candidate = payload.get("rules")
+        if isinstance(rules_candidate, (Mapping, list, tuple, set)):
+            return _iter_rule_payloads(rules_candidate)
+        items: list[Mapping[str, Any]] = []
+        for key, value in payload.items():
+            if isinstance(value, Mapping):
+                rule_payload = dict(value)
+                rule_payload.setdefault("symbol", key)
+                items.append(rule_payload)
+        return items
+    if isinstance(payload, (list, tuple, set)):
+        items = []
+        for item in payload:
+            if isinstance(item, Mapping):
+                items.append(dict(item))
+        return items
+    raise ValueError("rules payload must be a mapping or iterable of objects")
 
 
 async def _load_json(redis: Any, key: str) -> dict[str, Any] | None:
@@ -365,6 +388,74 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail="Failed to calculate position sizing") from exc
+
+    @app.get("/order_queue_status", status_code=status.HTTP_200_OK)
+    async def order_queue_status(runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:
+        try:
+            return await runtime_instance.fetch_order_queue_status()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to load order queue status") from exc
+
+    @app.get("/sizing/history", status_code=status.HTTP_200_OK)
+    async def sizing_history(
+        runtime_instance: RiskRuntime = Depends(_get_runtime),
+        symbol: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        try:
+            limit_value = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="limit must be an integer") from exc
+        try:
+            return await runtime_instance.fetch_sizing_history(
+                symbol=symbol,
+                since=since,
+                limit=limit_value,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to load sizing history") from exc
+
+    @app.get("/config/rules", status_code=status.HTTP_200_OK)
+    async def get_config_rules(runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:
+        rules_snapshot = runtime_instance.get_rules_snapshot()
+        return {
+            "success": True,
+            "rules": rules_snapshot,
+            "count": len(rules_snapshot),
+        }
+
+    @app.put("/config/rules", status_code=status.HTTP_200_OK)
+    async def update_config_rules(
+        payload: Mapping[str, Any],
+        runtime_instance: RiskRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            rule_payloads = list(_iter_rule_payloads(payload))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        updates: dict[str, Mapping[str, Any]] = {}
+        for rule_payload in rule_payloads:
+            merged = _merge_rule({"symbol": rule_payload.get("symbol")}, rule_payload)
+            updates[merged["symbol"]] = merged
+        try:
+            await _refresh_runtime(
+                runtime_instance,
+                rule_updates=updates,
+                replace_rules=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to update risk rules") from exc
+        rules_snapshot = runtime_instance.get_rules_snapshot()
+        return {
+            "success": True,
+            "rules": rules_snapshot,
+            "count": len(rules_snapshot),
+        }
 
     @app.get("/risk/analytics/health", status_code=status.HTTP_200_OK)
     async def analytics_health(runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:

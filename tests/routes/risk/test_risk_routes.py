@@ -84,6 +84,46 @@ def risk_app(monkeypatch: pytest.MonkeyPatch):
                 {"success": True, "contracts": 1, "N": 1},
             )
 
+        async def fetch_order_queue_status(self) -> Any:
+            self.calls.append(("fetch_order_queue_status", None))
+            exc = self.exceptions.get("fetch_order_queue_status")
+            if exc:
+                raise exc
+            return self.responses.get(
+                "fetch_order_queue_status",
+                {"success": True, "pending": 0},
+            )
+
+        async def fetch_sizing_history(self, params: dict[str, Any]) -> Any:
+            self.calls.append(("fetch_sizing_history", dict(params)))
+            exc = self.exceptions.get("fetch_sizing_history")
+            if exc:
+                raise exc
+            return self.responses.get(
+                "fetch_sizing_history",
+                {"success": True, "items": [], "count": 0},
+            )
+
+        async def fetch_config_rules(self) -> Any:
+            self.calls.append(("fetch_config_rules", None))
+            exc = self.exceptions.get("fetch_config_rules")
+            if exc:
+                raise exc
+            return self.responses.get(
+                "fetch_config_rules",
+                {"success": True, "rules": {}, "count": 0},
+            )
+
+        async def update_config_rules(self, payload: dict[str, Any]) -> Any:
+            self.calls.append(("update_config_rules", dict(payload)))
+            exc = self.exceptions.get("update_config_rules")
+            if exc:
+                raise exc
+            return self.responses.get(
+                "update_config_rules",
+                {"success": True, "rules": payload.get("rules", {}), "count": len(payload.get("rules", {}))},
+            )
+
     stub_client = StubRiskServiceClient()
     monkeypatch.setattr(risk_module, "_get_risk_service_client", lambda: stub_client)
 
