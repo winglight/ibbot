@@ -66,6 +66,11 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
             "hash:service:health:market-data": None,
             "hash:service:health:ib-feed": None,
             "hash:service:health:connection_control": None,
+            "hash:service:health:notification": {
+                "healthy": "true",
+                "last_error": "",
+                "last_seen": recent,
+            },
             "hash:service:health:queue": {
                 "status": "running",
                 "total_queue_length": "2",
@@ -93,6 +98,8 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert "未上报" in (status_map["connection_control"].detail or "")
         assert "未上报" in (status_map["market_data_feed"].detail or "")
         assert "未上报" in (status_map["market_data"].detail or "")
+        assert status_map["notification"].status == "running"
+        assert status_map["notification"].payload is not None
 
         account_payload = status_map["account"].payload or {}
         assert "readiness" in account_payload
