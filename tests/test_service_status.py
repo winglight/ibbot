@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.account_service_readiness import AccountServiceReadiness
+from src.routes.service_registry import DOM_SERVICE_NAME
 from src.service_status import gather_service_statuses, build_service_status_payload
 
 
@@ -62,6 +63,15 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
                 "last_seen": recent,
             },
             "hash:service:health:account-snapshot": None,
+            "hash:service:health:ib-feed": {
+                "status": "running",
+                "last_seen": recent,
+            },
+            "hash:service:health:market-data": {
+                "status": "running",
+                "last_seen": recent,
+            },
+            "hash:service:health:optimizer": None,
             "hash:service:health:queue": {
                 "status": "running",
                 "total_queue_length": "2",
@@ -87,6 +97,10 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert status_map["ib-gateway"].status == "external"
         assert status_map["cloudflared"].status == "external"
         assert status_map["account_snapshot"].status == "unhealthy"
+        assert status_map["ib_feed"].status == "running"
+        assert status_map["market_data"].status == "running"
+        assert status_map["optimizer"].status == "unhealthy"
+        assert status_map[DOM_SERVICE_NAME].status == "offline"
 
         account_payload = status_map["account"].payload or {}
         assert "readiness" in account_payload
@@ -177,6 +191,10 @@ def test_build_service_status_payload_structure(monkeypatch: pytest.MonkeyPatch)
         assert isinstance(services, list)
         assert any(entry.get("service") == "ibbot" for entry in services)
         assert any(entry.get("service") == "account" for entry in services)
+        registry = payload.get("registry")
+        assert isinstance(registry, list)
+        assert any(entry.get("service") == "ib_feed" for entry in registry)
+        assert any(entry.get("health_key") for entry in registry if entry.get("service") == "ib_feed")
 
     asyncio.run(_run())
 
@@ -234,5 +252,45 @@ def test_build_service_status_payload_includes_queue_metrics(monkeypatch: pytest
             "metrics_snapshot" in (entry.get("payload") or {})
             for entry in queue_entries
         )
+
+        registry = payload.get("registry")
+        assert isinstance(registry, list)
+        assert any(entry.get("service") == "optimizer" for entry in registry)
+
+    asyncio.run(_run())
+
+
+def test_missing_health_entries_marked_unhealthy(monkeypatch: pytest.MonkeyPatch):
+    async def _run() -> None:
+        now = datetime.now(timezone.utc)
+
+        async def _fake_readiness(**_: object) -> AccountServiceReadiness:
+            return AccountServiceReadiness(ready=True, checked_at=now, error=None)
+
+        monkeypatch.setattr(
+            "src.service_status.refresh_account_service_status",
+            _fake_readiness,
+        )
+
+        redis_data = {
+            "hash:service:health:ib-command": {
+                "last_seen": now.isoformat(),
+                "queue_depth": "1",
+            },
+        }
+
+        statuses = await gather_service_statuses(redis=StubRedis(redis_data))
+        status_map = {status.service: status for status in statuses}
+
+        feed_status = status_map["ib_feed"]
+        market_status = status_map["market_data"]
+        optimizer_status = status_map["optimizer"]
+
+        assert feed_status.status == "unhealthy"
+        assert feed_status.detail and "行情订阅服务未上报健康数据" in feed_status.detail
+        assert market_status.status == "unhealthy"
+        assert market_status.detail and "行情落地服务未上报健康数据" in market_status.detail
+        assert optimizer_status.status == "unhealthy"
+        assert optimizer_status.detail and "优化器未上报健康数据" in optimizer_status.detail
 
     asyncio.run(_run())

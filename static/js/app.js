@@ -23,6 +23,7 @@ const notificationsModules = appModules.notifications || {};
 const NotificationsManagerModule = notificationsModules.manager || {};
 const NotificationsManagerClass = NotificationsManagerModule.NotificationsManager || globalScope.NotificationsManager;
 const serviceRestartModules = appModules.serviceRestart || {};
+const serviceStatusModules = appModules.serviceStatus || {};
 
 const getConfigCenterModules = () => {
     const modules = globalScope.appModules?.configCenter;
@@ -135,6 +136,10 @@ class TradingApp {
         // 通知列表
         this.notifications = [];
         this.serviceRestartController = null;
+        this.serviceStatusContainer = null;
+        this.serviceRegistry = [];
+        this.serviceRegistrySignature = null;
+        this.serviceStatusInitialising = null;
         this.configCenterManager = null;
         this.configCenterInitRetry = null;
 
@@ -912,63 +917,11 @@ class TradingApp {
         // DOM 已就绪时同步访客模式下的界面元素状态，避免初始渲染遗漏
         this.updateReadOnlyMode(this.isReadOnly, this.authRole, { persist: false });
 
-        if (!this.serviceRestartController && serviceRestartModules?.createListController) {
-            const listContainer = document.getElementById('serviceStatusList');
-            if (listContainer) {
-                const controller = serviceRestartModules.createListController({
-                    document,
-                    container: listContainer,
-                    fetcher: (payload) => this.apiCall('/services/restart', {
-                        method: 'POST',
-                        body: JSON.stringify(payload),
-                    }),
-                    describeService: (serviceName, element) => {
-                        if (element?.dataset?.serviceLabel) {
-                            return element.dataset.serviceLabel;
-                        }
-                        const title = element?.querySelector('.fw-semibold');
-                        return title?.textContent?.trim() || serviceName;
-                    },
-                    readOnlyMessage: '访客模式无法执行重启操作',
-                    runningMessage: '正在重启 {service}...',
-                    successMessage: '已重启 {services}',
-                    dependencySuccessMessage: '{service} 已随依赖重启',
-                    errorMessage: '重启失败，请稍后重试',
-                    initialMessage: '点击重启以重新启动 {service}。',
-                    badgeLabels: {
-                        idle: '已下线',
-                        running: '重启中',
-                        success: '运行中',
-                        error: '不健康',
-                    },
-                    onStatusChange: (info) => {
-                        if (info.meta?.trigger !== 'restart') {
-                            return;
-                        }
-                        if (info.state === 'success') {
-                            this.showAlert('success', info.message);
-                        } else if (info.state === 'error') {
-                            const errorObj = info.payload?.error;
-                            const level = errorObj?.isReadOnly ? 'warning' : 'danger';
-                            this.showAlert(level, info.message);
-                        }
-                    },
-                });
-                if (controller) {
-                    this.serviceRestartController = controller;
-                    if (this.isReadOnly && typeof controller.setReadOnly === 'function') {
-                        controller.setReadOnly(true);
-                    }
-                    const wsResult = this.ibkrManager?.requestServiceStatuses
-                        ? this.ibkrManager.requestServiceStatuses({ force: true })
-                        : 'failed';
-                    if (wsResult === 'failed') {
-                        this.loadServiceStatuses({ silent: true, preferSocket: false }).catch((error) => {
-                            console.warn('Failed to load initial service statuses', error);
-                        });
-                    }
-                }
-            }
+        this.serviceStatusContainer = document.getElementById('serviceStatusList');
+        if (this.serviceStatusContainer) {
+            this.initialiseServiceStatusList({ silent: true }).catch((error) => {
+                console.warn('Failed to initialise service status list', error);
+            });
         }
 
         const refreshButton = document.getElementById('btn-refresh');
@@ -1790,6 +1743,10 @@ class TradingApp {
     }
 
     applyServiceStatusesPayload(payload, options = {}) {
+        if (Array.isArray(payload?.registry)) {
+            this.updateServiceRegistry(payload.registry);
+        }
+
         const controller = this.serviceRestartController;
         if (!controller || !controller.items) {
             return false;
@@ -1799,6 +1756,7 @@ class TradingApp {
             running: { state: 'success', fallback: '运行中' },
             offline: { state: 'idle', fallback: '服务已下线' },
             unhealthy: { state: 'error', fallback: '服务状态异常' },
+            external: { state: 'idle', fallback: '外部依赖' },
         };
 
         const services = Array.isArray(payload?.services) ? payload.services : [];
@@ -1860,10 +1818,226 @@ class TradingApp {
         return applied;
     }
 
-    async loadServiceStatuses(options = {}) {
-        const controller = this.serviceRestartController;
-        if (!controller || !controller.items) {
+    renderServiceStatusFallback(registry = []) {
+        const container = this.serviceStatusContainer;
+        if (!container) {
+            return 0;
+        }
+        const doc = document;
+        container.innerHTML = '';
+        registry.forEach((entry) => {
+            if (!entry || !entry.service) {
+                return;
+            }
+            const item = doc.createElement('div');
+            item.className = 'service-status-item list-group-item d-flex flex-wrap justify-content-between align-items-center gap-3';
+            item.dataset.service = entry.service;
+            const datasetLabel = entry.display_name
+                ? `${entry.display_name} (${entry.service})`
+                : entry.service;
+            item.dataset.serviceLabel = datasetLabel;
+            if (entry.internal !== undefined) {
+                item.dataset.serviceInternal = entry.internal ? 'true' : 'false';
+            }
+            if (entry.restart_service) {
+                item.dataset.restartService = entry.restart_service;
+            }
+
+            const meta = doc.createElement('div');
+            meta.className = 'service-status-meta';
+
+            const name = doc.createElement('div');
+            name.className = 'fw-semibold service-name';
+            name.textContent = entry.display_name || entry.service;
+            meta.appendChild(name);
+
+            const description = doc.createElement('div');
+            description.className = 'service-description small text-muted';
+            description.textContent = entry.description || entry.display_name || entry.service;
+            meta.appendChild(description);
+
+            const statusText = doc.createElement('div');
+            statusText.className = 'service-status-text small text-muted';
+            statusText.dataset.role = 'status-text';
+            statusText.textContent = '等待状态更新';
+            meta.appendChild(statusText);
+
+            const actions = doc.createElement('div');
+            actions.className = 'service-status-actions d-flex align-items-center gap-2';
+
+            const badge = doc.createElement('span');
+            badge.className = 'badge bg-secondary';
+            badge.dataset.role = 'status-badge';
+            badge.textContent = '已下线';
+            actions.appendChild(badge);
+
+            const button = doc.createElement('button');
+            button.className = 'btn btn-outline-warning btn-sm d-flex align-items-center gap-2';
+            button.type = 'button';
+            button.dataset.action = 'restart';
+
+            const spinner = doc.createElement('span');
+            spinner.className = 'spinner-border spinner-border-sm d-none';
+            spinner.setAttribute('role', 'status');
+            spinner.setAttribute('aria-hidden', 'true');
+            button.appendChild(spinner);
+
+            const icon = doc.createElement('i');
+            icon.className = 'fas fa-rotate-right';
+            button.appendChild(icon);
+
+            const labelSpan = doc.createElement('span');
+            labelSpan.className = 'restart-label';
+            labelSpan.textContent = '重启';
+            button.appendChild(labelSpan);
+
+            actions.appendChild(button);
+
+            item.appendChild(meta);
+            item.appendChild(actions);
+
+            container.appendChild(item);
+        });
+        return container.children.length;
+    }
+
+    createServiceRestartController() {
+        const listContainer = this.serviceStatusContainer;
+        if (!listContainer || !serviceRestartModules?.createListController) {
             return null;
+        }
+        const controller = serviceRestartModules.createListController({
+            document,
+            container: listContainer,
+            fetcher: (payload) => this.apiCall('/services/restart', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            }),
+            describeService: (serviceName, element) => {
+                if (element?.dataset?.serviceLabel) {
+                    return element.dataset.serviceLabel;
+                }
+                const title = element?.querySelector('.fw-semibold');
+                return title?.textContent?.trim() || serviceName;
+            },
+            readOnlyMessage: '访客模式无法执行重启操作',
+            runningMessage: '正在重启 {service}...',
+            successMessage: '已重启 {services}',
+            dependencySuccessMessage: '{service} 已随依赖重启',
+            errorMessage: '重启失败，请稍后重试',
+            initialMessage: '点击重启以重新启动 {service}。',
+            badgeLabels: {
+                idle: '已下线',
+                running: '重启中',
+                success: '运行中',
+                error: '不健康',
+            },
+            onStatusChange: (info) => {
+                if (info.meta?.trigger !== 'restart') {
+                    return;
+                }
+                if (info.state === 'success') {
+                    this.showAlert('success', info.message);
+                } else if (info.state === 'error') {
+                    const errorObj = info.payload?.error;
+                    const level = errorObj?.isReadOnly ? 'warning' : 'danger';
+                    this.showAlert(level, info.message);
+                }
+            },
+        });
+        if (controller) {
+            this.serviceRestartController = controller;
+            if (this.isReadOnly && typeof controller.setReadOnly === 'function') {
+                controller.setReadOnly(true);
+            }
+        }
+        return controller;
+    }
+
+    updateServiceRegistry(registry, options = {}) {
+        const entries = Array.isArray(registry)
+            ? registry.filter((entry) => entry && entry.service)
+            : [];
+        this.serviceRegistry = entries;
+        const signature = JSON.stringify(entries.map((entry) => [
+            entry.service,
+            entry.display_name,
+            entry.description,
+            entry.internal,
+        ]));
+        const force = options.force === true;
+        if (!force && this.serviceRegistrySignature === signature && this.serviceRestartController) {
+            return false;
+        }
+        this.serviceRegistrySignature = signature;
+        if (!this.serviceStatusContainer) {
+            return false;
+        }
+        const renderer = typeof serviceStatusModules.renderList === 'function'
+            ? serviceStatusModules.renderList
+            : null;
+        if (renderer) {
+            renderer({ document, container: this.serviceStatusContainer, registry: entries });
+        } else {
+            this.renderServiceStatusFallback(entries);
+        }
+        this.createServiceRestartController();
+        return true;
+    }
+
+    async initialiseServiceStatusList(options = {}) {
+        if (!this.serviceStatusContainer) {
+            return null;
+        }
+        if (this.serviceStatusInitialising) {
+            return this.serviceStatusInitialising;
+        }
+        const { silent = false } = options;
+        const run = async () => {
+            let payload;
+            try {
+                payload = await this.apiCall('/services/status', { method: 'GET', useCache: false });
+            } catch (error) {
+                if (!silent) {
+                    const message = error?.message || '无法加载服务状态';
+                    this.showAlert('danger', message);
+                }
+                throw error;
+            }
+            const registry = Array.isArray(payload?.registry) ? payload.registry : [];
+            this.updateServiceRegistry(registry, { force: true });
+            const enrichedPayload = {
+                type: 'service_statuses',
+                success: true,
+                source: 'http-initial',
+                ...(payload && typeof payload === 'object' ? payload : {}),
+            };
+            this.applyServiceStatusesPayload(enrichedPayload, { source: enrichedPayload.source, silent: true });
+            if (typeof this.ibkrManager?.requestServiceStatuses === 'function') {
+                this.ibkrManager.requestServiceStatuses({ force: true });
+            }
+            return enrichedPayload;
+        };
+        const pending = run()
+            .catch((error) => {
+                console.warn('Failed to initialise service status list', error);
+                throw error;
+            })
+            .finally(() => {
+                this.serviceStatusInitialising = null;
+            });
+        this.serviceStatusInitialising = pending;
+        return pending;
+    }
+
+    async loadServiceStatuses(options = {}) {
+        let controller = this.serviceRestartController;
+        if (!controller || !controller.items) {
+            await this.initialiseServiceStatusList({ silent: true });
+            controller = this.serviceRestartController;
+            if (!controller || !controller.items) {
+                return null;
+            }
         }
 
         const { silent = false, force = false, preferSocket = true, minInterval } = options || {};
