@@ -182,6 +182,31 @@ services:
     profiles:
       - risk
 
+  risk-http:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      ["python", "-m", "uvicorn", "services.risk.http:app", "--host", "0.0.0.0", "--port", "8030"]
+    container_name: ibbot-risk-http
+    ports:
+      - "8030:8030"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      risk:
+        condition: service_started
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - risk
+
   strategy:
     <<: *app-environment
     build:
@@ -197,6 +222,32 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - strategy
+
+  strategy-http:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      ["python", "-m", "uvicorn", "services.strategy.http:app", "--host", "0.0.0.0", "--port", "8045"]
+    container_name: ibbot-strategy-http
+    ports:
+      - "8045:8045"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+      - ./src/strategies:/app/src/strategies
+    depends_on:
+      redis:
+        condition: service_healthy
+      strategy:
+        condition: service_started
     networks:
       - ibbot-network
     restart: unless-stopped
@@ -261,6 +312,27 @@ services:
     container_name: ibbot-account
     ports:
       - "8020:8020"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+
+  orders:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      ["python", "-m", "uvicorn", "services.orders.main:app", "--host", "0.0.0.0", "--port", "8050"]
+    container_name: ibbot-orders
+    ports:
+      - "8050:8050"
     volumes:
       - ./data/logs:/app/logs
       - ./data:/app/data

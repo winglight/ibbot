@@ -74,6 +74,9 @@ class RiskRuntime:
     _results_last_processed: datetime | None = field(default=None, init=False, repr=False)
     _health_last_error: str = field(default="", init=False, repr=False)
     _last_exception_message: str = field(default="", init=False, repr=False)
+    _last_config_snapshot: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _last_rules_snapshot: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _last_snapshot_timestamp: str | None = field(default=None, init=False, repr=False)
 
     async def update_config(self, config: Mapping[str, Any]) -> None:
         snapshot: tuple[dict[str, Any], dict[str, Any], str] | None = None
@@ -97,10 +100,53 @@ class RiskRuntime:
             except (TypeError, ValueError):
                 pass
             snapshot = self._build_snapshots(config)
+            if snapshot is not None:
+                config_payload, rules_payload, timestamp = snapshot
+                self._last_config_snapshot = dict(config_payload)
+                self._last_rules_snapshot = {
+                    str(symbol): dict(values) if isinstance(values, Mapping) else values
+                    for symbol, values in rules_payload.items()
+                }
+                self._last_snapshot_timestamp = timestamp
             self._configured = True
 
         if snapshot is not None:
             await self._publish_snapshots(*snapshot)
+
+    async def get_rules_snapshot(self) -> Mapping[str, Any] | None:
+        async with self._config_lock:
+            if not self._configured:
+                return None
+            rules = {
+                str(symbol): dict(values) if isinstance(values, Mapping) else values
+                for symbol, values in self._last_rules_snapshot.items()
+            }
+            timestamp = self._last_snapshot_timestamp
+        if not rules:
+            rules = self._engine.export_rules()
+        payload: dict[str, Any] = {
+            "success": True,
+            "rules": rules,
+            "source": self.cache_source,
+            "count": len(rules),
+        }
+        if timestamp:
+            payload["updated_at"] = timestamp
+        return payload
+
+    async def get_config_snapshot(self) -> Mapping[str, Any] | None:
+        async with self._config_lock:
+            if not self._configured:
+                return None
+            config_payload = dict(self._last_config_snapshot)
+        if not config_payload:
+            return None
+        payload = {
+            **config_payload,
+            "success": True,
+            "source": self.cache_source,
+        }
+        return payload
 
     def _build_snapshots(
         self, config: Mapping[str, Any]

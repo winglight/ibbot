@@ -39,6 +39,16 @@ SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
         os.getenv("STRATEGY_SERVICE_HEALTH_KEY", "hash:service:health:strategy"),
     ),
     (
+        "account_service_probe",
+        "account-service",
+        os.getenv("ACCOUNT_SERVICE_HEALTH_KEY", "hash:service:health:account-service"),
+    ),
+    (
+        "orders_service_probe",
+        "orders",
+        os.getenv("ORDERS_SERVICE_HEALTH_KEY", "hash:service:health:orders"),
+    ),
+    (
         "account_snapshot_probe",
         "account-snapshot",
         os.getenv(

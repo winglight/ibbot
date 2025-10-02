@@ -116,6 +116,25 @@ services:
       - stack
     restart: unless-stopped
 
+  orders:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-orders
+    command:
+      ["python", "-m", "uvicorn", "services.orders.main:app", "--host", "0.0.0.0", "--port", "8050"]
+    ports:
+      - "8050:8050"
+    env_file:
+      - ./.env
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
   # IB Gateway (gnzsnz)
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:10.39.1h

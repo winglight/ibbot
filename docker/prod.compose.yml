@@ -75,3 +75,25 @@ services:
     volumes:
       - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
       - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+
+  orders:
+    ports:
+      - "${ORDERS_SERVICE_PORT:-8050}:8050"
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+
+  risk-http:
+    ports:
+      - "${RISK_SERVICE_PORT:-8030}:8030"
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+
+  strategy-http:
+    ports:
+      - "${STRATEGY_SERVICE_PORT:-8045}:8045"
+    volumes:
+      - ${IBBOT_LOGS_DIR:-/var/lib/ibbot/logs}:/app/logs
+      - ${IBBOT_DATA_DIR:-/var/lib/ibbot/data}:/app/data
+      - ${IBBOT_STRATEGY_DIR:-/var/lib/ibbot/strategies}:/app/src/strategies

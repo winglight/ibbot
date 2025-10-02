@@ -60,18 +60,26 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
         async def fetch_positions(self, *, force_refresh: bool = False, fast: bool = True) -> list[dict[str, Any]]:
             return [{"symbol": "ES", "position": 1}]
 
-        async def fetch_orders(
+    account_client = StubAccountClient()
+    monkeypatch.setattr(websocket_module, "_ACCOUNT_CLIENT", account_client)
+
+    class StubOrdersClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, int, Any]] = []
+
+        async def list_orders(
             self,
             *,
             limit: int,
             offset: int,
             start_date: str | None = None,
         ) -> dict[str, Any]:
-            self.orders_calls.append((limit, offset, start_date))
+            self.calls.append((limit, offset, start_date))
             return {"orders": [{"order_id": "1", "symbol": "ES"}], "total": 1}
 
-    account_client = StubAccountClient()
-    monkeypatch.setattr(websocket_module, "_ACCOUNT_CLIENT", account_client)
+    orders_client = StubOrdersClient()
+    monkeypatch.setattr(websocket_module, "_ORDERS_CLIENT", orders_client)
+    account_client.orders_calls = orders_client.calls
 
     class StubRiskClient:
         async def fetch_rules(self) -> dict[str, Any]:
@@ -153,13 +161,15 @@ def test_websocket_orders_service_unavailable(
 ) -> None:
     app, account_client = websocket_app
 
-    async def failing_fetch_orders(
+    orders_client = websocket_module._ORDERS_CLIENT
+
+    async def failing_list_orders(
         *, limit: int, offset: int, start_date: str | None = None
     ) -> dict[str, Any]:
-        account_client.orders_calls.append((limit, offset, start_date))
-        raise ServiceUnavailableError("account", "offline")
+        orders_client.calls.append((limit, offset, start_date))
+        raise ServiceUnavailableError("orders", "offline")
 
-    monkeypatch.setattr(account_client, "fetch_orders", failing_fetch_orders)
+    monkeypatch.setattr(orders_client, "list_orders", failing_list_orders)
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as ws:
@@ -182,6 +192,8 @@ def test_websocket_orders_service_unavailable(
 
             ws.send_json({"type": "ping"})
             assert ws.receive_json() == {"type": "pong"}
+
+    assert orders_client.calls
 
 
 def test_websocket_strategy_requests(websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,3 +223,50 @@ def test_websocket_strategy_requests(websocket_app: tuple[FastAPI, Any], monkeyp
             assert performance_payload["type"] == "strategy_performance"
             assert performance_payload["success"] is True
             assert performance_payload["metrics"]["pnl"] == 10
+
+
+def test_websocket_risk_rules_degrades_when_service_unavailable(
+    websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = websocket_app
+
+    class FailingRiskClient:
+        async def fetch_rules(self) -> dict[str, Any]:
+            raise ServiceUnavailableError("risk", "offline")
+
+    monkeypatch.setattr(websocket_module, "_RISK_CLIENT", FailingRiskClient())
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            _drain_initial_messages(ws, 4)
+            ws.send_json({"type": "request_risk_rules", "force": True})
+            payload = ws.receive_json()
+
+    assert payload["type"] == "risk_rules"
+    assert payload["success"] is False
+
+
+def test_websocket_strategy_status_degrades_when_service_unavailable(
+    websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = websocket_app
+
+    class FailingStrategyClient:
+        async def list_strategies(self) -> dict[str, Any]:
+            raise ServiceUnavailableError("strategy", "offline")
+
+        async def fetch_strategy(self, name: str) -> dict[str, Any]:
+            raise ServiceUnavailableError("strategy", "offline")
+
+    monkeypatch.setattr(websocket_module, "_STRATEGY_CLIENT", FailingStrategyClient())
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            _drain_initial_messages(ws, 4)
+            ws.send_json({"type": "request_strategies", "force": True})
+            strategies_payload = ws.receive_json()
+            ws.send_json({"type": "request_strategy_status", "name": "alpha", "force": True})
+            status_payload = ws.receive_json()
+
+    assert strategies_payload["success"] is False
+    assert status_payload["success"] is False
