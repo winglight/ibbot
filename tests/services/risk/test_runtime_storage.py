@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Mapping
 
 import pytest
 
 from services.risk.runtime import RiskRuntime
+from tests.services.risk.helpers import FakeRedis
 
 
 pytestmark = pytest.mark.anyio
@@ -16,95 +16,10 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-class _FakePipeline:
-    def __init__(self, redis: "_FakeRedis") -> None:
-        self._redis = redis
-        self._operations: list[tuple[str, str]] = []
-
-    def set(self, key: str, value: str) -> "_FakePipeline":
-        self._operations.append((key, value))
-        return self
-
-    async def execute(self) -> list[bool]:
-        results: list[bool] = []
-        for key, value in self._operations:
-            results.append(bool(await self._redis.set(key, value)))
-        self._operations.clear()
-        return results
-
-
-class _FakeRedis:
-    def __init__(self) -> None:
-        self.store: dict[str, str] = {}
-        self.hashes: dict[str, dict[str, str]] = {}
-        self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
-        self.published: list[tuple[str, str]] = []
-        self._counter = 0
-
-    async def get(self, key: str) -> str | None:
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str) -> bool:
-        self.store[key] = value
-        return True
-
-    def pipeline(self) -> _FakePipeline:
-        return _FakePipeline(self)
-
-    async def publish(self, channel: str, message: str) -> int:
-        self.published.append((channel, message))
-        return 1
-
-    async def hset(self, key: str, mapping: Mapping[str, Any]) -> int:
-        bucket = self.hashes.setdefault(key, {})
-        for field, value in mapping.items():
-            bucket[str(field)] = str(value)
-        return len(mapping)
-
-    async def hgetall(self, key: str) -> dict[str, str]:
-        return dict(self.hashes.get(key, {}))
-
-    async def hdel(self, key: str, *fields: str) -> int:
-        bucket = self.hashes.get(key)
-        if not bucket:
-            return 0
-        removed = 0
-        for field in fields:
-            if field in bucket:
-                del bucket[field]
-                removed += 1
-        return removed
-
-    async def xadd(
-        self,
-        key: str,
-        fields: Mapping[str, Any],
-        *,
-        maxlen: int | None = None,
-        approximate: bool | None = None,
-    ) -> str:
-        stream = self.streams.setdefault(key, [])
-        entry_id = f"{int(self._counter)}-0"
-        self._counter += 1
-        stream.append((entry_id, {str(k): str(v) for k, v in fields.items()}))
-        if maxlen is not None and len(stream) > int(maxlen):
-            stream[:] = stream[-int(maxlen) :]
-        return entry_id
-
-    async def xlen(self, key: str) -> int:
-        return len(self.streams.get(key, []))
-
-    async def xrevrange(self, key: str, *, count: int | None = None) -> list[tuple[str, Mapping[str, str]]]:
-        stream = list(reversed(self.streams.get(key, [])))
-        if count is not None:
-            return stream[: int(count)]
-        return stream
-
-
 async def test_rule_lifecycle_persists_and_records_history() -> None:
-    redis = _FakeRedis()
+    redis = FakeRedis()
 
-    async def factory() -> _FakeRedis:
+    async def factory() -> FakeRedis:
         return redis
 
     runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
@@ -139,9 +54,9 @@ async def test_rule_lifecycle_persists_and_records_history() -> None:
 
 
 async def test_config_saves_merge_and_removal() -> None:
-    redis = _FakeRedis()
+    redis = FakeRedis()
 
-    async def factory() -> _FakeRedis:
+    async def factory() -> FakeRedis:
         return redis
 
     runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
@@ -161,9 +76,9 @@ async def test_config_saves_merge_and_removal() -> None:
 
 
 async def test_sizing_history_stream_filters_and_counts() -> None:
-    redis = _FakeRedis()
+    redis = FakeRedis()
 
-    async def factory() -> _FakeRedis:
+    async def factory() -> FakeRedis:
         return redis
 
     runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
