@@ -17,6 +17,7 @@ from services.strategy.http import (
     create_app,
     persist_strategy_settings,
 )
+import src.utils.strategy_cache as strategy_cache_module
 from tests.services.redis_utils import InMemoryRedis
 
 
@@ -50,6 +51,31 @@ def _read_metadata(redis: InMemoryRedis, name: str) -> dict[str, object]:
     if isinstance(raw, str):
         return json.loads(raw)
     return dict(raw)
+
+
+def _install_strategy_cache_stubs(redis: InMemoryRedis, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _ensure() -> InMemoryRedis:
+        return redis
+
+    async def _hmget(key: str, fields: list[str]) -> list[str | None]:
+        data = await redis.hgetall(key)
+        return [data.get(field) for field in fields]
+
+    async def _zrangebyscore(key: str, *_: object, **__: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr(strategy_cache_module, "ensure_redis", _ensure)
+    setattr(redis, "hmget", _hmget)
+    setattr(redis, "zrangebyscore", _zrangebyscore)
+
+
+def _prepare_strategy_orders(redis: InMemoryRedis, name: str, orders: list[dict[str, object]]) -> None:
+    key = f"strategy:{name}:orders"
+    mapping = {}
+    for order in orders:
+        order_id = str(order.get("order_id"))
+        mapping[order_id] = json.dumps({**order, "order_id": order_id})
+    asyncio.run(redis.hset(key, mapping=mapping))
 
 
 def test_discovered_strategy_available_on_start(redis_client: InMemoryRedis) -> None:
@@ -198,6 +224,7 @@ def test_strategy_run_enqueues_tasks(redis_client: InMemoryRedis) -> None:
         runtime: StrategyRuntime = client.app.state.runtime
         assert runtime.pending_tasks == 1
 
+
         asyncio.run(
             redis_client.xadd(
                 runtime.event_stream,
@@ -212,6 +239,99 @@ def test_strategy_run_enqueues_tasks(redis_client: InMemoryRedis) -> None:
         assert runtime.last_event_at is not None
         last_event = datetime.fromisoformat(runtime.last_event_at)
         assert last_event <= datetime.now(timezone.utc)
+
+
+def test_get_strategy_performance_success(
+    redis_client: InMemoryRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_strategy_cache_stubs(redis_client, monkeypatch)
+    client = _build_client(redis_client)
+
+    payload = {
+        "name": "alpha",
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "ES"},
+    }
+
+    orders = [
+        {
+            "order_id": "order-1",
+            "strategy": "alpha",
+            "created_at": "2024-01-01T09:50:00+08:00",
+            "executed_at": "2024-01-01T10:00:00+08:00",
+            "pnl": -20.0,
+            "commission": 2.0,
+            "duration": 300,
+        },
+        {
+            "order_id": "order-2",
+            "strategy": "alpha",
+            "created_at": "2024-01-01T11:00:00+08:00",
+            "executed_at": "2024-01-01T11:05:00+08:00",
+            "pnl": 50.0,
+            "commission": 1.0,
+            "duration": 600,
+        },
+    ]
+
+    with client:
+        assert client.post("/strategy", json=payload).status_code == 201
+        _prepare_strategy_orders(redis_client, "alpha", orders)
+        response = client.get(
+            "/strategies/alpha/performance",
+            params={
+                "start": "2023-12-31T16:00:00Z",
+                "end": "2024-01-02T00:00:00+08:00",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["name"] == "alpha"
+    metrics = payload["metrics"]
+    assert metrics["total_executions"] == 2
+    assert metrics["total_pnl"] == pytest.approx(30.0)
+    assert metrics["avg_pnl"] == pytest.approx(15.0)
+    assert metrics["winning_trades"] == 1
+    assert metrics["losing_trades"] == 1
+    assert metrics["win_rate"] == pytest.approx(50.0)
+    assert metrics["max_drawdown"] == pytest.approx(20.0)
+    assert metrics["avg_trade_duration"] == pytest.approx(450.0)
+    assert metrics["total_commission"] == pytest.approx(3.0)
+
+
+def test_get_strategy_performance_not_found(
+    redis_client: InMemoryRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_strategy_cache_stubs(redis_client, monkeypatch)
+    client = _build_client(redis_client)
+
+    with client:
+        response = client.get("/strategies/ghost/performance")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "strategy not found"
+
+
+def test_get_strategy_performance_invalid_range(
+    redis_client: InMemoryRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_strategy_cache_stubs(redis_client, monkeypatch)
+    client = _build_client(redis_client)
+
+    payload = {
+        "name": "beta",
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "NQ"},
+    }
+
+    with client:
+        assert client.post("/strategy", json=payload).status_code == 201
+        response = client.get("/strategies/beta/performance", params={"range": "invalid"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid range parameter"
 
 
 def test_strategy_settings_endpoints(redis_client: InMemoryRedis) -> None:
