@@ -19,6 +19,7 @@ from src.ib_command_health import (
 from src.ibbot.redis import get_redis_client
 from src.routes.service_registry import SERVICE_REGISTRY
 from src.service_restart import RestartMode, get_service_restart_manager
+from src.startup_checks import get_startup_checks
 
 
 __all__ = [
@@ -549,9 +550,15 @@ async def build_service_status_payload(redis: Any | None = None) -> Mapping[str,
     else:
         endpoint = "/services/restart"
 
-    return {
+    payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "services": services_payload,
         "restart_mode": restart_mode.value,
         "restart_endpoint": endpoint,
     }
+
+    startup_checks = get_startup_checks()
+    if startup_checks:
+        payload["startup_checks"] = startup_checks
+
+    return payload
