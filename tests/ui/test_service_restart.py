@@ -21,16 +21,22 @@ class MockRestartManager:
             "market_data_feed": ("market_data_feed",),
             "queue_monitor": ("queue_monitor",),
         }
+        self.service_names: dict[str, str] = {
+            "market_data_feed": "ib-feed",
+            "market_data": "market-data",
+            "queue_monitor": "queue-monitor",
+        }
 
     async def restart(self, service: str, *, include_dependencies: bool = True) -> list[RestartCommandResult]:
         self.calls.append((service, include_dependencies))
         plan = self.plans.get(service, (service,)) if include_dependencies else (service,)
         results: list[RestartCommandResult] = []
         for name in plan:
+            target = self.service_names.get(name, name)
             results.append(
                 RestartCommandResult(
                     service=name,
-                    command=("docker", "compose", "restart", name),
+                    command=("docker", "compose", "restart", target),
                     returncode=0,
                     stdout=f"{name} ok",
                     stderr="",
@@ -159,6 +165,8 @@ def test_restart_market_data_plan(restart_app: FastAPI) -> None:
     payload = response.json()
     assert payload["restarted"] == ["market_data_feed", "market_data"]
     assert manager.calls[-1] == ("market_data", True)
+    assert payload["logs"][0]["command"][-1] == "ib-feed"
+    assert payload["logs"][1]["command"][-1] == "market-data"
 
 
 def test_restart_market_data_feed_plan(restart_app: FastAPI) -> None:
@@ -171,6 +179,7 @@ def test_restart_market_data_feed_plan(restart_app: FastAPI) -> None:
     payload = response.json()
     assert payload["restarted"] == ["market_data_feed"]
     assert manager.calls[-1] == ("market_data_feed", True)
+    assert payload["logs"][0]["command"][-1] == "ib-feed"
 
 
 def test_restart_queue_monitor_plan(restart_app: FastAPI) -> None:
@@ -183,6 +192,7 @@ def test_restart_queue_monitor_plan(restart_app: FastAPI) -> None:
     payload = response.json()
     assert payload["restarted"] == ["queue_monitor"]
     assert manager.calls[-1] == ("queue_monitor", True)
+    assert payload["logs"][0]["command"][-1] == "queue-monitor"
 
 
 def test_frontend_controller_updates_status() -> None:
