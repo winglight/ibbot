@@ -25,6 +25,13 @@ __all__ = [
     "get_dom_service",
     "get_db_manager",
     "get_data_source_manager",
+    "get_notification_manager",
+    "get_order_manager",
+    "get_queue_manager",
+    "get_risk_manager",
+    "get_strategy_manager",
+    "get_strategy_risk_manager",
+    "get_telegram_notifier",
     "ibkr_client",
     "get_ibkr_client",
     "set_ibkr_client",
@@ -105,6 +112,55 @@ def get_data_source_manager():
     return container.get_data_source_manager()
 
 
+def get_notification_manager():
+    """Return the lazily-instantiated notification manager."""
+
+    container = get_core_container()
+    return container.get_notification_manager()
+
+
+def get_order_manager():
+    """Return the shared order manager instance."""
+
+    container = get_core_container()
+    return container.get_order_manager()
+
+
+def get_queue_manager():
+    """Return the shared queue manager instance."""
+
+    container = get_core_container()
+    return container.get_queue_manager()
+
+
+def get_risk_manager():
+    """Return the shared risk manager instance."""
+
+    container = get_core_container()
+    return container.get_risk_manager()
+
+
+def get_strategy_manager():
+    """Return the shared strategy manager instance."""
+
+    container = get_core_container()
+    return container.get_strategy_manager()
+
+
+def get_strategy_risk_manager():
+    """Return the shared per-strategy risk manager."""
+
+    container = get_core_container()
+    return container.get_strategy_risk_manager()
+
+
+def get_telegram_notifier():
+    """Return the shared Telegram notifier."""
+
+    container = get_core_container()
+    return container.telegram_notifier
+
+
 def __getattr__(name: str) -> Any:
     """Delegate legacy attribute lookups to the dependency container."""
 
@@ -121,4 +177,18 @@ def __getattr__(name: str) -> Any:
         return container.depth_subscriber
     if name == "redis_client":
         return container.redis_client
+    if name == "notification_manager":
+        return container.get_notification_manager()
+    if name == "order_manager":
+        return container.get_order_manager()
+    if name == "queue_manager":
+        return container.get_queue_manager()
+    if name == "risk_manager":
+        return container.get_risk_manager()
+    if name == "strategy_manager":
+        return container.get_strategy_manager()
+    if name == "strategy_risk_manager":
+        return container.get_strategy_risk_manager()
+    if name == "telegram_notifier":
+        return container.telegram_notifier
     raise AttributeError(f"module 'core' has no attribute '{name}'")
