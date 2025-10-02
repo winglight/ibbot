@@ -110,7 +110,6 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
     async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
         return fake_redis
 
-    monkeypatch.setenv("ENABLE_EMBEDDED_RISK_MANAGER", "1")
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "change_me")
     monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
@@ -128,38 +127,13 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
         assert container.websocket_manager is core.websocket_manager
         provider = container.config_provider
         assert provider is not None and getattr(provider, "_started", False)
-        assert container.telegram_notifier is not None
-        assert container.notification_manager is not None
-        assert container.risk_manager is not None and getattr(
-            container.risk_manager, "monitoring_active", False
-        )
-        assert container.strategy_manager is not None
-        assert container.strategy_risk_manager is not None
-        assert container.queue_manager is not None and container.queue_manager.is_running
+        assert not hasattr(container, "risk_manager")
+        assert not hasattr(container, "strategy_manager")
+        assert not hasattr(container, "strategy_risk_manager")
+        assert not hasattr(container, "notification_manager")
+        assert not hasattr(container, "telegram_notifier")
+        assert not hasattr(container, "queue_manager")
         assert container.account_snapshot_service is None
-
-    await core.shutdown()
-
-
-@pytest.mark.anyio("asyncio")
-async def test_startup_allows_disabling_embedded_risk_manager(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_redis = FakeRedis()
-
-    async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
-        return fake_redis
-
-    monkeypatch.setenv("ENABLE_EMBEDDED_RISK_MANAGER", "0")
-    monkeypatch.setattr("core.container.init_redis", fake_init_redis)
-    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
-    monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
-
-    await core.shutdown()
-
-    async with app.router.lifespan_context(app):
-        container = core.require_container()
-        assert container.risk_manager is None
 
     await core.shutdown()
 

@@ -9,7 +9,8 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Lock
-from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
+from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional, Mapping
+import json
 
 from zoneinfo import ZoneInfo
 
@@ -35,7 +36,7 @@ from src.dom_dependencies import (
     get_dom_processor,
     set_dom_processor,
 )
-from src.database import get_db_manager
+from src.ibbot.redis import get_redis_client
 from src.dom_processor import DOMProcessor
 from src.dom_parameter_tuner import (
     DOMParameterTuner,
@@ -64,6 +65,53 @@ DEFAULT_TUNER_PARAMETERS = {
     "reversal_window_sec": 60,
     "session_timezone": "America/New_York",
 }
+
+DOM_CONFIG_REDIS_KEY = os.getenv("DOM_CONFIG_REDIS_KEY", "json:dom:config")
+
+
+class _DomConfigStore:
+    def __init__(self, redis_key: str = DOM_CONFIG_REDIS_KEY) -> None:
+        self.redis_key = redis_key
+
+    async def _load_async(self) -> Optional[Dict[str, Any]]:
+        try:
+            client = await get_redis_client()
+            raw = await client.get(self.redis_key)
+        except Exception as exc:
+            logger.warning("Failed to read DOM config from Redis", error=str(exc))
+            return None
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Invalid DOM config payload in Redis", error=str(exc))
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def load(self) -> Optional[Dict[str, Any]]:
+        try:
+            return asyncio.run(self._load_async())
+        except RuntimeError:
+            logger.debug("DOM config load skipped: event loop already running")
+            return None
+
+    async def _persist_async(self, payload: Mapping[str, Any]) -> None:
+        try:
+            client = await get_redis_client()
+            await client.set(self.redis_key, json.dumps(dict(payload)))
+        except Exception as exc:
+            logger.warning("Failed to persist DOM config to Redis", error=str(exc))
+
+    def persist(self, payload: Mapping[str, Any]) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._persist_async(payload))
+        else:
+            loop.create_task(self._persist_async(payload))
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 UTC_TZ = ZoneInfo("UTC")
@@ -111,7 +159,7 @@ class DOMService:
         self._processors: Dict[str, DOMProcessor] = {}
         self._cache = DomCacheManager()
         self._stats = DomStatsAggregator(self._cache)
-        self.db_manager = get_db_manager()
+        self._config_store = _DomConfigStore()
         self.trend_thresholds: List[float] = list(
             getattr(dom_config, "trend_thresholds", DEFAULT_TREND_THRESHOLDS)
         ) or list(DEFAULT_TREND_THRESHOLDS)
@@ -355,16 +403,7 @@ class DOMService:
         self._listeners[event].append(callback)
 
     def _load_persisted_config(self) -> Optional[Dict[str, Any]]:
-        if not getattr(self, "db_manager", None):
-            return None
-        try:
-            config = self.db_manager.load_dom_config()
-        except Exception as exc:
-            logger.warning(f"Failed to load DOM config from database: {exc}")
-            return None
-        if not isinstance(config, dict) or not config:
-            return None
-        return config
+        return self._config_store.load()
 
     def _resolve_tuner_parameters(
         self, overrides: Optional[Dict[str, Any]] = None
@@ -523,7 +562,7 @@ class DOMService:
         except Exception:
             pass
 
-        if persist and getattr(self, "db_manager", None):
+        if persist:
             payload = {
                 "window": dom_config.window,
                 "max_levels": dom_config.max_levels,
@@ -532,10 +571,7 @@ class DOMService:
                 "tuner_feature_thresholds": copy.deepcopy(feature_thresholds),
                 "tuner_parameters": copy.deepcopy(self._tuner_parameters),
             }
-            try:
-                self.db_manager.save_dom_config(payload)
-            except Exception as exc:
-                logger.warning(f"Failed to persist DOM config: {exc}")
+            self._config_store.persist(payload)
 
     # --------------------------------------------------------------
     def remove_listener(self, callback: Callable, event: str = "metrics") -> None:

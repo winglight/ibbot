@@ -22,24 +22,10 @@ FORBIDDEN_RULES = {
         "pattern": re.compile(r"(?m)^\s*(?:from\s+core\s+import\s+connection_manager|import\s+core\.connection_manager)"),
         "allowed": set(),
     },
-    "get_db_manager": {
-        "pattern": re.compile(r"(?m)^\s*from\s+src\.database\s+import\s+get_db_manager"),
-        "allowed": {
-            "main.py",
-            "services/risk/runtime.py",
-            "src/dom_service.py",
-            "src/ibkr_client.py",
-            "src/optimizer_service/routes.py",
-            "src/risk_manager.py",
-            "src/routes/notifications.py",
-            "src/strategy_manager.py",
-        },
-    },
     "sqlite3": {
         "pattern": re.compile(r"(?m)^\s*import\s+sqlite3"),
         "allowed": {
             "scripts/migrate_risk_rule_type.py",
-            "src/database.py",
             "src/optimizer_service/db.py",
         },
     },
@@ -60,5 +46,25 @@ def test_forbidden_imports() -> None:
                 line = text.count("\n", 0, match.start()) + 1
                 snippet = match.group(0).strip()
                 violations.append(f"{rel_path}:{line}: {rule_name} -> {snippet}")
+
+        if rel_path == "main.py" or rel_path.startswith("src/routes/"):
+            for module in (
+                "src.notification_manager",
+                "src.queue_manager",
+                "src.risk_manager",
+                "src.strategy_manager",
+                "src.strategy_risk",
+                "src.telegram_notifier",
+                "src.database",
+            ):
+                legacy_pattern = re.compile(
+                    rf"(?m)^\s*(?:from\s+{module}\s+import|import\s+{module})"
+                )
+                for match in legacy_pattern.finditer(text):
+                    line = text.count("\n", 0, match.start()) + 1
+                    snippet = match.group(0).strip()
+                    violations.append(
+                        f"{rel_path}:{line}: legacy-manager-import -> {snippet}"
+                    )
 
     assert not violations, "Forbidden imports detected:\n" + "\n".join(violations)
