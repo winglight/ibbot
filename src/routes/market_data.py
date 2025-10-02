@@ -1,12 +1,10 @@
 import asyncio
 import contextlib
-import inspect
 import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Mapping
 
-import httpx
 import websockets
 
 import pandas as pd
@@ -14,8 +12,7 @@ from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisco
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-import core
-from core import connection_manager, get_db_manager
+from core import get_db_manager
 from .auth import get_current_user
 from src.models import (
     HistoricalDataRequest,
@@ -30,20 +27,25 @@ from src.data_layer import (
     get_data_source_manager,
     is_legacy_mode,
 )
+from src.routes.service_clients import (
+    MarketDataServiceClient,
+    ServiceClientError,
+    ServiceResponseError,
+    ServiceUnavailableError,
+)
 
 router = APIRouter()
 
 # Cache controls
 CURRENT_PRICE_CACHE_ONLY = os.getenv("CURRENT_PRICE_CACHE_ONLY", "False").lower() == "true"
-MARKET_DATA_SERVICE_URL = os.getenv("MARKET_DATA_SERVICE_URL", "http://localhost:8010").rstrip("/")
 MARKET_DATA_SERVICE_WS_URL = os.getenv("MARKET_DATA_SERVICE_WS_URL")
-MARKET_DATA_SERVICE_TIMEOUT = float(os.getenv("MARKET_DATA_SERVICE_TIMEOUT", "5.0"))
 historical_data_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_DURATION_MINUTES = 1  # 缓存1分钟
-INDEX_FUTURE_ROOTS = {"ES", "MES", "NQ", "MNQ", "YM", "MYM", "RTY", "M2K", "VX"}
 NY_TZ = ZoneInfo("America/New_York")
 
 _data_layer_manager = None
+
+_MARKET_DATA_SERVICE_CLIENT = MarketDataServiceClient()
 
 _BAR_SIZE_TO_INTERVAL = {
     "1 sec": "1s",
@@ -77,35 +79,24 @@ def _get_data_layer_manager():
         return None
 
 
-def _market_service_base_url() -> str:
-    return MARKET_DATA_SERVICE_URL or "http://localhost:8010"
+def _get_market_data_service_client() -> MarketDataServiceClient:
+    return _MARKET_DATA_SERVICE_CLIENT
 
 
-def _market_service_ws_url() -> str:
+def _market_service_base_url(client: Optional[MarketDataServiceClient] = None) -> str:
+    resolved = client.base_url if client else _MARKET_DATA_SERVICE_CLIENT.base_url
+    return resolved or MarketDataServiceClient.default_base_url
+
+
+def _market_service_ws_url(client: Optional[MarketDataServiceClient] = None) -> str:
     if MARKET_DATA_SERVICE_WS_URL:
         return MARKET_DATA_SERVICE_WS_URL.rstrip("/")
-    base = _market_service_base_url()
+    base = _market_service_base_url(client)
     if "://" not in base:
         base = f"http://{base}"
     scheme, rest = base.split("://", 1)
     ws_scheme = "wss" if scheme == "https" else "ws"
     return f"{ws_scheme}://{rest.rstrip('/')}/ws/market"
-
-
-async def _market_service_get(path: str) -> httpx.Response:
-    async with httpx.AsyncClient(
-        base_url=_market_service_base_url(),
-        timeout=MARKET_DATA_SERVICE_TIMEOUT,
-    ) as client:
-        return await client.get(path)
-
-
-async def _market_service_post(path: str, payload: Dict[str, Any]) -> httpx.Response:
-    async with httpx.AsyncClient(
-        base_url=_market_service_base_url(),
-        timeout=MARKET_DATA_SERVICE_TIMEOUT,
-    ) as client:
-        return await client.post(path, json=payload)
 
 
 def _map_bar_size_to_interval(bar_size: str) -> Optional[str]:
@@ -160,14 +151,6 @@ def _candles_to_records(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return records
 
 
-def _require_ib_client():
-    """Ensure an IBKR client instance is available before servicing the request."""
-    ib_client = getattr(core, "ibkr_client", None)
-    if ib_client is None:
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    return ib_client
-
-
 def _parse_duration_to_minutes(duration: str) -> int:
     """Parse IB-style duration strings into minutes."""
     if not duration:
@@ -215,47 +198,6 @@ def _clean_expired_cache() -> None:
         logger.debug(f"Cleaned {len(expired_keys)} expired cache entries")
 
 
-async def _fetch_ib_historical(
-    ib_client,
-    *,
-    symbol: str,
-    duration: str,
-    bar_size: str,
-    exchange: str,
-    timeout: float,
-):
-    """Call IB client's historical data API with coroutine/sync compatibility."""
-
-    method = getattr(ib_client, "get_historical_data", None)
-    if method is None:
-        return None
-
-    if inspect.iscoroutinefunction(method):
-        return await asyncio.wait_for(
-            method(
-                symbol=symbol,
-                duration=duration,
-                bar_size=bar_size,
-                exchange=exchange,
-            ),
-            timeout=timeout,
-        )
-
-    loop = asyncio.get_running_loop()
-    return await asyncio.wait_for(
-        loop.run_in_executor(
-            None,
-            lambda: method(
-                symbol=symbol,
-                duration=duration,
-                bar_size=bar_size,
-                exchange=exchange,
-            ),
-        ),
-        timeout=timeout,
-    )
-
-
 @router.post("/api/historical_data")
 async def get_historical_data(
     request: HistoricalDataRequest,
@@ -264,17 +206,6 @@ async def get_historical_data(
     """获取历史数据"""
     mode = get_data_layer_mode()
     manager = None if is_legacy_mode(mode) else _get_data_layer_manager()
-
-    if manager is None and not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
-
-    ib_client = None
-    if manager is None or connection_manager.is_connected():
-        try:
-            ib_client = _require_ib_client()
-        except HTTPException:
-            if manager is None:
-                raise
 
     try:
         _clean_expired_cache()
@@ -378,64 +309,76 @@ async def get_historical_data(
                         "source": "data_layer",
                     }
 
-        if ib_client is None:
-            raise HTTPException(status_code=404, detail="No data found")
+        client = _get_market_data_service_client()
+        service_payload = request.model_dump(exclude_none=True)
+        alias_payload = request.model_dump(by_alias=True, exclude_none=True)
+        service_payload.update(alias_payload)
 
         try:
-            df = await _fetch_ib_historical(
-                ib_client,
-                symbol=request.symbol,
-                duration=request.duration,
-                bar_size=request.bar_size,
-                exchange=request.exchange,
-                timeout=30.0,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                f"Historical data request timed out for {request.symbol}"
-            )
+            service_result = await client.request_historical_data(service_payload)
+        except ServiceUnavailableError:
             raise HTTPException(
-                status_code=408, detail="Historical data request timed out"
+                status_code=503, detail="Market data service unavailable"
+            )
+        except ServiceResponseError as exc:
+            if 500 <= exc.status_code < 600:
+                raise HTTPException(
+                    status_code=502, detail="Market data service error"
+                ) from exc
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail or "Market data service error",
+            ) from exc
+        except ServiceClientError as exc:
+            logger.error(
+                "Market data service request failed for {}: {}",
+                request.symbol,
+                exc,
+            )
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        if not isinstance(service_result, Mapping):
+            raise HTTPException(
+                status_code=502, detail="Unexpected response from market data service"
             )
 
-        if df is None or getattr(df, "empty", False):
-            if cache_df is not None and not cache_df.empty:
-                return {
-                    "success": True,
-                    "data": cache_df.to_dict("records"),
-                    "filename": None,
-                    "rows": len(cache_df),
-                }
-            raise HTTPException(status_code=404, detail="No data found")
+        records = service_result.get("data")
+        if isinstance(records, list):
+            expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
+            historical_data_cache[cache_key] = {
+                "data": records,
+                "timestamp": now,
+                "expires_at": expires_at,
+            }
 
-        db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
-        data_dict = df.to_dict("records")
-        expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
-        historical_data_cache[cache_key] = {
-            "data": data_dict,
-            "timestamp": now,
-            "expires_at": expires_at,
-        }
-        logger.debug(
-            f"Cached historical data for {request.symbol}, expires at {expires_at}"
-        )
+            if records:
+                try:
+                    df = pd.DataFrame(records)
+                    if not df.empty:
+                        db_manager.save_historical_data(
+                            request.symbol, df, bar_size=request.bar_size
+                        )
+                        filename = f"data/{request.symbol}_historical.csv"
+                        try:
+                            os.makedirs(os.path.dirname(filename), exist_ok=True)
+                            df.to_csv(filename, index=False)
+                            service_result.setdefault("filename", filename)
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to write CSV backup for historical data: {}",
+                                exc,
+                            )
+                except Exception as exc:
+                    logger.debug(
+                        "Skipping historical data persistence for %s due to %s",
+                        request.symbol,
+                        exc,
+                    )
 
-        filename = f"data/{request.symbol}_historical.csv"
-        try:
-            os.makedirs(os.path.dirname(filename), exist_ok=True)
-            df.to_csv(filename, index=False)
-        except Exception as e:
-            logger.warning(
-                f"Failed to write CSV backup for historical data: {e}"
-            )
-
-        return {
-            "success": True,
-            "data": data_dict,
-            "filename": filename,
-            "rows": len(df),
-            "source": "ibkr_api",
-        }
+        service_result.setdefault("success", True)
+        service_result.setdefault("rows", len(service_result.get("data", [])) if isinstance(service_result.get("data"), list) else 0)
+        service_result.setdefault("source", "market_data_service")
+        return service_result
 
     except HTTPException as exc:
         # Preserve explicit HTTP errors (e.g. 404/408) so callers can handle
@@ -593,152 +536,59 @@ async def get_chart_data(
                 "bar_size": request.bar_size,
             }
 
-        service_error: Optional[Exception] = None
+        client = _get_market_data_service_client()
+        service_payload = request.model_dump(exclude_none=True)
+        alias_payload = request.model_dump(by_alias=True, exclude_none=True)
+        service_payload.update(alias_payload)
+
         try:
-            service_payload = request.model_dump(exclude_none=True)
-            alias_payload = request.model_dump(by_alias=True, exclude_none=True)
-            service_payload.update(alias_payload)
-            response = await _market_service_post("/chart_data", service_payload)
-        except httpx.RequestError as exc:
-            service_error = exc
+            service_result = await client.request(
+                "POST", "/chart_data", json=service_payload
+            )
+        except ServiceUnavailableError:
+            raise HTTPException(
+                status_code=503, detail="Market data service unavailable"
+            )
+        except ServiceResponseError as exc:
+            if 500 <= exc.status_code < 600:
+                raise HTTPException(
+                    status_code=502, detail="Market data service error"
+                ) from exc
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail or "Market data service error",
+            ) from exc
+        except ServiceClientError as exc:
             logger.error(
-                "Market data service request failed for {}: {}",
+                "Market data chart request failed for {}: {}",
                 request.symbol,
                 exc,
             )
-        else:
-            if response.status_code == 404:
-                logger.debug(
-                    "Market data service returned 404 for {}",
-                    request.symbol,
-                )
-            elif response.status_code >= 500:
-                logger.error(
-                    "Market data service error",
-                    status=response.status_code,
-                    body=response.text,
-                )
-                raise HTTPException(
-                    status_code=502, detail="Market data service error"
-                )
-            elif not response.is_success:
-                detail = response.text or "Failed to load chart data"
-                raise HTTPException(status_code=response.status_code, detail=detail)
-            else:
-                try:
-                    service_result = response.json()
-                except ValueError as exc:
-                    logger.error(
-                        "Invalid JSON from market data service",
-                        error=str(exc),
-                    )
-                    raise HTTPException(
-                        status_code=502,
-                        detail="Invalid response from market data service",
-                    ) from exc
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-                if not isinstance(service_result, dict):
-                    raise HTTPException(
-                        status_code=502,
-                        detail="Unexpected chart data format from market data service",
-                    )
-
-                chart_data = service_result.get("data")
-                if isinstance(chart_data, list) and chart_data and use_cache:
-                    expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
-                    historical_data_cache[cache_key] = {
-                        "data": chart_data,
-                        "timestamp": now,
-                        "expires_at": expires_at,
-                    }
-
-                service_result.setdefault("success", True)
-                service_result.setdefault("symbol", request.symbol)
-                service_result.setdefault("duration", request.duration)
-                service_result.setdefault("bar_size", request.bar_size)
-                return service_result
-
-        if manager is None and not connection_manager.is_connected():
-            if service_error is not None:
-                raise HTTPException(
-                    status_code=503, detail="Market data service unavailable"
-                )
-            reason = None
-            try:
-                reason = connection_manager.get_last_connect_error()
-            except Exception:
-                reason = None
-            detail = "Not connected to IBKR"
-            if reason:
-                detail = f"{detail}: {reason}"
-            raise HTTPException(status_code=400, detail=detail)
-
-        if not connection_manager.is_connected():
-            if service_error is not None:
-                raise HTTPException(
-                    status_code=503, detail="Market data service unavailable"
-                )
-            raise HTTPException(status_code=400, detail="Not connected to IBKR")
-
-        ib_client = getattr(core, "ibkr_client", None)
-        if ib_client is None:
-            raise HTTPException(status_code=400, detail="IBKR client unavailable")
-
-        try:
-            df = await _fetch_ib_historical(
-                ib_client,
-                symbol=request.symbol,
-                duration=request.duration,
-                bar_size=request.bar_size,
-                exchange=request.exchange,
-                timeout=30.0,
+        if not isinstance(service_result, Mapping):
+            raise HTTPException(
+                status_code=502,
+                detail="Unexpected chart data format from market data service",
             )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Chart data historical fetch timed out for {request.symbol}"
-            )
-            df = None
 
-        # 4) 成功获取数据
-        if df is not None and not df.empty:
-            try:
-                db_manager.save_historical_data(
-                    request.symbol, df, bar_size=request.bar_size
-                )
-            except Exception as e:
-                logger.warning(f"Failed to save chart data: {e}")
+        chart_data = service_result.get("data")
+        if isinstance(chart_data, list):
+            if chart_data and use_cache:
+                expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
+                historical_data_cache[cache_key] = {
+                    "data": chart_data,
+                    "timestamp": now,
+                    "expires_at": expires_at,
+                }
+            service_result.setdefault("rows", len(chart_data))
+        service_result.setdefault("success", True)
+        service_result.setdefault("symbol", request.symbol)
+        service_result.setdefault("duration", request.duration)
+        service_result.setdefault("bar_size", request.bar_size)
 
-            chart_data = []
-            for _, row in df.iterrows():
-                raw_time = row["date"]
-                if "time" in df.columns and not pd.isna(row.get("time")):
-                    raw_time = f"{row['date']} {row['time']}"
-                t = to_local_time(raw_time)
-                chart_data.append(
-                    {
-                        "time": t,
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
-                        "volume": int(row["volume"]) if "volume" in row else 0,
-                    }
-                )
-
-            expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
-            historical_data_cache[cache_key] = {
-                "data": chart_data,
-                "timestamp": now,
-                "expires_at": expires_at,
-            }
-
-            return {
-                "success": True,
-                "data": chart_data,
-                "symbol": request.symbol,
-                "duration": request.duration,
-                "bar_size": request.bar_size,
-            }
+        if chart_data is not None:
+            return service_result
 
         # 5) API返回空，回退数据库load_historical_data
         fallback_df = None
@@ -774,31 +624,13 @@ async def get_chart_data(
                     "bar_size": request.bar_size,
                 }
 
-        reason = None
-        try:
-            reason = connection_manager.get_last_connect_error()
-        except Exception:
-            reason = None
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "No chart data found"
-                + (f". Possible cause: {reason}" if reason else "")
-            ),
-        )
+        raise HTTPException(status_code=404, detail="No chart data found")
 
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
         logger.error(f"Chart data error: {e}")
-        reason = None
-        try:
-            reason = connection_manager.get_last_connect_error()
-        except Exception:
-            reason = None
-        detail = (str(e) if str(e) else "Internal error") + (
-            f" | {reason}" if reason else ""
-        )
+        detail = str(e) if str(e) else "Internal error"
         raise HTTPException(status_code=500, detail=detail)
 
 
@@ -807,61 +639,48 @@ async def get_realtime_data(
     symbol: str,
     exchange: str = "SMART",
     user: Optional[str] = Depends(get_current_user),
+    client: MarketDataServiceClient = Depends(_get_market_data_service_client),
 ):
     """获取实时数据"""
     try:
-        response = await _market_service_get(f"/market/{symbol}")
-    except httpx.RequestError as exc:
-        logger.error("Market data service request failed", symbol=symbol, error=str(exc))
-        raise HTTPException(status_code=503, detail="Market data service unavailable") from exc
+        payload = await client.request("GET", f"/market/{symbol}")
+    except ServiceUnavailableError:
+        raise HTTPException(status_code=503, detail="Market data service unavailable")
+    except ServiceResponseError as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="No data available")
+        if 500 <= exc.status_code < 600:
+            raise HTTPException(status_code=502, detail="Market data service error")
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail or "Market data service error",
+        )
+    except ServiceClientError as exc:
+        logger.error("Market data realtime request failed for {}: {}", symbol, exc)
+        raise HTTPException(status_code=502, detail=str(exc))
 
-    if response.status_code == 404:
-        raise HTTPException(status_code=404, detail="No data available")
-    if response.status_code >= 500:
-        logger.error("Market data service error", status=response.status_code, body=response.text)
-        raise HTTPException(status_code=502, detail="Market data service error")
-    if not response.is_success:
-        detail = response.text or "Failed to load market data"
-        raise HTTPException(status_code=response.status_code, detail=detail)
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        logger.error("Invalid JSON from market data service", error=str(exc))
-        raise HTTPException(status_code=502, detail="Invalid response from market data service") from exc
-
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         raise HTTPException(status_code=502, detail="Unexpected market data format")
 
-    return {"success": True, "data": payload}
+    return {"success": True, "data": dict(payload)}
 
 @router.post("/api/current_price")
 async def get_current_price(
     request: CurrentPriceRequest,
     user: Optional[str] = Depends(get_current_user),
+    client: MarketDataServiceClient = Depends(_get_market_data_service_client),
 ):
     """获取当前价格 - 轻量级接口"""
-    ib_client = getattr(core, "ibkr_client", None)
     mode = get_data_layer_mode()
     manager = None if is_legacy_mode(mode) else _get_data_layer_manager()
 
     if CURRENT_PRICE_CACHE_ONLY:
-        if ib_client and hasattr(ib_client, "price_cache") and request.symbol in ib_client.price_cache:
-            cached_price = ib_client.price_cache.get(request.symbol)
-            if cached_price is not None:
-                return {
-                    "success": True,
-                    "symbol": request.symbol,
-                    "price": cached_price,
-                    "timestamp": now_local().isoformat(),
-                    "source": "cache_only",
-                }
         return {
             "success": False,
             "symbol": request.symbol,
             "price": None,
             "timestamp": now_local().isoformat(),
-            "error": "Cache-only mode: no cached price",
+            "error": "Cache-only mode not supported without market data service",
         }
 
     if manager:
@@ -887,7 +706,7 @@ async def get_current_price(
                 exc,
             )
             snapshot = {}
-        if snapshot and snapshot.get("last"):
+        if snapshot and snapshot.get("last") is not None:
             return {
                 "success": True,
                 "symbol": request.symbol,
@@ -896,89 +715,47 @@ async def get_current_price(
                 "source": "data_layer",
             }
 
-    if not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
-
-    ib_client = _require_ib_client()
-
     try:
-        if hasattr(ib_client, "price_cache") and request.symbol in ib_client.price_cache:
-            cached_price = ib_client.price_cache.get(request.symbol)
-            if cached_price:
-                return {
-                    "success": True,
-                    "symbol": request.symbol,
-                    "price": cached_price,
-                    "timestamp": now_local().isoformat(),
-                    "source": "cache",
-                }
+        payload = await client.fetch_current_price(request.symbol)
+    except ServiceUnavailableError:
+        raise HTTPException(status_code=503, detail="Market data service unavailable")
+    except ServiceResponseError as exc:
+        if 500 <= exc.status_code < 600:
+            raise HTTPException(status_code=502, detail="Market data service error")
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail or "Market data service error",
+        )
+    except ServiceClientError as exc:
+        logger.error("Market data current price request failed for {}: {}", request.symbol, exc)
+        raise HTTPException(status_code=502, detail=str(exc))
 
-        try:
-            data = await ib_client.get_real_time_data(
-                        request.symbol, request.exchange
-                    )
+    response: Dict[str, Any]
+    if isinstance(payload, Mapping):
+        response = dict(payload)
+    else:
+        response = {"price": payload}
 
-            if data and "last" in data:
-                price = data["last"]
-                return {
-                    "success": True,
-                    "symbol": request.symbol,
-                    "price": price,
-                    "timestamp": now_local().isoformat(),
-                    "source": "realtime",
-                }
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Current price request for {request.symbol} timed out"
-            )
+    response.setdefault("symbol", request.symbol)
+    response.setdefault("timestamp", now_local().isoformat())
+    response.setdefault("source", "market_data_service")
 
-        symbol_upper = (request.symbol or '').upper()
-        timeout_duration = 3.0 if any(symbol_upper.startswith(root) for root in INDEX_FUTURE_ROOTS) else 2.0
-        try:
-            df = await _fetch_ib_historical(
-                ib_client,
-                symbol=request.symbol,
-                duration="1 D",
-                bar_size="1 min",
-                exchange=request.exchange,
-                timeout=timeout_duration,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Historical data fallback for {request.symbol} timed out"
-            )
-            df = None
+    price = response.get("price")
+    if price is None:
+        response.setdefault("success", False)
+        response.setdefault("error", "Unable to get current price")
+    else:
+        response.setdefault("success", True)
 
-        if df is not None and not df.empty:
-            latest_price = float(df.iloc[-1]["close"])
-            return {
-                "success": True,
-                "symbol": request.symbol,
-                "price": latest_price,
-                "timestamp": now_local().isoformat(),
-                "source": "historical",
-            }
-
-        return {
-            "success": False,
-            "symbol": request.symbol,
-            "price": None,
-            "timestamp": now_local().isoformat(),
-            "error": "Unable to get current price",
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Current price error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return response
 
 
 @router.websocket("/ws/market")
 async def proxy_market_data_stream(websocket: WebSocket) -> None:
     """Proxy websocket updates from the market data service to UI clients."""
 
-    upstream_url = _market_service_ws_url()
+    client = _get_market_data_service_client()
+    upstream_url = _market_service_ws_url(client)
     await websocket.accept()
 
     async def _client_to_upstream(upstream: websockets.WebSocketClientProtocol) -> None:
@@ -1017,6 +794,10 @@ async def proxy_market_data_stream(websocket: WebSocket) -> None:
         pass
     except Exception as exc:
         logger.error("Market data websocket proxy error: {}", exc)
+        with contextlib.suppress(Exception):
+            await websocket.send_json(
+                {"type": "error", "detail": "Market data service unavailable"}
+            )
         with contextlib.suppress(Exception):
             await websocket.close(code=1011, reason="Upstream connection failed")
     finally:
