@@ -4,7 +4,9 @@ import asyncio
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, Optional, Tuple
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -68,7 +70,16 @@ class AccountServiceState:
         return metrics
 
 
-app = FastAPI(title="Account Service")
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    await _startup()
+    try:
+        yield
+    finally:
+        await _shutdown()
+
+
+app = FastAPI(title="Account Service", lifespan=_lifespan)
 _state = AccountServiceState()
 
 
@@ -232,8 +243,7 @@ async def _snapshot_watchdog_loop() -> None:
             continue
 
 
-@app.on_event("startup")
-async def on_startup() -> None:
+async def _startup() -> None:
     _state.health_interval = _read_health_interval()
     _state.watchdog_stop_event = asyncio.Event()
     _state.stale = False
@@ -262,8 +272,7 @@ async def on_startup() -> None:
     logger.info("Account service startup complete")
 
 
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
+async def _shutdown() -> None:
     if _state.watchdog_stop_event is not None:
         _state.watchdog_stop_event.set()
 
