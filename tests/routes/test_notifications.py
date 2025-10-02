@@ -184,3 +184,52 @@ def test_send_notification_returns_disabled_when_service_unavailable(
     payload = response.json()
     assert payload["success"] is False
     assert payload["message"] == "Notification service not enabled"
+
+
+def test_notification_history_route_calls_service(notifications_app: SimpleNamespace) -> None:
+    captured: dict[str, Any] = {}
+
+    class HistoryClient(NotificationServiceClient):
+        async def history(  # type: ignore[override]
+            self,
+            *,
+            channel: str | None = None,
+            status: str | None = None,
+            since: str | None = None,
+            limit: int | None = None,
+        ) -> Mapping[str, Any]:
+            captured["params"] = {
+                "channel": channel,
+                "status": status,
+                "since": since,
+                "limit": limit,
+            }
+            return {"success": True, "history": [{"channel": channel or "websocket"}]}
+
+    notifications_module.set_notification_service_client(HistoryClient())
+
+    with TestClient(notifications_app.app) as client:
+        response = client.get(
+            "/api/notifications/history",
+            params={"channel": "telegram", "status": "failed", "since": "2024-06-01T00:00:00Z", "limit": 25},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["history"][0]["channel"] == "telegram"
+    assert captured["params"]["limit"] == 25
+
+
+def test_clear_notification_history_calls_service(notifications_app: SimpleNamespace) -> None:
+    class ClearClient(NotificationServiceClient):
+        async def clear_history(self) -> Mapping[str, Any]:  # type: ignore[override]
+            return {"success": True, "cleared": 42}
+
+    notifications_module.set_notification_service_client(ClearClient())
+
+    with TestClient(notifications_app.app) as client:
+        response = client.delete("/api/notifications/history")
+
+    assert response.status_code == 200
+    assert response.json()["cleared"] == 42

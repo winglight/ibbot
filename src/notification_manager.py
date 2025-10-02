@@ -1,13 +1,19 @@
 import asyncio
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any, List, Mapping
 from loguru import logger
 
 from .utils import now_local
 
 from .telegram_notifier import TelegramNotifier
 from .websocket_manager import WebSocketManager
-from .database import DatabaseManager
+from .cache import ensure_redis
+
+SETTINGS_STORE_KEY = "json:notification:settings"
+HISTORY_LIST_KEY = "list:notification:history"
+HISTORY_MAX_ENTRIES = 500
 
 EVENT_TOKEN_TO_LABEL = {
     'order_filled': 'Order Filled',
@@ -65,12 +71,20 @@ notification_logger = logger.bind(module="notification_manager", request_id="-")
 class NotificationManager:
     """统一的通知管理器，负责所有通知的发送和保存"""
 
-    def __init__(self, telegram_notifier: Optional[TelegramNotifier] = None,
-                 websocket_manager: Optional[WebSocketManager] = None,
-                 db_manager: Optional[DatabaseManager] = None):
+    def __init__(
+        self,
+        telegram_notifier: Optional[TelegramNotifier] = None,
+        websocket_manager: Optional[WebSocketManager] = None,
+        redis_client: Optional[Any] = None,
+        *,
+        history_key: str = HISTORY_LIST_KEY,
+        history_max_entries: int = HISTORY_MAX_ENTRIES,
+    ):
         self.telegram_notifier = telegram_notifier
         self.websocket_manager = websocket_manager
-        self.db_manager = db_manager
+        self._redis = redis_client
+        self._history_key = history_key
+        self._history_max_entries = max(0, int(history_max_entries))
         self._settings_cache: Optional[Dict[str, Any]] = None
         self._settings_expires: Optional[datetime] = None
         self._settings_lock: Optional[asyncio.Lock] = None
@@ -146,16 +160,19 @@ class NotificationManager:
             return DEFAULT_EVENT_TOKENS.copy()
         return normalized
 
-    def set_dependencies(self, telegram_notifier: Optional[TelegramNotifier] = None,
-                        websocket_manager: Optional[WebSocketManager] = None,
-                        db_manager: Optional[DatabaseManager] = None):
+    def set_dependencies(
+        self,
+        telegram_notifier: Optional[TelegramNotifier] = None,
+        websocket_manager: Optional[WebSocketManager] = None,
+        redis_client: Optional[Any] = None,
+    ):
         """设置依赖项"""
         if telegram_notifier:
             self.telegram_notifier = telegram_notifier
         if websocket_manager:
             self.websocket_manager = websocket_manager
-        if db_manager:
-            self.db_manager = db_manager
+        if redis_client is not None:
+            self._redis = redis_client
 
     def _load_settings(self, raw_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """将数据库配置与默认值合并，确保返回结构完整。"""
@@ -237,18 +254,29 @@ class NotificationManager:
             ):
                 return self._settings_cache
 
-            loaded: Optional[Dict[str, Any]] = None
-            if self.db_manager:
+            loaded: Optional[Mapping[str, Any]] = None
+            redis = await self._ensure_redis()
+            if redis is not None:
                 try:
-                    loaded = await asyncio.to_thread(
-                        self.db_manager.load_notification_config
-                    )
+                    record: Optional[Any] = None
+                    json_api = getattr(redis, "json", None)
+                    if callable(json_api):
+                        record = await json_api().get(SETTINGS_STORE_KEY)
+                    else:
+                        raw_value = await redis.get(SETTINGS_STORE_KEY)
+                        if isinstance(raw_value, str):
+                            record = json.loads(raw_value)
+                    if isinstance(record, Mapping):
+                        if isinstance(record.get("settings"), Mapping):
+                            loaded = record["settings"]
+                        else:
+                            loaded = record
                 except Exception as exc:
                     notification_logger.error(
                         f"Load notification settings failed: {exc}"
                     )
 
-            settings = self._load_settings(loaded)
+            settings = self._load_settings(dict(loaded) if isinstance(loaded, Mapping) else None)
             self._settings_cache = settings
             self._settings_expires = now + timedelta(seconds=self._settings_ttl_seconds)
             return settings
@@ -269,24 +297,46 @@ class NotificationManager:
     ) -> None:
         """在后台线程中保存通知历史，避免阻塞事件循环。"""
 
-        if not self.db_manager:
+        redis = await self._ensure_redis()
+        if redis is None or not self._history_key:
             return
 
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "stream": "manager",
+            "message_id": uuid.uuid4().hex,
+            "channel": channel,
+            "status": status,
+            "message": message,
+            "event_type": event_type,
+            "retries": 0,
+        }
+        if error_message:
+            entry["error"] = error_message
+
         try:
-            await asyncio.to_thread(
-                self.db_manager.save_notification_history,
-                channel=channel,
-                event_type=event_type,
-                message=message,
-                status=status,
-                error_message=error_message,
-            )
+            serialised = json.dumps(entry, ensure_ascii=False)
+        except TypeError:
+            entry.pop("message", None)
+            serialised = json.dumps(entry, ensure_ascii=False)
+
+        try:
+            await redis.lpush(self._history_key, serialised)
+            if self._history_max_entries:
+                await redis.ltrim(self._history_key, 0, self._history_max_entries - 1)
         except Exception as exc:  # pragma: no cover - defensive logging
             notification_logger.warning(
                 f"Failed to persist notification history: {exc}",
                 channel=channel,
                 event_type=event_type,
             )
+
+    async def _ensure_redis(self) -> Optional[Any]:
+        if self._redis is not None:
+            return self._redis
+        redis = await ensure_redis()
+        self._redis = redis
+        return redis
 
     async def send_notification(self, message: str, event_type: str = "general",
                                channels: List[str] = None, **kwargs) -> Dict[str, bool]:
