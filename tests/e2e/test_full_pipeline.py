@@ -174,7 +174,6 @@ def test_websocket_handshake_with_mock_manager(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(websocket_module, "_websocket_manager", lambda: dummy_ws_manager)
     monkeypatch.setattr(websocket_module, "_order_manager", lambda: None)
     monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
-    monkeypatch.setattr(websocket_module, "get_dom_optimization_orchestrator", lambda: None)
     monkeypatch.setattr(websocket_module.core, "ibkr_client", _DummyIBClient(), raising=False)
 
     with TestClient(app) as client:

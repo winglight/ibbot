@@ -58,7 +58,6 @@ async def test_websocket_emits_connection_status(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(websocket_module, "_fetch_positions", noop_fetch_positions)
     monkeypatch.setattr(websocket_module, "_fetch_orders", stub_fetch_orders)
     monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
-    monkeypatch.setattr(websocket_module, "get_dom_optimization_orchestrator", lambda: None)
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:
@@ -128,7 +127,6 @@ async def test_websocket_emits_disconnected_status(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(websocket_module, "_fetch_positions", empty_positions)
     monkeypatch.setattr(websocket_module, "_fetch_orders", empty_orders)
     monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
-    monkeypatch.setattr(websocket_module, "get_dom_optimization_orchestrator", lambda: None)
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:
@@ -196,7 +194,6 @@ async def test_websocket_handles_service_unavailable(monkeypatch: pytest.MonkeyP
     )
     monkeypatch.setattr(websocket_module._ORDERS_CLIENT, "list_orders", fail_list_orders)
     monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
-    monkeypatch.setattr(websocket_module, "get_dom_optimization_orchestrator", lambda: None)
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:
