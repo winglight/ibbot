@@ -120,7 +120,8 @@ def test_queue_monitor_aggregates_metrics() -> None:
     payload = json.loads(hash_state["queue:commands"])
     assert payload["length"] == 7
 
-    health_key = f"hash:service:health:{runtime.service_name}"
+    health_key = runtime.health_hash_key
+    assert health_key == "hash:service:health:queue"
     assert health_key in hash_state_all
     health_payload = hash_state_all[health_key]
     assert health_payload.get("total_queue_length") == "7"
@@ -131,3 +132,28 @@ def test_queue_monitor_aggregates_metrics() -> None:
     assert "commands-queue-length" in metric_names
     assert "commands-consumption-rate" in metric_names
     assert "jobs-pending" in metric_names
+
+
+def test_collect_once_writes_health_to_queue_hash() -> None:
+    redis = FakeRedis()
+    writer = RecordingWriter()
+
+    async def redis_factory() -> FakeRedis:
+        return redis
+
+    runtime = QueueMonitorRuntime(
+        queues=[QueueTarget(name="commands", queue_key="queue:ib:commands")],
+        stream_targets=[StreamTarget(name="jobs", stream_key="stream:jobs", group="group:jobs")],
+        redis_factory=redis_factory,
+        write_fn=writer,
+        metrics_interval=60.0,
+        pubsub_channel=None,
+    )
+
+    async def run_collect_once() -> None:
+        await runtime.collect_once()
+
+    asyncio.run(run_collect_once())
+
+    assert "hash:service:health:queue" in redis.hash_store
+    assert "hash:service:health:queue-monitor" not in redis.hash_store
