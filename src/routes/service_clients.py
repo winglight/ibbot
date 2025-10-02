@@ -259,6 +259,19 @@ class AccountServiceClient(ServiceClient):
             params=params,
         )
 
+    async def request_refresh(self, *, reason: str | None = None) -> None:
+        payload: Dict[str, Any] = {}
+        if reason:
+            payload["reason"] = reason
+
+        await self.request(
+            "POST",
+            "/account/refresh",
+            json=payload,
+            expected_status=202,
+            parse_json=False,
+        )
+
 
 class OrdersServiceClient(ServiceClient):
     """HTTP client for the Orders microservice."""

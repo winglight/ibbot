@@ -162,7 +162,6 @@ python scripts/run_all.py --dry-run ib_command
 | `hash:service:health:risk-service` | `risk` 服务（`RISK_SERVICE_HEALTH_KEY`） | `status`、`last_seen`、`last_error` |
 | `hash:service:health:strategy` | `strategy` 服务（`STRATEGY_SERVICE_HEALTH_KEY`） | `status`/`healthy`、`last_error`、`last_seen` |
 | `hash:service:health:notification` | 通知服务（`NOTIFICATION_SERVICE_HEALTH_KEY`） | `healthy`、`last_error`、`pending_retries` |
-| `hash:service:health:account-snapshot` | 账户快照服务（`ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY`） | `status`、`healthy`、`last_error` |
 | `hash:service:health:queue` | 队列监控守护进程（`QUEUE_MONITOR_HEALTH_KEY`） | `status`、`last_seen`、聚合队列指标 |
 | `hash:service:queue-monitor` | `queue_monitor` 服务 | `timestamp`、队列统计字段 |
 

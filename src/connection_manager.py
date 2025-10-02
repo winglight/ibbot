@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Any, Callable, Coroutine, Dict, Optional
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -19,12 +19,24 @@ import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 from src.config import load_project_env
+from . import account_snapshot_cache
+from .routes.service_clients import AccountServiceClient, ServiceClientError
 import types
 import subprocess
 from pathlib import Path
 
 
 load_project_env()
+
+# Cached HTTP client for the account service to avoid repeated reconfiguration
+_ACCOUNT_SERVICE_CLIENT: AccountServiceClient | None = None
+
+
+def _get_account_service_client() -> AccountServiceClient:
+    global _ACCOUNT_SERVICE_CLIENT
+    if _ACCOUNT_SERVICE_CLIENT is None:
+        _ACCOUNT_SERVICE_CLIENT = AccountServiceClient()
+    return _ACCOUNT_SERVICE_CLIENT
 
 # Robust env int parser to tolerate inline comments and invalid values
 # Examples:
@@ -151,6 +163,93 @@ class ConnectionManager:
         self._next_client_id_hint = self._normalize_client_id(self.config.client_id)
         self.config.client_id = self._next_client_id_hint
         self._client_id_conflict_detected: bool = False
+
+    def _schedule_background_task(
+        self,
+        coro_factory: Callable[[], Coroutine[Any, Any, Any]],
+        *,
+        description: str,
+    ) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            try:
+                loop.create_task(coro_factory())
+                return
+            except Exception as exc:  # pragma: no cover - defensive guard
+                connection_logger.debug(
+                    "Failed to schedule %s on running loop: %s",
+                    description,
+                    exc,
+                )
+
+        target_loop = self._loop if self._loop and self._loop.is_running() else None
+        if target_loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(coro_factory(), target_loop)
+                return
+            except Exception as exc:  # pragma: no cover - defensive guard
+                connection_logger.debug(
+                    "Failed to schedule %s on connection loop: %s",
+                    description,
+                    exc,
+                )
+
+        def _runner() -> None:
+            try:
+                asyncio.run(coro_factory())
+            except Exception as exc:  # pragma: no cover - defensive guard
+                connection_logger.debug(
+                    "Background %s task raised: %s",
+                    description,
+                    exc,
+                )
+
+        thread_name = f"ibbot-{description.replace(' ', '-')}"
+        threading.Thread(target=_runner, name=thread_name, daemon=True).start()
+
+    def _mark_snapshots_stale(self, reason: str) -> None:
+        async def _task() -> None:
+            try:
+                await account_snapshot_cache.mark_all_snapshots_stale(reason)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                connection_logger.warning(
+                    "Failed to mark account snapshots stale (%s): %s",
+                    reason,
+                    exc,
+                )
+
+        self._schedule_background_task(
+            _task,
+            description="account-snapshots-stale",
+        )
+
+    def _request_account_refresh(self, reason: str) -> None:
+        async def _task() -> None:
+            try:
+                client = _get_account_service_client()
+                await client.request_refresh(reason=reason)
+            except ServiceClientError as exc:
+                detail = getattr(exc, "detail", None)
+                connection_logger.warning(
+                    "Account refresh request failed (%s): %s",
+                    reason,
+                    detail or str(exc),
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                connection_logger.warning(
+                    "Account refresh request failed (%s): %s",
+                    reason,
+                    exc,
+                )
+
+        self._schedule_background_task(
+            _task,
+            description="account-refresh",
+        )
 
     def _notify_ibkr_client_connected(self, *, external: bool) -> None:
         """Inform ``IBKRClient`` when a connection succeeds outside its control."""
@@ -446,26 +545,13 @@ class ConnectionManager:
                         pass
                 return
 
-            try:
-                import core  # 延迟导入避免循环依赖
+            connection_loss_codes = {1100, 1300, 2103, 2105, 2110}
+            connection_restore_codes = {1101, 1102, 1301, 2104, 2106, 2111}
 
-                snapshot_service = getattr(core, "account_snapshot_service", None)
-                if snapshot_service:
-                    connection_loss_codes = {1100, 1300, 2103, 2105, 2110}
-                    connection_restore_codes = {1101, 1102, 1301, 2104, 2106, 2111}
-
-                    if errorCode in connection_loss_codes:
-                        snapshot_service.flag_connection_loss(
-                            errorString or f"IBKR error {errorCode}"
-                        )
-                    elif errorCode in connection_restore_codes:
-                        snapshot_service.request_immediate_refresh(
-                            reason="connection_restored"
-                        )
-            except Exception as snapshot_err:  # pragma: no cover - 防御性日志
-                connection_logger.debug(
-                    f"Snapshot service notification failed: {snapshot_err}"
-                )
+            if errorCode in connection_loss_codes:
+                self._mark_snapshots_stale(errorString or f"IBKR error {errorCode}")
+            elif errorCode in connection_restore_codes:
+                self._request_account_refresh("connection_restored")
 
             if errorCode in {2103, 2105}:
                 client = None
@@ -741,18 +827,7 @@ class ConnectionManager:
                 account_type = "Paper" if self.config.paper_trading else "Live"
                 connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
 
-                try:
-                    import core
-
-                    snapshot_service = getattr(core, "account_snapshot_service", None)
-                    if snapshot_service:
-                        snapshot_service.request_immediate_refresh(
-                            reason="connection_established"
-                        )
-                except Exception as notify_err:  # pragma: no cover - defensive logging
-                    connection_logger.debug(
-                        f"Failed to notify snapshot service after connect: {notify_err}"
-                    )
+                self._request_account_refresh("connection_established")
                 
                 # 保存事件循环引用
                 self._loop = loop
@@ -1200,16 +1275,7 @@ class ConnectionManager:
             self._loop = None
             self._connection_thread = None
 
-            try:
-                import core
-
-                snapshot_service = getattr(core, "account_snapshot_service", None)
-                if snapshot_service:
-                    snapshot_service.flag_connection_loss("disconnected")
-            except Exception as notify_err:  # pragma: no cover - defensive logging
-                connection_logger.debug(
-                    f"Failed to notify snapshot service on disconnect: {notify_err}"
-                )
+            self._mark_snapshots_stale("disconnected")
         except Exception as e:
             connection_logger.error(f"Disconnect error: {e}")
 

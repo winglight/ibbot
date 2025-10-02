@@ -360,7 +360,7 @@ def test_websocket_broadcasts_risk_rules_updates(
                 "updated_at": "2024-01-01T00:00:00+00:00",
                 "source": "test",
             }
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 websocket_module._handle_risk_rules_pubsub(
                     websocket_module.RISK_RULES_UPDATE_CHANNEL,
                     json.dumps(payload),
