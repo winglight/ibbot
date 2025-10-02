@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
 
 from services.risk.engine import RiskEngine, RiskEvent
 from src.ibbot import update_service_health
+from src.database import get_db_manager
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
     ack_stream,
@@ -544,6 +545,41 @@ class RiskRuntime:
         """Expose health metrics collected by the runtime."""
 
         return self._health_metrics()
+
+    async def fetch_order_queue_status(self) -> dict[str, Any]:
+        """Return a lightweight snapshot of the order queue state."""
+
+        metrics = self.health_snapshot()
+        pending = int(metrics.get("pending_commands", 0) or 0)
+        payload = {
+            "success": True,
+            "queue": self.command_queue,
+            "pending": pending,
+            "metrics": metrics,
+        }
+        if self._market_last_processed is not None:
+            payload["market_last_processed_at"] = self._market_last_processed.isoformat()
+        if self._results_last_processed is not None:
+            payload["results_last_processed_at"] = self._results_last_processed.isoformat()
+        return payload
+
+    async def fetch_sizing_history(
+        self,
+        *,
+        symbol: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Load persisted sizing recommendations from the database."""
+
+        limit_clamped = max(1, min(int(limit or 1), 500))
+
+        def _load_history() -> list[dict[str, Any]]:
+            db = get_db_manager()
+            return db.load_sizing_history(symbol=symbol, since=since, limit=limit_clamped)
+
+        items = await asyncio.to_thread(_load_history)
+        return {"success": True, "items": items, "count": len(items)}
 
     async def position_sizing(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Estimate a contract count for the provided payload."""
