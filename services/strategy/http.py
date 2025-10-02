@@ -7,7 +7,7 @@ import contextlib
 import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import secrets
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +19,12 @@ from services.strategy import StrategyTaskConsumer, sync_strategy_metadata
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
+from src.utils import now_local, parse_local_datetime
+from src.utils.strategy_cache import (
+    compute_performance_metrics,
+    get_strategy_orders,
+    get_strategy_orders_in_range,
+)
 
 SERVICE_NAME = "strategy"
 DEFAULT_STRATEGY_QUEUE = "list:queue:strategy"
@@ -728,6 +734,76 @@ def create_app(
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
         return document
+
+    @app.get("/strategies/{name}/performance")
+    async def get_strategy_performance(
+        name: str,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+        range_param: str | None = Query(None, alias="range"),
+        start: str | None = Query(None),
+        end: str | None = Query(None),
+    ) -> dict[str, Any]:
+        def _parse_datetime(value: str | None, label: str) -> datetime | None:
+            if value is None:
+                return None
+            try:
+                return parse_local_datetime(value)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"invalid {label} datetime",
+                ) from exc
+
+        start_date = _parse_datetime(start, "start")
+        end_date = _parse_datetime(end, "end")
+
+        range_value = (range_param or "").strip().lower()
+        if range_value:
+            now = now_local()
+            if range_value == "1d":
+                start_date = now - timedelta(days=1)
+            elif range_value == "1w":
+                start_date = now - timedelta(weeks=1)
+            elif range_value == "1m":
+                start_date = now - timedelta(days=30)
+            elif range_value == "wtd":
+                start_date = (now - timedelta(days=now.weekday())).replace(
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
+            elif range_value == "mtd":
+                start_date = now.replace(hour=0, minute=0, second=0, microsecond=0, day=1)
+            elif range_value == "ytd":
+                start_date = now.replace(hour=0, minute=0, second=0, microsecond=0, month=1, day=1)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="invalid range parameter",
+                )
+
+        if start_date and end_date and end_date < start_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="end must not be earlier than start",
+            )
+
+        document = await runtime.get_strategy(name)
+        if document is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
+
+        if start_date or end_date:
+            await get_strategy_orders_in_range(name, start_date=start_date, end_date=end_date)
+        else:
+            await get_strategy_orders(name)
+
+        metrics = await compute_performance_metrics(
+            name,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return {"success": True, "name": name, "metrics": metrics}
 
     @app.delete("/strategy/{name}", status_code=status.HTTP_204_NO_CONTENT)
     @app.delete("/strategies/{name}", status_code=status.HTTP_204_NO_CONTENT)
