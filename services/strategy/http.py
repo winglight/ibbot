@@ -362,7 +362,7 @@ async def _lifespan(
 ) -> AsyncIterator[None]:
     logger = get_logger("ibbot.services.strategy.http")
     if redis_factory is None:
-        redis = await get_redis_client(DEFAULT_REDIS_URL)
+        redis = await get_redis_client()
         owns_redis = True
     else:
         candidate = redis_factory()
