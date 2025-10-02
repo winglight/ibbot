@@ -44,6 +44,7 @@ sys.path.append(str(Path(__file__).parent))
 
 import core
 from src.cache import hgetall
+from src.account_service_readiness import refresh_account_service_status
 from src.database import get_db_manager
 from src.notification_manager import NotificationManager
 from src.order_manager import get_order_manager
@@ -630,6 +631,13 @@ async def lifespan(app: FastAPI):
         )
 
     await registry.start_modules(app, enabled_modules)
+
+    # Perform an early readiness probe so operators receive feedback before the
+    # first websocket handshake or status poll.
+    try:
+        await refresh_account_service_status(max_age=None)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        main_logger.warning("Account service readiness probe raised an exception: {}", exc)
 
     try:
         yield

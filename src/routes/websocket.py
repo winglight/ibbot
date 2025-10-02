@@ -722,17 +722,21 @@ async def websocket_endpoint(websocket: WebSocket):
         initial_limit = 10
         orders_result = await _fetch_orders(limit=initial_limit, offset=0)
         if orders_result is None:
-            raise RuntimeError("Orders unavailable")
-        orders, total = orders_result
-        payload = _orders_payload(orders, limit=initial_limit, page=1, total=total)
-        await websocket.send_text(json.dumps(payload))
+            unavailable_payload = _service_unavailable_payload(
+                "orders_snapshot", meta={"limit": initial_limit, "page": 1}
+            )
+            await websocket.send_text(json.dumps(unavailable_payload))
+        else:
+            orders, total = orders_result
+            payload = _orders_payload(orders, limit=initial_limit, page=1, total=total)
+            await websocket.send_text(json.dumps(payload))
     except Exception as e:
         logger.warning(f"Failed to send initial orders snapshot: {e}")
         await websocket.send_text(
             json.dumps(
                 _service_unavailable_payload(
                     "orders_snapshot",
-                    meta={"limit": 10, "page": 1},
+                    meta={"limit": initial_limit, "page": 1},
                 )
             )
         )
@@ -977,7 +981,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         start_date=start_dt.isoformat() if start_dt else None,
                     )
                     if result is None:
-                        raise RuntimeError("Orders unavailable")
+                        error_payload = _service_unavailable_payload(
+                            "orders_snapshot",
+                            meta={
+                                "limit": limit,
+                                "page": page,
+                                "start_date": start_date_raw,
+                            },
+                        )
+                        last_responses[key] = error_payload
+                        await websocket.send_text(json.dumps(error_payload))
+                        continue
+
                     orders, total = result
                     payload = _orders_payload(
                         orders,
