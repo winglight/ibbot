@@ -258,7 +258,18 @@ class OrderManager {
             if (response?.success) {
                 const actionText = response.action || 'CLOSE';
                 const quantityText = Number.isFinite(response.quantity) ? response.quantity : qty;
-                const orderIdText = response.order_id ? ` (订单ID: ${response.order_id})` : '';
+                let orderIdText = '';
+                if (response?.order_id !== undefined && response?.order_id !== null) {
+                    const idInfo = this.app?.formatOrderIdDisplay?.(response.order_id);
+                    const rawId = String(response.order_id).trim();
+                    const shortId = idInfo?.short || (rawId ? rawId.slice(-3) : '');
+                    if (shortId) {
+                        orderIdText = ` (订单ID: ${shortId})`;
+                    }
+                    if (idInfo?.full && idInfo.full !== shortId) {
+                        console.info('Close position order submitted with full ID:', idInfo.full);
+                    }
+                }
                 this.app.showAlert('success', `平仓订单已提交: ${actionText} ${quantityText} ${lookupSymbol}${orderIdText}`);
                 await this.app.loadPortfolio();
                 this.loadOrders();
@@ -515,24 +526,36 @@ class OrderManager {
         // 获取当前表格中的所有行
         const existingRows = Array.from(tbody.querySelectorAll('tr'));
         const existingOrderIds = new Set();
-        
+
         // 收集现有的订单ID
         existingRows.forEach(row => {
-            const cells = row.querySelectorAll('td');
-            if (cells.length > 0) {
-                const orderId = cells[0].textContent.trim();
-                if (orderId && orderId !== 'No orders found' && !orderId.includes('Loading')) {
-                    existingOrderIds.add(orderId);
-                }
+            const datasetId = row?.dataset?.orderId;
+            if (datasetId) {
+                existingOrderIds.add(datasetId);
+                return;
+            }
+            const firstCell = row.querySelector('td');
+            const orderId = firstCell ? firstCell.textContent.trim() : '';
+            if (orderId && orderId !== 'No orders found' && !orderId.includes('Loading')) {
+                existingOrderIds.add(orderId);
             }
         });
         
         // 处理每个新订单
         newOrders.forEach((order, index) => {
-            const orderId = order.order_id.toString();
+            const rawOrderId = order?.order_id;
+            if (rawOrderId === null || rawOrderId === undefined) {
+                console.warn('Skipping order without order_id field:', order);
+                return;
+            }
+            const orderId = String(rawOrderId).trim();
+            if (!orderId) {
+                console.warn('Skipping order with blank order_id:', order);
+                return;
+            }
             const existingRow = this.findOrderRow(tbody, orderId);
             const newRowContent = this.generateOrderRowHtml(order);
-            
+
             if (existingRow) {
                 // 检查内容是否有变化
                 if (!this.isRowContentEqual(existingRow, newRowContent)) {
@@ -568,10 +591,15 @@ class OrderManager {
      * 查找指定订单ID的行
      */
     findOrderRow(tbody, orderId) {
+        if (!tbody) return null;
+        const targetId = orderId === null || orderId === undefined ? '' : String(orderId);
         const rows = tbody.querySelectorAll('tr');
         for (let row of rows) {
-            const cells = row.querySelectorAll('td');
-            if (cells.length > 0 && cells[0].textContent.trim() === orderId) {
+            if (row?.dataset?.orderId === targetId) {
+                return row;
+            }
+            const firstCell = row.querySelector('td');
+            if (!row?.dataset?.orderId && firstCell && firstCell.textContent.trim() === targetId) {
                 return row;
             }
         }
@@ -596,9 +624,18 @@ class OrderManager {
         };
 
         for (let i = 0; i < cells1.length; i++) {
+            const isOrderIdCol = (i === 0);
             const isActionsCol = (i === cells1.length - 1);
             const isPnlCol = (i === 7);        // 列顺序：0-id,1-sym,2-act,3-qty,4-price,5-status,6-created,7-pnl,8-comm,9-source,10-ops
             const isCommissionCol = (i === 8);
+
+            if (isOrderIdCol) {
+                const id1 = row1?.dataset?.orderId || '';
+                const id2 = row2?.dataset?.orderId || '';
+                if (id1 !== id2) return false;
+                if (cells1[i].textContent.trim() !== cells2[i].textContent.trim()) return false;
+                continue;
+            }
 
             if (isActionsCol) {
                 // 操作列：比较按钮数量与类型（通过 title），忽略禁用状态、图标闪烁等差异
@@ -766,7 +803,13 @@ class OrderManager {
         }
 
         this.app.editingOrderId = orderId;
-        this.app.showAlert('info', `正在编辑订单 ${orderId}，请修改后重新提交`);
+        const idInfo = this.app?.formatOrderIdDisplay?.(orderId);
+        const shortId = idInfo?.short || (orderId !== null && orderId !== undefined ? String(orderId).slice(-3) : '');
+        const label = shortId || (orderId !== null && orderId !== undefined ? String(orderId) : '');
+        if (idInfo?.full && idInfo.full !== label) {
+            console.info('Editing order with full ID:', idInfo.full);
+        }
+        this.app.showAlert('info', `正在编辑订单 ${label}，请修改后重新提交`);
     }
 
     generateOrderRowHtml(order) {
@@ -799,7 +842,36 @@ class OrderManager {
         const escapedAction = actionStr.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
         const escapedOrderType = orderTypeStr.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
         
-        const detailsButton = `<button class="btn btn-sm btn-info me-1" onclick="app.openOrderDetails('${order.order_id}')" title="Details"><i class="fas fa-info-circle"></i></button>`;
+        const rawOrderId = order?.order_id !== undefined && order?.order_id !== null
+            ? String(order.order_id).trim()
+            : '';
+        const orderIdInfo = this.app?.formatOrderIdDisplay?.(rawOrderId);
+        const escapeHtml = (value) => {
+            if (this.app && typeof this.app.escapeHtml === 'function') {
+                return this.app.escapeHtml(value);
+            }
+            if (value === null || value === undefined) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        };
+        const orderIdCellHtml = (() => {
+            if (orderIdInfo && typeof orderIdInfo.html === 'string') {
+                return orderIdInfo.html;
+            }
+            if (!rawOrderId) {
+                return '<span class="order-id-display text-muted">—</span>';
+            }
+            const safeFull = escapeHtml(rawOrderId);
+            const safeShort = escapeHtml(rawOrderId.slice(-3));
+            return `<span class="order-id-display" title="${safeFull}" aria-label="${safeFull}" data-full-order-id="${safeFull}">${safeShort}</span>`;
+        })();
+        const safeOrderIdForJs = rawOrderId.replace(/'/g, "\\'");
+
+        const detailsButton = `<button class="btn btn-sm btn-info me-1" onclick="app.openOrderDetails('${safeOrderIdForJs}')" title="Details"><i class="fas fa-info-circle"></i></button>`;
 
         const createdAtInfo = this.formatOrderTimestamp(order.submit_time || order.created_at);
         const createdTitleAttr = createdAtInfo.title ? ` title="${createdAtInfo.title}"` : '';
@@ -808,7 +880,7 @@ class OrderManager {
             `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${order.order_id}, '${escapedSymbol}', '${escapedAction}', ${order.quantity}, '${escapedOrderType}', ${(order.limit_price || order.price) || 0})" title="Edit"><i class="fas fa-edit"></i></button>` : '';
 
         const syncButton = (order.order_type === 'LMT' && order.status === 'Submitted') ?
-            `<button class="btn btn-sm btn-outline-primary me-1" onclick="app.orderManager.syncLimitOrder('${order.order_id}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : '';
+            `<button class="btn btn-sm btn-outline-primary me-1" onclick="app.orderManager.syncLimitOrder('${safeOrderIdForJs}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : '';
         
         const cancelButton = canCancel ? 
             `<button class="btn btn-sm btn-danger" onclick="app.orderManager.cancelOrder(${order.order_id}, this)" title="Cancel"><i class="fas fa-times"></i></button>` : '';
@@ -819,11 +891,25 @@ class OrderManager {
         if (createdAtInfo.raw) {
             trElement.setAttribute('data-created-at', createdAtInfo.raw);
         }
+        if (orderIdInfo?.full) {
+            trElement.dataset.orderId = orderIdInfo.full;
+            if (orderIdInfo.short) {
+                trElement.dataset.shortOrderId = orderIdInfo.short;
+            } else {
+                delete trElement.dataset.shortOrderId;
+            }
+        } else if (rawOrderId) {
+            trElement.dataset.orderId = rawOrderId;
+            trElement.dataset.shortOrderId = rawOrderId.slice(-3);
+        } else {
+            delete trElement.dataset.orderId;
+            delete trElement.dataset.shortOrderId;
+        }
         trElement.onmouseenter = (event) => this.app.showNotesTooltip(event, trElement);
         trElement.onmouseleave = () => this.app.hideNotesTooltip();
 
         trElement.innerHTML = `
-            <td>${order.order_id}</td>
+            <td>${orderIdCellHtml}</td>
             <td><a href="#" class="text-decoration-none" onclick="app.openMonitorModal('${escapedSymbol}'); return false;">${this.app.escapeHtml ? this.app.escapeHtml(symbolStr) : symbolStr}</a></td>
             <td>${this.app.escapeHtml ? this.app.escapeHtml(actionStr) : escapedAction}</td>
             <td>${order.quantity}</td>
@@ -1254,8 +1340,26 @@ class OrderManager {
             const pnlClass = exe.pnl != null
                 ? (Number(exe.pnl) > 0 ? 'text-success' : Number(exe.pnl) < 0 ? 'text-danger' : '')
                 : '';
+            const rawExecId = exe?.id != null ? String(exe.id).trim() : (exe?.order_id != null ? String(exe.order_id).trim() : '');
+            const execIdInfo = this.app?.formatOrderIdDisplay?.(rawExecId);
+            const execIdCell = (() => {
+                if (execIdInfo && typeof execIdInfo.html === 'string') {
+                    return execIdInfo.html;
+                }
+                if (!rawExecId) {
+                    return '<span class="order-id-display text-muted">—</span>';
+                }
+                const safeFull = this.app.escapeHtml ? this.app.escapeHtml(rawExecId) : rawExecId;
+                const safeShort = this.app.escapeHtml ? this.app.escapeHtml(rawExecId.slice(-3)) : rawExecId.slice(-3);
+                return `<span class="order-id-display" title="${safeFull}" aria-label="${safeFull}" data-full-order-id="${safeFull}">${safeShort}</span>`;
+            })();
+            if (execIdInfo?.full) {
+                tr.dataset.orderId = execIdInfo.full;
+            } else if (rawExecId) {
+                tr.dataset.orderId = rawExecId;
+            }
             tr.innerHTML = `
-              <td>${exe.id ?? exe.order_id ?? '-'}</td>
+              <td>${execIdCell}</td>
               <td>${exe.symbol ?? '-'}</td>
               <td>${createdDisplay}</td>
               <td>${exe.action ?? '-'}</td>

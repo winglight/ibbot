@@ -2960,8 +2960,28 @@
                 const submitLabel = order?.submit_time ? formatIsoDatetime(order.submit_time) : '-';
                 const execLabel = order?.executed_at ? formatIsoDatetime(order.executed_at) : '-';
                 const statusBadge = this.renderOrderStatus(order?.status);
+                const rawOrderId = order?.order_id !== undefined && order?.order_id !== null
+                    ? String(order.order_id).trim()
+                    : '';
+                const orderIdInfo = this.app?.formatOrderIdDisplay?.(rawOrderId);
+                const orderIdCell = (() => {
+                    if (orderIdInfo && typeof orderIdInfo.html === 'string') {
+                        return orderIdInfo.html;
+                    }
+                    if (!rawOrderId) {
+                        return '<span class="order-id-display text-muted">—</span>';
+                    }
+                    const safeFull = escapeHtml(rawOrderId);
+                    const safeShort = escapeHtml(rawOrderId.slice(-3));
+                    return `<span class="order-id-display" title="${safeFull}" aria-label="${safeFull}" data-full-order-id="${safeFull}">${safeShort}</span>`;
+                })();
+                if (orderIdInfo?.full) {
+                    row.dataset.orderId = orderIdInfo.full;
+                } else if (rawOrderId) {
+                    row.dataset.orderId = rawOrderId;
+                }
                 row.innerHTML = `
-                    <td class="text-nowrap">${escapeHtml(order?.order_id || '-')}</td>
+                    <td class="text-nowrap">${orderIdCell}</td>
                     <td>${escapeHtml(order?.action || '-')}</td>
                     <td>${qty != null ? qty : '-'}</td>
                     <td>${Number.isFinite(avgPrice) ? formatNumber(avgPrice, 2) : '-'}</td>
@@ -3129,7 +3149,13 @@
             if (this.elements.outcomePriceMeta) {
                 let baseSource = '信号';
                 if (baselineOrder?.order_id) {
-                    baseSource = `订单 ${baselineOrder.order_id}`;
+                    const baseOrderInfo = this.app?.formatOrderIdDisplay?.(baselineOrder.order_id);
+                    const rawBaselineId = String(baselineOrder.order_id).trim();
+                    const shortBaselineId = baseOrderInfo?.short || (rawBaselineId ? rawBaselineId.slice(-3) : '');
+                    baseSource = shortBaselineId ? `订单 ${shortBaselineId}` : '订单';
+                    if (baseOrderInfo?.full && baseOrderInfo.full !== shortBaselineId) {
+                        console.info('Outcome baseline uses full order ID:', baseOrderInfo.full);
+                    }
                 } else if (signal?.signal_id) {
                     baseSource = `信号 ${signal.signal_id}`;
                 }

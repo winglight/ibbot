@@ -128,12 +128,62 @@
             && date.getDate() === compareTarget.getDate();
     }
 
+    function formatOrderIdDisplay(fullId, options = {}) {
+        const {
+            element = 'span',
+            className = 'order-id-display',
+            includeTitle = true,
+            includeAriaLabel = true,
+            includeDataAttr = true,
+            dataAttributeName = 'data-full-order-id',
+            emptyText = '—',
+            escapeHtmlFn,
+        } = options || {};
+
+        const escapeFn = typeof escapeHtmlFn === 'function' ? escapeHtmlFn : escapeHtml;
+
+        const rawValue = fullId === null || fullId === undefined ? '' : String(fullId);
+        const normalized = rawValue.trim();
+        const hasValue = normalized.length > 0;
+        const short = hasValue ? normalized.slice(-3) : emptyText;
+
+        const safeShort = escapeFn(short);
+        const safeFull = hasValue ? escapeFn(normalized) : '';
+
+        const classes = className ? escapeFn(className) : '';
+        const attrs = [];
+        if (hasValue && includeTitle) {
+            attrs.push(`title="${safeFull}"`);
+        }
+        if (hasValue && includeAriaLabel) {
+            attrs.push(`aria-label="${safeFull}"`);
+        }
+        if (hasValue && includeDataAttr && dataAttributeName) {
+            attrs.push(`${dataAttributeName}="${safeFull}"`);
+        }
+
+        const attrStr = attrs.length ? ' ' + attrs.join(' ') : '';
+        const classAttr = classes ? ` class="${classes}"` : '';
+        const tagName = typeof element === 'string' && element.trim() ? element.trim() : 'span';
+
+        const html = `<${tagName}${classAttr}${attrStr}>${safeShort}</${tagName}>`;
+
+        return {
+            html,
+            short: hasValue ? normalized.slice(-3) : '',
+            full: normalized,
+            escapedFull: safeFull,
+            hasValue,
+        };
+    }
+
     utils.slugifyStrategyName = slugifyStrategyName;
     utils.TrendSignalLabelPlugin = TrendSignalLabelPlugin;
     utils.formatNumber = formatNumber;
     utils.escapeHtml = escapeHtml;
     utils.formatDuration = formatDuration;
     utils.isSameDay = isSameDay;
+    utils.formatOrderIdDisplay = formatOrderIdDisplay;
 
     if (root && typeof root === 'object') {
         root.slugifyStrategyName = root.slugifyStrategyName || slugifyStrategyName;
