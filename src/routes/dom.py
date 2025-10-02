@@ -17,7 +17,10 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user
 from src.dom_service import get_dom_service
-from src.dom_optimizer import get_dom_optimization_orchestrator
+from src.dom_optimizer import (
+    DOMOptimizationUnavailable,
+    get_dom_optimization_orchestrator,
+)
 from src.dom_dependencies import dom_config
 from loguru import logger
 
@@ -348,7 +351,10 @@ async def optimize_dom_parameters(
     user: Optional[str] = Depends(get_current_user),
 ):
     _ensure_not_read_only(request)
-    orchestrator = get_dom_optimization_orchestrator()
+    try:
+        orchestrator = get_dom_optimization_orchestrator()
+    except DOMOptimizationUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     try:
         result = orchestrator.run_optimization(
             req.symbol,
@@ -393,7 +399,10 @@ async def configure_dom_automation(
     user: Optional[str] = Depends(get_current_user),
 ):
     _ensure_not_read_only(request)
-    orchestrator = get_dom_optimization_orchestrator()
+    try:
+        orchestrator = get_dom_optimization_orchestrator()
+    except DOMOptimizationUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     try:
         status = orchestrator.configure_schedule(
             enabled=req.enabled,
@@ -417,5 +426,8 @@ async def configure_dom_automation(
 async def get_dom_automation_status(
     user: Optional[str] = Depends(get_current_user),
 ):
-    orchestrator = get_dom_optimization_orchestrator()
+    try:
+        orchestrator = get_dom_optimization_orchestrator()
+    except DOMOptimizationUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     return {"success": True, **orchestrator.get_status()}
