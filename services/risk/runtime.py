@@ -74,6 +74,12 @@ class RiskRuntime:
     _results_last_processed: datetime | None = field(default=None, init=False, repr=False)
     _health_last_error: str = field(default="", init=False, repr=False)
     _last_exception_message: str = field(default="", init=False, repr=False)
+    _active_config: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _rules_state: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _config_snapshot: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _rules_snapshot: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _snapshot_timestamp: str | None = field(default=None, init=False, repr=False)
+    _sizing_history: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     async def update_config(self, config: Mapping[str, Any]) -> None:
         snapshot: tuple[dict[str, Any], dict[str, Any], str] | None = None
@@ -99,6 +105,18 @@ class RiskRuntime:
             snapshot = self._build_snapshots(config)
             self._configured = True
 
+            if snapshot is not None:
+                config_payload, rules_payload, timestamp = snapshot
+                self._active_config = {
+                    str(key): value
+                    for key, value in config_payload.items()
+                    if str(key) != "updated_at"
+                }
+                self._rules_state = self._normalise_rules_state(rules_payload)
+                self._config_snapshot = dict(config_payload)
+                self._rules_snapshot = self._build_rules_response(self._rules_state)
+                self._snapshot_timestamp = timestamp
+
         if snapshot is not None:
             await self._publish_snapshots(*snapshot)
 
@@ -114,6 +132,44 @@ class RiskRuntime:
         config_payload.setdefault("updated_at", timestamp)
         rules_payload = self._engine.export_rules()
         return config_payload, rules_payload, timestamp
+
+    def _normalise_rules_state(
+        self, rules_payload: Mapping[str, Mapping[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        rules: dict[str, dict[str, Any]] = {}
+        for symbol, payload in rules_payload.items():
+            symbol_key = str(symbol).strip().upper()
+            rule = {"symbol": symbol_key}
+            for key, value in dict(payload).items():
+                if key == "symbol":
+                    continue
+                if key == "metadata" and isinstance(value, Mapping):
+                    rule["metadata"] = dict(value)
+                else:
+                    rule[key] = value
+            rules[symbol_key] = rule
+        return rules
+
+    def _build_rules_response(
+        self, rules: Mapping[str, Mapping[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        response: dict[str, dict[str, Any]] = {}
+        for symbol, payload in rules.items():
+            rule_payload: dict[str, Any] = {"symbol": str(symbol).strip().upper()}
+            metadata: Mapping[str, Any] | None = None
+            for key, value in payload.items():
+                if key == "metadata" and isinstance(value, Mapping):
+                    metadata = value
+                    continue
+                if key == "symbol":
+                    continue
+                rule_payload[key] = value
+            if metadata:
+                rule_payload["metadata"] = dict(metadata)
+                for meta_key, meta_value in metadata.items():
+                    rule_payload.setdefault(str(meta_key), meta_value)
+            response[rule_payload["symbol"]] = rule_payload
+        return response
 
     async def _publish_snapshots(
         self,
@@ -515,3 +571,275 @@ class RiskRuntime:
         except Exception:
             if self._logger:
                 self._logger.debug("Failed to write log point to Influx", exc_info=True)
+
+    async def report_health(
+        self,
+        *,
+        healthy: bool,
+        last_error: str | None = None,
+        extra_metrics: Mapping[str, Any] | None = None,
+    ) -> None:
+        await self._update_health(
+            healthy=healthy,
+            last_error=last_error,
+            extra_metrics=extra_metrics,
+        )
+
+    async def fetch_rules(self) -> Mapping[str, Any]:
+        if not self._configured:
+            return {
+                "success": False,
+                "rules": {},
+                "detail": "risk runtime not configured",
+            }
+        payload = self._build_rules_response(self._rules_state)
+        return {
+            "success": True,
+            "rules": payload,
+            "count": len(payload),
+            "updated_at": self._snapshot_timestamp or _utc_now().isoformat(),
+            "source": self.cache_source,
+        }
+
+    async def _apply_rules_state(self, rules: Mapping[str, Mapping[str, Any]]) -> None:
+        config_payload = dict(self._active_config)
+        config_payload["rules"] = [dict(rule) for rule in rules.values()]
+        await self.update_config(config_payload)
+
+    def _prepare_rule_update(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        existing: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if "symbol" in payload:
+            symbol = str(payload["symbol"]).strip().upper()
+        elif existing and "symbol" in existing:
+            symbol = str(existing["symbol"]).strip().upper()
+        else:
+            raise ValueError("symbol is required")
+
+        rule: dict[str, Any] = {"symbol": symbol}
+        metadata: dict[str, Any] = {}
+
+        if existing:
+            for key, value in existing.items():
+                if key == "metadata" and isinstance(value, Mapping):
+                    metadata.update(value)
+                elif key != "symbol":
+                    rule[key] = value
+
+        for key, value in payload.items():
+            if key == "symbol":
+                continue
+            if key in {"stop_loss", "stop_loss_price", "take_profit", "take_profit_price"}:
+                if value is None or value == "":
+                    if key.startswith("stop"):
+                        rule.pop("stop_loss", None)
+                        rule.pop("stop_loss_price", None)
+                    else:
+                        rule.pop("take_profit", None)
+                        rule.pop("take_profit_price", None)
+                    continue
+                try:
+                    price = float(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("invalid price value") from exc
+                if key.startswith("stop"):
+                    rule["stop_loss"] = price
+                    rule["stop_loss_price"] = price
+                else:
+                    rule["take_profit"] = price
+                    rule["take_profit_price"] = price
+            elif key == "enabled":
+                rule["enabled"] = bool(value)
+            elif key == "max_position":
+                try:
+                    rule["max_position"] = int(value) if value is not None else None
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("invalid max_position") from exc
+            elif key == "metadata" and isinstance(value, Mapping):
+                metadata.update(value)
+            else:
+                metadata[key] = value
+
+        if metadata:
+            rule["metadata"] = metadata
+        elif "metadata" in rule:
+            rule.pop("metadata", None)
+        return rule
+
+    async def add_rule(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        if not self._configured:
+            raise RuntimeError("RiskRuntime is not configured")
+        rule = self._prepare_rule_update(payload)
+        symbol = rule["symbol"]
+        self._rules_state[symbol] = rule
+        await self._apply_rules_state(self._rules_state)
+        return await self.fetch_rules()
+
+    async def update_rule(
+        self,
+        symbol: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if not self._configured:
+            raise RuntimeError("RiskRuntime is not configured")
+        key = str(symbol).strip().upper()
+        existing = self._rules_state.get(key)
+        if existing is None:
+            raise KeyError(symbol)
+        rule = self._prepare_rule_update({"symbol": key, **payload}, existing=existing)
+        self._rules_state[key] = rule
+        await self._apply_rules_state(self._rules_state)
+        return await self.fetch_rules()
+
+    async def delete_rule(self, symbol: str) -> Mapping[str, Any]:
+        if not self._configured:
+            raise RuntimeError("RiskRuntime is not configured")
+        key = str(symbol).strip().upper()
+        if key not in self._rules_state:
+            raise KeyError(symbol)
+        self._rules_state.pop(key, None)
+        await self._apply_rules_state(self._rules_state)
+        return await self.fetch_rules()
+
+    async def fetch_config(self) -> Mapping[str, Any]:
+        if not self._configured:
+            return {
+                "success": False,
+                "config": {},
+                "detail": "risk runtime not configured",
+            }
+        payload = dict(self._config_snapshot)
+        payload.setdefault("updated_at", self._snapshot_timestamp or _utc_now().isoformat())
+        payload.setdefault("source", self.cache_source)
+        return {"success": True, "config": payload}
+
+    async def update_config_values(self, updates: Mapping[str, Any]) -> Mapping[str, Any]:
+        if not self._configured:
+            raise RuntimeError("RiskRuntime is not configured")
+        base = dict(self._active_config)
+        for key, value in updates.items():
+            normalised_key = str(key)
+            if value is None:
+                base.pop(normalised_key, None)
+            else:
+                base[normalised_key] = value
+        base["rules"] = [dict(rule) for rule in self._rules_state.values()]
+        await self.update_config(base)
+        return await self.fetch_config()
+
+    async def fetch_order_queue_status(self) -> Mapping[str, Any]:
+        return {
+            "success": True,
+            "pending_commands": len(self._pending_commands),
+            "market_last_processed_at": (
+                self._market_last_processed.isoformat() if self._market_last_processed else ""
+            ),
+            "results_last_processed_at": (
+                self._results_last_processed.isoformat() if self._results_last_processed else ""
+            ),
+        }
+
+    async def position_sizing(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        if not self._configured:
+            raise RuntimeError("RiskRuntime is not configured")
+        symbol = str(payload.get("symbol") or "").strip().upper()
+        if not symbol:
+            raise ValueError("symbol is required")
+        try:
+            stop_distance = float(payload.get("stop_distance", 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("stop_distance must be numeric") from exc
+        if stop_distance <= 0:
+            raise ValueError("stop_distance must be greater than zero")
+        try:
+            rv_current = float(payload.get("rv_current", 0) or 0)
+        except (TypeError, ValueError):
+            rv_current = 0.0
+
+        equity = float(self._active_config.get("equity", 100_000))
+        risk_fraction = float(self._active_config.get("risk_per_trade", 0.01))
+        point_value = float(self._active_config.get("point_value", 50))
+
+        risk_amount = max(0.0, equity * risk_fraction)
+        denominator = max(point_value * stop_distance, 1e-6)
+        contracts_float = risk_amount / denominator
+        contracts = max(0, int(round(contracts_float)))
+
+        timestamp = _utc_now().isoformat()
+        record = {
+            "symbol": symbol,
+            "contracts": contracts,
+            "stop_distance": stop_distance,
+            "rv_current": rv_current,
+            "calculated_at": timestamp,
+        }
+        self._sizing_history.append(record)
+        if len(self._sizing_history) > 500:
+            self._sizing_history = self._sizing_history[-500:]
+        return {"success": True, **record, "contracts_float": contracts_float}
+
+    async def fetch_sizing_history(
+        self,
+        *,
+        symbol: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> Mapping[str, Any]:
+        entries = list(self._sizing_history)
+        if symbol:
+            key = str(symbol).strip().upper()
+            entries = [entry for entry in entries if entry.get("symbol") == key]
+        if since:
+            try:
+                threshold = datetime.fromisoformat(since)
+            except ValueError:
+                threshold = None
+            if threshold is not None:
+                entries = [
+                    entry
+                    for entry in entries
+                    if _parse_datetime(entry.get("calculated_at")) >= threshold
+                ]
+        limited = entries[-max(1, min(limit, 500)) :]
+        return {"success": True, "entries": limited}
+
+    async def fetch_config_rules(self) -> Mapping[str, Any]:
+        if not self._configured:
+            return {
+                "success": False,
+                "g_rules": {},
+                "s_rules": {},
+                "detail": "risk runtime not configured",
+            }
+        g_rules = self._active_config.get("g_rules")
+        s_rules = self._active_config.get("s_rules")
+        return {
+            "success": True,
+            "g_rules": dict(g_rules) if isinstance(g_rules, Mapping) else {},
+            "s_rules": dict(s_rules) if isinstance(s_rules, Mapping) else {},
+        }
+
+    async def update_config_rules(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        updates: dict[str, Any] = {}
+        if "g_rules" in payload:
+            updates["g_rules"] = payload.get("g_rules")
+        if "s_rules" in payload:
+            updates["s_rules"] = payload.get("s_rules")
+        if not updates:
+            return await self.fetch_config_rules()
+        await self.update_config_values(updates)
+        return await self.fetch_config_rules()
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return _utc_now()
+    return _utc_now()
