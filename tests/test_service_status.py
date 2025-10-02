@@ -44,6 +44,9 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
             "hash:service:health:account-service": {
                 "status": "running",
                 "last_seen": recent,
+                "snapshot_updated_at": recent,
+                "stale": "false",
+                "stale_reason": "",
             },
             "hash:service:health:orders": {
                 "status": "running",
@@ -91,6 +94,10 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
 
         account_payload = status_map["account"].payload or {}
         assert "readiness" in account_payload
+        metrics = account_payload.get("metrics") or {}
+        assert metrics.get("snapshot_updated_at") == recent
+        assert metrics.get("stale") is False
+        assert "stale_reason" in metrics
         assert status_map["queue_monitor"].status == "running"
         queue_payload = status_map["queue_monitor"].payload or {}
         assert queue_payload.get("total_queue_length") == "2"
@@ -158,6 +165,9 @@ def test_build_service_status_payload_structure(monkeypatch: pytest.MonkeyPatch)
             "hash:service:health:account-service": {
                 "status": "running",
                 "last_seen": now,
+                "snapshot_updated_at": now,
+                "stale": "false",
+                "stale_reason": "",
             },
             "hash:service:health:orders": {
                 "status": "running",
@@ -198,6 +208,12 @@ def test_build_service_status_payload_structure(monkeypatch: pytest.MonkeyPatch)
         assert connection_entry.get("display_name") == "Connection Control"
         assert connection_entry.get("internal") is True
         assert connection_entry.get("port") == "8056"
+
+        account_entry = next(entry for entry in services if entry.get("service") == "account")
+        account_metrics = (account_entry.get("payload") or {}).get("metrics") or {}
+        assert account_metrics.get("snapshot_updated_at") == now
+        assert account_metrics.get("stale") is False
+        assert "stale_reason" in account_metrics
         assert connection_entry.get("default_health_key") == "hash:service:health:connection_control"
         assert connection_entry.get("health_key") == "hash:service:health:connection_control"
         assert connection_entry.get("status") == "unhealthy"
@@ -227,6 +243,9 @@ def test_build_service_status_payload_includes_queue_metrics(monkeypatch: pytest
             "hash:service:health:account-service": {
                 "status": "running",
                 "last_seen": now,
+                "snapshot_updated_at": now,
+                "stale": "false",
+                "stale_reason": "",
             },
             "hash:service:health:orders": {
                 "status": "running",

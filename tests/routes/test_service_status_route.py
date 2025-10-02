@@ -31,15 +31,24 @@ def service_status_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     app.include_router(service_module.router)
 
     original_build = service_status_module.build_service_status_payload
+    captured: dict[str, str] = {}
 
     async def fake_build(*_: object, **__: object):
         now = datetime.now(timezone.utc).isoformat()
+        captured["now"] = now
         redis_data: dict[str, dict[str, str] | None] = {
             "hash:service:health:ib-command": {
                 "last_seen": now,
                 "queue_depth": "0",
             },
             "hash:service:queue-monitor": {"timestamp": now},
+            "hash:service:health:account-service": {
+                "status": "running",
+                "last_seen": now,
+                "snapshot_updated_at": now,
+                "stale": "false",
+                "stale_reason": "",
+            },
         }
         return await original_build(redis=StubRedis(redis_data))
 
@@ -49,6 +58,7 @@ def service_status_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     monkeypatch.setattr(service_module, "build_service_status_payload", fake_build)
     monkeypatch.setattr(service_status_module, "refresh_account_service_status", fake_readiness)
 
+    app.state.service_status_captured = captured
     return app
 
 
@@ -81,3 +91,13 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     assert connection_entry.get("port") == "8056"
     assert connection_entry.get("default_health_key") == "hash:service:health:connection_control"
     assert connection_entry.get("health_key") == "hash:service:health:connection_control"
+
+    account_entry = next(
+        (item for item in services if item.get("service") == "account"),
+        None,
+    )
+    assert account_entry is not None
+    account_metrics = (account_entry.get("payload") or {}).get("metrics") or {}
+    captured_state = getattr(service_status_app.state, "service_status_captured", {})
+    assert account_metrics.get("snapshot_updated_at") == captured_state.get("now")
+    assert account_metrics.get("stale") is False

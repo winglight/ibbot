@@ -71,6 +71,30 @@
         statusText.dataset.role = 'status-text';
         meta.appendChild(statusText);
 
+        const metricsContainer = createElement(
+            'div',
+            'service-metrics small text-muted d-flex flex-wrap align-items-center gap-2 mt-1'
+        );
+        metricsContainer.dataset.role = 'service-metrics';
+        metricsContainer.classList.add('d-none');
+
+        const freshnessBadge = createElement('span', 'badge rounded-pill bg-secondary service-metrics-badge', '未知');
+        freshnessBadge.dataset.role = 'freshness-badge';
+        freshnessBadge.classList.add('d-none');
+        metricsContainer.appendChild(freshnessBadge);
+
+        const timestampText = createElement('span', 'service-metrics-timestamp');
+        timestampText.dataset.role = 'metrics-timestamp';
+        timestampText.classList.add('d-none');
+        metricsContainer.appendChild(timestampText);
+
+        const reasonText = createElement('span', 'service-metrics-reason text-danger');
+        reasonText.dataset.role = 'metrics-reason';
+        reasonText.classList.add('d-none');
+        metricsContainer.appendChild(reasonText);
+
+        meta.appendChild(metricsContainer);
+
         const actions = createElement('div', 'service-status-actions d-flex align-items-center gap-2');
         const badge = createElement('span', 'badge bg-secondary', '已下线');
         badge.dataset.role = 'status-badge';
@@ -87,6 +111,12 @@
             badge,
             button,
             spinner,
+            metrics: {
+                container: metricsContainer,
+                freshness: freshnessBadge,
+                timestamp: timestampText,
+                reason: reasonText,
+            },
         };
 
         return item;
@@ -153,5 +183,9 @@
 
         return buildPromise;
     };
+
+    module.__test__ = Object.assign(module.__test__ || {}, {
+        createServiceItem,
+    });
 })(typeof window !== 'undefined' ? window : this);
 

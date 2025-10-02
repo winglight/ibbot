@@ -24,6 +24,139 @@
         error: '不健康',
     };
 
+    function coerceBoolean(value) {
+        if (typeof value === 'boolean') {
+            return value;
+        }
+        if (value === null || value === undefined) {
+            return null;
+        }
+        const text = String(value).trim().toLowerCase();
+        if (!text) {
+            return null;
+        }
+        if (['1', 'true', 't', 'yes', 'y', 'on'].includes(text)) {
+            return true;
+        }
+        if (['0', 'false', 'f', 'no', 'n', 'off'].includes(text)) {
+            return false;
+        }
+        return null;
+    }
+
+    function applyFreshnessMetrics(target, metrics) {
+        if (!target || !target.metricsContainer) {
+            return { visible: false, stale: null, timestamp: '', reason: '' };
+        }
+
+        const container = target.metricsContainer;
+        const badge = target.metricsBadge;
+        const timestampEl = target.metricsTimestamp;
+        const reasonEl = target.metricsReason;
+
+        const hide = () => {
+            container.classList.add('d-none');
+            container.dataset.freshness = 'unknown';
+            if (badge) {
+                badge.classList.add('d-none');
+                badge.textContent = '未知';
+                badge.title = '';
+                badge.classList.remove('bg-success', 'bg-danger');
+                badge.classList.add('bg-secondary');
+            }
+            if (timestampEl) {
+                timestampEl.textContent = '';
+                timestampEl.title = '';
+                timestampEl.classList.add('d-none');
+            }
+            if (reasonEl) {
+                reasonEl.textContent = '';
+                reasonEl.title = '';
+                reasonEl.classList.add('d-none');
+                reasonEl.classList.remove('text-danger');
+                reasonEl.classList.remove('text-warning');
+            }
+            return { visible: false, stale: null, timestamp: '', reason: '' };
+        };
+
+        if (!metrics || typeof metrics !== 'object') {
+            return hide();
+        }
+
+        const staleValue = coerceBoolean(metrics.stale);
+        const reason = metrics.stale_reason
+            || metrics.last_refresh_error
+            || '';
+        const snapshotTimestamp = metrics.snapshot_updated_at
+            || metrics.account_snapshot_updated_at
+            || metrics.positions_snapshot_updated_at
+            || '';
+
+        const hasContent = (staleValue !== null) || Boolean(reason) || Boolean(snapshotTimestamp);
+        if (!hasContent) {
+            return hide();
+        }
+
+        container.classList.remove('d-none');
+        container.dataset.freshness = staleValue === true
+            ? 'stale'
+            : staleValue === false
+                ? 'fresh'
+                : 'unknown';
+
+        if (badge) {
+            badge.classList.remove('d-none', 'bg-success', 'bg-danger', 'bg-secondary');
+            if (staleValue === true) {
+                badge.classList.add('bg-danger');
+                badge.textContent = '已过期';
+                badge.title = reason ? `账户快照过期：${reason}` : '账户快照过期';
+            } else if (staleValue === false) {
+                badge.classList.add('bg-success');
+                badge.textContent = '最新';
+                badge.title = reason ? `账户快照最新（${reason}）` : '账户快照最新';
+            } else {
+                badge.classList.add('bg-secondary');
+                badge.textContent = '未知';
+                badge.title = reason ? `账户快照状态未知：${reason}` : '账户快照状态未知';
+            }
+        }
+
+        if (timestampEl) {
+            if (snapshotTimestamp) {
+                timestampEl.textContent = `快照时间：${snapshotTimestamp}`;
+                timestampEl.title = snapshotTimestamp;
+                timestampEl.classList.remove('d-none');
+            } else {
+                timestampEl.textContent = '';
+                timestampEl.title = '';
+                timestampEl.classList.add('d-none');
+            }
+        }
+
+        if (reasonEl) {
+            if (reason) {
+                reasonEl.textContent = `原因：${reason}`;
+                reasonEl.title = reason;
+                reasonEl.classList.remove('d-none');
+                if (staleValue === true) {
+                    reasonEl.classList.add('text-danger');
+                    reasonEl.classList.remove('text-warning');
+                } else {
+                    reasonEl.classList.add('text-warning');
+                    reasonEl.classList.remove('text-danger');
+                }
+            } else {
+                reasonEl.textContent = '';
+                reasonEl.title = '';
+                reasonEl.classList.add('d-none');
+                reasonEl.classList.remove('text-danger');
+                reasonEl.classList.remove('text-warning');
+            }
+        }
+
+        return { visible: true, stale: staleValue, timestamp: snapshotTimestamp, reason };
+    }
+
     function formatMessage(template, replacements = {}) {
         if (typeof template !== 'string') {
             return '';
@@ -214,6 +347,23 @@
                         meta,
                     });
                 }
+
+                const metricsPayload = payload && typeof payload === 'object'
+                    ? (payload.payload?.metrics || payload.metrics || null)
+                    : null;
+                this.updateMetrics(serviceName, metricsPayload, payload);
+            },
+            updateMetrics(serviceName, metrics, payload) {
+                const item = this.items[serviceName];
+                if (!item) {
+                    return;
+                }
+                const result = applyFreshnessMetrics(item, metrics);
+                item.lastMetrics = {
+                    metrics,
+                    result,
+                    payload,
+                };
             },
             setMode(value) {
                 this.mode = normaliseMode(value, this.mode);
@@ -385,6 +535,10 @@
                 lastMessage: defaultIdleMessage,
                 defaultIdleMessage,
                 label: resolvedLabel,
+                metricsContainer: element.querySelector('[data-role="service-metrics"]'),
+                metricsBadge: element.querySelector('[data-role="freshness-badge"]'),
+                metricsTimestamp: element.querySelector('[data-role="metrics-timestamp"]'),
+                metricsReason: element.querySelector('[data-role="metrics-reason"]'),
             };
 
             if (spinner?.classList) {
@@ -557,5 +711,8 @@
 
     module.createController = createController;
     module.createListController = createListController;
+    module.__test__ = Object.assign(module.__test__ || {}, {
+        applyFreshnessMetrics,
+    });
     module.applyStatusClass = applyStatusClass;
 })(typeof window !== 'undefined' ? window : globalThis);
