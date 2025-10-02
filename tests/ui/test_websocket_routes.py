@@ -89,10 +89,39 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
         async def list_strategies(self) -> dict[str, Any]:
             return {"strategies": [{"name": "alpha", "enabled": True}]}
 
+        async def get_strategy_status(self, name: str) -> dict[str, Any]:
+            return {
+                "status": {
+                    "name": name,
+                    "state": "idle",
+                    "is_receiving_data": True,
+                }
+            }
+
         async def fetch_strategy(self, name: str) -> dict[str, Any]:
             return {
                 "status": {"is_receiving_data": True},
                 "performance": {"pnl": 10},
+            }
+
+        async def get_strategy_performance(
+            self,
+            name: str,
+            *,
+            range_: str | None = None,
+            start: str | None = None,
+            end: str | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "metrics": {
+                    "pnl": 10,
+                    "range": range_ or "",
+                },
+                "performance": {
+                    "name": name,
+                    "range": range_ or "",
+                    "points": [],
+                }
             }
 
     monkeypatch.setattr(websocket_module, "_STRATEGY_CLIENT", StubStrategyClient())
@@ -102,6 +131,24 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
             return {"symbol": symbol, "price": 123.45}
 
     monkeypatch.setattr(websocket_module, "_MARKET_CLIENT", StubMarketClient())
+
+    if not hasattr(websocket_module, "cache_get_strategy_stats"):
+        monkeypatch.setattr(
+            websocket_module,
+            "cache_get_strategy_stats",
+            lambda name: {},
+            raising=False,
+        )
+    if not hasattr(websocket_module, "cache_compute_performance"):
+        async def _noop_cache_compute(*_: Any, **__: Any) -> dict[str, Any]:
+            return {}
+
+        monkeypatch.setattr(
+            websocket_module,
+            "cache_compute_performance",
+            _noop_cache_compute,
+            raising=False,
+        )
 
     monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
     monkeypatch.setattr(websocket_module, "get_dom_optimization_orchestrator", lambda: None)
@@ -202,6 +249,56 @@ def test_websocket_orders_service_unavailable(
             assert _receive_until_type(ws, "pong") == {"type": "pong"}
 
 
+def test_websocket_risk_service_unavailable(
+    websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = websocket_app
+
+    risk_client = websocket_module._RISK_CLIENT
+
+    async def failing_fetch_rules() -> dict[str, Any]:
+        raise ServiceUnavailableError("risk", "offline")
+
+    monkeypatch.setattr(risk_client, "fetch_rules", failing_fetch_rules)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            _drain_initial_messages(ws, 4)
+            ws.send_json({"type": "request_risk_rules", "force": True})
+            payload = _receive_until_type(ws, "risk_rules")
+            assert payload["type"] == "risk_rules"
+            assert payload["success"] is False
+            assert payload["error"] == websocket_module.SERVICE_UNAVAILABLE_MESSAGE
+
+
+def test_websocket_strategy_status_service_unavailable(
+    websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = websocket_app
+
+    class FailingStrategyClient:
+        async def list_strategies(self) -> dict[str, Any]:
+            return {"strategies": []}
+
+        async def get_strategy_status(self, name: str) -> dict[str, Any]:
+            raise ServiceUnavailableError("strategy", "offline")
+
+    monkeypatch.setattr(websocket_module, "_STRATEGY_CLIENT", FailingStrategyClient())
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            _drain_initial_messages(ws, 4)
+            ws.send_json(
+                {
+                    "type": "request_strategy_status",
+                    "name": "alpha",
+                    "force": True,
+                }
+            )
+            payload = _receive_until_type(ws, "strategy_status")
+            assert payload["type"] == "strategy_status"
+            assert payload["success"] is False
+            assert payload["error"] == websocket_module.SERVICE_UNAVAILABLE_MESSAGE
 def test_websocket_strategy_requests(websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     app, _ = websocket_app
 

@@ -125,7 +125,7 @@ python scripts/run_service.py ib_feed --dry-run
 # 实际运行单个服务（等同于 python -m services.ib_feed.main）
 python scripts/run_service.py ib_feed
 
-# 批量启动核心服务，默认包含 ib_command/ib_feed/strategy/risk/notification
+# 批量启动核心服务，默认包含 connection_control/account/orders/ib_command/ib_feed/strategy/risk/notification
 python scripts/run_all.py
 
 # 仅做导入与环境自检，可自定义服务组合
@@ -135,7 +135,7 @@ python scripts/run_all.py ib_feed strategy --dry-run
 python scripts/run_all.py --dry-run ib_command
 ```
 
-> ⚠️ 主进程依赖 `services/account` 提供账户/订单接口，请优先启动该服务（`python scripts/run_service.py account`）。Docker Compose 与部署脚本已调整为在启动 `ibbot` 之前拉起 `account` 服务。
+> ⚠️ 主进程依赖 `services/account` 与 `services/orders` 提供账户/订单接口，请优先启动这两个服务（示例：`uvicorn services.account.main:app`、`uvicorn services.orders.main:app`）。Docker Compose 与部署脚本已调整为在启动 `ibbot` 之前拉起相关服务。
 
 上述命令无需额外设置 `PYTHONPATH`，直接使用 `python scripts/run_all.py ...` 即可完成导入检测与服务启动。
 
@@ -143,11 +143,12 @@ python scripts/run_all.py --dry-run ib_command
 
 | 服务模块 | 启动命令 | 主要依赖 | 说明 |
 | --- | --- | --- | --- |
-| `account` | `python scripts/run_service.py account` | Redis（账户快照缓存） | 提供账户/订单/持仓 REST 接口，默认监听 `8020` 端口，请在主进程前启动。 |
+| `account` | `uvicorn services.account.main:app --port 8020` | Redis（账户快照缓存） | 提供账户 REST 接口，默认监听 `8020` 端口，请在主进程前启动。 |
+| `orders` | `uvicorn services.orders.main:app --port 8050` | Redis（命令队列/健康上报） | 提供下单、撤单与仓位指令 REST 接口，默认监听 `8050` 端口。 |
 | `ib_command` | `python scripts/run_service.py ib_command` | Redis（任务队列） | 可选对接 IB Gateway/TWS，使用 `--dry-run` 可跳过连接。 |
 | `ib_feed` | `python scripts/run_service.py ib_feed` | Redis（行情缓存） | 连接 IBKR 抓取实时/历史行情。 |
-| `strategy` | `python scripts/run_service.py strategy` | Redis（策略调度） | 负责策略生命周期与任务入队。 |
-| `risk` | `python scripts/run_service.py risk` | Redis（风险配置） | 拉取风险规则并监听指标。 |
+| `strategy` | `uvicorn services.strategy.http:app --port 8045` | Redis（策略调度/事件流） | 提供策略管理 REST 接口并维护任务队列。 |
+| `risk` | `uvicorn services.risk.http:app --port 8030` | Redis（风险配置） | 提供风险配置 REST 接口并刷新风控运行时。 |
 | `notification` | `python scripts/run_service.py notification` | Redis（事件队列） | 推送通知到浏览器/Telegram。 |
 | `optimizer` | `python scripts/run_service.py optimizer` | Redis、InfluxDB | 需要历史数据（InfluxDB）与事件流（Redis）。 |
 

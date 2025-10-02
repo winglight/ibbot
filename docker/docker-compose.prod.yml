@@ -32,6 +32,9 @@ services:
       - IBKR_HOST=ib-gateway
       - IBKR_PORT=4002
       - ACCOUNT_SERVICE_URL=http://account:8020
+      - ORDERS_SERVICE_URL=http://orders:8050
+      - RISK_SERVICE_URL=http://risk:8030
+      - STRATEGY_SERVICE_URL=http://strategy:8045
 
       # 认证与安全（务必覆盖默认值）
       - ADMIN_USERNAME=${ADMIN_USERNAME}
@@ -56,6 +59,9 @@ services:
       - ibbot-network
     depends_on:
       - account
+      - orders
+      - risk
+      - strategy
       - ib-gateway
     restart: unless-stopped
     healthcheck:
@@ -89,6 +95,45 @@ services:
       ["python", "-m", "uvicorn", "services.account.main:app", "--host", "0.0.0.0", "--port", "8020"]
     ports:
       - "8020:8020"
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+
+  orders:
+    image: ghcr.io/<owner>/ibbot:v1.0.0
+    container_name: ibbot-orders
+    env_file:
+      - ./.env
+    command:
+      ["python", "-m", "uvicorn", "services.orders.main:app", "--host", "0.0.0.0", "--port", "8050"]
+    ports:
+      - "8050:8050"
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+
+  risk:
+    image: ghcr.io/<owner>/ibbot:v1.0.0
+    container_name: ibbot-risk
+    env_file:
+      - ./.env
+    command:
+      ["python", "-m", "uvicorn", "services.risk.http:app", "--host", "0.0.0.0", "--port", "8030"]
+    ports:
+      - "8030:8030"
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+
+  strategy:
+    image: ghcr.io/<owner>/ibbot:v1.0.0
+    container_name: ibbot-strategy
+    env_file:
+      - ./.env
+    command:
+      ["python", "-m", "uvicorn", "services.strategy.http:app", "--host", "0.0.0.0", "--port", "8045"]
+    ports:
+      - "8045:8045"
     networks:
       - ibbot-network
     restart: unless-stopped
