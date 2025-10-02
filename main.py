@@ -75,6 +75,7 @@ from src.strategy_risk import StrategyRiskManager
 from src.telegram_notifier import TelegramNotifier
 
 # Authentication and routers
+from src.routes.api_docs import router as api_docs_router
 from src.routes.auth import get_current_user, router as auth_router
 from src.routes.connection import router as connection_router
 from src.routes.market_data import router as market_data_router
@@ -747,7 +748,10 @@ async def rapidoc_html_main():
             <title>IBKR Trading Bot API - RapiDoc</title>
             <script type="module" src="https://unpkg.com/rapidoc/dist/rapidoc-min.js"></script>
             <style>
-              body { margin: 0; padding: 0; }
+              body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+              #controls { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; }
+              #service-selector { min-width: 220px; padding: 4px 8px; font-size: 14px; }
+              #service-warning { color: #b02a37; font-size: 14px; display: none; }
               #paste-last { position: fixed; right: 16px; top: 12px; z-index: 9999; }
             </style>
             <script>
@@ -763,8 +767,117 @@ async def rapidoc_html_main():
                 });
               });
             </script>
+            <script>
+              const SERVICE_STORAGE_KEY = 'rapidoc:selectedService';
+              async function fetchDocServices() {
+                try {
+                  const response = await fetch('/api/docs/services');
+                  if (!response.ok) throw new Error('Request failed');
+                  const data = await response.json();
+                  if (!data || !Array.isArray(data.services)) {
+                    return [];
+                  }
+                  return data.services;
+                } catch (error) {
+                  console.warn('Failed to load documentation services', error);
+                  return [];
+                }
+              }
+              function updateServiceWarning(message) {
+                const warningEl = document.getElementById('service-warning');
+                if (!warningEl) {
+                  return;
+                }
+                if (message) {
+                  warningEl.textContent = message;
+                  warningEl.style.display = 'inline';
+                } else {
+                  warningEl.textContent = '';
+                  warningEl.style.display = 'none';
+                }
+              }
+              async function refreshMergedWarnings(specUrl) {
+                try {
+                  const response = await fetch(specUrl);
+                  if (!response.ok) return;
+                  const payload = await response.json();
+                  const warnings = payload['x-service-warnings'];
+                  if (Array.isArray(warnings) && warnings.length) {
+                    updateServiceWarning('Warnings: ' + warnings.join('; '));
+                    return;
+                  }
+                } catch (error) {
+                  console.warn('Failed to load merged OpenAPI warnings', error);
+                }
+                updateServiceWarning('');
+              }
+              async function applySelectedService(service) {
+                const docEl = document.querySelector('rapi-doc');
+                if (!docEl) return;
+                docEl.setAttribute('spec-url', service.spec_url);
+                if (service.name === 'merged') {
+                  await refreshMergedWarnings(service.spec_url);
+                } else {
+                  updateServiceWarning('');
+                }
+              }
+              window.addEventListener('DOMContentLoaded', async () => {
+                const selectEl = document.getElementById('service-selector');
+                if (!selectEl) return;
+                const services = await fetchDocServices();
+                if (!services.length) {
+                  services.push(
+                    { name: 'merged', title: 'All Services', spec_url: '/api/docs/merged' },
+                    { name: 'main', title: 'Main Application', spec_url: '/api-docs.json' },
+                  );
+                }
+                const serviceMap = new Map();
+                selectEl.innerHTML = '';
+                let defaultIndex = 0;
+                services.forEach((service, index) => {
+                  serviceMap.set(service.name, service);
+                  const option = document.createElement('option');
+                  option.value = service.spec_url;
+                  option.textContent = service.title || service.name;
+                  option.dataset.serviceName = service.name;
+                  if (service.name === 'merged') {
+                    defaultIndex = index;
+                  }
+                  selectEl.appendChild(option);
+                });
+                const stored = localStorage.getItem(SERVICE_STORAGE_KEY);
+                async function selectServiceByName(name) {
+                  const targetService = serviceMap.get(name);
+                  if (!targetService) return;
+                  Array.from(selectEl.options).forEach((opt) => {
+                    opt.selected = opt.dataset.serviceName === name;
+                  });
+                  await applySelectedService(targetService);
+                }
+                if (stored && serviceMap.has(stored)) {
+                  await selectServiceByName(stored);
+                } else {
+                  const fallbackOption = selectEl.options[defaultIndex] || selectEl.options[0];
+                  const fallbackName = fallbackOption?.dataset?.serviceName;
+                  await selectServiceByName(fallbackName || 'merged');
+                }
+                selectEl.addEventListener('change', async () => {
+                  const option = selectEl.options[selectEl.selectedIndex];
+                  const name = option?.dataset?.serviceName || 'merged';
+                  localStorage.setItem(SERVICE_STORAGE_KEY, name);
+                  await selectServiceByName(name);
+                });
+              });
+            </script>
           </head>
           <body>
+            <div id="controls">
+              <label for="service-selector">API Specification:</label>
+              <select id="service-selector">
+                <option>Loading...</option>
+              </select>
+              <span id="service-warning"></span>
+            </div>
             <button id="paste-last">复制上次请求体</button>
             <script>
               document.getElementById('paste-last').addEventListener('click', () => {
@@ -777,7 +890,7 @@ async def rapidoc_html_main():
               });
             </script>
             <rapi-doc
-              spec-url="/api-docs.json"
+              spec-url="/api/docs/merged"
               render-style="read"
               show-header="true"
               allow-try="true"
@@ -904,6 +1017,7 @@ app.add_api_route("/rapidoc", rapidoc_html_main, include_in_schema=False)
 
 # Register routers
 app.include_router(auth_router)
+app.include_router(api_docs_router)
 app.include_router(connection_router)
 app.include_router(market_data_router)
 app.include_router(account_router)
