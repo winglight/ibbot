@@ -64,8 +64,11 @@
 > `connection_control` 仍可手动触发，但默认计划已不再包含。
 
 `services/notification/main.py` 是通知管道的常驻进程，负责将 Redis 队列中的事件转发至 Telegram/邮件等渠道。
-无论采用 Docker 还是 `scripts/run_service.py notification` 方式，都需要确保该脚本与主服务同机运行，
-并在主程序环境变量中配置 `NOTIFICATION_SERVICE_URL`（Docker 模式默认指向 `http://notification:8055`）。
+Docker Compose 会通过 `uvicorn services.notification.main:app --port 8055` 启动该模块；
+若在裸机环境运行，请使用 `python -m uvicorn services.notification.main:app --host 0.0.0.0 --port 8055`
+或调用 `scripts/run_service.py notification` 让监督脚本代为启动。
+无论采用哪种方式，都需要确保该脚本与主服务同机运行，并在主程序环境变量中配置
+`NOTIFICATION_SERVICE_URL`（Docker 模式默认指向 `http://notification:8055`）。
 如果在本地单机调试时仅启动主程序与通知脚本，可在 `.env.local` 中设置
 `NOTIFICATION_SERVICE_URL=http://127.0.0.1:8055` 与 `NOTIFICATION_SERVICE_TIMEOUT`，以便跳过容器网络解析。
 
