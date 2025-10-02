@@ -22,7 +22,10 @@ from src.account_snapshot_cache import (
     read_positions_snapshot,
 )
 from src.connection_manager import connection_manager
-from src.dom_optimizer import get_dom_optimization_orchestrator
+from src.dom_optimizer import (
+    DOMOptimizationUnavailable,
+    get_dom_optimization_orchestrator,
+)
 from src.dom_service import get_dom_service
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
@@ -1348,6 +1351,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 if orchestrator is None:
                     try:
                         orchestrator = get_dom_optimization_orchestrator()
+                    except DOMOptimizationUnavailable as exc:
+                        logger.info("DOM optimisation orchestrator unavailable: {}", exc)
+                        orchestrator = None
                     except Exception as exc:
                         logger.warning(f"Failed to init DOM orchestrator: {exc}")
                         orchestrator = None

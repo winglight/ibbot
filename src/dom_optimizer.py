@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,10 @@ def _ensure_timezone(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+class DOMOptimizationUnavailable(RuntimeError):
+    """Raised when the optimisation orchestrator is disabled or unavailable."""
 
 
 class DOMOptimizationOrchestrator:
@@ -718,7 +723,19 @@ class DOMOptimizationOrchestrator:
 _optimizer_instance: Optional[DOMOptimizationOrchestrator] = None
 
 
+def _orchestrator_enabled() -> bool:
+    """Return True when the DOM optimisation orchestrator is enabled."""
+
+    value = os.getenv("ENABLE_DOM_OPTIMIZATION_ORCHESTRATOR")
+    if value is None:
+        return False
+    return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
 def get_dom_optimization_orchestrator() -> DOMOptimizationOrchestrator:
+    if not _orchestrator_enabled():
+        raise DOMOptimizationUnavailable("DOM optimisation orchestrator is disabled")
+
     global _optimizer_instance
     if _optimizer_instance is None:
         _optimizer_instance = DOMOptimizationOrchestrator()
@@ -727,5 +744,6 @@ def get_dom_optimization_orchestrator() -> DOMOptimizationOrchestrator:
 
 __all__ = [
     "DOMOptimizationOrchestrator",
+    "DOMOptimizationUnavailable",
     "get_dom_optimization_orchestrator",
 ]
