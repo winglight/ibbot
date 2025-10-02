@@ -29,18 +29,16 @@ def _patch_service_client(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
 def test_submit_external_strategy_order_success(
     strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    recorded: dict[str, Any] = {}
-
     class StubClient:
-        async def request(self, method: str, path: str, **kwargs: Any) -> Any:
-            recorded.update({
-                "method": method,
-                "path": path,
-                "kwargs": kwargs,
-            })
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        async def submit_external_order(self, payload: dict[str, Any]) -> Any:
+            self.payloads.append(payload)
             return {"success": True, "order_id": "ord-001"}
 
-    _patch_service_client(monkeypatch, StubClient())
+    stub = StubClient()
+    _patch_service_client(monkeypatch, stub)
 
     payload = {
         "strategy": "demo",
@@ -57,10 +55,10 @@ def test_submit_external_strategy_order_success(
 
     assert response.status_code == 200
     assert response.json() == {"success": True, "order_id": "ord-001"}
-    assert recorded["method"] == "POST"
-    assert recorded["path"] == "/strategy"
-    assert recorded["kwargs"]["json"]["strategy"] == "demo"
-    metadata = recorded["kwargs"]["json"].get("metadata")
+    assert stub.payloads
+    submitted = stub.payloads[0]
+    assert submitted["strategy"] == "demo"
+    metadata = submitted.get("metadata")
     assert isinstance(metadata, dict)
     assert metadata.get("client")
 
@@ -69,7 +67,7 @@ def test_submit_external_strategy_order_service_unavailable(
     strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class UnavailableClient:
-        async def request(self, method: str, path: str, **kwargs: Any) -> Any:
+        async def submit_external_order(self, payload: dict[str, Any]) -> Any:
             raise strategy_module.ServiceUnavailableError("strategy", "offline")
 
     _patch_service_client(monkeypatch, UnavailableClient())
@@ -129,7 +127,7 @@ def test_submit_external_strategy_order_queue_unavailable(
     strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class UnavailableClient:
-        async def request(self, method: str, path: str, **kwargs: Any) -> Any:
+        async def submit_external_order(self, payload: dict[str, Any]) -> Any:
             raise strategy_module.ServiceUnavailableError("strategy", "offline")
 
     _patch_service_client(monkeypatch, UnavailableClient())
@@ -155,3 +153,39 @@ def test_submit_external_strategy_order_queue_unavailable(
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Strategy queue unavailable"
+
+
+def test_list_strategies_uses_client(strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    class StubClient:
+        def __init__(self) -> None:
+            self.called = False
+
+        async def list_strategies(self) -> Any:
+            self.called = True
+            return {"strategies": [{"name": "alpha"}]}
+
+    stub = StubClient()
+    _patch_service_client(monkeypatch, stub)
+
+    with TestClient(strategy_app) as client:
+        response = client.get("/api/strategies")
+
+    assert response.status_code == 200
+    assert response.json() == {"strategies": [{"name": "alpha"}]}
+    assert stub.called is True
+
+
+def test_list_strategies_service_unavailable(
+    strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StubClient:
+        async def list_strategies(self) -> Any:
+            raise strategy_module.ServiceUnavailableError("strategy", "offline")
+
+    _patch_service_client(monkeypatch, StubClient())
+
+    with TestClient(strategy_app) as client:
+        response = client.get("/api/strategies")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Strategy service unavailable"

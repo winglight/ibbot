@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -101,14 +102,14 @@ async def _enqueue_strategy_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     return response
 
 
-async def _call_strategy_service(
-    client: StrategyServiceClient,
-    method: str,
-    path: str,
-    **kwargs: Any,
+StrategyClientCall = Callable[..., Awaitable[Any]]
+
+
+async def _call_strategy_client(
+    action: StrategyClientCall, *args: Any, **kwargs: Any
 ) -> Any:
     try:
-        result = await client.request(method, path, **kwargs)
+        result = await action(*args, **kwargs)
     except ServiceClientError as exc:
         _raise_strategy_service_error(exc)
     return result if result is not None else {}
@@ -119,7 +120,7 @@ async def get_strategy_settings(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(client, "GET", "/strategy/settings")
+    return await _call_strategy_client(client.get_settings)
 
 
 @router.post("/api/strategy/settings")
@@ -128,11 +129,9 @@ async def update_strategy_settings(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "POST",
-        "/strategy/settings",
-        json=settings.model_dump(exclude_none=True),
+    return await _call_strategy_client(
+        client.update_settings,
+        settings.model_dump(exclude_none=True),
     )
 
 
@@ -141,11 +140,7 @@ async def generate_strategy_token(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "POST",
-        "/strategy/settings/generate-token",
-    )
+    return await _call_strategy_client(client.generate_settings_token)
 
 
 @router.get("/api/strategy/files")
@@ -153,7 +148,7 @@ async def list_strategy_files(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(client, "GET", "/strategy/files")
+    return await _call_strategy_client(client.list_files)
 
 
 @router.get("/api/strategies")
@@ -161,7 +156,7 @@ async def list_strategies(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(client, "GET", "/strategies")
+    return await _call_strategy_client(client.list_strategies)
 
 
 @router.post("/api/strategies")
@@ -170,11 +165,9 @@ async def add_strategy_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "POST",
-        "/strategies",
-        json=strategy.model_dump(exclude_none=True),
+    return await _call_strategy_client(
+        client.create_strategy,
+        strategy.model_dump(exclude_none=True),
     )
 
 
@@ -184,7 +177,7 @@ async def get_strategy_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(client, "GET", f"/strategies/{name}")
+    return await _call_strategy_client(client.get_strategy, name)
 
 
 @router.get("/api/strategies/{name}/internal-info")
@@ -193,11 +186,7 @@ async def get_internal_strategy_info_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "GET",
-        f"/strategies/{name}/internal-info",
-    )
+    return await _call_strategy_client(client.get_internal_info, name)
 
 
 @router.post("/api/strategies/{name}/internal-info/parameter")
@@ -207,11 +196,10 @@ async def update_strategy_parameter_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "POST",
-        f"/strategies/{name}/internal-info/parameter",
-        json=payload.model_dump(exclude_none=True),
+    return await _call_strategy_client(
+        client.update_internal_parameter,
+        name,
+        payload.model_dump(exclude_none=True),
     )
 
 
@@ -221,11 +209,7 @@ async def get_strategy_risk_settings_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "GET",
-        f"/strategies/{name}/risk-settings",
-    )
+    return await _call_strategy_client(client.get_risk_settings, name)
 
 
 @router.put("/api/strategies/{name}/risk-settings")
@@ -235,11 +219,10 @@ async def update_strategy_risk_settings_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "PUT",
-        f"/strategies/{name}/risk-settings",
-        json=payload.model_dump(exclude_unset=True),
+    return await _call_strategy_client(
+        client.update_risk_settings,
+        name,
+        payload.model_dump(exclude_unset=True),
     )
 
 
@@ -249,11 +232,7 @@ async def get_internal_strategy_status_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "GET",
-        f"/strategies/{name}/status",
-    )
+    return await _call_strategy_client(client.get_strategy_status, name)
 
 
 @router.post("/api/strategies/{name}/data-push")
@@ -263,11 +242,10 @@ async def request_strategy_data_push(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "POST",
-        f"/strategies/{name}/data-push",
-        json=payload.model_dump(exclude_none=True),
+    return await _call_strategy_client(
+        client.request_data_push,
+        name,
+        payload.model_dump(exclude_none=True),
     )
 
 
@@ -278,12 +256,7 @@ async def update_strategy_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "PUT",
-        f"/strategies/{name}",
-        json=dict(updates),
-    )
+    return await _call_strategy_client(client.update_strategy, name, dict(updates))
 
 
 @router.post("/api/strategies/{name}/rename")
@@ -293,11 +266,10 @@ async def rename_strategy_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "POST",
-        f"/strategies/{name}/rename",
-        json=payload.model_dump(exclude_none=True),
+    return await _call_strategy_client(
+        client.rename_strategy,
+        name,
+        payload.model_dump(exclude_none=True),
     )
 
 
@@ -307,11 +279,7 @@ async def delete_strategy_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "DELETE",
-        f"/strategies/{name}",
-    )
+    return await _call_strategy_client(client.delete_strategy, name)
 
 
 @router.post("/api/strategies/{name}/toggle")
@@ -321,11 +289,10 @@ async def toggle_strategy_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "POST",
-        f"/strategies/{name}/toggle",
-        json={"enabled": bool(enabled)},
+    return await _call_strategy_client(
+        client.toggle_strategy,
+        name,
+        enabled=bool(enabled),
     )
 
 
@@ -335,11 +302,7 @@ async def reset_strategy_data_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "POST",
-        f"/strategies/{name}/reset",
-    )
+    return await _call_strategy_client(client.reset_strategy, name)
 
 
 @router.get("/api/strategies/{name}/performance")
@@ -351,16 +314,12 @@ async def get_strategy_performance_api(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    params = {"range": range}
-    if start:
-        params["start"] = start
-    if end:
-        params["end"] = end
-    return await _call_strategy_service(
-        client,
-        "GET",
-        f"/strategies/{name}/performance",
-        params=params,
+    return await _call_strategy_client(
+        client.get_strategy_performance,
+        name,
+        range_=range,
+        start=start,
+        end=end,
     )
 
 
@@ -371,12 +330,10 @@ async def get_strategy_daily_pnl(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    params = {"force_refresh": str(force_refresh).lower()}
-    return await _call_strategy_service(
-        client,
-        "GET",
-        f"/strategies/{name}/pnl/daily",
-        params=params,
+    return await _call_strategy_client(
+        client.get_daily_pnl,
+        name,
+        force_refresh=force_refresh,
     )
 
 
@@ -395,7 +352,7 @@ async def submit_external_strategy_order(
             metadata.setdefault("client", client_host)
 
     try:
-        return await client.request("POST", "/strategy", json=data)
+        return await client.submit_external_order(data)
     except ServiceUnavailableError as exc:
         logger.warning(
             "Strategy service unavailable; queuing external order",
@@ -417,15 +374,11 @@ async def get_strategy_executions(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    params = {
-        "limit": max(1, min(int(limit or 1), 1000)),
-        "force_refresh": str(force_refresh).lower(),
-    }
-    return await _call_strategy_service(
-        client,
-        "GET",
-        f"/strategies/{name}/executions",
-        params=params,
+    return await _call_strategy_client(
+        client.get_executions,
+        name,
+        limit=limit,
+        force_refresh=force_refresh,
     )
 
 
@@ -435,8 +388,4 @@ async def clear_strategy_executions(
     user: Optional[str] = Depends(get_current_user),
     client: StrategyServiceClient = Depends(_get_strategy_service_client),
 ) -> Any:
-    return await _call_strategy_service(
-        client,
-        "DELETE",
-        f"/strategies/{name}/executions",
-    )
+    return await _call_strategy_client(client.clear_executions, name)

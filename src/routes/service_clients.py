@@ -392,20 +392,136 @@ class StrategyServiceClient(ServiceClient):
     env_prefix = "STRATEGY"
     default_base_url = "http://localhost:8045"
 
-    async def list_strategies(self) -> Any:
-        return await self.request("GET", "/strategy/list")
+    async def get_settings(self) -> Any:
+        return await self.request("GET", "/strategy/settings")
 
-    async def fetch_strategy(self, name: str) -> Any:
-        return await self.request("GET", f"/strategy/{name}")
+    async def update_settings(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request(
+            "POST",
+            "/strategy/settings",
+            json=dict(payload),
+        )
+
+    async def generate_settings_token(self) -> Any:
+        return await self.request("POST", "/strategy/settings/generate-token")
+
+    async def list_files(self) -> Any:
+        return await self.request("GET", "/strategy/files")
+
+    async def list_strategies(self) -> Any:
+        return await self.request("GET", "/strategies")
+
+    async def create_strategy(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request("POST", "/strategies", json=dict(payload))
+
+    async def get_strategy(self, name: str) -> Any:
+        return await self.request("GET", f"/strategies/{name}")
+
+    async def get_internal_info(self, name: str) -> Any:
+        return await self.request("GET", f"/strategies/{name}/internal-info")
+
+    async def update_internal_parameter(
+        self, name: str, payload: Mapping[str, Any]
+    ) -> Any:
+        return await self.request(
+            "POST",
+            f"/strategies/{name}/internal-info/parameter",
+            json=dict(payload),
+        )
+
+    async def get_risk_settings(self, name: str) -> Any:
+        return await self.request("GET", f"/strategies/{name}/risk-settings")
+
+    async def update_risk_settings(self, name: str, payload: Mapping[str, Any]) -> Any:
+        return await self.request(
+            "PUT",
+            f"/strategies/{name}/risk-settings",
+            json=dict(payload),
+        )
+
+    async def get_strategy_status(self, name: str) -> Any:
+        return await self.request("GET", f"/strategies/{name}/status")
+
+    async def request_data_push(self, name: str, payload: Mapping[str, Any]) -> Any:
+        return await self.request(
+            "POST",
+            f"/strategies/{name}/data-push",
+            json=dict(payload),
+        )
 
     async def update_strategy(self, name: str, updates: Mapping[str, Any]) -> Any:
         return await self.request(
             "PUT",
-            f"/strategy/{name}",
+            f"/strategies/{name}",
             json=dict(updates),
         )
 
-    async def post_strategy(self, payload: Mapping[str, Any]) -> Any:
+    async def rename_strategy(self, name: str, payload: Mapping[str, Any]) -> Any:
+        return await self.request(
+            "POST",
+            f"/strategies/{name}/rename",
+            json=dict(payload),
+        )
+
+    async def delete_strategy(self, name: str) -> Any:
+        return await self.request("DELETE", f"/strategies/{name}")
+
+    async def toggle_strategy(self, name: str, *, enabled: bool) -> Any:
+        return await self.request(
+            "POST",
+            f"/strategies/{name}/toggle",
+            json={"enabled": bool(enabled)},
+        )
+
+    async def reset_strategy(self, name: str) -> Any:
+        return await self.request("POST", f"/strategies/{name}/reset")
+
+    async def get_strategy_performance(
+        self,
+        name: str,
+        *,
+        range_: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> Any:
+        params: Dict[str, Any] = {}
+        if range_ is not None:
+            params["range"] = range_
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        return await self.request(
+            "GET",
+            f"/strategies/{name}/performance",
+            params=params or None,
+        )
+
+    async def get_daily_pnl(self, name: str, *, force_refresh: bool = False) -> Any:
+        params = {"force_refresh": str(force_refresh).lower()}
+        return await self.request(
+            "GET",
+            f"/strategies/{name}/pnl/daily",
+            params=params,
+        )
+
+    async def get_executions(
+        self, name: str, *, limit: int = 100, force_refresh: bool = False
+    ) -> Any:
+        params = {
+            "limit": max(1, min(int(limit or 1), 1000)),
+            "force_refresh": str(force_refresh).lower(),
+        }
+        return await self.request(
+            "GET",
+            f"/strategies/{name}/executions",
+            params=params,
+        )
+
+    async def clear_executions(self, name: str) -> Any:
+        return await self.request("DELETE", f"/strategies/{name}/executions")
+
+    async def submit_external_order(self, payload: Mapping[str, Any]) -> Any:
         return await self.request("POST", "/strategy", json=dict(payload))
 
 

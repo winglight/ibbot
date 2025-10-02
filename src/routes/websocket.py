@@ -28,10 +28,6 @@ from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
 from src.routes.monitoring import build_influx_write_rate_payload, get_queue_metrics
 from src.service_status import build_service_status_payload
-from src.utils.strategy_cache import (
-    compute_performance_metrics as cache_compute_performance,
-    get_strategy_stats as cache_get_strategy_stats,
-)
 from src.ib_command_health import (
     IB_COMMAND_HEALTH_KEY,
     IB_COMMAND_HEALTH_STALE_AFTER_SEC,
@@ -1799,19 +1795,32 @@ async def websocket_endpoint(websocket: WebSocket):
                     response = await _STRATEGY_CLIENT.list_strategies()
                 except ServiceUnavailableError as exc:
                     logger.debug(f"Strategy service unavailable: {exc}")
-                    response = None
+                    payload = _service_unavailable_payload("strategies_snapshot")
+                    payload["detail"] = "Strategy service unavailable"
+                    last_responses[key] = payload
+                    await _send_or_disconnect(websocket, payload)
+                    continue
                 except ServiceClientError as exc:
                     logger.warning(f"Strategy service error: {exc}")
-                    response = None
+                    payload = _service_unavailable_payload("strategies_snapshot")
+                    payload["detail"] = str(exc)
+                    last_responses[key] = payload
+                    await _send_or_disconnect(websocket, payload)
+                    continue
 
                 strategies: Any = []
                 if isinstance(response, Mapping):
-                    strategies = response.get("strategies") or response.get("data") or []
+                    strategies = response.get("strategies")
+                    if strategies is None:
+                        strategies = response.get("data")
+                    if strategies is None:
+                        strategies = response
                 elif isinstance(response, list):
                     strategies = response
 
-                if not strategies:
+                if not isinstance(strategies, list):
                     payload = _service_unavailable_payload("strategies_snapshot")
+                    payload["detail"] = "Unexpected strategy payload"
                     last_responses[key] = payload
                     await _send_or_disconnect(websocket, payload)
                     continue
@@ -1819,7 +1828,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = {
                     "type": "strategies_snapshot",
                     "success": True,
-                    "strategies": strategies or [],
+                    "strategies": strategies,
                     "source": "service",
                 }
                 last_responses[key] = payload
@@ -1858,22 +1867,33 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    response = await _STRATEGY_CLIENT.fetch_strategy(name)
+                    response = await _STRATEGY_CLIENT.get_strategy_status(name)
                 except ServiceUnavailableError as exc:
                     logger.debug(f"Strategy service unavailable for {name}: {exc}")
-                    response = None
+                    payload = _service_unavailable_payload("strategy_status", name=name)
+                    payload["detail"] = "Strategy service unavailable"
+                    last_responses[key] = payload
+                    await _send_or_disconnect(websocket, payload)
+                    continue
                 except ServiceClientError as exc:
                     logger.warning(f"Strategy service error for {name}: {exc}")
-                    response = None
+                    payload = _service_unavailable_payload("strategy_status", name=name)
+                    payload["detail"] = str(exc)
+                    last_responses[key] = payload
+                    await _send_or_disconnect(websocket, payload)
+                    continue
 
                 status_payload: Any = None
                 if isinstance(response, Mapping):
-                    status_payload = response.get("status") or response.get("data")
-                if status_payload is None and isinstance(response, Mapping):
-                    status_payload = response
+                    status_payload = response.get("status")
+                    if status_payload is None:
+                        status_payload = response.get("data")
+                    if status_payload is None:
+                        status_payload = response
 
                 if status_payload is None:
                     payload = _service_unavailable_payload("strategy_status", name=name)
+                    payload["detail"] = "Unexpected strategy status payload"
                     last_responses[key] = payload
                     await _send_or_disconnect(websocket, payload)
                     continue
@@ -1945,52 +1965,52 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
-                cache_stats = None
                 try:
-                    cache_stats = await cache_get_strategy_stats(name)
-                except Exception:
-                    cache_stats = {}
-                metrics_source = None
-                if cache_stats and not cache_stats.get("stale"):
-                    try:
-                        metrics = await cache_compute_performance(
-                            name, start_date=start_date, end_date=end_date
-                        )
-                        payload = {
-                            "type": "strategy_performance",
-                            "success": True,
-                            "name": name,
-                            "range": range_value,
-                            "metrics": metrics,
-                            "from_cache": True,
-                        }
-                        metrics_source = "cache"
-                        last_responses[key] = payload
-                        await _send_or_disconnect(websocket, payload)
-                        continue
-                    except Exception as exc:
-                        logger.debug(
-                            f"Cache performance fetch failed for {name}: {exc}"
-                        )
-
-                try:
-                    response = await _STRATEGY_CLIENT.fetch_strategy(name)
+                    response = await _STRATEGY_CLIENT.get_strategy_performance(
+                        name,
+                        range_=range_value,
+                        start=start_raw,
+                        end=end_raw,
+                    )
                 except ServiceUnavailableError as exc:
                     logger.debug(f"Strategy service unavailable for {name}: {exc}")
-                    response = None
+                    payload = _service_unavailable_payload(
+                        "strategy_performance",
+                        name=name,
+                        range=range_value,
+                    )
+                    payload["detail"] = "Strategy service unavailable"
+                    last_responses[key] = payload
+                    await _send_or_disconnect(websocket, payload)
+                    continue
                 except ServiceClientError as exc:
                     logger.warning(f"Strategy service error for {name}: {exc}")
-                    response = None
+                    payload = _service_unavailable_payload(
+                        "strategy_performance",
+                        name=name,
+                        range=range_value,
+                    )
+                    payload["detail"] = str(exc)
+                    last_responses[key] = payload
+                    await _send_or_disconnect(websocket, payload)
+                    continue
 
-                metrics = None
+                metrics: Any = None
+                source = "service"
                 if isinstance(response, Mapping):
-                    metrics = response.get("performance") or response.get("metrics")
+                    metrics = (
+                        response.get("metrics")
+                        or response.get("performance")
+                        or response.get("data")
+                    )
                     if metrics is None:
-                        strategy_payload = response.get("strategy")
-                        if isinstance(strategy_payload, Mapping):
-                            metrics = strategy_payload.get("performance") or strategy_payload.get("metrics")
-                    if metrics is not None and metrics_source is None:
-                        metrics_source = response.get("source", "service") or "service"
+                        nested = response.get("strategy")
+                        if isinstance(nested, Mapping):
+                            metrics = nested.get("metrics") or nested.get("performance")
+                    if isinstance(response.get("source"), str):
+                        source = response["source"] or source
+                elif isinstance(response, list):
+                    metrics = response
 
                 if metrics is None:
                     payload = _service_unavailable_payload(
@@ -1998,6 +2018,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         name=name,
                         range=range_value,
                     )
+                    payload["detail"] = "Unexpected strategy performance payload"
                     last_responses[key] = payload
                     await _send_or_disconnect(websocket, payload)
                     continue
@@ -2008,9 +2029,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     "name": name,
                     "range": range_value,
                     "metrics": metrics,
+                    "source": source,
                 }
-                if metrics_source:
-                    payload["source"] = metrics_source
                 last_responses[key] = payload
                 await _send_or_disconnect(websocket, payload)
     except WebSocketDisconnect:
