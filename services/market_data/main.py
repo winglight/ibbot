@@ -662,6 +662,7 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             "symbol": result.get("symbol", query.symbol),
             "duration": result.get("duration", query.duration),
             "bar_size": result.get("bar_size", query.bar_size),
+            "exchange": result.get("exchange", query.exchange),
             "rows": len(candles),
             "source": "market_data_service",
             "metadata": {
@@ -683,6 +684,8 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             "symbol": result["symbol"],
             "duration": result["duration"],
             "bar_size": result["bar_size"],
+            "exchange": result.get("exchange", query.exchange),
+            "source": "market_data_service",
         }
         return JSONResponse(response_payload)
 

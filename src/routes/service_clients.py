@@ -550,6 +550,13 @@ class MarketDataServiceClient(ServiceClient):
             json=dict(payload),
         )
 
+    async def request_chart_data(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request(
+            "POST",
+            "/chart_data",
+            json=dict(payload),
+        )
+
 
 class NotificationServiceClient(ServiceClient):
     service_name = "notification"

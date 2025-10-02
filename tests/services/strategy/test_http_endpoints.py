@@ -171,6 +171,9 @@ def test_strategy_settings_endpoints(redis_client: InMemoryRedis) -> None:
         assert updated["enable_auth"] is True
         assert updated["api_payload_template"] == {"hello": "world"}
 
+        health = asyncio.run(redis_client.hgetall("hash:service:health:strategy"))
+        assert "settings_updated_at" in health
+
         response = client.post("/strategy/settings/generate-token")
         assert response.status_code == 200
         token_payload = response.json()

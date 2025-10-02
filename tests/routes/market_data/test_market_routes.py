@@ -21,7 +21,6 @@ def market_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
     app.dependency_overrides[market_data_module.get_current_user] = allow_user
 
-    monkeypatch.setattr(market_data_module, "_get_data_layer_manager", lambda: None)
     monkeypatch.setattr(market_data_module, "historical_data_cache", {})
     monkeypatch.setattr(market_data_module, "CURRENT_PRICE_CACHE_ONLY", False)
 
@@ -80,6 +79,60 @@ def test_historical_data_service_unavailable(
     with TestClient(market_app) as client:
         response = client.post(
             "/api/historical_data",
+            json={"symbol": "ES", "duration": "1 D", "bar_size": "1 min", "exchange": "CME"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Market data service unavailable"
+
+
+def test_chart_data_returns_service_payload(
+    market_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StubClient:
+        async def request_chart_data(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+            assert payload["symbol"] == "ES"
+            return {
+                "data": [
+                    {
+                        "time": "2024-01-01T09:30:00-05:00",
+                        "open": 1.0,
+                        "high": 2.0,
+                        "low": 0.5,
+                        "close": 1.5,
+                        "volume": 100,
+                    }
+                ],
+                "symbol": "ES",
+            }
+
+    _override_market_service(monkeypatch, StubClient())
+
+    with TestClient(market_app) as client:
+        response = client.post(
+            "/api/chart_data",
+            json={"symbol": "ES", "duration": "1 D", "bar_size": "1 min", "exchange": "CME"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"][0]["open"] == 1.0
+    assert payload["symbol"] == "ES"
+
+
+def test_chart_data_service_unavailable(
+    market_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingClient:
+        async def request_chart_data(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+            raise ServiceUnavailableError("market_data", "offline")
+
+    _override_market_service(monkeypatch, FailingClient())
+
+    with TestClient(market_app) as client:
+        response = client.post(
+            "/api/chart_data",
             json={"symbol": "ES", "duration": "1 D", "bar_size": "1 min", "exchange": "CME"},
         )
 

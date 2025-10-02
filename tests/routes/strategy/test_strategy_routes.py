@@ -26,6 +26,82 @@ def _patch_service_client(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
     monkeypatch.setattr(strategy_module, "_get_strategy_service_client", lambda: client)
 
 
+def test_get_strategy_settings_success(
+    strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StubClient:
+        async def get_settings(self) -> Any:
+            return {"success": True, "settings": {"api_endpoint": "/api/strategy"}}
+
+    _patch_service_client(monkeypatch, StubClient())
+
+    with TestClient(strategy_app) as client:
+        response = client.get("/api/strategy/settings")
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+
+def test_get_strategy_settings_unavailable(
+    strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StubClient:
+        async def get_settings(self) -> Any:
+            raise strategy_module.ServiceUnavailableError("strategy", "offline")
+
+    _patch_service_client(monkeypatch, StubClient())
+
+    with TestClient(strategy_app) as client:
+        response = client.get("/api/strategy/settings")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Strategy service unavailable"
+
+
+def test_update_strategy_settings_success(
+    strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StubClient:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        async def update_settings(self, payload: dict[str, Any]) -> Any:
+            self.payloads.append(payload)
+            return {"success": True, "settings": payload}
+
+    stub = StubClient()
+    _patch_service_client(monkeypatch, stub)
+
+    with TestClient(strategy_app) as client:
+        response = client.post(
+            "/api/strategy/settings",
+            json={"api_endpoint": "/hook"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert stub.payloads and stub.payloads[0]["api_endpoint"] == "/hook"
+
+
+def test_update_strategy_settings_unavailable(
+    strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StubClient:
+        async def update_settings(self, payload: dict[str, Any]) -> Any:
+            raise strategy_module.ServiceUnavailableError("strategy", "offline")
+
+    _patch_service_client(monkeypatch, StubClient())
+
+    with TestClient(strategy_app) as client:
+        response = client.post(
+            "/api/strategy/settings",
+            json={"api_endpoint": "/hook"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Strategy service unavailable"
+
+
 def test_submit_external_strategy_order_success(
     strategy_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
