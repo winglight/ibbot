@@ -11,6 +11,7 @@ from src.cache import init_redis
 from src.config import load_project_env
 from src.ibbot.config import ConfigProvider
 from src.ibbot.influx import InfluxConfig, configure_influx
+from src.order_manager import OrderManager
 from src.utils import now_local
 from src.websocket_manager import WebSocketManager, websocket_manager
 
@@ -23,6 +24,7 @@ class CoreContainer:
     influx_config: InfluxConfig | None
     config_provider: ConfigProvider | None
     websocket_manager: WebSocketManager
+    order_manager: OrderManager
     account_snapshot_service: Any | None = None
 
 
@@ -92,11 +94,19 @@ async def initialise(*, force: bool = False) -> CoreContainer:
 
     config_provider = await _start_config_provider(config_provider)
 
+    async def _redis_factory() -> Any:
+        if redis_client is not None:
+            return redis_client
+        return await init_redis()
+
+    order_manager = OrderManager(redis_factory=_redis_factory)
+
     container = CoreContainer(
         redis_client=redis_client,
         influx_config=influx_config,
         config_provider=config_provider,
         websocket_manager=websocket_manager,
+        order_manager=order_manager,
     )
 
     set_container(container)
