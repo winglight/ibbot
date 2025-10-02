@@ -20,6 +20,8 @@ __pycache__
 strategy
 !services/strategy/
 !services/strategy/**
+!tests/services/strategy/
+!tests/services/strategy/**
 !tests/routes/strategy/
 !tests/routes/strategy/**
 test/src
