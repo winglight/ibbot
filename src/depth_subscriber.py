@@ -333,14 +333,6 @@ class DepthSubscriber:
 
         setattr(core, "ibkr_client", client)
 
-        # Best effort: update risk manager reference when available
-        try:
-            risk_manager = getattr(core, "risk_manager", None)
-            if risk_manager and hasattr(risk_manager, "ibkr_client"):
-                risk_manager.ibkr_client = client
-        except Exception:  # pragma: no cover - defensive
-            pass
-
         return client
 
 
