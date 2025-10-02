@@ -256,6 +256,7 @@ class QueueMonitorRuntime:
             self.service_name,
             healthy=True,
             metrics=metrics,
+            key="hash:service:health:queue",
             logger=self._logger,
         )
 
