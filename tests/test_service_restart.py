@@ -16,11 +16,11 @@ class DummyController:
         raise AssertionError(f"restart should not be called for {service}")
 
 
-def test_notification_restart_plan_excludes_connection_control() -> None:
-    """Restarting the notification service should not bounce dependencies."""
+def test_notification_restart_plan_includes_connection_control() -> None:
+    """Restarting notification also restarts the connection controller."""
 
     manager = ServiceRestartManager(DummyController())
 
     plan = manager.resolve_plan("notification")
 
-    assert plan == ["notification"]
+    assert plan == ["connection_control", "notification"]

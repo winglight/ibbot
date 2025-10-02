@@ -240,14 +240,11 @@ DEFAULT_SERVICE_DEPENDENCIES: Mapping[str, Sequence[str]] = {
     "market_data_feed": (),
     "market_data": ("market_data_feed",),
     "risk": ("orders",),
-    # Restarting the notification dispatcher should not implicitly bounce
-    # ``connection_control``.  The dispatcher only depends on Redis and the
-    # web API forwards health checks directly to it; forcing a restart of the
-    # connection controller caused confusing failures in the UI when the
-    # underlying supervisor refused to restart that service.  Keeping the
-    # dependency list empty ensures the "Restart" button on the notification
-    # card only targets the dispatcher itself.
-    "notification": (),
+    # The notification dispatcher requires a healthy connection controller to
+    # refresh client subscriptions. Restarting the dispatcher therefore also
+    # restarts ``connection_control`` so operators can recover from Redis
+    # disconnects with a single action.
+    "notification": ("connection_control",),
     "strategy": ("orders",),
     "ibbot": ("account", "orders"),
 }
