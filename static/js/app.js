@@ -492,11 +492,21 @@ class TradingApp {
 
     handleWebSocketPayload(payload) {
         if (!payload || !payload.type) return false;
+        let handled = false;
+        switch (payload.type) {
+            case 'service_health':
+                handled = this.updateServiceHealth(payload) || handled;
+                break;
+            case 'connection_command':
+                handled = this.handleConnectionCommand(payload) || handled;
+                break;
+            default:
+                break;
+        }
         const handlers = this.wsHandlers.get(payload.type);
         if (!handlers || handlers.size === 0) {
-            return false;
+            return handled;
         }
-        let handled = false;
         [...handlers].forEach(handler => {
             try {
                 const result = handler(payload);
@@ -506,6 +516,30 @@ class TradingApp {
             }
         });
         return handled;
+    }
+
+    updateServiceHealth(payload = {}) {
+        if (!payload || typeof payload !== 'object') return false;
+        const services = payload.services && typeof payload.services === 'object' ? payload.services : {};
+        this.serviceHealth = services;
+        let applied = false;
+        if (this.monitoringManager && typeof this.monitoringManager.applyServiceHealth === 'function') {
+            try {
+                applied = this.monitoringManager.applyServiceHealth(services, payload) || applied;
+            } catch (error) {
+                console.error('[monitoring] applyServiceHealth failed', error);
+            }
+        }
+        return true;
+    }
+
+    handleConnectionCommand(payload = {}) {
+        if (!payload || payload.type !== 'connection_command') return false;
+        this.lastConnectionCommand = {
+            ...payload,
+            receivedAt: Date.now()
+        };
+        return true;
     }
 
     handleStrategyPerformanceMessage(message) {

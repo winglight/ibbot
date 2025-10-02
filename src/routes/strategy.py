@@ -17,7 +17,6 @@ from src.utils.strategy_cache import (
     rebuild_strategy_cache as cache_rebuild_strategy_cache,
 )
 
-from core import strategy_manager, queue_manager, order_manager
 from .auth import get_current_user
 from src.database import get_db_manager
 from src.models import (
@@ -29,6 +28,12 @@ from src.models import (
     StrategyRiskSettings,
     StrategyParameterUpdateRequest,
 )
+
+import core
+
+strategy_manager = getattr(core, "strategy_manager", None)
+queue_manager = getattr(core, "queue_manager", None)
+order_manager = getattr(core, "order_manager", None)
 
 router = APIRouter()
 

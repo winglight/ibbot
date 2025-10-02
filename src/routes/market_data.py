@@ -1,17 +1,16 @@
-import asyncio
-import inspect
+import csv
+import json
 import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Iterable
 
-import pandas as pd
+import httpx
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import JSONResponse
 from loguru import logger
 
-import core
-from core import connection_manager, get_db_manager
+from core import get_core_container
+from ibbot.redis import ensure_redis
 from .auth import get_current_user
 from src.models import (
     HistoricalDataRequest,
@@ -27,6 +26,7 @@ from src.data_layer import (
     is_legacy_mode,
 )
 
+core_container = get_core_container()
 router = APIRouter()
 
 # Cache controls
@@ -37,6 +37,26 @@ INDEX_FUTURE_ROOTS = {"ES", "MES", "NQ", "MNQ", "YM", "MYM", "RTY", "M2K", "VX"}
 NY_TZ = ZoneInfo("America/New_York")
 
 _data_layer_manager = None
+
+MARKET_DATA_SERVICE_URL = (
+    os.getenv("MARKET_DATA_SERVICE_URL")
+    or os.getenv("MARKET_DATA_API_URL")
+    or os.getenv("MARKET_DATA_BASE_URL")
+)
+MARKET_DATA_HISTORY_PATH = os.getenv(
+    "MARKET_DATA_HISTORY_PATH", "/market/history"
+)
+MARKET_DATA_SNAPSHOT_PATH = os.getenv(
+    "MARKET_DATA_SNAPSHOT_PATH", "/market/{symbol}"
+)
+MARKET_DATA_TIMEOUT = float(os.getenv("MARKET_DATA_SERVICE_TIMEOUT", "5.0"))
+MARKET_DATA_STREAM_KEY = os.getenv(
+    "MARKET_DATA_STREAM_KEY", "stream:market-service"
+)
+MARKET_DATA_SNAPSHOT_PREFIX = os.getenv(
+    "MARKET_DATA_SNAPSHOT_PREFIX", "hash:market:snapshot"
+)
+MAX_HISTORY_RECORDS = int(os.getenv("MARKET_DATA_MAX_HISTORY", "2000"))
 
 _BAR_SIZE_TO_INTERVAL = {
     "1 sec": "1s",
@@ -99,35 +119,120 @@ def _filter_candles_by_duration(
     return filtered
 
 
-def _candles_to_records(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=NY_TZ)
+        return value.astimezone(NY_TZ)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=NY_TZ)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            try:
+                return datetime.fromtimestamp(int(text), tz=NY_TZ)
+            except (OverflowError, OSError, ValueError):
+                return None
+        try:
+            return datetime.fromisoformat(text).astimezone(NY_TZ)
+        except ValueError:
+            pass
+        try:
+            return datetime.fromtimestamp(float(text), tz=NY_TZ)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
+
+
+def _normalise_candle_record(candle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(candle, dict):
+        return None
+
+    ts_candidate = (
+        candle.get("interval_end")
+        or candle.get("interval_end_ns")
+        or candle.get("interval_start")
+        or candle.get("interval_start_ns")
+        or candle.get("timestamp")
+        or candle.get("ts")
+        or candle.get("time")
+    )
+    timestamp = None
+    if ts_candidate is not None and str(ts_candidate).isdigit() and len(str(ts_candidate)) > 12:
+        try:
+            timestamp = datetime.fromtimestamp(
+                int(ts_candidate) / 1_000_000_000, tz=NY_TZ
+            )
+        except (OverflowError, OSError, ValueError):
+            timestamp = None
+    if timestamp is None:
+        timestamp = _parse_timestamp(ts_candidate)
+    if timestamp is None:
+        return None
+
+    record = {
+        "date": to_local_iso(timestamp),
+        "open": _coerce_float(
+            candle.get("open")
+            or candle.get("o")
+            or candle.get("price_open")
+        ),
+        "high": _coerce_float(
+            candle.get("high")
+            or candle.get("h")
+            or candle.get("price_high")
+        ),
+        "low": _coerce_float(
+            candle.get("low")
+            or candle.get("l")
+            or candle.get("price_low")
+        ),
+        "close": _coerce_float(
+            candle.get("close")
+            or candle.get("c")
+            or candle.get("price_close")
+        ),
+        "volume": _coerce_int(
+            candle.get("volume")
+            or candle.get("v")
+            or candle.get("trade_volume")
+        ),
+    }
+
+    return record
+
+
+def _candles_to_records(candles: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for candle in candles:
-        ts_ns = candle.get("interval_end_ns") or candle.get("interval_start_ns")
-        if ts_ns is not None:
-            try:
-                ts = datetime.fromtimestamp(int(ts_ns) / 1_000_000_000, tz=NY_TZ)
-            except Exception:
-                ts = now_local()
-        else:
-            ts = now_local()
-        record = {
-            "date": to_local_iso(ts),
-            "open": candle.get("open"),
-            "high": candle.get("high"),
-            "low": candle.get("low"),
-            "close": candle.get("close"),
-            "volume": candle.get("volume"),
-        }
-        records.append(record)
+        normalised = _normalise_candle_record(candle)
+        if normalised is not None:
+            records.append(normalised)
+    records.sort(key=lambda item: item.get("date") or "")
     return records
-
-
-def _require_ib_client():
-    """Ensure an IBKR client instance is available before servicing the request."""
-    ib_client = getattr(core, "ibkr_client", None)
-    if ib_client is None:
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    return ib_client
 
 
 def _parse_duration_to_minutes(duration: str) -> int:
@@ -162,6 +267,385 @@ def _parse_duration_to_minutes(duration: str) -> int:
     return int(n)
 
 
+async def _fetch_service_json(path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
+    base_url = MARKET_DATA_SERVICE_URL
+    if not base_url:
+        return None
+
+    url = f"{base_url.rstrip('/')}{path}"
+
+    try:
+        async with httpx.AsyncClient(timeout=MARKET_DATA_TIMEOUT) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "Market data service HTTP error",
+            url=url,
+            status=exc.response.status_code,
+        )
+        return None
+    except httpx.RequestError as exc:
+        logger.warning(
+            "Market data service request failed",
+            url=url,
+            error=str(exc),
+        )
+        return None
+
+    try:
+        return response.json()
+    except ValueError:
+        logger.warning("Market data service returned invalid JSON", url=url)
+        return None
+
+
+def _normalise_snapshot_payload(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(data, dict):
+        return None
+
+    symbol = data.get("symbol") or data.get("ticker")
+    price = _coerce_float(data.get("price") or data.get("last") or data.get("close"))
+    bid = _coerce_float(data.get("bid"))
+    ask = _coerce_float(data.get("ask"))
+    volume = _coerce_int(data.get("volume")) or 0
+
+    timestamp_value = (
+        data.get("timestamp")
+        or data.get("updated_at")
+        or data.get("ts")
+        or data.get("time")
+    )
+    timestamp = _parse_timestamp(timestamp_value) or now_local()
+
+    result = {
+        "symbol": symbol,
+        "last": price,
+        "bid": bid,
+        "ask": ask,
+        "volume": volume,
+        "timestamp": to_local_iso(timestamp),
+    }
+
+    if data.get("stale") is not None:
+        result["stale"] = bool(data.get("stale"))
+    if data.get("source"):
+        result["source"] = data.get("source")
+
+    return result
+
+
+async def _fetch_snapshot_from_service(symbol: str) -> Optional[Dict[str, Any]]:
+    path = MARKET_DATA_SNAPSHOT_PATH.format(symbol=symbol)
+    payload = await _fetch_service_json(path)
+    if isinstance(payload, dict):
+        if "data" in payload and isinstance(payload["data"], dict):
+            payload = payload["data"]
+        return _normalise_snapshot_payload(payload)
+    return None
+
+
+async def _fetch_snapshot_from_redis(symbol: str) -> Optional[Dict[str, Any]]:
+    redis = await ensure_redis()
+    if redis is None:
+        return None
+
+    key = f"{MARKET_DATA_SNAPSHOT_PREFIX}:{symbol.upper()}"
+    try:
+        raw = await redis.hgetall(key)
+    except Exception as exc:
+        logger.warning("Failed to read market snapshot", symbol=symbol, error=str(exc))
+        return None
+
+    if not raw:
+        return None
+
+    decoded: Dict[str, Any] = {}
+    for key_field, value in raw.items():
+        if isinstance(key_field, bytes):
+            key_field = key_field.decode("utf-8", errors="ignore")
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8")
+            except Exception:
+                value = value.decode("latin-1", errors="ignore")
+        decoded[key_field] = value
+
+    dom_value = decoded.get("dom")
+    if isinstance(dom_value, str):
+        try:
+            decoded["dom"] = json.loads(dom_value)
+        except json.JSONDecodeError:
+            pass
+
+    if "data" in decoded and isinstance(decoded["data"], str):
+        try:
+            decoded["data"] = json.loads(decoded["data"])
+        except json.JSONDecodeError:
+            pass
+
+    result = _normalise_snapshot_payload(decoded)
+    if result is not None and decoded.get("stale") is not None:
+        result["stale"] = bool(decoded.get("stale"))
+    return result
+
+
+async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
+    snapshot = await _fetch_snapshot_from_service(symbol)
+    if snapshot:
+        snapshot.setdefault("source", "service")
+        return snapshot
+
+    snapshot = await _fetch_snapshot_from_redis(symbol)
+    if snapshot:
+        snapshot.setdefault("source", "redis")
+        return snapshot
+
+    return None
+
+
+def _limit_for_duration(duration_minutes: int) -> int:
+    if duration_minutes <= 0:
+        return min(500, MAX_HISTORY_RECORDS)
+    approx = max(1, duration_minutes)
+    return min(MAX_HISTORY_RECORDS, approx * 5)
+
+
+def _extract_history_payload(payload: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(payload, dict):
+        for key in ("candles", "bars", "data", "history"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        return []
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+async def _fetch_history_from_service(
+    symbol: str,
+    *,
+    interval: Optional[str],
+    duration_minutes: int,
+    exchange: str,
+) -> List[Dict[str, Any]]:
+    path = MARKET_DATA_HISTORY_PATH
+    params: Dict[str, Any] = {"symbol": symbol}
+    if interval:
+        params["interval"] = interval
+    if duration_minutes > 0:
+        params["duration_minutes"] = duration_minutes
+    if exchange:
+        params["exchange"] = exchange
+
+    payload = await _fetch_service_json(path, params=params)
+    records = _candles_to_records(_extract_history_payload(payload))
+    return records
+
+
+async def _fetch_history_from_stream(
+    symbol: str,
+    *,
+    interval: Optional[str],
+    duration_minutes: int,
+) -> List[Dict[str, Any]]:
+    redis = await ensure_redis()
+    if redis is None:
+        return []
+
+    count = _limit_for_duration(duration_minutes)
+    try:
+        entries = await redis.xrevrange(MARKET_DATA_STREAM_KEY, count=count)
+    except Exception as exc:
+        logger.warning("Failed to read market data stream", error=str(exc))
+        return []
+
+    records: List[Dict[str, Any]] = []
+    symbol_upper = symbol.upper()
+    seen_dates: set[str] = set()
+
+    for _, data in entries:
+        if not isinstance(data, dict):
+            continue
+        decoded: Dict[str, Any] = {}
+        for key, value in data.items():
+            if isinstance(key, bytes):
+                key = key.decode("utf-8", errors="ignore")
+            if isinstance(value, bytes):
+                try:
+                    value = value.decode("utf-8")
+                except Exception:
+                    value = value.decode("latin-1", errors="ignore")
+            decoded[key] = value
+
+        entry_symbol = str(decoded.get("symbol") or "").upper()
+        if entry_symbol != symbol_upper:
+            continue
+
+        event_type = str(decoded.get("type") or decoded.get("event_type") or "")
+        if not event_type.startswith("market.candle"):
+            continue
+
+        payload_raw = decoded.get("data")
+        if isinstance(payload_raw, str):
+            try:
+                payload_data = json.loads(payload_raw)
+            except json.JSONDecodeError:
+                continue
+        elif isinstance(payload_raw, dict):
+            payload_data = payload_raw
+        else:
+            continue
+
+        if interval:
+            payload_interval = (
+                payload_data.get("interval")
+                or decoded.get("interval")
+                or event_type.rsplit(".", 1)[-1]
+            )
+            if payload_interval and str(payload_interval).lower() != interval.lower():
+                continue
+
+        normalised = _normalise_candle_record(payload_data)
+        if normalised is None:
+            continue
+
+        date_key = normalised.get("date")
+        if date_key in seen_dates:
+            continue
+        seen_dates.add(date_key)
+        records.append(normalised)
+
+    records.sort(key=lambda item: item.get("date") or "")
+    return records
+
+
+async def _fetch_market_history(
+    symbol: str,
+    *,
+    interval: Optional[str],
+    duration_minutes: int,
+    exchange: str,
+) -> List[Dict[str, Any]]:
+    records = await _fetch_history_from_service(
+        symbol,
+        interval=interval,
+        duration_minutes=duration_minutes,
+        exchange=exchange,
+    )
+    if records:
+        return records
+
+    records = await _fetch_history_from_stream(
+        symbol,
+        interval=interval,
+        duration_minutes=duration_minutes,
+    )
+    return records
+
+
+def _write_records_to_csv(filename: str, records: Iterable[Dict[str, Any]]) -> None:
+    if not records:
+        return
+
+    try:
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, "w", newline="") as fp:
+            fieldnames = ["date", "open", "high", "low", "close", "volume"]
+            writer = csv.DictWriter(fp, fieldnames=fieldnames)
+            writer.writeheader()
+            for record in records:
+                row = {field: record.get(field) for field in fieldnames}
+                writer.writerow(row)
+    except Exception as exc:
+        logger.warning(
+            "Failed to write historical data CSV",
+            filename=filename,
+            error=str(exc),
+        )
+
+
+def _records_to_chart(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    chart: List[Dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        date_value = record.get("date")
+        ts = _parse_timestamp(date_value) if date_value else None
+        if ts is None and isinstance(date_value, str):
+            try:
+                ts = datetime.fromisoformat(date_value)
+            except ValueError:
+                ts = None
+        if ts is None:
+            ts = now_local()
+        chart.append(
+            {
+                "time": to_local_iso(ts),
+                "open": float(record.get("open") or 0),
+                "high": float(record.get("high") or 0),
+                "low": float(record.get("low") or 0),
+                "close": float(record.get("close") or 0),
+                "volume": int(record.get("volume") or 0),
+            }
+        )
+    return chart
+
+
+def _dataframe_to_records(df: Any) -> List[Dict[str, Any]]:
+    if df is None or getattr(df, "empty", False):
+        return []
+
+    records: List[Dict[str, Any]] = []
+    to_dict = getattr(df, "to_dict", None)
+    if callable(to_dict):
+        try:
+            raw_records = to_dict("records")  # type: ignore[call-arg]
+            if isinstance(raw_records, list):
+                for row in raw_records:
+                    if not isinstance(row, dict):
+                        continue
+                    records.append(
+                        {
+                            "date": row.get("date") or row.get("time"),
+                            "open": row.get("open"),
+                            "high": row.get("high"),
+                            "low": row.get("low"),
+                            "close": row.get("close"),
+                            "volume": row.get("volume"),
+                        }
+                    )
+                if records:
+                    return records
+        except Exception:
+            records = []
+
+    columns = list(getattr(df, "columns", []))
+    itertuples = getattr(df, "itertuples", None)
+    if callable(itertuples):
+        try:
+            iterator = itertuples(index=False, name=None)
+        except TypeError:
+            iterator = itertuples()
+        for row in iterator:
+            row_dict = {}
+            for column in columns:
+                row_dict[column] = getattr(row, column, None)
+            records.append(
+                {
+                    "date": row_dict.get("date") or row_dict.get("time"),
+                    "open": row_dict.get("open"),
+                    "high": row_dict.get("high"),
+                    "low": row_dict.get("low"),
+                    "close": row_dict.get("close"),
+                    "volume": row_dict.get("volume"),
+                }
+            )
+
+    return records
+
+
 def _clean_expired_cache() -> None:
     """清理过期的内存缓存"""
     global historical_data_cache
@@ -177,47 +661,6 @@ def _clean_expired_cache() -> None:
         logger.debug(f"Cleaned {len(expired_keys)} expired cache entries")
 
 
-async def _fetch_ib_historical(
-    ib_client,
-    *,
-    symbol: str,
-    duration: str,
-    bar_size: str,
-    exchange: str,
-    timeout: float,
-):
-    """Call IB client's historical data API with coroutine/sync compatibility."""
-
-    method = getattr(ib_client, "get_historical_data", None)
-    if method is None:
-        return None
-
-    if inspect.iscoroutinefunction(method):
-        return await asyncio.wait_for(
-            method(
-                symbol=symbol,
-                duration=duration,
-                bar_size=bar_size,
-                exchange=exchange,
-            ),
-            timeout=timeout,
-        )
-
-    loop = asyncio.get_running_loop()
-    return await asyncio.wait_for(
-        loop.run_in_executor(
-            None,
-            lambda: method(
-                symbol=symbol,
-                duration=duration,
-                bar_size=bar_size,
-                exchange=exchange,
-            ),
-        ),
-        timeout=timeout,
-    )
-
-
 @router.post("/api/historical_data")
 async def get_historical_data(
     request: HistoricalDataRequest,
@@ -226,17 +669,6 @@ async def get_historical_data(
     """获取历史数据"""
     mode = get_data_layer_mode()
     manager = None if is_legacy_mode(mode) else _get_data_layer_manager()
-
-    if manager is None and not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
-
-    ib_client = None
-    if manager is None or connection_manager.is_connected():
-        try:
-            ib_client = _require_ib_client()
-        except HTTPException:
-            if manager is None:
-                raise
 
     try:
         _clean_expired_cache()
@@ -256,7 +688,7 @@ async def get_historical_data(
                     "source": "memory_cache",
                 }
 
-        db_manager = get_db_manager()
+        db_manager = core_container.get_db_manager()
         interval = db_manager._normalize_interval(request.bar_size)
         minutes = _parse_duration_to_minutes(request.duration)
         start_dt = now - timedelta(minutes=minutes)
@@ -298,6 +730,7 @@ async def get_historical_data(
         # Unified data layer attempt ----------------------------------
         interval_key = _map_bar_size_to_interval(request.bar_size)
         duration_minutes = _parse_duration_to_minutes(request.duration)
+        records: List[Dict[str, Any]] = []
         if manager and interval_key:
             try:
                 candles = await manager.history(
@@ -340,63 +773,54 @@ async def get_historical_data(
                         "source": "data_layer",
                     }
 
-        if ib_client is None:
-            raise HTTPException(status_code=404, detail="No data found")
-
-        try:
-            df = await _fetch_ib_historical(
-                ib_client,
-                symbol=request.symbol,
-                duration=request.duration,
-                bar_size=request.bar_size,
+        if not records:
+            records = await _fetch_market_history(
+                request.symbol,
+                interval=interval_key,
+                duration_minutes=duration_minutes,
                 exchange=request.exchange,
-                timeout=30.0,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                f"Historical data request timed out for {request.symbol}"
-            )
-            raise HTTPException(
-                status_code=408, detail="Historical data request timed out"
             )
 
-        if df is None or getattr(df, "empty", False):
-            if cache_df is not None and not cache_df.empty:
-                return {
-                    "success": True,
-                    "data": cache_df.to_dict("records"),
-                    "filename": None,
-                    "rows": len(cache_df),
-                }
+        if not records:
+            if cache_df is not None and not getattr(cache_df, "empty", False):
+                data_dict = _dataframe_to_records(cache_df)
+                if data_dict:
+                    return {
+                        "success": True,
+                        "data": data_dict,
+                        "filename": None,
+                        "rows": len(data_dict),
+                        "source": "database_cache",
+                    }
             raise HTTPException(status_code=404, detail="No data found")
 
-        db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
-        data_dict = df.to_dict("records")
         expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
         historical_data_cache[cache_key] = {
-            "data": data_dict,
+            "data": records,
             "timestamp": now,
             "expires_at": expires_at,
         }
         logger.debug(
-            f"Cached historical data for {request.symbol}, expires at {expires_at}"
+            "Cached historical data for {}, expires at {}",
+            request.symbol,
+            expires_at,
+        )
+
+        db_manager.save_historical_records(
+            request.symbol,
+            records,
+            bar_size=request.bar_size,
         )
 
         filename = f"data/{request.symbol}_historical.csv"
-        try:
-            os.makedirs(os.path.dirname(filename), exist_ok=True)
-            df.to_csv(filename, index=False)
-        except Exception as e:
-            logger.warning(
-                f"Failed to write CSV backup for historical data: {e}"
-            )
+        _write_records_to_csv(filename, records)
 
         return {
             "success": True,
-            "data": data_dict,
+            "data": records,
             "filename": filename,
-            "rows": len(df),
-            "source": "ibkr_api",
+            "rows": len(records),
+            "source": "market_service",
         }
 
     except HTTPException as exc:
@@ -417,17 +841,6 @@ async def get_chart_data(
     try:
         mode = get_data_layer_mode()
         manager = None if is_legacy_mode(mode) else _get_data_layer_manager()
-
-        if manager is None and not connection_manager.is_connected():
-            reason = None
-            try:
-                reason = connection_manager.get_last_connect_error()
-            except Exception:
-                reason = None
-            detail = "Not connected to IBKR"
-            if reason:
-                detail = f"{detail}: {reason}"
-            raise HTTPException(status_code=400, detail=detail)
 
         # 统一使用与历史接口一致的缓存策略，使用前缀避免冲突
         _clean_expired_cache()
@@ -453,7 +866,7 @@ async def get_chart_data(
                 }
 
         # 2) 数据库缓存（覆盖请求范围且不强制刷新时）
-        db_manager = get_db_manager()
+        db_manager = core_container.get_db_manager()
         interval = db_manager._normalize_interval(request.bar_size)
         minutes = _parse_duration_to_minutes(request.duration)
         start_dt = now - timedelta(minutes=minutes)
@@ -469,24 +882,7 @@ async def get_chart_data(
             cache_df, start_dt.isoformat(), now.isoformat(), interval
         ):
             logger.debug(f"Using chart database cache for {request.symbol}")
-            chart_data = []
-            try:
-                records = cache_df.to_dict("records")
-                for row in records:
-                    raw_time = row.get("date") or row.get("time")
-                    t = to_local_time(raw_time)
-                    chart_data.append(
-                        {
-                            "time": t,
-                            "open": float(row.get("open", 0) or 0),
-                            "high": float(row.get("high", 0) or 0),
-                            "low": float(row.get("low", 0) or 0),
-                            "close": float(row.get("close", 0) or 0),
-                            "volume": int(row.get("volume", 0) or 0),
-                        }
-                    )
-            except Exception:
-                chart_data = []
+            chart_data = _records_to_chart(_dataframe_to_records(cache_df))
 
             if chart_data:
                 expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
@@ -537,19 +933,7 @@ async def get_chart_data(
                 candles = _filter_candles_by_duration(candles, duration_minutes)
                 records = _candles_to_records(candles)
                 if records:
-                    chart_data = []
-                    for row in records:
-                        chart_data.append(
-                            {
-                                "time": row["date"],
-                                "open": float(row.get("open", 0) or 0),
-                                "high": float(row.get("high", 0) or 0),
-                                "low": float(row.get("low", 0) or 0),
-                                "close": float(row.get("close", 0) or 0),
-                                "volume": int(row.get("volume", 0) or 0),
-                            }
-                        )
-                    unified_chart = chart_data
+                    unified_chart = _records_to_chart(records)
 
         if unified_chart:
             expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
@@ -566,129 +950,46 @@ async def get_chart_data(
                 "bar_size": request.bar_size,
             }
 
-        if not connection_manager.is_connected():
-            raise HTTPException(status_code=400, detail="Not connected to IBKR")
-
-        ib_client = getattr(core, "ibkr_client", None)
-        if ib_client is None:
-            raise HTTPException(status_code=400, detail="IBKR client unavailable")
-
-        try:
-            df = await _fetch_ib_historical(
-                ib_client,
-                symbol=request.symbol,
-                duration=request.duration,
-                bar_size=request.bar_size,
-                exchange=request.exchange,
-                timeout=30.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Chart data historical fetch timed out for {request.symbol}"
-            )
-            df = None
-
-        # 4) 成功获取数据
-        if df is not None and not df.empty:
-            try:
-                db_manager.save_historical_data(
-                    request.symbol, df, bar_size=request.bar_size
-                )
-            except Exception as e:
-                logger.warning(f"Failed to save chart data: {e}")
-
-            chart_data = []
-            for _, row in df.iterrows():
-                raw_time = row["date"]
-                if "time" in df.columns and not pd.isna(row.get("time")):
-                    raw_time = f"{row['date']} {row['time']}"
-                t = to_local_time(raw_time)
-                chart_data.append(
-                    {
-                        "time": t,
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
-                        "volume": int(row["volume"]) if "volume" in row else 0,
-                    }
-                )
-
-            expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
-            historical_data_cache[cache_key] = {
-                "data": chart_data,
-                "timestamp": now,
-                "expires_at": expires_at,
-            }
-
-            return {
-                "success": True,
-                "data": chart_data,
-                "symbol": request.symbol,
-                "duration": request.duration,
-                "bar_size": request.bar_size,
-            }
-
-        # 5) API返回空，回退数据库load_historical_data
-        fallback_df = None
-        try:
-            fallback_df = db_manager.load_historical_data(
-                request.symbol, bar_size=request.bar_size
-            )
-        except Exception:
-            fallback_df = None
-        if fallback_df is not None and not fallback_df.empty:
-            chart_data = []
-            try:
-                for ts, row in fallback_df.iterrows():
-                    t = to_local_time(ts)
-                    chart_data.append(
-                        {
-                            "time": t,
-                            "open": float(row.get("open", 0) or 0),
-                            "high": float(row.get("high", 0) or 0),
-                            "low": float(row.get("low", 0) or 0),
-                            "close": float(row.get("close", 0) or 0),
-                            "volume": int(row.get("volume", 0) or 0),
-                        }
-                    )
-            except Exception:
-                chart_data = []
-            if chart_data:
-                return {
-                    "success": True,
-                    "data": chart_data,
-                    "symbol": request.symbol,
-                    "duration": request.duration,
-                    "bar_size": request.bar_size,
-                }
-
-        reason = None
-        try:
-            reason = connection_manager.get_last_connect_error()
-        except Exception:
-            reason = None
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "No chart data found"
-                + (f". Possible cause: {reason}" if reason else "")
-            ),
+        records = await _fetch_market_history(
+            request.symbol,
+            interval=interval_key,
+            duration_minutes=duration_minutes,
+            exchange=request.exchange,
         )
+
+        if not records and cache_df is not None and not getattr(cache_df, "empty", False):
+            records = _dataframe_to_records(cache_df)
+
+        if not records:
+            raise HTTPException(status_code=404, detail="No chart data found")
+
+        chart_data = _records_to_chart(records)
+        expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
+        historical_data_cache[cache_key] = {
+            "data": chart_data,
+            "timestamp": now,
+            "expires_at": expires_at,
+        }
+
+        db_manager.save_historical_records(
+            request.symbol,
+            records,
+            bar_size=request.bar_size,
+        )
+
+        return {
+            "success": True,
+            "data": chart_data,
+            "symbol": request.symbol,
+            "duration": request.duration,
+            "bar_size": request.bar_size,
+        }
 
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
         logger.error(f"Chart data error: {e}")
-        reason = None
-        try:
-            reason = connection_manager.get_last_connect_error()
-        except Exception:
-            reason = None
-        detail = (str(e) if str(e) else "Internal error") + (
-            f" | {reason}" if reason else ""
-        )
-        raise HTTPException(status_code=500, detail=detail)
+        raise HTTPException(status_code=500, detail=str(e) or "Internal error")
 
 
 @router.get("/api/realtime_data/{symbol}")
@@ -698,70 +999,47 @@ async def get_realtime_data(
     user: Optional[str] = Depends(get_current_user),
 ):
     """获取实时数据"""
-    if not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
-
-    ib_client = _require_ib_client()
-
     try:
-        loop = asyncio.get_event_loop()
-        try:
-            data = await ib_client.get_real_time_data(symbol, exchange)
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Real-time data request for {symbol} timed out, checking cache"
-            )
-            cached_data = None
-            if hasattr(ib_client, "price_cache") and symbol in ib_client.price_cache:
-                cached_price = ib_client.price_cache.get(symbol)
-                if cached_price:
-                    cached_data = {
-                        "symbol": symbol,
-                        "last": cached_price,
-                        "bid": 0,
-                        "ask": 0,
-                        "volume": 0,
-                        "timestamp": now_local().isoformat(),
-                        "is_cached": True,
-                    }
-            if cached_data:
-                logger.info(f"Returning cached data for {symbol}: {cached_price}")
-                return {"success": True, "data": cached_data}
-            else:
-                logger.warning(
-                    f"No cached data available for {symbol}"
-                )
-                return {
-                    "success": False,
-                    "error": "Real-time data request timed out and no cached data available",
-                }
-
-        if data:
+        snapshot = await _fetch_market_snapshot(symbol)
+        if snapshot and snapshot.get("last") is not None:
+            data = {
+                "symbol": symbol,
+                "last": snapshot.get("last"),
+                "bid": snapshot.get("bid") or 0.0,
+                "ask": snapshot.get("ask") or 0.0,
+                "volume": snapshot.get("volume") or 0,
+                "timestamp": snapshot.get("timestamp") or now_local().isoformat(),
+                "source": snapshot.get("source"),
+            }
             return {"success": True, "data": data}
-        else:
-            if hasattr(ib_client, "price_cache") and symbol in ib_client.price_cache:
-                cached_price = ib_client.price_cache.get(symbol)
-                if cached_price:
-                    cached_data = {
-                        "symbol": symbol,
-                        "last": cached_price,
-                        "bid": 0,
-                        "ask": 0,
-                        "volume": 0,
-                        "timestamp": now_local().isoformat(),
-                        "is_cached": True,
-                    }
-                    logger.info(
-                        f"No fresh data for {symbol}, returning cached: {cached_price}"
-                    )
-                    return {"success": True, "data": cached_data}
-            raise HTTPException(status_code=404, detail="No data available")
 
-    except HTTPException as exc:
-        raise exc
-    except Exception as e:
-        logger.error(f"Real-time data error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        records = await _fetch_market_history(
+            symbol,
+            interval=None,
+            duration_minutes=5,
+            exchange=exchange,
+        )
+        if records:
+            last = records[-1]
+            data = {
+                "symbol": symbol,
+                "last": last.get("close"),
+                "bid": last.get("close"),
+                "ask": last.get("close"),
+                "volume": last.get("volume") or 0,
+                "timestamp": last.get("date") or now_local().isoformat(),
+                "source": "history",
+                "is_cached": True,
+            }
+            return {"success": True, "data": data}
+
+        raise HTTPException(status_code=404, detail="No data available")
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Real-time data error: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/api/current_price")
@@ -770,21 +1048,19 @@ async def get_current_price(
     user: Optional[str] = Depends(get_current_user),
 ):
     """获取当前价格 - 轻量级接口"""
-    ib_client = getattr(core, "ibkr_client", None)
     mode = get_data_layer_mode()
     manager = None if is_legacy_mode(mode) else _get_data_layer_manager()
 
     if CURRENT_PRICE_CACHE_ONLY:
-        if ib_client and hasattr(ib_client, "price_cache") and request.symbol in ib_client.price_cache:
-            cached_price = ib_client.price_cache.get(request.symbol)
-            if cached_price is not None:
-                return {
-                    "success": True,
-                    "symbol": request.symbol,
-                    "price": cached_price,
-                    "timestamp": now_local().isoformat(),
-                    "source": "cache_only",
-                }
+        snapshot = await _fetch_snapshot_from_redis(request.symbol)
+        if snapshot and snapshot.get("last") is not None:
+            return {
+                "success": True,
+                "symbol": request.symbol,
+                "price": snapshot.get("last"),
+                "timestamp": snapshot.get("timestamp") or now_local().isoformat(),
+                "source": "cache_only",
+            }
         return {
             "success": False,
             "symbol": request.symbol,
@@ -825,68 +1101,40 @@ async def get_current_price(
                 "source": "data_layer",
             }
 
-    if not connection_manager.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected to IBKR")
-
-    ib_client = _require_ib_client()
-
     try:
-        if hasattr(ib_client, "price_cache") and request.symbol in ib_client.price_cache:
-            cached_price = ib_client.price_cache.get(request.symbol)
-            if cached_price:
-                return {
-                    "success": True,
-                    "symbol": request.symbol,
-                    "price": cached_price,
-                    "timestamp": now_local().isoformat(),
-                    "source": "cache",
-                }
+        snapshot = await _fetch_market_snapshot(request.symbol)
+        if snapshot and snapshot.get("last") is not None:
+            return {
+                "success": True,
+                "symbol": request.symbol,
+                "price": snapshot.get("last"),
+                "timestamp": snapshot.get("timestamp") or now_local().isoformat(),
+                "source": snapshot.get("source") or "snapshot",
+            }
 
-        try:
-            data = await ib_client.get_real_time_data(
-                        request.symbol, request.exchange
-                    )
+        symbol_upper = (request.symbol or "").upper()
+        duration_minutes = 3 if any(
+            symbol_upper.startswith(root) for root in INDEX_FUTURE_ROOTS
+        ) else 2
 
-            if data and "last" in data:
-                price = data["last"]
+        records = await _fetch_market_history(
+            request.symbol,
+            interval=_map_bar_size_to_interval("1 min"),
+            duration_minutes=duration_minutes,
+            exchange=request.exchange,
+        )
+
+        if records:
+            latest = records[-1]
+            price = latest.get("close")
+            if price is not None:
                 return {
                     "success": True,
                     "symbol": request.symbol,
                     "price": price,
-                    "timestamp": now_local().isoformat(),
-                    "source": "realtime",
+                    "timestamp": latest.get("date") or now_local().isoformat(),
+                    "source": "historical",
                 }
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Current price request for {request.symbol} timed out"
-            )
-
-        symbol_upper = (request.symbol or '').upper()
-        timeout_duration = 3.0 if any(symbol_upper.startswith(root) for root in INDEX_FUTURE_ROOTS) else 2.0
-        try:
-            df = await _fetch_ib_historical(
-                ib_client,
-                symbol=request.symbol,
-                duration="1 D",
-                bar_size="1 min",
-                exchange=request.exchange,
-                timeout=timeout_duration,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Historical data fallback for {request.symbol} timed out"
-            )
-            df = None
-
-        if df is not None and not df.empty:
-            latest_price = float(df.iloc[-1]["close"])
-            return {
-                "success": True,
-                "symbol": request.symbol,
-                "price": latest_price,
-                "timestamp": now_local().isoformat(),
-                "source": "historical",
-            }
 
         return {
             "success": False,
@@ -898,6 +1146,6 @@ async def get_current_price(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Current price error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        logger.error("Current price error: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

@@ -1,22 +1,47 @@
 import asyncio
+import os
 from typing import Optional
+
+import httpx
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
-import core
 from core import (
-    connection_manager,
-    risk_manager,
-    strategy_manager,
-    queue_manager,
-    websocket_manager,
-    order_manager,
-    notification_manager,
+    IBKRClient,
+    get_core_container,
+    get_ibkr_client,
+    set_ibkr_client,
 )
 from src.connection_manager import ConnectionConfig
 from .auth import get_current_user
 
 router = APIRouter()
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
+websocket_manager = core_container.websocket_manager
+CONNECTION_SERVICE_URL = os.getenv("CONNECTION_SERVICE_URL")
+
+
+def _use_external_service() -> bool:
+    return bool(CONNECTION_SERVICE_URL and CONNECTION_SERVICE_URL.strip())
+
+
+async def _dispatch_connection_action(action: str, payload: dict) -> dict:
+    if not _use_external_service():
+        raise RuntimeError("Connection service URL not configured")
+
+    base_url = CONNECTION_SERVICE_URL.rstrip("/")
+    url = f"{base_url}/{action.strip('/')}"
+    timeout = httpx.Timeout(15.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(url, json=payload)
+    if response.status_code >= 400:
+        detail = response.text or response.reason_phrase
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    try:
+        return response.json()
+    except Exception:
+        return {"status": "ok"}
 
 @router.get("/api/connection_config")
 async def get_connection_config():
@@ -34,6 +59,33 @@ async def get_connection_config():
 
 @router.post("/api/connect")
 async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(get_current_user)):
+    if _use_external_service():
+        try:
+            connection_manager.update_config(config)
+        except Exception as exc:
+            logger.debug(f"Failed to update local connection config: {exc}")
+        payload = {"config": config.to_dict(), "requested_by": user or "ui"}
+        try:
+            response = await _dispatch_connection_action("connect", payload)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Connection service connect failed: {exc}")
+            raise HTTPException(status_code=502, detail=str(exc))
+
+        try:
+            await websocket_manager.broadcast({
+                "type": "connection_command",
+                "action": "connect",
+                "requested_by": user,
+                "source": "service",
+                "service_response": response,
+            })
+        except Exception:
+            logger.debug("Failed to broadcast connection_command for service connect")
+
+        return {"success": True, "message": "Connect dispatched", "service_response": response}
+
     try:
         loop = asyncio.get_event_loop()
         try:
@@ -68,30 +120,12 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
             raise HTTPException(status_code=400, detail=detail)
 
         if success:
-            if core.ibkr_client is None:
-                ibkr_client_local = core.IBKRClient()
+            existing_client = get_ibkr_client()
+            if existing_client is None:
+                ibkr_client_local = IBKRClient()
             else:
-                ibkr_client_local = core.ibkr_client
-            try:
-                risk_manager.ibkr_client = ibkr_client_local
-                try:
-                    risk_manager.set_dependencies(order_manager=order_manager)
-                except Exception as _rm_dep_err:
-                    logger.warning(f"RiskManager set_dependencies after connect failed: {_rm_dep_err}")
-                logger.info("Risk manager ibkr_client updated after connection")
-            except Exception as re_err:
-                logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
-            try:
-                queue_manager.set_dependencies(
-                    risk_manager=risk_manager,
-                    strategy_manager=strategy_manager,
-                    websocket_manager=websocket_manager,
-                    order_manager=order_manager,
-                    notification_manager=notification_manager,
-                )
-            except Exception as dep_err:
-                logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
-            core.ibkr_client = ibkr_client_local
+                ibkr_client_local = existing_client
+            set_ibkr_client(ibkr_client_local)
 
             # 主动广播连接状态，供前端立即更新UI
             try:
@@ -127,10 +161,32 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
 
 @router.post("/api/disconnect")
 async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
+    if _use_external_service():
+        payload = {"requested_by": user or "ui"}
+        try:
+            response = await _dispatch_connection_action("disconnect", payload)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Connection service disconnect failed: {exc}")
+            raise HTTPException(status_code=502, detail=str(exc))
+
+        try:
+            await websocket_manager.broadcast({
+                "type": "connection_command",
+                "action": "disconnect",
+                "requested_by": user,
+                "source": "service",
+                "service_response": response,
+            })
+        except Exception:
+            logger.debug("Failed to broadcast connection_command for service disconnect")
+
+        return {"success": True, "message": "Disconnect dispatched", "service_response": response}
+
     try:
-        if risk_manager:
-            risk_manager.stop()
         connection_manager.disconnect()
+        set_ibkr_client(None)
 
         # 主动广播断开状态，供前端立即更新UI
         try:

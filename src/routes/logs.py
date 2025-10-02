@@ -1,16 +1,70 @@
+import json
 import os
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
 from src.utils import now_local
+from core import get_core_container
+
+try:  # pragma: no cover - redis optional in some environments
+    from redis.asyncio import Redis
+except Exception:  # pragma: no cover - defensive guard
+    Redis = None  # type: ignore
 
 from .auth import get_current_user
 
 router = APIRouter()
+core_container = get_core_container()
+SERVICE_HEALTH_PATTERN = os.getenv("SERVICE_HEALTH_PATTERN", "hash:service:health:*")
+
+
+async def _ensure_redis() -> Optional[Redis]:
+    if Redis is None:  # pragma: no cover - redis optional
+        return None
+    try:
+        return await core_container.ensure_redis()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.debug("Redis unavailable for service health", error=str(exc))
+        return None
+
+
+async def _collect_service_health(redis: Optional[Redis]) -> Dict[str, Any]:
+    if redis is None:
+        return {}
+    services: Dict[str, Any] = {}
+    try:
+        cursor = "0"
+        while True:
+            cursor, keys = await redis.scan(cursor=cursor, match=SERVICE_HEALTH_PATTERN, count=50)
+            for key in keys:
+                try:
+                    mapping = await redis.hgetall(key)
+                except Exception:
+                    mapping = {}
+                if not mapping:
+                    continue
+                name = key.split(":", maxsplit=1)[-1]
+                decoded = {}
+                for field, value in mapping.items():
+                    if isinstance(value, (bytes, bytearray)):
+                        try:
+                            value = value.decode("utf-8")
+                        except Exception:
+                            value = value.decode("utf-8", errors="ignore")
+                    try:
+                        decoded[field] = json.loads(value)
+                    except Exception:
+                        decoded[field] = value
+                services[name] = decoded
+            if cursor == "0":
+                break
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.debug("Failed to read service health keys", error=str(exc))
+    return services
 
 @router.get("/api/logs")
 async def get_logs(
@@ -94,6 +148,19 @@ async def get_logs(
     except Exception as e:
         logger.error(f"Get logs error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/service_health")
+async def get_service_health(user: Optional[str] = Depends(get_current_user)):
+    try:
+        redis = await _ensure_redis()
+        services = await _collect_service_health(redis)
+        return {"success": True, "services": services}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Get service health error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to load service health")
 
 
 @router.get("/api/logs/modules")

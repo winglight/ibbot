@@ -1828,18 +1828,36 @@ class StrategyManager:
                 elif stored_subscription == "market_data":
                     try:
                         import core
-
-                        if not core.connection_manager.is_connected():
-                            error = "IBKR connection required"
-                            ok = False
-                        else:
-                            if core.ibkr_client is None:
-                                core.ibkr_client = core.IBKRClient()
-                            data = await core.ibkr_client.get_real_time_data(target_symbol)
-                            ok = bool(data)
+                        from core import get_core_container
                     except Exception as exc:  # pragma: no cover - defensive guard
                         error = str(exc)
                         ok = False
+                    else:
+                        try:
+                            container = get_core_container()
+                            connection_manager = container.connection_manager
+                        except Exception as exc:  # pragma: no cover - defensive guard
+                            error = str(exc)
+                            ok = False
+                        else:
+                            if not connection_manager.is_connected():
+                                error = "IBKR connection required"
+                                ok = False
+                            else:
+                                ib_client = getattr(core, "ibkr_client", None)
+                                if ib_client is None:
+                                    ib_client = core.IBKRClient()
+                                    try:
+                                        core.set_ibkr_client(ib_client)
+                                    except AttributeError:  # pragma: no cover - backwards compatibility
+                                        core.ibkr_client = ib_client
+                                try:
+                                    data = await ib_client.get_real_time_data(target_symbol)
+                                except Exception as exc:  # pragma: no cover - defensive guard
+                                    error = str(exc)
+                                    ok = False
+                                else:
+                                    ok = bool(data)
                 else:
                     error = f"Unsupported subscription: {stored_subscription}"
             except Exception as exc:  # pragma: no cover - defensive guard

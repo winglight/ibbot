@@ -4,7 +4,10 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from loguru import logger
 
-from core import notification_manager, telegram_notifier
+import core
+
+notification_manager = getattr(core, "notification_manager", None)
+telegram_notifier = getattr(core, "telegram_notifier", None)
 from .auth import get_current_user
 from src.database import get_db_manager, DatabaseManager
 

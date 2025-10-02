@@ -21,6 +21,186 @@
 
     const sharedUtils = appModules.utils || {};
 
+    const SERVICE_DISPLAY_NAMES = Object.freeze({
+        'ib-command': 'IB Command Service',
+        'account-snapshot': 'Account Snapshot Service',
+        'market-data': 'Market Data Service',
+        'ib-feed': 'IB Feed Service',
+        'risk-service': 'Risk Control Service',
+        'strategy-service': 'Strategy Service',
+        'optimizer-service': 'Optimizer Service',
+        'notification-service': 'Notification Service',
+        'ui-gateway': 'UI Gateway',
+        redis: 'Redis',
+    });
+
+    const DEFAULT_SERVICE_ORDER = Object.freeze([
+        'ib-command',
+        'account-snapshot',
+        'market-data',
+        'ib-feed',
+        'risk-service',
+        'strategy-service',
+        'optimizer-service',
+        'notification-service',
+        'ui-gateway',
+        'redis',
+    ]);
+
+    const RUNNING_STATUSES = new Set([
+        'ok',
+        'running',
+        'online',
+        'active',
+        'ready',
+        'connected',
+        'healthy',
+        'idle',
+        'standby',
+        'available',
+        'initialized',
+    ]);
+
+    const UNHEALTHY_STATUSES = new Set([
+        'error',
+        'failed',
+        'fail',
+        'failing',
+        'warning',
+        'unhealthy',
+        'degraded',
+        'critical',
+        'alert',
+        'timeout',
+    ]);
+
+    const OFFLINE_STATUSES = new Set([
+        'offline',
+        'stopped',
+        'stale',
+        'disconnected',
+        'disabled',
+        'unknown',
+        'sleeping',
+        'inactive',
+        'missing',
+    ]);
+
+    const STATUS_PRESENTATION = Object.freeze({
+        running: { label: '运行中', badgeClass: 'bg-success text-white' },
+        offline: { label: '已下线', badgeClass: 'bg-secondary text-white' },
+        unhealthy: { label: '不健康', badgeClass: 'bg-danger text-white' },
+    });
+
+    const normalizeServiceKey = (name) => {
+        if (typeof name !== 'string') return '';
+        const trimmed = name.trim();
+        if (!trimmed) return '';
+        const lastColon = trimmed.lastIndexOf(':');
+        if (lastColon >= 0 && lastColon < trimmed.length - 1) {
+            return trimmed.slice(lastColon + 1);
+        }
+        return trimmed;
+    };
+
+    const formatServiceName = (key) => {
+        if (!key) return 'Unknown Service';
+        return key
+            .split(/[:._-]+/)
+            .filter(Boolean)
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(' ');
+    };
+
+    const pickPrimaryTimestamp = (data) => {
+        if (!data || typeof data !== 'object') return null;
+        const candidateFields = [
+            'last_seen',
+            'last_success',
+            'heartbeat_ts',
+            'updated_at',
+            'last_success_ts',
+        ];
+        for (const field of candidateFields) {
+            const value = data[field];
+            if (value) return value;
+        }
+        return null;
+    };
+
+    const parseTimestampValue = (value) => {
+        if (!value) return null;
+        if (value instanceof Date) {
+            return Number.isNaN(value.getTime()) ? null : value;
+        }
+        if (typeof value === 'number') {
+            const ms = value > 1e12 ? value : value * 1000;
+            const date = new Date(ms);
+            return Number.isNaN(date.getTime()) ? null : date;
+        }
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (!trimmed) return null;
+            const numeric = Number(trimmed);
+            if (!Number.isNaN(numeric) && trimmed.replace(/\s+/g, '') === String(numeric)) {
+                const ms = numeric > 1e12 ? numeric : numeric * 1000;
+                const date = new Date(ms);
+                return Number.isNaN(date.getTime()) ? null : date;
+            }
+            const date = new Date(trimmed);
+            return Number.isNaN(date.getTime()) ? null : date;
+        }
+        return null;
+    };
+
+    const formatRelativeTimestamp = (value) => {
+        const date = parseTimestampValue(value);
+        if (!date) return null;
+        const diffMs = Date.now() - date.getTime();
+        if (!Number.isFinite(diffMs)) return null;
+        const diffSeconds = Math.max(0, Math.round(diffMs / 1000));
+        if (diffSeconds < 60) {
+            return `${diffSeconds} 秒前`;
+        }
+        if (diffSeconds < 3600) {
+            const minutes = Math.floor(diffSeconds / 60);
+            return `${minutes} 分钟前`;
+        }
+        if (diffSeconds < 86400) {
+            const hours = Math.floor(diffSeconds / 3600);
+            return `${hours} 小时前`;
+        }
+        const days = Math.floor(diffSeconds / 86400);
+        return `${days} 天前`;
+    };
+
+    const formatAbsoluteTimestamp = (value) => {
+        const date = parseTimestampValue(value);
+        if (!date) return null;
+        try {
+            return date.toLocaleString();
+        } catch (error) {
+            return date.toISOString();
+        }
+    };
+
+    const resolveStatusPresentation = (rawStatus, { missing = false } = {}) => {
+        if (missing) {
+            return { category: 'offline', ...STATUS_PRESENTATION.offline, rawStatus: rawStatus ?? '' };
+        }
+        const normalized = typeof rawStatus === 'string' ? rawStatus.trim().toLowerCase() : '';
+        if (RUNNING_STATUSES.has(normalized)) {
+            return { category: 'running', ...STATUS_PRESENTATION.running, rawStatus: rawStatus ?? '' };
+        }
+        if (UNHEALTHY_STATUSES.has(normalized)) {
+            return { category: 'unhealthy', ...STATUS_PRESENTATION.unhealthy, rawStatus: rawStatus ?? '' };
+        }
+        if (OFFLINE_STATUSES.has(normalized) || !normalized) {
+            return { category: 'offline', ...STATUS_PRESENTATION.offline, rawStatus: rawStatus ?? '' };
+        }
+        return { category: 'unhealthy', ...STATUS_PRESENTATION.unhealthy, rawStatus: rawStatus ?? '' };
+    };
+
     const requireMonitoringUtil = (fn, name) => {
         if (typeof fn !== 'function') {
             throw new Error(`monitoring.utils.${name} is required`);
@@ -103,6 +283,7 @@
             this._syncingCharts = false;
             this.monitorModalFullscreen = false;
             this._monitorFullscreenChangeHandler = null;
+            this.latestServiceHealth = {};
         }
 
         ensureApp(methodName = 'method') {
@@ -1786,6 +1967,171 @@
                 }
             } finally {
                 this._syncingCharts = false;
+            }
+        }
+
+        applyServiceHealth(services = {}, payload = {}) {
+            if (!services || typeof services !== 'object') {
+                this.latestServiceHealth = {};
+            } else {
+                this.latestServiceHealth = { ...services };
+            }
+            this.renderServiceHealth(payload);
+            return true;
+        }
+
+        renderServiceHealth(meta = {}) {
+            const container = document.querySelector('[data-service-health]');
+            if (!container) return;
+
+            const rawEntries = Object.entries(this.latestServiceHealth || {});
+            const servicesMap = new Map();
+
+            DEFAULT_SERVICE_ORDER.forEach((key) => {
+                servicesMap.set(key, {
+                    key,
+                    rawKey: key,
+                    displayName: SERVICE_DISPLAY_NAMES[key] || formatServiceName(key),
+                    data: null,
+                    present: false,
+                });
+            });
+
+            rawEntries.forEach(([rawKey, rawValue]) => {
+                const normalizedKey = normalizeServiceKey(rawKey);
+                const mapKey = normalizedKey || rawKey;
+                const data = rawValue && typeof rawValue === 'object' ? { ...rawValue } : {};
+
+                const existing = servicesMap.get(mapKey) || {
+                    key: mapKey,
+                    rawKey,
+                    displayName:
+                        SERVICE_DISPLAY_NAMES[mapKey]
+                        || SERVICE_DISPLAY_NAMES[rawKey]
+                        || formatServiceName(mapKey),
+                    data: null,
+                    present: false,
+                };
+
+                existing.key = mapKey;
+                existing.rawKey = rawKey;
+                existing.displayName =
+                    SERVICE_DISPLAY_NAMES[mapKey]
+                    || SERVICE_DISPLAY_NAMES[rawKey]
+                    || formatServiceName(mapKey);
+                existing.data = data;
+                existing.present = Object.keys(data).length > 0 || rawValue != null;
+
+                servicesMap.set(mapKey, existing);
+            });
+
+            const orderedKeys = [...new Set([...DEFAULT_SERVICE_ORDER, ...servicesMap.keys()])];
+            const fragments = [];
+            let presentCount = 0;
+
+            orderedKeys.forEach((key) => {
+                const entry = servicesMap.get(key);
+                if (!entry) return;
+
+                const data = entry.data;
+                const hasData = entry.present;
+                if (hasData) {
+                    presentCount += 1;
+                }
+
+                const rawStatus =
+                    data && Object.prototype.hasOwnProperty.call(data, 'status')
+                        ? data.status
+                        : (meta?.statuses && entry.rawKey ? meta.statuses[entry.rawKey] : '');
+
+                const statusInfo = resolveStatusPresentation(rawStatus, { missing: !hasData });
+
+                const displayName = entry.displayName || formatServiceName(entry.key);
+                const badgeClass = `badge service-status-badge ${statusInfo.badgeClass}`;
+                const itemClasses = `service-health-item ${statusInfo.category}`;
+
+                const metaSections = [];
+
+                if (hasData) {
+                    const normalizedStatusText =
+                        typeof rawStatus === 'string' && rawStatus.trim() !== ''
+                            ? rawStatus
+                            : 'unknown';
+                    metaSections.push(`<div>Reported state: ${sharedEscapeHtml(String(normalizedStatusText))}</div>`);
+
+                    const heartbeat = pickPrimaryTimestamp(data);
+                    if (heartbeat) {
+                        const relative = formatRelativeTimestamp(heartbeat);
+                        const absolute = formatAbsoluteTimestamp(heartbeat);
+                        const relativeDisplay = relative
+                            ? sharedEscapeHtml(relative)
+                            : sharedEscapeHtml(String(heartbeat));
+                        const titleAttr = absolute ? ` title="${sharedEscapeHtml(absolute)}"` : '';
+                        metaSections.push(`<div${titleAttr}>Last heartbeat: ${relativeDisplay}</div>`);
+                    } else {
+                        metaSections.push('<div>Last heartbeat: Unknown</div>');
+                    }
+
+                    const queueParts = [];
+                    if (data.queue_depth !== undefined) {
+                        queueParts.push(`Queue: ${sharedEscapeHtml(String(data.queue_depth))}`);
+                    }
+                    if (data.pending !== undefined) {
+                        queueParts.push(`Pending: ${sharedEscapeHtml(String(data.pending))}`);
+                    }
+                    if (data.inflight !== undefined) {
+                        queueParts.push(`Inflight: ${sharedEscapeHtml(String(data.inflight))}`);
+                    }
+                    if (queueParts.length > 0) {
+                        metaSections.push(`<div>${queueParts.join(' · ')}</div>`);
+                    }
+
+                    if (typeof data.age_seconds === 'number' && Number.isFinite(data.age_seconds)) {
+                        const roundedAge = Math.max(0, Math.round(data.age_seconds));
+                        metaSections.push(`<div>Data age: ${sharedEscapeHtml(String(roundedAge))} 秒</div>`);
+                    }
+
+                    if (data.last_error) {
+                        metaSections.push(`<div class="text-danger">Last error: ${sharedEscapeHtml(String(data.last_error))}</div>`);
+                    }
+                } else {
+                    metaSections.push('<div>未检测到状态上报</div>');
+                }
+
+                fragments.push(`
+                    <div class="col">
+                        <div class="${itemClasses}" data-service-key="${sharedEscapeHtml(entry.key || key)}" data-raw-service-key="${sharedEscapeHtml(entry.rawKey || key)}">
+                            <div class="d-flex justify-content-between align-items-start gap-3">
+                                <div class="service-name">${sharedEscapeHtml(displayName)}</div>
+                                <span class="${badgeClass}">${statusInfo.label}</span>
+                            </div>
+                            <div class="service-health-meta mt-3">
+                                ${metaSections.join('')}
+                            </div>
+                        </div>
+                    </div>
+                `);
+            });
+
+            if (fragments.length === 0) {
+                container.innerHTML = `
+                    <div class="col">
+                        <div class="service-health-empty text-muted text-center py-3">
+                            <i class="fas fa-circle-info me-2"></i>
+                            <span>No service metrics</span>
+                        </div>
+                    </div>
+                `;
+                container.dataset.state = 'empty';
+            } else {
+                container.innerHTML = fragments.join('');
+                container.dataset.state = presentCount > 0 ? 'ok' : 'empty';
+            }
+
+            try {
+                container.title = JSON.stringify(this.latestServiceHealth, null, 2);
+            } catch (error) {
+                container.title = '';
             }
         }
 

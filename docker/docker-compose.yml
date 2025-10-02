@@ -38,6 +38,9 @@ services:
       # Restart after repeated IBKR connection retries
       - IBKR_MAX_CONNECT_RETRIES=5
       - IBKR_RESTART_DELAY_SEC=1.0
+      # Market data service integration
+      - MARKET_DATA_SERVICE_URL=http://market-data-service:8010
+      - MARKET_DATA_SERVICE_WS_URL=ws://market-data-service:8010/ws/market
       # Risk Management
       - LOSS_THRESHOLD_1=0.05
       - LOSS_THRESHOLD_2=0.10
@@ -90,6 +93,52 @@ services:
       - ../src/strategies:/app/src/strategies
     depends_on:
       - ibbot
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
+  market-data-service:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-market-data
+    command:
+      [
+        "uvicorn",
+        "services.market_data.app:create_app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8010",
+      ]
+    ports:
+      - "8010:8010"
+    env_file:
+      - ./.env
+    environment:
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - MARKET_DATA_SYMBOLS=${MARKET_DATA_SYMBOLS:-MNQ,ES}
+      - MARKET_DATA_STREAM_KEY=${MARKET_DATA_STREAM_KEY:-stream:market-data}
+      - MARKET_DATA_STREAM_LENGTH=${MARKET_DATA_STREAM_LENGTH:-1000}
+      - MARKET_DATA_SERVICE_NAME=${MARKET_DATA_SERVICE_NAME:-market-data-service}
+      - MARKET_DATA_SERVICE_VERSION=${MARKET_DATA_SERVICE_VERSION:-}
+      - MARKET_DATA_METRICS_PERIOD=${MARKET_DATA_METRICS_PERIOD:-60}
+      - MARKET_DATA_ACCOUNT_SNAPSHOT_REFRESH_INTERVAL=${MARKET_DATA_ACCOUNT_SNAPSHOT_REFRESH_INTERVAL:-5}
+      - MARKET_DATA_ACCOUNT_SNAPSHOT_RETRY_INTERVAL=${MARKET_DATA_ACCOUNT_SNAPSHOT_RETRY_INTERVAL:-30}
+      - MARKET_DATA_ACCOUNT_SNAPSHOT_REQUIRED=${MARKET_DATA_ACCOUNT_SNAPSHOT_REQUIRED:-False}
+      - MARKET_DATA_METRICS_INFLUX_URL=${MARKET_DATA_METRICS_INFLUX_URL:-}
+      - MARKET_DATA_METRICS_INFLUX_BUCKET=${MARKET_DATA_METRICS_INFLUX_BUCKET:-}
+      - MARKET_DATA_METRICS_INFLUX_ORG=${MARKET_DATA_METRICS_INFLUX_ORG:-}
+      - MARKET_DATA_METRICS_INFLUX_TOKEN=${MARKET_DATA_METRICS_INFLUX_TOKEN:-}
+      - MARKET_DATA_METRICS_MEASUREMENT=${MARKET_DATA_METRICS_MEASUREMENT:-service_metrics}
+      - MARKET_DATA_METRICS_INFLUX_TIMEOUT_MS=${MARKET_DATA_METRICS_INFLUX_TIMEOUT_MS:-}
+    volumes:
+      - ../logs:/app/logs
+      - ../data:/app/data
     networks:
       - ibbot-network
       - stack

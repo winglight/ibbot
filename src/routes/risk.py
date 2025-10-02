@@ -11,14 +11,21 @@ from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
 import core
-from core import connection_manager, risk_manager
+from core import get_core_container
+
+risk_manager = getattr(core, "risk_manager", None)
 from .auth import get_current_user
 from src.models import (
     RiskRuleRequest,
     RiskConfigUpdateRequest,
     PositionSizingRequest,
 )
-from src.database import get_db_manager
+from src.ib_command_service import (
+    get_ib_command_service_status,
+    load_ib_command_config,
+)
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
 
 from .orders import (
     _validate_g7_basic_params,
@@ -31,6 +38,8 @@ from .orders import (
 )
 
 router = APIRouter()
+
+_IB_COMMAND_CONFIG = load_ib_command_config()
 
 # Cache the most recent successful risk configuration so that the endpoint can
 # respond immediately even if the underlying manager becomes unresponsive.
@@ -299,12 +308,21 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
     
     try:
         # 获取实时账户信息
-        account_info = {}
-        if connection_manager.is_connected():
+        account_info: Dict[str, Any] = {}
+        try:
+            command_status = await get_ib_command_service_status(
+                config=_IB_COMMAND_CONFIG
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug(f"Failed to fetch command service status for risk sizing: {exc}")
+            command_status = None
+
+        ib_client = getattr(core, "ibkr_client", None)
+        if command_status and command_status.connected and ib_client is not None:
             try:
                 account_response = await asyncio.wait_for(
-                    core.ibkr_client.get_account_info(),
-                    timeout=5.0
+                    ib_client.get_account_info(),
+                    timeout=5.0,
                 )
                 if account_response:
                     account_info = account_response
@@ -348,7 +366,7 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
             g7_result = _validate_g7_basic_params(mock_order)
             g_rules_checked.append(g7_result)
             
-            g6_result = _validate_g6_connection()
+            g6_result = await _validate_g6_connection()
             g_rules_checked.append(g6_result)
             
             g5_result = _validate_g5_market_hours(payload.symbol)
@@ -372,7 +390,7 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
         
         # 写入历史
         try:
-            db = get_db_manager()
+            db = core_container.get_db_manager()
             db.save_sizing_history(
                 symbol=payload.symbol,
                 action="calculate",
@@ -412,7 +430,7 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
 @router.get("/api/sizing/history")
 async def get_sizing_history(symbol: Optional[str] = None, since: Optional[str] = None, limit: int = 100, user: Optional[str] = Depends(get_current_user)):
     try:
-        db = get_db_manager()
+        db = core_container.get_db_manager()
         items = db.load_sizing_history(symbol=symbol, since=since, limit=limit)
         
         # 为每个历史记录添加g_rules_status和s_rules_status
@@ -496,7 +514,7 @@ async def get_sizing_history(symbol: Optional[str] = None, since: Optional[str] 
 @router.get("/api/config/rules")
 async def get_config_rules(user: Optional[str] = Depends(get_current_user)):
     try:
-        db = get_db_manager()
+        db = core_container.get_db_manager()
         
         # 从新的config表获取配置
         g_rules = db.get_config("g_rules", {})
@@ -524,7 +542,7 @@ async def get_config_rules(user: Optional[str] = Depends(get_current_user)):
 @router.put("/api/config/rules")
 async def update_config_rules(payload: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
     try:
-        db = get_db_manager()
+        db = core_container.get_db_manager()
         
         # 保存G Rules和S Rules到config表
         if "g_rules" in payload:

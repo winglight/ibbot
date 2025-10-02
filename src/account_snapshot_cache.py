@@ -25,7 +25,7 @@ import asyncio
 import json
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from loguru import logger
 
@@ -33,6 +33,8 @@ try:  # ``redis`` is optional during testing; callers should handle ``None``
     from redis.asyncio import Redis
 except Exception:  # pragma: no cover - redis is optional in some tests
     Redis = None  # type: ignore
+
+from ibbot.config import load_account_snapshot_config
 
 from .utils import now_local, to_local_iso, parse_local_datetime
 from .utils.account_pnl_cache import write_net_liquidation_snapshot
@@ -43,6 +45,11 @@ SNAPSHOT_POSITIONS_KEY = "account:positions"
 
 _redis_client: Optional[Redis] = None
 _redis_lock = asyncio.Lock()
+_snapshot_config = load_account_snapshot_config()
+SNAPSHOT_STREAM_KEY = _snapshot_config.snapshot_stream_key
+SNAPSHOT_STREAM_LOOKBACK = 50
+SNAPSHOT_HEALTH_HASH_KEY = _snapshot_config.health_hash_key
+
 snapshot_logger = logger.bind(module="account_snapshot_cache", request_id="-")
 
 
@@ -112,25 +119,145 @@ async def _ensure_client() -> Optional[Redis]:
     return client
 
 
-async def _write_snapshot(key: str, data: Any, source: str, *, stale: bool = False) -> bool:
+def _bool_to_flag(value: bool) -> str:
+    return "1" if value else "0"
+
+
+def _normalise_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _maybe_json(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except Exception:  # pragma: no cover - defensive guard
+            value = str(value)
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def _serialise_snapshot_payload(payload: Dict[str, Any]) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        if key == "data":
+            try:
+                mapping[key] = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                mapping[key] = json.dumps({"repr": repr(value)}, ensure_ascii=False)
+        elif isinstance(value, bool):
+            mapping[key] = _bool_to_flag(value)
+        elif isinstance(value, (dict, list)):
+            mapping[key] = json.dumps(value, ensure_ascii=False)
+        else:
+            mapping[key] = str(value)
+    return mapping
+
+
+def _decode_snapshot_mapping(mapping: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not mapping:
+        return None
+
+    snapshot: Dict[str, Any] = {}
+
+    data_value = mapping.get("data")
+    if data_value is not None:
+        snapshot["data"] = _maybe_json(data_value)
+    else:
+        meta_fields = {
+            "updated_at",
+            "source",
+            "stale",
+            "stale_reason",
+            "stale_at",
+            "cache_source",
+            "cache_age_seconds",
+        }
+        additional: Dict[str, Any] = {}
+        for key, value in mapping.items():
+            if key in meta_fields:
+                continue
+            additional[key] = _maybe_json(value)
+        if additional:
+            snapshot["data"] = additional
+
+    for key, value in mapping.items():
+        if key == "data":
+            continue
+        if key == "stale":
+            decoded = _normalise_bool(value)
+            snapshot[key] = decoded if decoded is not None else value
+        elif key.endswith("_seconds"):
+            try:
+                snapshot[key] = float(value)
+            except (TypeError, ValueError):
+                snapshot[key] = value
+        else:
+            snapshot[key] = value
+
+    if "stale" not in snapshot:
+        snapshot["stale"] = False
+
+    return snapshot
+
+
+async def _write_snapshot(
+    key: str,
+    data: Any,
+    source: str,
+    *,
+    stale: bool = False,
+    updated_at: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> bool:
     """Persist a snapshot to Redis."""
 
     client = await _ensure_client()
     if client is None:
         return False
 
-    payload = {
+    timestamp = updated_at or to_local_iso(now_local())
+
+    payload: Dict[str, Any] = {
         "data": data,
-        "updated_at": to_local_iso(now_local()),
+        "updated_at": timestamp,
         "source": source,
         "stale": stale,
     }
-    if not stale:
-        payload.pop("stale_reason", None)
-        payload.pop("stale_at", None)
+
+    if meta:
+        for field, value in meta.items():
+            if field in {"data", "source", "stale", "updated_at"}:
+                continue
+            payload[field] = value
+
+    mapping = _serialise_snapshot_payload(payload)
+
+    pipe = client.pipeline(transaction=True)
+    pipe.delete(key)
+    pipe.hset(key, mapping=mapping)
 
     try:
-        await client.set(key, json.dumps(payload, ensure_ascii=False))
+        await pipe.execute()
         return True
     except Exception as exc:
         snapshot_logger.warning(f"Failed to write snapshot '{key}': {exc}")
@@ -143,6 +270,18 @@ async def _read_snapshot(key: str) -> Optional[Dict[str, Any]]:
     client = await _ensure_client()
     if client is None:
         return None
+
+    mapping: Dict[str, Any] = {}
+
+    try:
+        mapping = await client.hgetall(key)
+    except Exception as exc:
+        snapshot_logger.warning(f"Failed to read snapshot hash '{key}': {exc}")
+        mapping = {}
+
+    decoded = _decode_snapshot_mapping(mapping)
+    if decoded is not None:
+        return decoded
 
     try:
         raw = await client.get(key)
@@ -163,6 +302,51 @@ async def _read_snapshot(key: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+async def _read_snapshot_from_stream(command: str, *, lookback: int = SNAPSHOT_STREAM_LOOKBACK) -> Optional[Dict[str, Any]]:
+    client = await _ensure_client()
+    if client is None:
+        return None
+
+    try:
+        entries: Iterable[Tuple[str, Dict[str, Any]]] = await client.xrevrange(
+            SNAPSHOT_STREAM_KEY,
+            count=max(1, lookback),
+        )
+    except Exception as exc:
+        snapshot_logger.debug(
+            "Failed to read account snapshot stream",
+            error=str(exc),
+        )
+        return None
+
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            continue
+        entry_id, fields = entry
+        if not isinstance(fields, dict):
+            continue
+        if fields.get("command") != command:
+            continue
+        status = str(fields.get("status") or "").lower()
+        if status and status not in {"ok", "success"}:
+            continue
+        payload = fields.get("payload")
+        decoded_payload = _maybe_json(payload)
+        snapshot: Dict[str, Any] = {
+            "data": decoded_payload,
+            "updated_at": fields.get("timestamp"),
+            "source": fields.get("source") or "account_snapshot_stream",
+            "stale": False,
+            "command_id": fields.get("command_id"),
+            "stream_id": entry_id,
+            "status": fields.get("status"),
+            "reason": fields.get("reason"),
+        }
+        return snapshot
+
+    return None
+
+
 async def _mark_snapshot_stale(key: str, reason: str) -> None:
     """Flag a snapshot as stale, preserving the original payload when present."""
 
@@ -174,18 +358,23 @@ async def _mark_snapshot_stale(key: str, reason: str) -> None:
             "source": "stale",
         }
 
-    existing["stale"] = True
-    existing["stale_reason"] = reason
-    existing["stale_at"] = to_local_iso(now_local())
+    meta_payload = {
+        field: value
+        for field, value in existing.items()
+        if field not in {"data", "source", "stale", "updated_at"}
+    }
+    meta_payload["stale_reason"] = reason
+    meta_payload["stale_at"] = to_local_iso(now_local())
+    meta_payload.pop("stale", None)
 
-    client = await _ensure_client()
-    if client is None:
-        return
-
-    try:
-        await client.set(key, json.dumps(existing, ensure_ascii=False))
-    except Exception as exc:
-        snapshot_logger.warning(f"Failed to flag snapshot '{key}' as stale: {exc}")
+    await _write_snapshot(
+        key,
+        existing.get("data"),
+        existing.get("source") or "stale",
+        stale=True,
+        updated_at=existing.get("updated_at"),
+        meta=meta_payload,
+    )
 
 
 async def write_account_info_snapshot(data: Dict[str, Any], source: str) -> bool:
@@ -240,13 +429,19 @@ async def write_positions_snapshot(data: Any, source: str) -> bool:
 async def read_account_info_snapshot() -> Optional[Dict[str, Any]]:
     """Return the latest account info snapshot when available."""
 
-    return await _read_snapshot(SNAPSHOT_ACCOUNT_INFO_KEY)
+    snapshot = await _read_snapshot(SNAPSHOT_ACCOUNT_INFO_KEY)
+    if snapshot is not None:
+        return snapshot
+    return await _read_snapshot_from_stream("get_account_info")
 
 
 async def read_positions_snapshot() -> Optional[Dict[str, Any]]:
     """Return the latest positions snapshot when available."""
 
-    return await _read_snapshot(SNAPSHOT_POSITIONS_KEY)
+    snapshot = await _read_snapshot(SNAPSHOT_POSITIONS_KEY)
+    if snapshot is not None:
+        return snapshot
+    return await _read_snapshot_from_stream("get_positions")
 
 
 async def mark_account_info_stale(reason: str) -> None:
@@ -269,6 +464,43 @@ async def mark_all_snapshots_stale(reason: str) -> None:
         mark_positions_stale(reason),
         return_exceptions=True,
     )
+
+
+async def read_account_service_health() -> Dict[str, Any]:
+    """Read the health information published by the account snapshot service."""
+
+    client = await _ensure_client()
+    if client is None:
+        return {}
+
+    try:
+        mapping = await client.hgetall(SNAPSHOT_HEALTH_HASH_KEY)
+    except Exception as exc:
+        snapshot_logger.debug(
+            "Failed to read account snapshot health hash",
+            error=str(exc),
+        )
+        return {}
+
+    if not mapping:
+        return {}
+
+    health: Dict[str, Any] = {}
+    for key, value in mapping.items():
+        if key in {"queue_depth", "pending", "inflight"}:
+            try:
+                health[key] = int(value)
+            except (TypeError, ValueError):
+                health[key] = value
+        elif key.endswith("_seconds"):
+            try:
+                health[key] = float(value)
+            except (TypeError, ValueError):
+                health[key] = value
+        else:
+            health[key] = value
+
+    return health
 
 
 async def clear_redis_client() -> None:

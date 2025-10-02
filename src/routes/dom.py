@@ -15,15 +15,15 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
-import core
 from .auth import get_current_user
-from src.dom_service import get_dom_service
 from src.dom_optimizer import get_dom_optimization_orchestrator
-from core import dom_config
+from core import get_core_container
 from loguru import logger
 
 router = APIRouter()
-dom_service = get_dom_service()
+core_container = get_core_container()
+dom_service = core_container.dom_service
+dom_config = core_container.dom_config
 
 DOM_STOP_TIMEOUT = 2.5
 

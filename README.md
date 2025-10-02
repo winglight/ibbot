@@ -26,7 +26,7 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
       │                          │
       ▼                          ▼
 ┌──────────────┐      ┌────────────────────┐
-│ core/* 单例 │      │ Queue / Risk / DOM │
+│ CoreContainer│      │ Queue / Risk / DOM │
 │ queue_manager│      │ Order / Strategy   │
 └──────┬───────┘      └─────────┬──────────┘
        │                        │
@@ -37,10 +37,43 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 └──────────────┘      └────────────────────┘
 ```
 
-- **core/** 初始化共享实例（通知、策略、风险、订单、队列、DOM、ATR 等）。
+- **core/** 提供 `CoreContainer` 单例，按需装配 Redis、配置提供者、WebSocket 管理器等 UI 依赖。
 - **src/routes/** 按功能拆分的 REST/WebSocket 接口；`docs/api_doc.json` 自动从 OpenAPI 导出。
 - **src/dom_*** 深度行情分析、参数调优与自动化调度。
 - **src/optimizer_service/** 提供 DOM 优化任务编排与异步执行。
+- FastAPI 主程序通过 `get_core_container()` 访问 Redis、Influx 持久化入口与配置提供者，替代旧的全局管理器引用。
+
+## 🔌 Redis/REST 服务编排
+
+为了让 UI 与后端服务解耦，核心模块通过 Redis 队列与 REST/Stream 通道协作。推荐的启动顺序如下：
+
+1. **Redis**：提供命令队列、快照缓存与健康信息的集中存储。
+2. **IB Command Worker**（部署在 IB Gateway 附近的命令执行器）：消费 `queue:ib:commands` 并写入 `hash:ib:result:*`/`stream:ib:results`。
+3. **Account Snapshot Service**（`python -m services.account_snapshot.main --mode worker`）：定期刷新账户/持仓，写入 `account:info`、`account:positions` 与 `stream:account-snapshot`，同时更新 `hash:service:health:account-snapshot`。
+4. **Market Data Service**（`uvicorn services.market_data.app:create_app ...`）：聚合行情并输出 `hash:market:snapshot:{symbol}`、`stream:market-data`，健康信息写入 `hash:service:health:market-data`。
+5. **UI Gateway (本仓库)**：通过 `/api/account_*`、`/api/place_order`、`/ws` 等接口消费上述数据并广播给前端。
+
+### Redis 键与 Stream 约定
+
+| 键 / 前缀 | 生产者 | 用途 |
+| --- | --- | --- |
+| `queue:ib:commands` | UI Gateway / Snapshot Service | 向 IBKR 命令执行器派发指令 |
+| `hash:ib:result:{command_id}` | IB Command Worker | 回写命令执行结果，TTL 由 `ACCOUNT_SNAPSHOT_RESULT_TTL_SECONDS` 控制 |
+| `stream:ib:results` | IB Command Worker | 持续推送命令完成事件（可选消费者） |
+| `account:info` / `account:positions` | Account Snapshot Service | 最新账户/持仓快照，字段包含 `data`、`updated_at`、`stale` 等 |
+| `stream:account-snapshot` | Account Snapshot Service | 快照增量及 stale 标记 |
+| `hash:market:snapshot:{symbol}` | Market Data Service | 单标的行情快照，包含 `price/bid/ask/volume/stale` |
+| `stream:market-data` | Market Data Service | 统一行情事件 Stream，字段 `symbol`、`type`、`data`、`ts_ns` |
+| `hash:service:health:*` | 各服务 | 健康与指标信息，`/api/service_health` 会聚合输出 |
+
+### 健康检查
+
+- Account Snapshot Service：`GET http://<host>:8082/health`，返回最近刷新时间、队列深度与错误计数。
+- Market Data Service：`GET http://<host>:8010/health`，包含 Stream 写入状态、订阅延迟及账户快照合并结果。
+- IB Command Worker：通过 Redis `HGETALL hash:service:health:ib-command` 或 UI 的 `/api/service_health` 查看最新心跳、排队情况。
+- UI Gateway：`GET /api/service_health`（需认证）聚合所有 `hash:service:health:*` 键，便于运维面板展示。
+
+更多 Redis/REST 通道契约细节，请参阅 [docs/redis_rest_channels.md](docs/redis_rest_channels.md)。
 
 ## 🚀 快速开始
 
@@ -67,6 +100,7 @@ cp .env.example .env
 - `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING`：IBKR 连接配置。
 - `AUTO_CONNECT=false`：开发阶段建议禁用自动连接。
 - `PNL_BROADCAST_INTERVAL_SEC`、`ACCOUNT_BROADCAST_INTERVAL_SEC`：WebSocket 广播节奏。
+- `ENABLED_MODULES`：控制 FastAPI lifespan 启动的后台模块，默认 `ALL`（即 `auto_connect` 与 `data_subscriptions` 均启用）。
 - Redis 可选：`REDIS_URL` 或 `REDIS_HOST/PORT/DB`。
 
 ### 3. 启动服务
@@ -95,6 +129,16 @@ uvicorn main:app --reload
 - `/ws/dom/{symbol}`：推送特定标的的 DOM 深度与指标。
 - Notification Center 支持浏览器与 Telegram 通道，配置接口为 `/api/notifications/settings`。
 
+## 📈 市场数据服务
+
+- **REST API**：默认部署在 `http://localhost:8010`，提供 `/market`（全部订阅快照）、`/market/{symbol}`（单标的快照）与 `/health`（运行状态）等接口。主程序可通过 `MARKET_DATA_SERVICE_URL` 指向容器内地址（示例：`http://market-data-service:8010`）。
+- **WebSocket**：`ws://localhost:8010/ws/market`，支持通过查询参数 `symbols=AAPL,MSFT`、`types=dom.metrics` 过滤；连接建立后也可发送 `{ "type": "subscribe", "symbols": ["MNQ"] }` 动态调整订阅。将 `MARKET_DATA_SERVICE_WS_URL` 指向 `ws://market-data-service:8010/ws/market` 后，前端即可复用原有实时面板。
+- **Redis Stream**：归一化行情事件写入 `MARKET_DATA_STREAM_KEY`（默认 `stream:market-data`），字段包含 `symbol`、`type`、`data`、`ts_ns` 与 `latency_ms`。可结合现有队列监控面板展示流速与滞留。
+- **依赖**：需 Redis（读取订阅配置、推送 Stream）与可选 InfluxDB（写入 `service_metrics` 指标）。对应环境变量如 `MARKET_DATA_STREAM_LENGTH`、`MARKET_DATA_METRICS_PERIOD`、`MARKET_DATA_METRICS_INFLUX_URL` 已加入 `.env.example`。
+- **运维**：健康检查 `GET /health` 返回最近一次推送时间、Redis/Influx 写入状态与账户快照合并情况；日志默认写入 `logs/market-data-service.log`（也会输出到 stdout），指标可在 Influx 中查看 `service.<service_name>` 主题。
+
+> 更多部署细节与 API 契约见 [docs/market_data_service.md](docs/market_data_service.md)。
+
 ## 🧪 测试
 
 更新后的测试用例覆盖 JWT 登录、连接状态、通知配置与 DOM 配置。运行方式：
@@ -115,5 +159,7 @@ pytest
 - DOM 服务与调优：`docs/dom_optimizer_guide.md`、`src/dom_service.py`。
 - 风险管理设计：`docs/策略级风控模块设计.docx`、`src/risk_manager.py`。
 - 手工测试指引：`docs/tests.md`。
+- Redis/REST 契约：`docs/redis_rest_channels.md`。
+- 迁移指南：`docs/migration_to_redis_rest.md`。
 
 如需扩展策略或接入外部系统，请参考 `src/strategies/readme.md` 与 `/api/strategy` 相关接口。

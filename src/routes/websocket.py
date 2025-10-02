@@ -1,33 +1,52 @@
 import asyncio
 import json
 import math
+import os
 import time
+from contextlib import suppress
 from datetime import timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 import core
-from core import (
-    connection_manager,
-    websocket_manager,
-    order_manager,
-    strategy_manager,
-    risk_manager,
-)
-from src.database import get_db_manager
+from core import get_core_container
+
+try:  # ``redis`` is optional during some tests
+    from redis.asyncio import Redis
+except Exception:  # pragma: no cover - defensive guard when redis is absent
+    Redis = None  # type: ignore
+
+order_manager = getattr(core, "order_manager", None)
+risk_manager = getattr(core, "risk_manager", None)
+strategy_manager = getattr(core, "strategy_manager", None)
 from src.dom_optimizer import get_dom_optimization_orchestrator
-from src.dom_service import get_dom_service
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.utils.strategy_cache import (
     compute_performance_metrics as cache_compute_performance,
     get_strategy_stats as cache_get_strategy_stats,
 )
+from src.account_snapshot_cache import (
+    read_account_info_snapshot,
+    read_positions_snapshot,
+    read_account_service_health,
+)
 
+core_container = get_core_container()
+connection_manager = core_container.connection_manager
+websocket_manager = core_container.websocket_manager
+dom_service = core_container.dom_service
 router = APIRouter()
 
 RATE_LIMIT_SECONDS = 15.0
+
+ACCOUNT_STREAM_KEY = os.getenv("ACCOUNT_STREAM_KEY", "stream:account-snapshot")
+ORDERS_STREAM_KEY = os.getenv("ORDERS_STREAM_KEY", "stream:ib:results")
+MARKET_STREAM_KEY = os.getenv("MARKET_STREAM_KEY", "stream:market-service")
+NOTIFICATION_STREAM_KEY = os.getenv("NOTIFICATION_STREAM_KEY", "stream:notifications")
+ORDERS_SNAPSHOT_KEY = os.getenv("ORDERS_SNAPSHOT_KEY", "hash:orders:snapshot")
+SERVICE_HEALTH_PATTERN = os.getenv("SERVICE_HEALTH_PATTERN", "hash:service:health:*")
 
 async def _send_json(websocket: WebSocket, payload: Dict[str, Any]) -> bool:
     try:
@@ -48,8 +67,289 @@ async def _send_or_disconnect(websocket: WebSocket, payload: Dict[str, Any]) -> 
         raise WebSocketDisconnect()
 
 
+async def _ensure_redis_client() -> Optional[Redis]:
+    if Redis is None:  # pragma: no cover - redis optional in some environments
+        return None
+
+    try:
+        client = await core_container.ensure_redis()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.debug("Redis client unavailable for websocket", error=str(exc))
+        return None
+
+    return client
+
+
+def _decode_json_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except Exception:  # pragma: no cover - best effort fallback
+            value = value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and stripped[0] in "[{\"":
+            with suppress(Exception):
+                return json.loads(stripped)
+    return value
+
+
+async def _load_orders_snapshot_from_redis(
+    redis: Optional[Redis],
+    *,
+    limit: int = 10,
+) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+    if redis is None:
+        return [], None
+
+    try:
+        mapping = await redis.hgetall(ORDERS_SNAPSHOT_KEY)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.debug("Failed to read Redis orders snapshot", error=str(exc))
+        return [], None
+
+    if not mapping:
+        return [], None
+
+    orders: List[Dict[str, Any]] = []
+    for value in mapping.values():
+        decoded = _decode_json_value(value)
+        if isinstance(decoded, dict):
+            orders.append(decoded)
+
+    if not orders:
+        return [], None
+
+    def _order_ts(item: Dict[str, Any]) -> float:
+        for field in ("submit_time", "created_at", "timestamp", "created_at_ns"):
+            candidate = item.get(field)
+            if candidate is None:
+                continue
+            if isinstance(candidate, (int, float)):
+                return float(candidate)
+            if isinstance(candidate, str):
+                parsed = parse_local_datetime(candidate)
+                if parsed is not None:
+                    return parsed.timestamp()
+        return 0.0
+
+    orders.sort(key=_order_ts, reverse=True)
+    total = len(orders)
+    limited = orders[: max(1, limit)] if limit > 0 else orders
+    return limited, total
+
+
+async def _gather_service_health(redis: Optional[Redis]) -> Dict[str, Any]:
+    if redis is None:
+        return {}
+
+    services: Dict[str, Any] = {}
+    try:
+        cursor = "0"
+        pattern = SERVICE_HEALTH_PATTERN
+        while True:
+            cursor, keys = await redis.scan(cursor=cursor, match=pattern, count=50)
+            for key in keys:
+                try:
+                    data = await redis.hgetall(key)
+                except Exception:
+                    data = {}
+                if not data:
+                    continue
+                name = key.split(":", maxsplit=1)[-1]
+                services[name] = {k: _decode_json_value(v) for k, v in data.items()}
+            if cursor == "0":
+                break
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.debug("Failed to gather service health", error=str(exc))
+    return services
+
+
+async def _send_initial_snapshots(websocket: WebSocket, redis: Optional[Redis]) -> None:
+    try:
+        account_snapshot = await read_account_info_snapshot()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.debug("Failed to read account snapshot", error=str(exc))
+        account_snapshot = None
+
+    if account_snapshot and isinstance(account_snapshot, dict):
+        payload = {
+            "type": "account_update",
+            "account_info": account_snapshot.get("data"),
+            "updated_at": account_snapshot.get("updated_at"),
+            "stale": account_snapshot.get("stale"),
+            "source": "redis",
+        }
+        await _send_json(websocket, payload)
+
+    try:
+        positions_snapshot = await read_positions_snapshot()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.debug("Failed to read positions snapshot", error=str(exc))
+        positions_snapshot = None
+
+    if positions_snapshot and isinstance(positions_snapshot, dict):
+        payload = {
+            "type": "position_update",
+            "positions": positions_snapshot.get("data"),
+            "updated_at": positions_snapshot.get("updated_at"),
+            "stale": positions_snapshot.get("stale"),
+            "source": "redis",
+        }
+        await _send_json(websocket, payload)
+
+    orders, total = await _load_orders_snapshot_from_redis(redis, limit=50)
+    if orders:
+        payload = _orders_payload(orders, limit=50, page=1, total=total)
+        payload["source"] = "redis"
+        await _send_json(websocket, payload)
+
+    health = await _gather_service_health(redis)
+    if health:
+        await _send_json(
+            websocket,
+            {"type": "service_health", "services": health, "source": "redis"},
+        )
+
+
+async def _stream_listener(
+    redis: Redis,
+    websocket: WebSocket,
+    stream_key: str,
+    handler,
+    *,
+    last_id: str = "$",
+    block_ms: int = 5000,
+) -> None:
+    try:
+        while True:
+            try:
+                response = await redis.xread(
+                    {stream_key: last_id}, block=block_ms, count=50
+                )
+            except Exception as exc:
+                logger.debug("Redis stream read failed", stream=stream_key, error=str(exc))
+                await asyncio.sleep(1.0)
+                continue
+
+            if not response:
+                continue
+
+            for key, entries in response:
+                if key != stream_key:
+                    continue
+                for entry_id, fields in entries:
+                    last_id = entry_id
+                    try:
+                        await handler(websocket, entry_id, fields)
+                    except WebSocketDisconnect:
+                        raise
+                    except Exception as exc:
+                        logger.debug(
+                            "Failed to handle stream event",
+                            stream=stream_key,
+                            error=str(exc),
+                        )
+    except asyncio.CancelledError:  # pragma: no cover - cooperative cancellation
+        raise
+
+
+async def _handle_account_stream_event(
+    websocket: WebSocket, entry_id: str, fields: Dict[str, Any]
+) -> None:
+    payload = {k: _decode_json_value(v) for k, v in fields.items()}
+    command = str(payload.get("command") or "").lower()
+    data = payload.get("payload") or payload.get("data")
+    if command == "get_account_info" and data is not None:
+        await _send_json(
+            websocket,
+            {
+                "type": "account_update",
+                "account_info": data,
+                "stream_id": entry_id,
+                "source": "redis",
+            },
+        )
+    elif command == "get_positions" and data is not None:
+        await _send_json(
+            websocket,
+            {
+                "type": "position_update",
+                "positions": data,
+                "stream_id": entry_id,
+                "source": "redis",
+            },
+        )
+    else:
+        await _send_json(
+            websocket,
+            {
+                "type": "account_event",
+                "event": payload,
+                "stream_id": entry_id,
+                "source": "redis",
+            },
+        )
+
+
+async def _handle_orders_stream_event(
+    websocket: WebSocket, entry_id: str, fields: Dict[str, Any]
+) -> None:
+    payload = {k: _decode_json_value(v) for k, v in fields.items()}
+    event_type = str(payload.get("event") or payload.get("type") or "").lower()
+    order_data = payload.get("order") or payload.get("payload")
+    message_type = "order_event"
+    response: Dict[str, Any] = {
+        "type": message_type,
+        "event": payload,
+        "stream_id": entry_id,
+        "source": "redis",
+    }
+    if isinstance(order_data, dict):
+        response["order"] = order_data
+    if event_type in {"order_update", "order_filled"} and isinstance(order_data, dict):
+        response["type"] = "order_update"
+    await _send_json(websocket, response)
+
+
+async def _handle_market_stream_event(
+    websocket: WebSocket, entry_id: str, fields: Dict[str, Any]
+) -> None:
+    payload = {k: _decode_json_value(v) for k, v in fields.items()}
+    await _send_json(
+        websocket,
+        {
+            "type": "market_event",
+            "event": payload,
+            "stream_id": entry_id,
+            "source": "redis",
+        },
+    )
+
+
+async def _handle_notification_stream_event(
+    websocket: WebSocket, entry_id: str, fields: Dict[str, Any]
+) -> None:
+    payload = {k: _decode_json_value(v) for k, v in fields.items()}
+    await _send_json(
+        websocket,
+        {
+            "type": "notification_event",
+            "event": payload,
+            "stream_id": entry_id,
+            "source": "redis",
+        },
+    )
+
 def _serialise_order(order: Any) -> Dict[str, Any]:
-    raw_type = (getattr(order, "order_type", "") or "").upper()
+    def _get(attr: str, default: Any = None) -> Any:
+        if isinstance(order, dict):
+            return order.get(attr, default)
+        return getattr(order, attr, default)
+
+    raw_type = (_get("order_type", "") or "").upper()
     if raw_type in ("MARKET", "MKT"):
         order_type = "MKT"
     elif raw_type in ("LIMIT", "LMT"):
@@ -59,7 +359,7 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
 
     price_val = 0.0
     try:
-        price = getattr(order, "price", None)
+        price = _get("price")
         if price is not None:
             price_val = float(price)
     except Exception:
@@ -67,9 +367,9 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
 
     trigger_type = None
     try:
-        if getattr(order, "order_source", "manual") == "auto":
-            rule_id = getattr(order, "rule_id", None)
-            symbol = getattr(order, "symbol", None)
+        if _get("order_source", "manual") == "auto":
+            rule_id = _get("rule_id")
+            symbol = _get("symbol")
             if rule_id and rule_id != symbol:
                 trigger_type = "strategy"
             else:
@@ -77,7 +377,7 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
     except Exception:
         trigger_type = None
 
-    created_at = getattr(order, "created_at", None)
+    created_at = _get("created_at")
     created_iso = None
     try:
         created_iso = to_local_iso(created_at)
@@ -88,27 +388,27 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
             except Exception:
                 created_iso = None
 
-    avg_fill_price = getattr(order, "fill_price", None)
+    avg_fill_price = _get("fill_price")
     if avg_fill_price is None and order_type == "MKT" and price_val > 0:
         avg_fill_price = price_val
 
     return {
-        "order_id": getattr(order, "order_id", None),
-        "symbol": getattr(order, "symbol", None),
-        "action": getattr(order, "action", None),
-        "quantity": getattr(order, "quantity", None),
+        "order_id": _get("order_id"),
+        "symbol": _get("symbol"),
+        "action": _get("action"),
+        "quantity": _get("quantity"),
         "order_type": order_type,
         "limit_price": price_val if order_type == "LMT" and price_val > 0 else None,
         "avg_fill_price": avg_fill_price,
-        "status": getattr(order, "status", None),
-        "filled": getattr(order, "quantity", 0) if getattr(order, "status", None) == "Filled" else 0,
-        "remaining": 0 if getattr(order, "status", None) == "Filled" else getattr(order, "quantity", 0),
+        "status": _get("status"),
+        "filled": _get("quantity", 0) if _get("status") == "Filled" else 0,
+        "remaining": 0 if _get("status") == "Filled" else _get("quantity", 0),
         "submit_time": created_iso,
-        "order_source": getattr(order, "order_source", "manual"),
-        "strategy_name": getattr(order, "strategy_name", None),
+        "order_source": _get("order_source", "manual"),
+        "strategy_name": _get("strategy_name"),
         "trigger_type": trigger_type,
-        "commission": getattr(order, "commission", None),
-        "pnl": getattr(order, "pnl", None),
+        "commission": _get("commission"),
+        "pnl": _get("pnl"),
     }
 
 
@@ -183,7 +483,7 @@ def _enrich_sizing_history_items(items: List[Dict[str, Any]]) -> List[Dict[str, 
     if not items:
         return items
 
-    db = get_db_manager()
+    db = core_container.get_db_manager()
     try:
         s_rules_config = db.get_config("s_rules", {}) or {}
     except Exception as exc:
@@ -275,6 +575,7 @@ async def _realtime_price_sender(ws: WebSocket, symbol: str, interval: float = 2
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket_manager.connect(websocket)
+    redis_client = await _ensure_redis_client()
 
     # 新连接建立后，立即向该客户端单播当前连接状态
     try:
@@ -286,80 +587,126 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.debug(f"Failed to send initial connection status: {e}")
 
-    # 初次连接后，向该连接单播账户信息快照
-    try:
-        if connection_manager.is_connected():
-            try:
-                info = await asyncio.wait_for(core.ibkr_client.get_account_info(), timeout=8.0)
+    if redis_client is not None:
+        await _send_initial_snapshots(websocket, redis_client)
+    else:
+        # Redis 不可用时回退到本地查询逻辑
+        try:
+            if connection_manager.is_connected():
+                try:
+                    info = await asyncio.wait_for(core.ibkr_client.get_account_info(), timeout=8.0)
+                    await websocket.send_text(json.dumps({
+                        "type": "account_update",
+                        "account_info": info
+                    }))
+                except asyncio.TimeoutError:
+                    logger.warning("Initial account_info snapshot timed out on websocket connect")
+                except Exception as e:
+                    logger.warning(f"Failed to get/send initial account_info snapshot: {e}")
+            else:
+                last_err = None
+                try:
+                    last_err = connection_manager.get_last_connect_error()
+                except Exception:
+                    last_err = None
                 await websocket.send_text(json.dumps({
                     "type": "account_update",
-                    "account_info": info
+                    "account_info": {"connected": False, "last_error": last_err}
                 }))
-            except asyncio.TimeoutError:
-                logger.warning("Initial account_info snapshot timed out on websocket connect")
-            except Exception as e:
-                logger.warning(f"Failed to get/send initial account_info snapshot: {e}")
-        else:
-            # 未连接时也发送一个占位 account_update，便于前端立即渲染“未连接”状态
-            last_err = None
-            try:
-                last_err = connection_manager.get_last_connect_error()
-            except Exception:
-                last_err = None
-            await websocket.send_text(json.dumps({
-                "type": "account_update",
-                "account_info": {"connected": False, "last_error": last_err}
-            }))
-    except Exception as e:
-        logger.debug(f"Failed to send initial account_update: {e}")
+        except Exception as e:
+            logger.debug(f"Failed to send initial account_update: {e}")
 
-    # 初次连接后，向该连接单播发送订单快照（最多300条）
-    try:
-        if 'order_manager' in globals() and order_manager:
-            loop = asyncio.get_event_loop()
-            initial_limit = 10
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: order_manager.get_orders(
-                        limit=initial_limit,
-                        offset=0,
-                        return_total=True,
+        try:
+            if 'order_manager' in globals() and order_manager:
+                loop = asyncio.get_event_loop()
+                initial_limit = 10
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: order_manager.get_orders(
+                            limit=initial_limit,
+                            offset=0,
+                            return_total=True,
+                        ),
                     ),
-                ),
-                timeout=5.0
-            )
-            if isinstance(result, tuple):
-                orders, total = result
-            else:
-                orders = result
-                total = len(orders)
-            payload = _orders_payload(orders, limit=initial_limit, page=1, total=total)
-            await websocket.send_text(json.dumps(payload))
-    except Exception as e:
-        logger.warning(f"Failed to send initial orders snapshot: {e}")
-    
-    # 初次连接后，向该连接单播发送positions快照
-    try:
-        if connection_manager.is_connected():
-            try:
-                positions = await asyncio.wait_for(core.ibkr_client.get_positions(fast=True), timeout=8.0)
-                await websocket.send_text(json.dumps({
-                    "type": "position_update",
-                    "positions": positions
-                }))
-            except asyncio.TimeoutError:
-                logger.warning("Initial positions snapshot timed out on websocket connect")
-            except Exception as e:
-                logger.warning(f"Failed to get/send initial positions snapshot: {e}")
-    except Exception as e:
-        logger.debug(f"Failed to send initial positions snapshot: {e}")
+                    timeout=5.0
+                )
+                if isinstance(result, tuple):
+                    orders, total = result
+                else:
+                    orders = result
+                    total = len(orders)
+                payload = _orders_payload(orders, limit=initial_limit, page=1, total=total)
+                await websocket.send_text(json.dumps(payload))
+        except Exception as e:
+            logger.warning(f"Failed to send initial orders snapshot: {e}")
+
+        try:
+            if connection_manager.is_connected():
+                try:
+                    positions = await asyncio.wait_for(core.ibkr_client.get_positions(fast=True), timeout=8.0)
+                    await websocket.send_text(json.dumps({
+                        "type": "position_update",
+                        "positions": positions
+                    }))
+                except asyncio.TimeoutError:
+                    logger.warning("Initial positions snapshot timed out on websocket connect")
+                except Exception as e:
+                    logger.warning(f"Failed to get/send initial positions snapshot: {e}")
+        except Exception as e:
+            logger.debug(f"Failed to send initial positions snapshot: {e}")
     
     realtime_tasks: Dict[str, asyncio.Task] = {}
+    redis_tasks: List[asyncio.Task] = []
     request_tracker: Dict[str, float] = {}
     last_responses: Dict[str, Dict[str, Any]] = {}
-    dom_service = get_dom_service()
+    dom_service = core_container.dom_service
     orchestrator = None
+    if redis_client is not None:
+        if ACCOUNT_STREAM_KEY:
+            redis_tasks.append(
+                asyncio.create_task(
+                    _stream_listener(
+                        redis_client,
+                        websocket,
+                        ACCOUNT_STREAM_KEY,
+                        _handle_account_stream_event,
+                    )
+                )
+            )
+        if ORDERS_STREAM_KEY:
+            redis_tasks.append(
+                asyncio.create_task(
+                    _stream_listener(
+                        redis_client,
+                        websocket,
+                        ORDERS_STREAM_KEY,
+                        _handle_orders_stream_event,
+                    )
+                )
+            )
+        if MARKET_STREAM_KEY:
+            redis_tasks.append(
+                asyncio.create_task(
+                    _stream_listener(
+                        redis_client,
+                        websocket,
+                        MARKET_STREAM_KEY,
+                        _handle_market_stream_event,
+                    )
+                )
+            )
+        if NOTIFICATION_STREAM_KEY:
+            redis_tasks.append(
+                asyncio.create_task(
+                    _stream_listener(
+                        redis_client,
+                        websocket,
+                        NOTIFICATION_STREAM_KEY,
+                        _handle_notification_stream_event,
+                    )
+                )
+            )
     try:
         while True:
             data = await websocket.receive_text()
@@ -434,6 +781,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 if task:
                     task.cancel()
             elif msg_type == "request_orders_snapshot":
+                if redis_client is not None:
+                    orders, total = await _load_orders_snapshot_from_redis(
+                        redis_client, limit=int(message.get("limit", 10) or 10)
+                    )
+                    if orders:
+                        payload = _orders_payload(
+                            orders,
+                            limit=len(orders),
+                            page=1,
+                            total=total,
+                        )
+                        payload["source"] = "redis"
+                        last_responses[
+                            f"orders_snapshot:{payload['meta'].get('limit')}:None:1"
+                        ] = payload
+                        await websocket.send_text(json.dumps(payload))
+                        continue
                 if 'order_manager' not in globals() or not order_manager:
                     await websocket.send_text(json.dumps({
                         "type": "orders_snapshot",
@@ -828,7 +1192,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    db = get_db_manager()
+                    db = core_container.get_db_manager()
                     items = db.load_sizing_history(symbol=symbol, since=since_raw, limit=limit)
                     enriched = _enrich_sizing_history_items(items)
                     meta = {
@@ -1112,7 +1476,17 @@ async def websocket_endpoint(websocket: WebSocket):
                         },
                     )
     except WebSocketDisconnect:
+        pass
+    finally:
+        for task in redis_tasks:
+            task.cancel()
+        for task in redis_tasks:
+            with suppress(Exception):
+                await task
         for task in realtime_tasks.values():
             task.cancel()
+        for task in realtime_tasks.values():
+            with suppress(Exception):
+                await task
         websocket_manager.disconnect(websocket)
 

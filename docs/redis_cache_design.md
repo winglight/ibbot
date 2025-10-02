@@ -95,7 +95,7 @@
 ## 后续工作清单
 
 1. 实现 `src/cache.py`（或 `src/utils/cache.py`）提供统一的 Redis 客户端与 pipeline 辅助方法。
-2. 在应用初始化阶段（如 `core/__init__.py`）加载 Redis 配置并注入到 StrategyManager、OrderManager、IBKRClient 等组件。
+2. 通过 `CoreContainer.ensure_redis()` 在应用初始化阶段加载 Redis 配置，并向 StrategyManager、OrderManager、IBKRClient 等组件注入依赖。
 3. 按上述触发点更新订单处理流程，并确保单元测试覆盖 Filled 事件的缓存写入。
 4. 为回填与清理逻辑编写 CLI/脚本或管理接口，方便在 Redis 数据损坏时重建。
 5. 更新部署文档与 Docker Compose，确保 Redis 服务在默认环境中可用，并在 `.env.example` 中说明相关变量。

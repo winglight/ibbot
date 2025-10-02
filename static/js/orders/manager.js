@@ -61,6 +61,28 @@ class OrderManager {
         if (!this.app || typeof this.app.registerWebSocketHandler !== 'function') return;
         const unsubscribe = this.app.registerWebSocketHandler('orders_snapshot', (payload) => this.handleOrdersSnapshot(payload));
         this.wsSubscriptions.push(unsubscribe);
+        const commandUnsubscribe = this.app.registerWebSocketHandler(
+            'order_command_submitted',
+            (payload) => this.handleOrderCommandSubmitted(payload)
+        );
+        this.wsSubscriptions.push(commandUnsubscribe);
+    }
+
+    handleOrderCommandSubmitted(payload) {
+        try {
+            if (!payload) return;
+            const command = payload.command || '未知命令';
+            const commandId = payload.command_id || payload.commandId;
+            const symbol = payload.symbol ? ` ${payload.symbol}` : '';
+            const message = commandId
+                ? `已提交${symbol}的 ${command} 命令，命令ID: ${commandId}`
+                : `已提交${symbol}的 ${command} 命令`;
+            if (this.app && typeof this.app.showAlert === 'function') {
+                this.app.showAlert('info', message);
+            }
+        } catch (err) {
+            console.warn('Failed to handle order command notification:', err);
+        }
     }
 
     async loadOrders(options = {}) {
@@ -273,10 +295,13 @@ class OrderManager {
             });
 
             if (response?.success) {
-                const actionText = response.action || 'CLOSE';
-                const quantityText = Number.isFinite(response.quantity) ? response.quantity : qty;
-                const orderIdText = response.order_id ? ` (订单ID: ${response.order_id})` : '';
-                this.app.showAlert('success', `平仓订单已提交: ${actionText} ${quantityText} ${lookupSymbol}${orderIdText}`);
+                const commandId = response.command_id || response.commandId;
+                const statusText = (response.status || 'queued').toUpperCase();
+                const parts = [];
+                if (commandId) parts.push(`命令ID: ${commandId}`);
+                if (response.timeout) parts.push(`超时: ${Math.round(response.timeout)}s`);
+                const summary = parts.length ? ` · ${parts.join(' / ')}` : '';
+                this.app.showAlert('success', `平仓命令已提交 (${statusText})${summary}`);
                 await this.app.loadPortfolio();
                 this.loadOrders();
 
@@ -291,7 +316,7 @@ class OrderManager {
                 return true;
             }
 
-            const failureReason = (response && response.message) ? response.message : '未知错误';
+            const failureReason = response?.error || response?.message || '未知错误';
             this.app.showAlert('danger', `平仓失败: ${failureReason}`);
         } catch (err) {
             if (err?.isReadOnly) {
@@ -1011,8 +1036,16 @@ class OrderManager {
             }
             
             if (response.success) {
-                this.app.showAlert('success', isEdit ? 'Order modified successfully' : 'Order placed successfully');
-                
+                const commandId = response.command_id || response.commandId;
+                const statusText = (response.status || 'queued').toUpperCase();
+                const parts = [];
+                if (commandId) parts.push(`命令ID: ${commandId}`);
+                if (response.timeout) parts.push(`超时: ${Math.round(response.timeout)}s`);
+                const message = isEdit
+                    ? `订单修改命令已提交 (${statusText})`
+                    : `下单命令已提交 (${statusText})`;
+                this.app.showAlert('success', parts.length ? `${message} · ${parts.join(' / ')}` : message);
+
                 // 缓存上一次下单的关键字段，便于下次填充
                 try {
                     localStorage.setItem('lastOrderSymbol', orderData.symbol || '');
@@ -1022,22 +1055,23 @@ class OrderManager {
                 } catch (e) {
                     console.warn('Failed to save last order fields to localStorage:', e);
                 }
-                
+
                 // 重置表单
                 form.reset();
                 document.getElementById('editOrderId').value = '';
                 document.getElementById('orderModalLabel').textContent = 'Place Order';
-                
+
                 // 关闭模态框
                 const modal = bootstrap.Modal.getInstance(document.getElementById('orderModal'));
                 if (modal) {
                     modal.hide();
                 }
-                
+
                 // 刷新订单列表
                 this.loadOrders();
             } else {
-                this.app.showAlert('error', response.message || 'Failed to place order');
+                const errorText = response.error || response.message || 'Failed to place order';
+                this.app.showAlert('error', errorText);
             }
         } catch (error) {
             console.error('Error placing order:', error);
@@ -1161,10 +1195,18 @@ class OrderManager {
             }
             
             if (response.success) {
-                this.app.showAlert('success', 'Order cancelled successfully');
+                const commandId = response.command_id || response.commandId;
+                const statusText = (response.status || 'queued').toUpperCase();
+                const parts = [];
+                if (commandId) parts.push(`命令ID: ${commandId}`);
+                if (response.timeout) parts.push(`超时: ${Math.round(response.timeout)}s`);
+                this.app.showAlert('success', parts.length
+                    ? `撤单命令已提交 (${statusText}) · ${parts.join(' / ')}`
+                    : `撤单命令已提交 (${statusText})`);
                 this.loadOrders();
             } else {
-                this.app.showAlert('error', response.message || 'Failed to cancel order');
+                const errorText = response.error || response.message || 'Failed to cancel order';
+                this.app.showAlert('error', errorText);
             }
         } catch (error) {
             console.error('Error cancelling order:', error);
