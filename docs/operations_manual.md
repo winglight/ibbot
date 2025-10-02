@@ -121,6 +121,9 @@
   1. `redis-cli XLEN stream:notification:events` 判断事件是否进入通知流。
   2. 查看 `services/notification` 日志确认 `send_*` 调用是否报错。
   3. 在主服务调用 `/api/notifications/test`（需管理员身份）发送测试消息。
+- **监控**：前端 “Service Health” 面板新增 `Notification Service` 卡片，对应 Redis 健康键
+  `hash:service:health:notification`。若状态显示“未上报”，可通过 `/api/services/restart`
+  触发对 `notification` 服务的重启（依赖 `connection_control`，默认监听 `8060` 端口）。
 - **恢复**：检查 `.env.local` 中的 `TELEGRAM_TOKEN/CHAT_ID`、浏览器通知配置；修复后重启通知服务。
 
 ### 3.5 性能阈值不达标

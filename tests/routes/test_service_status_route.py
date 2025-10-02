@@ -77,7 +77,7 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     endpoint = payload.get("restart_endpoint")
     assert isinstance(endpoint, str) and endpoint.startswith("/services/restart")
 
-    for slug in ("connection_control", "market_data", "market_data_feed"):
+    for slug in ("connection_control", "market_data", "market_data_feed", "notification"):
         entry = next((item for item in services if item.get("service") == slug), None)
         assert entry, f"missing service entry for {slug}"
         assert entry.get("status") == "unhealthy"
@@ -91,6 +91,15 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     assert connection_entry.get("port") == "8056"
     assert connection_entry.get("default_health_key") == "hash:service:health:connection_control"
     assert connection_entry.get("health_key") == "hash:service:health:connection_control"
+
+    notification_entry = next(
+        (item for item in services if item.get("service") == "notification"),
+        None,
+    )
+    assert notification_entry is not None
+    assert notification_entry.get("port") == "8060"
+    assert notification_entry.get("default_health_key") == "hash:service:health:notification"
+    assert notification_entry.get("health_key") == "hash:service:health:notification"
 
     account_entry = next(
         (item for item in services if item.get("service") == "account"),
