@@ -53,6 +53,79 @@ class RiskRule:
     max_position: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
+    _BASE_FIELDS = {
+        "symbol",
+        "stop_loss",
+        "stop_loss_price",
+        "take_profit",
+        "take_profit_price",
+        "enabled",
+        "max_position",
+        "updated_at",
+    }
+    _PROMOTED_KEYS = {"rule_type", "atr_params", "auto_trailing", "trail_ticks"}
+    _PROMOTED_PREFIXES = ("trail_",)
+    _PROMOTED_SUFFIXES = ("_multiplier",)
+
+    @staticmethod
+    def _flatten_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+        flat: dict[str, Any] = {}
+
+        def _merge(source: Mapping[str, Any]) -> None:
+            for key, value in source.items():
+                key_str = str(key)
+                if key_str == "metadata" and isinstance(value, Mapping):
+                    _merge(value)
+                else:
+                    flat[key_str] = value
+
+        _merge(metadata)
+        return flat
+
+    @classmethod
+    def _should_promote_metadata(cls, key: str) -> bool:
+        if key in cls._PROMOTED_KEYS:
+            return True
+        return key.startswith(cls._PROMOTED_PREFIXES) or key.endswith(
+            cls._PROMOTED_SUFFIXES
+        )
+
+    @classmethod
+    def normalise_payload(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Promote known metadata keys to the top-level rule payload."""
+
+        base: dict[str, Any] = {}
+        metadata_bucket: dict[str, Any] = {}
+
+        for key, value in payload.items():
+            key_str = str(key)
+            if key_str == "metadata" and isinstance(value, Mapping):
+                continue
+            if key_str in cls._BASE_FIELDS or cls._should_promote_metadata(key_str):
+                base[key_str] = value
+            else:
+                metadata_bucket[key_str] = value
+
+        raw_metadata = payload.get("metadata")
+        if isinstance(raw_metadata, Mapping):
+            flattened = cls._flatten_metadata(raw_metadata)
+            for key, value in flattened.items():
+                key_str = str(key)
+                if cls._should_promote_metadata(key_str):
+                    if key_str == "atr_params" and isinstance(value, Mapping):
+                        base[key_str] = {str(k): v for k, v in value.items()}
+                    else:
+                        base[key_str] = value
+                else:
+                    metadata_bucket[key_str] = value
+
+        if metadata_bucket:
+            base["metadata"] = metadata_bucket
+        else:
+            base.pop("metadata", None)
+
+        return base
+
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "RiskRule":
         symbol_raw = payload.get("symbol")
@@ -69,8 +142,15 @@ class RiskRule:
             except (TypeError, ValueError):
                 max_position = None
         enabled = _to_bool(payload.get("enabled"), True)
-        metadata = dict(payload)
-        metadata.pop("symbol", None)
+        metadata: dict[str, Any] = {}
+        raw_metadata = payload.get("metadata")
+        if isinstance(raw_metadata, Mapping):
+            metadata.update(cls._flatten_metadata(raw_metadata))
+        for key, value in payload.items():
+            key_str = str(key)
+            if key_str in cls._BASE_FIELDS or key_str == "metadata":
+                continue
+            metadata[key_str] = value
         return cls(
             symbol=symbol,
             stop_loss=stop_loss,
@@ -95,7 +175,7 @@ class RiskRule:
             payload["max_position"] = self.max_position
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
-        return payload
+        return self.normalise_payload(payload)
 
 
 @dataclass(slots=True)

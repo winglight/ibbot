@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import json
+
 import pytest
 
 from services.risk.runtime import RiskRuntime
@@ -27,17 +29,33 @@ async def test_rule_lifecycle_persists_and_records_history() -> None:
     await runtime.save_risk_config({"risk_per_trade_r": 0.01})
     await runtime.reload_from_storage()
 
-    created = await runtime.save_risk_rule("ES", {"stop_loss": 5, "enabled": True})
+    created = await runtime.save_risk_rule(
+        "ES",
+        {
+            "stop_loss": 5,
+            "enabled": True,
+            "metadata": {
+                "rule_type": "trailing",
+                "atr_params": {"multiplier_sl": 1.3, "multiplier_tp": 2.1},
+            },
+        },
+    )
     assert created["symbol"] == "ES"
     assert created["stop_loss"] == 5
+    assert created["rule_type"] == "trailing"
+    assert created["atr_params"] == {"multiplier_sl": 1.3, "multiplier_tp": 2.1}
+    assert "rule_type" not in (created.get("metadata") or {})
 
     _, rules_snapshot = await runtime.reload_from_storage()
     assert "ES" in rules_snapshot
     assert rules_snapshot["ES"]["stop_loss"] == 5
+    assert rules_snapshot["ES"]["rule_type"] == "trailing"
+    assert rules_snapshot["ES"]["atr_params"]["multiplier_tp"] == 2.1
 
     updated = await runtime.save_risk_rule("ES", {"take_profit": 8})
     assert updated["take_profit"] == 8
     assert updated["stop_loss"] == 5
+    assert updated["rule_type"] == "trailing"
 
     removed = await runtime.delete_risk_rule("ES")
     assert removed is True
@@ -51,6 +69,38 @@ async def test_rule_lifecycle_persists_and_records_history() -> None:
 
     metrics = runtime.health_snapshot()
     assert metrics["rules_history_events"] == await redis.xlen(runtime.rules_history_stream)
+
+
+async def test_load_risk_rules_promotes_cached_metadata() -> None:
+    redis = FakeRedis()
+
+    async def factory() -> FakeRedis:
+        return redis
+
+    runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
+
+    legacy_payload = {
+        "symbol": "ES",
+        "stop_loss_price": 10.0,
+        "metadata": {
+            "rule_type": "trailing",
+            "atr_params": {"multiplier_sl": 1.4, "multiplier_tp": 2.2},
+        },
+    }
+    await redis.hset(
+        runtime.rules_hash_key,
+        mapping={"ES": json.dumps(legacy_payload)},
+    )
+
+    rules = await runtime.load_risk_rules()
+    assert "ES" in rules
+    es_rule = rules["ES"]
+    assert es_rule["rule_type"] == "trailing"
+    assert es_rule["atr_params"] == {
+        "multiplier_sl": 1.4,
+        "multiplier_tp": 2.2,
+    }
+    assert "rule_type" not in (es_rule.get("metadata") or {})
 
 
 async def test_config_saves_merge_and_removal() -> None:

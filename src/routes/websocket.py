@@ -44,6 +44,7 @@ from src.routes.service_clients import (
     ServiceClientError,
     ServiceUnavailableError,
 )
+from services.risk.engine import RiskRule
 from src.ibbot.redis import PubSubListener
 
 router = APIRouter()
@@ -381,12 +382,48 @@ async def _read_json_from_redis(key: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _normalise_rules_payload(rules: Any) -> Any:
+    if isinstance(rules, Mapping):
+        normalised: Dict[str, Dict[str, Any]] = {}
+        for symbol, value in rules.items():
+            if isinstance(value, Mapping):
+                payload = dict(value)
+                symbol_raw = str(payload.get("symbol") or symbol)
+                symbol_norm = symbol_raw.strip().upper() or symbol_raw
+                payload.setdefault("symbol", symbol_norm)
+                normalised[symbol_norm] = RiskRule.normalise_payload(payload)
+            else:
+                symbol_raw = str(symbol)
+                symbol_norm = symbol_raw.strip().upper() or symbol_raw
+                normalised[symbol_norm] = {"symbol": symbol_norm, "value": value}
+        return normalised
+    if isinstance(rules, list):
+        normalised_list: List[Any] = []
+        for item in rules:
+            if isinstance(item, Mapping):
+                payload = dict(item)
+                symbol_raw = str(payload.get("symbol") or "")
+                if symbol_raw:
+                    payload["symbol"] = symbol_raw.strip().upper() or symbol_raw
+                normalised_list.append(RiskRule.normalise_payload(payload))
+            else:
+                normalised_list.append(item)
+        return normalised_list
+    return rules
+
+
 async def _load_cached_risk_rules() -> Optional[Dict[str, Any]]:
     payload = await _read_json_from_redis(RISK_RULES_CACHE_KEY)
     if payload is None:
         return None
     payload.setdefault("success", True)
     payload.setdefault("source", payload.get("source", "redis"))
+    rules_payload = payload.get("rules")
+    if rules_payload is not None:
+        normalised_rules = _normalise_rules_payload(rules_payload)
+        payload["rules"] = normalised_rules
+        if isinstance(normalised_rules, Mapping):
+            payload["count"] = len(normalised_rules)
     return payload
 
 
@@ -420,8 +457,13 @@ async def _handle_risk_rules_pubsub(_: str, message: str) -> None:
                 payload.setdefault("count", snapshot.get("count"))
 
     rules_payload = payload.get("rules")
-    if isinstance(rules_payload, Mapping) and "count" not in payload:
-        payload["count"] = len(rules_payload)
+    if rules_payload is not None:
+        normalised_rules = _normalise_rules_payload(rules_payload)
+        payload["rules"] = normalised_rules
+        if isinstance(normalised_rules, Mapping):
+            payload["count"] = len(normalised_rules)
+        elif "count" not in payload and isinstance(rules_payload, Mapping):
+            payload["count"] = len(rules_payload)
 
     payload.setdefault("type", "risk_rules")
     payload.setdefault("success", True)
@@ -1939,6 +1981,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
                     continue
+
+                rules_payload = _normalise_rules_payload(rules_payload)
 
                 payload = {
                     "type": "risk_rules",
