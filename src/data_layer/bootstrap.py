@@ -12,6 +12,7 @@ from src.dom_dependencies import depth_subscriber
 from .adapters import DomDepthAdapter, MarketQuoteAdapter
 from .cache import InMemoryCacheBackend, RedisCacheBackend
 from .data_source_manager import DataSourceManager
+from .config import get_candle_intervals
 from .persistence import InfluxPersistenceBackend, NoopPersistenceBackend
 from .quote_feed import QuoteFeed, resolve_default_quote_feed
 from src.ibbot.redis import DEFAULT_REDIS_URL
@@ -44,11 +45,14 @@ def get_data_source_manager() -> DataSourceManager:
     dom_adapter = DomDepthAdapter(depth_subscriber, manager.event_bus)
     manager.register_source(dom_adapter)
 
+    intervals, history_limit = get_candle_intervals()
     quote_adapter = MarketQuoteAdapter(
         get_quote_feed(),
         manager.event_bus,
         _get_cache_backend(),
         _get_persistence_backend(),
+        intervals=intervals,
+        candle_history=history_limit,
     )
     manager.register_source(quote_adapter)
     _manager = manager

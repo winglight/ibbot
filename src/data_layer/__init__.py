@@ -7,7 +7,14 @@ between legacy and unified modes.  Concrete data adapters will be added
 in subsequent iterations.
 """
 
-from .config import DataLayerMode, get_data_layer_mode, is_dual_mode, is_legacy_mode, is_unified_mode
+from .config import (
+    DataLayerMode,
+    get_candle_intervals,
+    get_data_layer_mode,
+    is_dual_mode,
+    is_legacy_mode,
+    is_unified_mode,
+)
 from .cache import CacheBackend, InMemoryCacheBackend
 from .data_source_manager import (
     DataSourceAdapter,
@@ -22,6 +29,7 @@ from .persistence import PersistenceBackend, NoopPersistenceBackend
 __all__ = [
     "DataLayerMode",
     "get_data_layer_mode",
+    "get_candle_intervals",
     "is_dual_mode",
     "is_legacy_mode",
     "is_unified_mode",
