@@ -65,6 +65,34 @@ def test_discovered_strategy_available_on_start(redis_client: InMemoryRedis) -> 
     assert any(entry.get("name") == "BuyTheDipStrategy" for entry in payload)
 
 
+def test_filesystem_strategies_discovered(redis_client: InMemoryRedis, tmp_path: Path) -> None:
+    strategy_dir = tmp_path / "strategies"
+    strategy_dir.mkdir()
+    file_path = strategy_dir / "filesystem_alpha.py"
+    file_path.write_text("print('alpha')\n", encoding="utf-8")
+
+    settings = {**DEFAULT_SETTINGS, "strategy_path": str(strategy_dir)}
+    asyncio.run(persist_strategy_settings(redis_client, settings))
+
+    client = _build_client(redis_client)
+
+    with client:
+        files_response = client.get("/strategy/files")
+        assert files_response.status_code == 200
+        files_payload = files_response.json()
+        assert files_payload["success"] is True
+        assert "filesystem_alpha.py" in files_payload["files"]
+
+        strategies_response = client.get("/strategy")
+        assert strategies_response.status_code == 200
+        strategies = strategies_response.json()
+        names = [entry["name"] for entry in strategies]
+        assert "filesystem_alpha" in names
+        fs_entry = next(entry for entry in strategies if entry["name"] == "filesystem_alpha")
+        assert fs_entry["metadata"]["file"] == "filesystem_alpha.py"
+        assert fs_entry["metadata"]["source"] == "filesystem"
+
+
 def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
     client = _build_client(redis_client)
 
@@ -79,7 +107,8 @@ def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
     with client:
         response = client.get("/strategy")
         assert response.status_code == 200
-        assert response.json() == []
+        initial = response.json()
+        assert all(entry["name"] != "demo" for entry in initial)
 
         response = client.post("/strategy", json=payload)
         assert response.status_code == 201

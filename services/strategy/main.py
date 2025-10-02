@@ -65,8 +65,14 @@ async def run_service() -> None:
     poll_timeout = float(config.get("poll_timeout", 1.0))
 
     strategies = _parse_strategies(config)
+    strategy_path = config.get("strategy_path")
     try:
-        strategies = await sync_strategy_metadata(redis, strategies, logger=logger)
+        strategies = await sync_strategy_metadata(
+            redis,
+            strategies,
+            logger=logger,
+            strategy_path=strategy_path,
+        )
     except Exception:  # pragma: no cover - defensive guard
         logger.warning("Failed to synchronise strategy metadata", exc_info=True)
     consumer: StrategyTaskConsumer | None = None

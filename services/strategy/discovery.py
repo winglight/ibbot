@@ -5,13 +5,26 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import os
 import pkgutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from types import ModuleType
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 DEFAULT_METADATA_PREFIX = "json:strategy"
+_FILESYSTEM_SUFFIXES = (".py", ".json", ".yaml", ".yml")
+_FILESYSTEM_METADATA_KEYS = {
+    "file",
+    "file_path",
+    "filepath",
+    "path",
+    "script",
+    "scripts",
+    "files",
+    "paths",
+}
 
 
 @dataclass(slots=True)
@@ -19,7 +32,7 @@ class StrategyMetadata:
     """Structure representing persisted strategy metadata."""
 
     name: str
-    factory: str
+    factory: str | None
     params: dict[str, Any]
     metadata: dict[str, Any]
     description: str | None
@@ -82,7 +95,9 @@ def discover_builtin_strategies(package: str = "src.strategies") -> dict[str, st
     return discovered
 
 
-def _normalise_spec(spec: Any) -> tuple[str | None, dict[str, Any], dict[str, Any], str | None, bool | None]:
+def _normalise_spec(
+    spec: Any,
+) -> tuple[str | None, dict[str, Any], dict[str, Any], str | None, bool | None]:
     factory: str | None = None
     params: dict[str, Any] = {}
     metadata: dict[str, Any] = {}
@@ -109,6 +124,48 @@ def _normalise_spec(spec: Any) -> tuple[str | None, dict[str, Any], dict[str, An
         factory = spec
 
     return factory, params, metadata, description, enabled
+
+
+def _coerce_existing_metadata(
+    name: str,
+    payload: Mapping[str, Any],
+    *,
+    default_timestamp: str,
+) -> StrategyMetadata:
+    params_value = payload.get("params")
+    metadata_value = payload.get("metadata")
+    description_value = payload.get("description")
+
+    params: dict[str, Any] = {}
+    if isinstance(params_value, Mapping):
+        params = {str(k): v for k, v in params_value.items()}
+
+    metadata: dict[str, Any] = {}
+    if isinstance(metadata_value, Mapping):
+        metadata = {str(k): v for k, v in metadata_value.items()}
+
+    factory_value = payload.get("factory")
+    factory = None
+    if isinstance(factory_value, str):
+        factory = factory_value or None
+    elif factory_value is not None:
+        factory = str(factory_value) or None
+
+    description = str(description_value) if isinstance(description_value, str) else None
+    created_at = str(payload.get("created_at") or default_timestamp)
+    updated_at = str(payload.get("updated_at") or default_timestamp)
+    enabled = bool(payload.get("enabled", True))
+
+    return StrategyMetadata(
+        name=name,
+        factory=factory,
+        params=params,
+        metadata=metadata,
+        description=description,
+        enabled=enabled,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
 
 
 async def _load_existing_documents(redis_client: Any, *, metadata_prefix: str) -> dict[str, dict[str, Any]]:
@@ -156,7 +213,7 @@ async def _load_existing_documents(redis_client: Any, *, metadata_prefix: str) -
 def _build_metadata(
     name: str,
     *,
-    factory: str,
+    factory: str | None,
     params: dict[str, Any] | None,
     metadata: dict[str, Any] | None,
     description: str | None,
@@ -186,7 +243,16 @@ def _build_metadata(
         else bool(base_metadata.get("enabled", True))
     )
 
-    factory_value = factory or str(base_metadata.get("factory") or "")
+    existing_factory = base_metadata.get("factory")
+    if isinstance(existing_factory, str) and existing_factory:
+        default_factory: str | None = existing_factory
+    else:
+        default_factory = None
+
+    if factory is not None and isinstance(factory, str):
+        factory_value: str | None = factory or default_factory
+    else:
+        factory_value = default_factory
 
     return StrategyMetadata(
         name=name,
@@ -200,17 +266,118 @@ def _build_metadata(
     )
 
 
+def _resolve_strategy_path(path_value: str | os.PathLike[str] | None) -> Path | None:
+    if not path_value:
+        return None
+    candidate = Path(path_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    try:
+        return candidate.resolve()
+    except OSError:
+        return candidate
+
+
+def _iter_strategy_files(base: Path) -> Iterable[Path]:
+    if base.is_dir():
+        for candidate in base.rglob("*"):
+            if not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in _FILESYSTEM_SUFFIXES:
+                continue
+            yield candidate
+    elif base.is_file():
+        if base.suffix.lower() in _FILESYSTEM_SUFFIXES:
+            yield base
+
+
+def _derive_strategy_name(candidate: Path, *, base: Path | None) -> str:
+    relative: str
+    if base is not None and base.exists():
+        try:
+            relative = candidate.relative_to(base).as_posix()
+        except ValueError:
+            relative = candidate.name
+    else:
+        relative = candidate.name
+    without_suffix = relative.rsplit(".", 1)[0]
+    normalised = without_suffix.replace("/", "_").replace("\\", "_")
+    return normalised or candidate.stem or candidate.name
+
+
+def discover_filesystem_strategies(
+    path_value: str | os.PathLike[str] | None,
+) -> dict[str, Mapping[str, Any]]:
+    resolved = _resolve_strategy_path(path_value)
+    if resolved is None:
+        return {}
+
+    base_dir = resolved if resolved.is_dir() else resolved.parent if resolved.parent != resolved else resolved
+    discovered: dict[str, Mapping[str, Any]] = {}
+
+    for candidate in _iter_strategy_files(resolved):
+        if resolved.is_dir():
+            try:
+                relative_path = candidate.relative_to(resolved).as_posix()
+            except ValueError:
+                relative_path = candidate.name
+        else:
+            try:
+                relative_path = candidate.relative_to(base_dir).as_posix()
+            except ValueError:
+                relative_path = candidate.name
+
+        strategy_name = _derive_strategy_name(candidate, base=base_dir if base_dir.exists() else resolved)
+        metadata = {
+            "source": "filesystem",
+            "file": relative_path,
+        }
+        spec: dict[str, Any] = {
+            "factory": None,
+            "params": {},
+            "metadata": metadata,
+            "description": None,
+            "enabled": False,
+        }
+        discovered.setdefault(strategy_name, spec)
+
+    return discovered
+
+
 async def sync_strategy_metadata(
     redis_client: Any,
     configured: Mapping[str, Any],
     *,
     metadata_prefix: str = DEFAULT_METADATA_PREFIX,
+    strategy_path: str | os.PathLike[str] | None = None,
     logger: Any | None = None,
 ) -> dict[str, Any]:
     """Merge discovered strategies with configured ones and persist metadata."""
 
     discovered = discover_builtin_strategies()
     merged: dict[str, Any] = {str(k): v for k, v in configured.items()}
+
+    filesystem = discover_filesystem_strategies(strategy_path)
+
+    for name, spec in filesystem.items():
+        existing_spec = merged.get(name)
+        if existing_spec is None:
+            merged[name] = spec
+            continue
+        if isinstance(existing_spec, Mapping):
+            base_spec = dict(existing_spec)
+        else:
+            base_spec = {"factory": existing_spec}
+        metadata_payload = dict(base_spec.get("metadata") or {})
+        for key, value in dict(spec.get("metadata") or {}).items():
+            metadata_payload.setdefault(key, value)
+        combined = {**spec, **base_spec}
+        if metadata_payload:
+            combined["metadata"] = metadata_payload
+        if base_spec.get("factory"):
+            combined["factory"] = base_spec.get("factory")
+        merged[name] = combined
+
     for name, factory in discovered.items():
         merged.setdefault(name, {"factory": factory})
 
@@ -223,7 +390,10 @@ async def sync_strategy_metadata(
 
     for name, spec in merged.items():
         factory, params, metadata, description, enabled = _normalise_spec(spec)
-        if not factory:
+        metadata_has_file = False
+        if isinstance(metadata, Mapping):
+            metadata_has_file = any(metadata.get(key) for key in _FILESYSTEM_METADATA_KEYS)
+        if not factory and not metadata_has_file:
             if logger is not None:
                 logger.warning("Strategy %s is missing a factory specification", name)
             invalid.add(name)
@@ -244,6 +414,13 @@ async def sync_strategy_metadata(
 
     for name in invalid:
         merged.pop(name, None)
+
+    for name, payload in existing_docs.items():
+        if name in documents or name in invalid:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        documents[name] = _coerce_existing_metadata(name, payload, default_timestamp=now)
 
     if not documents:
         return merged
@@ -270,5 +447,6 @@ async def sync_strategy_metadata(
 __all__ = [
     "DEFAULT_METADATA_PREFIX",
     "discover_builtin_strategies",
+    "discover_filesystem_strategies",
     "sync_strategy_metadata",
 ]

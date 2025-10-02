@@ -15,7 +15,7 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError, validator
 
-from services.strategy import StrategyTaskConsumer
+from services.strategy import StrategyTaskConsumer, sync_strategy_metadata
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
@@ -230,7 +230,7 @@ class StrategyRuntime:
         return self._event_stream
 
     async def start(self) -> None:
-        await self._load_metadata()
+        await self._synchronise_metadata()
         self.pending_tasks = await self._get_queue_length()
         self._stop.clear()
         if self._consumer is not None:
@@ -378,6 +378,24 @@ class StrategyRuntime:
 
     def _metadata_key(self, name: str) -> str:
         return f"{self._metadata_prefix}:{name}"
+
+    async def _synchronise_metadata(self) -> None:
+        try:
+            settings = await load_strategy_settings(self._redis)
+        except Exception:  # pragma: no cover - defensive guard
+            settings = dict(DEFAULT_SETTINGS)
+        strategy_path = settings.get("strategy_path") or DEFAULT_SETTINGS.get("strategy_path")
+        try:
+            await sync_strategy_metadata(
+                self._redis,
+                {},
+                metadata_prefix=self._metadata_prefix,
+                strategy_path=strategy_path,
+                logger=self._logger,
+            )
+        except Exception:  # pragma: no cover - defensive guard
+            self._logger.warning("Failed to synchronise strategy metadata", exc_info=True)
+        await self._load_metadata()
 
     @classmethod
     def _extract_metadata_files(cls, metadata: Mapping[str, Any]) -> set[str]:
