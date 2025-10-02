@@ -382,22 +382,116 @@ def _snapshot_response(snapshot: Dict[str, Any], *, data_key: str) -> Dict[str, 
     return payload
 
 
+def _snapshot_requires_refresh(
+    snapshot: Optional[Dict[str, Any]], *, force_refresh: bool
+) -> bool:
+    if force_refresh:
+        return True
+    if not snapshot or "data" not in snapshot:
+        return True
+    return bool(snapshot.get("stale"))
+
+
+def _summarise_stale_state(
+    info_snapshot: Optional[Dict[str, Any]],
+    positions_snapshot: Optional[Dict[str, Any]],
+) -> tuple[bool, Optional[str]]:
+    stale = False
+    reasons: list[str] = []
+
+    for label, snapshot in (
+        ("account-info", info_snapshot),
+        ("positions", positions_snapshot),
+    ):
+        if not snapshot or "data" not in snapshot:
+            stale = True
+            reasons.append(f"{label}-missing")
+            continue
+        if snapshot.get("stale"):
+            stale = True
+            reason = snapshot.get("stale_reason") or f"{label}-stale"
+            reasons.append(reason)
+
+    return stale, ", ".join(reasons) if reasons else None
+
+
+async def _publish_refresh_health(
+    *,
+    info_snapshot: Optional[Dict[str, Any]],
+    positions_snapshot: Optional[Dict[str, Any]],
+    error: Optional[str],
+) -> None:
+    stale, reason = _summarise_stale_state(info_snapshot, positions_snapshot)
+    _state.stale = stale
+    _state.last_refresh_error = error
+    _state.stale_reason = reason
+
+    metrics = _state.as_metrics(info=info_snapshot, positions=positions_snapshot)
+    redis_client = _state.redis
+    if redis_client is None:
+        return
+
+    healthy = error is None and not stale
+    try:
+        await update_service_health(
+            redis_client,
+            ACCOUNT_SERVICE_NAME,
+            healthy=healthy,
+            last_error=error or "",
+            metrics=metrics,
+            logger=logger,
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to publish account service health after refresh: %s", exc)
+
+
 async def _refresh_account_info(
     *,
     force_refresh: bool,
 ) -> Dict[str, Any]:
     snapshot = await read_account_info_snapshot()
-    needs_refresh = force_refresh or _snapshot_is_stale(snapshot)
+    needs_refresh = _snapshot_requires_refresh(snapshot, force_refresh=force_refresh)
 
     if needs_refresh:
         service = _state.snapshot_service
-        if service is not None:
-            reason = "api-force-refresh" if force_refresh else "api-stale"
+        reason = "api-force-refresh" if force_refresh else "api-stale"
+        success = False
+        error: Optional[str] = None
+
+        if service is None:
+            error = "snapshot-service-unavailable"
+            logger.warning("Account info refresh skipped: snapshot service unavailable")
+        else:
             try:
                 await service.refresh_account_info(reason=reason)
+                success = True
             except Exception as exc:
+                error = str(exc)
                 logger.warning("Account info refresh failed: %s", exc)
-        snapshot = await read_account_info_snapshot()
+
+        info_snapshot, positions_snapshot = await _collect_snapshots()
+        await _publish_refresh_health(
+            info_snapshot=info_snapshot,
+            positions_snapshot=positions_snapshot,
+            error=None if success else error,
+        )
+
+        snapshot = info_snapshot
+        metadata = _snapshot_metadata(snapshot) if snapshot else {}
+        if success:
+            logger.info(
+                "Account info refresh succeeded (source=%s, updated_at=%s, stale=%s)",
+                metadata.get("source"),
+                metadata.get("snapshot_updated_at"),
+                metadata.get("stale"),
+            )
+        else:
+            logger.warning(
+                "Account info refresh unsuccessful (error=%s, stale=%s, updated_at=%s)",
+                error or "unknown-error",
+                metadata.get("stale"),
+                metadata.get("snapshot_updated_at"),
+            )
 
     return await _ensure_snapshot(snapshot, kind="Account info")
 
@@ -408,17 +502,48 @@ async def _refresh_positions(
     fast: bool,
 ) -> Dict[str, Any]:
     snapshot = await read_positions_snapshot()
-    needs_refresh = force_refresh or _snapshot_is_stale(snapshot)
+    needs_refresh = _snapshot_requires_refresh(snapshot, force_refresh=force_refresh)
 
     if needs_refresh:
         service = _state.snapshot_service
-        if service is not None:
-            reason = "api-force-refresh" if force_refresh else "api-stale"
+        reason = "api-force-refresh" if force_refresh else "api-stale"
+        success = False
+        error: Optional[str] = None
+
+        if service is None:
+            error = "snapshot-service-unavailable"
+            logger.warning("Positions refresh skipped: snapshot service unavailable")
+        else:
             try:
                 await service.refresh_positions(reason=reason, fast=fast)
+                success = True
             except Exception as exc:
+                error = str(exc)
                 logger.warning("Positions refresh failed: %s", exc)
-        snapshot = await read_positions_snapshot()
+
+        info_snapshot, positions_snapshot = await _collect_snapshots()
+        await _publish_refresh_health(
+            info_snapshot=info_snapshot,
+            positions_snapshot=positions_snapshot,
+            error=None if success else error,
+        )
+
+        snapshot = positions_snapshot
+        metadata = _snapshot_metadata(snapshot) if snapshot else {}
+        if success:
+            logger.info(
+                "Positions refresh succeeded (source=%s, updated_at=%s, stale=%s)",
+                metadata.get("source"),
+                metadata.get("snapshot_updated_at"),
+                metadata.get("stale"),
+            )
+        else:
+            logger.warning(
+                "Positions refresh unsuccessful (error=%s, stale=%s, updated_at=%s)",
+                error or "unknown-error",
+                metadata.get("stale"),
+                metadata.get("snapshot_updated_at"),
+            )
 
     return await _ensure_snapshot(snapshot, kind="Positions")
 
@@ -552,7 +677,7 @@ async def get_account_positions(
     fast: str | None = Query(None),
 ) -> Dict[str, Any]:
     refresh = _parse_bool(force_refresh, default=False)
-    fast_flag = _parse_bool(fast, default=True)
+    fast_flag = _parse_bool(fast, default=False)
     snapshot = await _refresh_positions(force_refresh=refresh, fast=fast_flag)
     return _snapshot_response(snapshot, data_key="positions")
 
