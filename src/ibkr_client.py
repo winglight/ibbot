@@ -36,8 +36,23 @@ from concurrent.futures import ThreadPoolExecutor
 import math
 import subprocess
 from .connection_manager import connection_manager, connection_logger
-from .database import get_db_manager
 from .restart_utils import restart_program
+from src.routes.service_clients import (
+    MarketDataServiceClient,
+    ServiceClientError,
+    ServiceResponseError,
+    ServiceUnavailableError,
+)
+
+_MARKET_DATA_SERVICE_CLIENT: Optional[MarketDataServiceClient] = None
+_MARKET_DATA_INGEST_PATH = "/market/historical/ingest"
+
+
+def _get_market_data_service_client() -> MarketDataServiceClient:
+    global _MARKET_DATA_SERVICE_CLIENT
+    if _MARKET_DATA_SERVICE_CLIENT is None:
+        _MARKET_DATA_SERVICE_CLIENT = MarketDataServiceClient()
+    return _MARKET_DATA_SERVICE_CLIENT
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -1103,29 +1118,108 @@ class IBKRClient:
         #     return []
 
     def save_historical_data(self, df: pd.DataFrame, symbol: str, filename: str = None):
-        """保存历史数据到数据库"""
+        """Push historical bars to the market data service for distribution."""
+
+        if df is None or df.empty:
+            ibkr_logger.debug(f"Skipping historical data publish for {symbol}: no rows")
+            return
+
         try:
-            # 获取数据库管理器
-            db_manager = get_db_manager()
-            
-            # 保存到数据库
-            db_manager.save_historical_data(symbol, df)
-            ibkr_logger.info(f"Historical data for {symbol} saved to database")
-            
-            # 保留文件保存作为备份（可选）
-            if filename:
-                os.makedirs(os.path.dirname(filename), exist_ok=True)
-                df.to_csv(filename, index=False)
-                ibkr_logger.info(f"Historical data also saved to {filename}")
-        except Exception as e:
-            ibkr_logger.error(f"Error saving historical data to database: {e}")
-            # 回退到文件保存
-            if filename is None:
-                filename = f"data/{symbol}_historical.csv"
-            
-            os.makedirs(os.path.dirname(filename), exist_ok=True)
-            df.to_csv(filename, index=False)
-            ibkr_logger.info(f"Historical data saved to {filename} (fallback)")
+            # Include the index as a column so downstream consumers receive timestamps.
+            reset_df = df.reset_index(drop=False)
+        except Exception:
+            reset_df = df
+
+        try:
+            records = reset_df.to_dict("records")
+        except Exception as exc:
+            ibkr_logger.error(
+                f"Failed to serialise historical data for {symbol}: {exc}"
+            )
+            return
+
+        if not records:
+            ibkr_logger.debug(
+                f"Skipping historical data publish for {symbol}: serialised payload empty"
+            )
+            return
+
+        def _normalise_value(value: Any) -> Any:
+            if pd.isna(value):  # type: ignore[arg-type]
+                return None
+            if isinstance(value, pd.Timestamp):
+                value = value.to_pydatetime()
+            if isinstance(value, datetime):
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=timezone.utc)
+                return value.isoformat()
+            return value
+
+        bars: List[Dict[str, Any]] = []
+        for row in records:
+            normalised_row = {key: _normalise_value(val) for key, val in row.items()}
+            bars.append(normalised_row)
+
+        payload: Dict[str, Any] = {
+            "symbol": symbol,
+            "bars": bars,
+        }
+
+        # Preserve optional metadata for observability (non-breaking if filename unused).
+        metadata: Dict[str, Any] = {
+            "row_count": len(bars),
+        }
+        if filename:
+            metadata["source_filename"] = filename
+        if hasattr(df, "attrs"):
+            bar_size = df.attrs.get("bar_size")
+            if bar_size:
+                metadata["bar_size"] = bar_size
+        payload["metadata"] = metadata
+
+        async def _push_to_service() -> None:
+            client = _get_market_data_service_client()
+            try:
+                await client.request("POST", _MARKET_DATA_INGEST_PATH, json=payload)
+                ibkr_logger.info(
+                    f"Published {len(bars)} historical bars for {symbol} to market data service"
+                )
+            except ServiceUnavailableError as exc:
+                ibkr_logger.warning(
+                    f"Market data service unavailable when publishing {symbol} bars: {exc}"
+                )
+            except ServiceResponseError as exc:
+                ibkr_logger.warning(
+                    "Market data service rejected %s bars with status %s: %s",
+                    symbol,
+                    exc.status_code,
+                    exc.detail,
+                )
+            except ServiceClientError as exc:
+                ibkr_logger.warning(
+                    f"Failed to deliver {symbol} bars to market data service: {exc}"
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                ibkr_logger.exception(
+                    f"Unexpected error publishing {symbol} historical data: {exc}"
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(_push_to_service())
+        else:
+            task = loop.create_task(_push_to_service())
+
+            def _log_task_result(fut: asyncio.Future[Any]) -> None:
+                try:
+                    fut.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    ibkr_logger.exception(
+                        f"Background publish of {symbol} bars failed: {exc}"
+                    )
+
+            task.add_done_callback(_log_task_result)
     
     async def get_real_time_data(self, symbol: str, exchange: str = 'SMART'):
         """获取实时行情，支持统一数据层或回退旧实现。"""
