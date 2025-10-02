@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import inspect
 import json
 import logging
 import uuid
@@ -12,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 
 from src.ibbot import update_service_health
+from src.ibbot.influx import build_order_point, init_influx_client, write_points
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, get_redis_client
 
 LOGGER = logging.getLogger("ibbot.services.orders")
@@ -42,6 +44,12 @@ def _maybe_json_loads(value: Any) -> Any:
     return value
 
 
+async def _maybe_await(result: Awaitable[Any] | Any) -> Any:
+    if inspect.isawaitable(result):
+        return await result  # type: ignore[return-value]
+    return result
+
+
 def _normalise_stream_payload(data: Mapping[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     for key, value in data.items():
@@ -57,6 +65,59 @@ def _normalise_stream_payload(data: Mapping[str, Any]) -> dict[str, Any]:
         else:
             payload[key] = value
     return payload
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+    return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (float, int)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, (float, int)) and not isinstance(value, bool):
+        return str(value)
+    return str(value)
+
+
+def _first_nonempty(*candidates: Any) -> Any:
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            continue
+        if candidate is None:
+            continue
+        if isinstance(candidate, str):
+            text = candidate.strip()
+            if not text:
+                continue
+            return text
+        return candidate
+    return None
 
 
 _REQUEST_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -205,6 +266,7 @@ class OrderSubmission(BaseModel):
 @dataclass
 class OrdersRuntime:
     redis_factory: Callable[[], Awaitable[Any]] = get_redis_client
+    write_fn: Callable[[Iterable[Any]], Awaitable[int] | int] = write_points
     command_queue: str = DEFAULT_COMMAND_QUEUE
     results_stream: str = "stream:ib:results"
     snapshot_key: str = "json:orders:snapshot"
@@ -228,14 +290,32 @@ class OrdersRuntime:
     _health_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _influx_initialised: bool = field(default=False, init=False, repr=False)
+    _influx_disabled: bool = field(default=False, init=False, repr=False)
+    _influx_disable_reason: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._history = deque(maxlen=self.history_limit)
+
+    def _configure_influx(self) -> None:
+        if self._influx_initialised:
+            return
+        self._influx_initialised = True
+        try:
+            init_influx_client()
+        except Exception as exc:  # pragma: no cover - depends on optional dependency
+            self._influx_disabled = True
+            self._influx_disable_reason = str(exc)
+            self.logger.info("Orders Influx integration disabled: %s", exc)
+        else:
+            self._influx_disabled = False
+            self._influx_disable_reason = ""
 
     async def start(self) -> None:
         if self._stream_task is not None or self._redis is not None:
             return
 
+        self._configure_influx()
         self._redis = await self.redis_factory()
         await self._load_snapshot()
         await self._publish_health()
@@ -276,12 +356,16 @@ class OrdersRuntime:
 
         request_payload = request.model_dump(mode="json")
         entry = _initial_order_record(command_id, request_payload)
+        entry_snapshot: dict[str, Any] | None = None
         async with self._lock:
             self._active_orders[command_id] = entry
             self._command_to_order[command_id] = command_id
             self._last_updated_at = _utc_now()
             await self._persist_snapshot()
             await self._append_history({"event": "submitted", "command_id": command_id, "order": entry})
+            entry_snapshot = _clone_order_record(entry)
+        if entry_snapshot is not None:
+            await self._write_order_point(entry_snapshot, timestamp=entry_snapshot.get("requested_at"))
         await self._publish_health()
         return command_id
 
@@ -535,6 +619,196 @@ class OrdersRuntime:
         except Exception as exc:  # pragma: no cover - defensive guard
             self.logger.debug("Failed to append order history: %s", exc)
 
+    def _build_influx_order_point(
+        self,
+        record: Mapping[str, Any],
+        *,
+        timestamp: str | datetime | None = None,
+    ) -> Any | None:
+        request = _coerce_mapping(record.get("request")) or {}
+        response = _coerce_mapping(record.get("response")) or {}
+        result = _coerce_mapping(record.get("result")) or {}
+        sources: tuple[Mapping[str, Any], ...] = tuple(
+            source for source in (record, result, response, request) if isinstance(source, Mapping)
+        )
+
+        def _lookup(*keys: str) -> Any:
+            for source in sources:
+                for key in keys:
+                    if key in source:
+                        value = source[key]
+                        if value is None:
+                            continue
+                        if isinstance(value, str) and not value.strip():
+                            continue
+                        return value
+            return None
+
+        order_identifier = _first_nonempty(
+            _lookup("order_id", "ib_order_id", "permid", "permId"),
+            record.get("id"),
+            record.get("command_id"),
+        )
+        symbol_value = _first_nonempty(_lookup("symbol", "ticker"))
+        if not order_identifier or not symbol_value:
+            return None
+
+        side_value = _first_nonempty(_lookup("action", "side"))
+        side = str(side_value).upper() if side_value is not None else "UNKNOWN"
+
+        exchange_value = _first_nonempty(_lookup("exchange"))
+        exchange = _coerce_str(exchange_value)
+
+        quantity_value = _coerce_float(
+            _lookup(
+                "quantity",
+                "total_quantity",
+                "totalQuantity",
+                "qty",
+                "filled_quantity",
+                "filledQuantity",
+            )
+        )
+        quantity = quantity_value if quantity_value is not None else 0.0
+
+        price_value = _coerce_float(
+            _lookup(
+                "avg_fill_price",
+                "avg_price",
+                "avgPrice",
+                "limit_price",
+                "lmt_price",
+                "limitPrice",
+                "stop_price",
+                "aux_price",
+                "stopPrice",
+                "price",
+            )
+        )
+        price = price_value if price_value is not None else 0.0
+
+        status_value = _first_nonempty(
+            record.get("status"),
+            _lookup("status", "order_status", "orderStatus"),
+        )
+        status = str(status_value) if status_value is not None else "unknown"
+
+        timestamp_dt = _parse_datetime(timestamp)
+        if timestamp_dt is None:
+            timestamp_dt = _parse_datetime(record.get("updated_at"))
+        if timestamp_dt is None:
+            timestamp_dt = _parse_datetime(record.get("requested_at"))
+        if timestamp_dt is None:
+            timestamp_dt = _utc_now()
+
+        extra_fields: dict[str, Any] = {}
+
+        float_fields: dict[str, tuple[str, ...]] = {
+            "filled_quantity": (
+                "filled_quantity",
+                "filled",
+                "filledQuantity",
+            ),
+            "remaining_quantity": (
+                "remaining_quantity",
+                "remaining",
+                "remainingQuantity",
+                "left",
+            ),
+            "avg_fill_price": ("avg_fill_price", "avg_price", "avgPrice"),
+            "limit_price": ("limit_price", "lmt_price", "limitPrice"),
+            "stop_price": ("stop_price", "aux_price", "stopPrice"),
+            "commission": ("commission",),
+            "realized_pnl": ("realized_pnl", "realizedPnl"),
+            "unrealized_pnl": ("unrealized_pnl", "unrealizedPnl"),
+            "trigger_price": ("trigger_price",),
+        }
+        for field_name, keys in float_fields.items():
+            value = None
+            for key in keys:
+                candidate = _lookup(key)
+                if candidate is not None:
+                    value = candidate
+                    break
+            coerced = _coerce_float(value)
+            if coerced is not None:
+                extra_fields[field_name] = coerced
+
+        string_fields: dict[str, tuple[str, ...]] = {
+            "order_type": ("order_type", "orderType", "type"),
+            "trigger": ("trigger",),
+            "trigger_type": ("trigger_type",),
+            "trigger_status": ("trigger_status", "triggerStatus"),
+        }
+        for field_name, keys in string_fields.items():
+            value = None
+            for key in keys:
+                candidate = _lookup(key)
+                if candidate is not None:
+                    value = candidate
+                    break
+            text = _coerce_str(value)
+            if text:
+                extra_fields[field_name] = text
+
+        extra_tags: dict[str, str] = {}
+        tag_fields: dict[str, tuple[str, ...]] = {
+            "account": ("account",),
+            "source": ("source",),
+            "strategy": ("strategy", "strategy_id"),
+            "sec_type": ("sec_type", "security_type", "secType"),
+        }
+        for tag_name, keys in tag_fields.items():
+            value = None
+            for key in keys:
+                candidate = _lookup(key)
+                if candidate is not None:
+                    value = candidate
+                    break
+            text = _coerce_str(value)
+            if text:
+                extra_tags[tag_name] = text
+
+        return build_order_point(
+            order_id=str(order_identifier),
+            symbol=str(symbol_value),
+            side=side,
+            quantity=quantity,
+            price=price,
+            status=status,
+            exchange=exchange,
+            timestamp=timestamp_dt,
+            extra_fields=extra_fields or None,
+            extra_tags=extra_tags or None,
+        )
+
+    async def _write_order_point(
+        self,
+        record: Mapping[str, Any],
+        *,
+        timestamp: str | datetime | None = None,
+    ) -> None:
+        if self._influx_disabled:
+            return
+        if not self._influx_initialised:
+            self._configure_influx()
+            if self._influx_disabled:
+                return
+
+        point = self._build_influx_order_point(record, timestamp=timestamp)
+        if point is None:
+            return
+        try:
+            await _maybe_await(self.write_fn([point]))
+        except ValueError as exc:
+            message = str(exc)
+            if not self._influx_disabled:
+                self.logger.info("Disabling orders Influx writes: %s", message)
+            self._influx_disabled = True
+            self._influx_disable_reason = message
+        except Exception:
+            self.logger.warning("Failed to write order point to InfluxDB", exc_info=True)
+
     async def _publish_health(self) -> None:
         if self._redis is None:
             return
@@ -607,6 +881,7 @@ class OrdersRuntime:
             return False
         event_time = _event_timestamp(parsed_payload)
         updated = False
+        record_snapshot: dict[str, Any] | None = None
         async with self._lock:
             record_identifier = identifier
             record = self._active_orders.get(record_identifier)
@@ -700,7 +975,10 @@ class OrdersRuntime:
                 ]
                 existing_history.insert(0, _clone_order_record(record))
                 self._history = deque(existing_history, maxlen=self.history_limit)
+            record_snapshot = _clone_order_record(record)
             updated = True
+        if record_snapshot is not None:
+            await self._write_order_point(record_snapshot, timestamp=event_time)
         return updated
 
     def _extract_order_id(

@@ -2,27 +2,62 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+import logging
+from typing import Any, Callable, Iterable, Mapping
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
-from services.orders.main import OrdersRuntime, create_app
+from services.orders.main import OrderSubmission, OrdersRuntime, create_app
 from tests.services.redis_utils import InMemoryRedis
 
 
-async def _create_runtime() -> tuple[OrdersRuntime, InMemoryRedis]:
+async def _create_runtime(
+    write_fn: Callable[[Iterable[Mapping[str, Any]]], int] | None = None,
+) -> tuple[OrdersRuntime, InMemoryRedis]:
     redis = InMemoryRedis()
 
     async def factory() -> InMemoryRedis:
         return redis
 
-    runtime = OrdersRuntime(
-        redis_factory=factory,
-        stream_poll_interval=0.0,
-        health_interval=0.0,
-    )
+    kwargs: dict[str, Any] = {
+        "redis_factory": factory,
+        "stream_poll_interval": 0.0,
+        "health_interval": 0.0,
+    }
+    if write_fn is not None:
+        kwargs["write_fn"] = write_fn
+    runtime = OrdersRuntime(**kwargs)
     await runtime.start()
     return runtime, redis
+
+
+class RecordingWriter:
+    def __init__(self) -> None:
+        self.points: list[dict[str, Any]] = []
+
+    def __call__(self, points: Iterable[Mapping[str, Any]]) -> int:
+        batch: list[dict[str, Any]] = []
+        for point in points:
+            if hasattr(point, "as_dict"):
+                payload = point.as_dict()
+            elif isinstance(point, Mapping):
+                payload = dict(point)
+            else:
+                payload = dict(point)  # type: ignore[arg-type]
+            batch.append(payload)
+        self.points.extend(batch)
+        return len(batch)
+
+
+class _FailingWriter:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    def __call__(self, points: Iterable[Mapping[str, Any]]) -> int:
+        self.calls += 1
+        raise self.error
 
 
 def test_order_submission_persists_snapshot_and_normalises_request() -> None:
@@ -217,3 +252,105 @@ def test_list_orders_pagination_with_history_and_active() -> None:
             await runtime.stop()
 
     asyncio.run(_scenario())
+
+
+def test_order_submission_writes_influx_point(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("services.orders.main.init_influx_client", lambda **_: None)
+
+    async def _scenario() -> None:
+        writer = RecordingWriter()
+        runtime, _ = await _create_runtime(write_fn=writer)
+        try:
+            submission = OrderSubmission(
+                symbol="ES",
+                quantity=2,
+                action="BUY",
+                order_type="LIMIT",
+                limit_price=4450.5,
+                exchange="CME",
+            )
+            await runtime.submit_order(submission)
+            assert writer.points
+            point = writer.points[-1]
+            assert point["measurement"] == "orders"
+            tags = point.get("tags", {})
+            assert tags.get("symbol") == "ES"
+            assert tags.get("side") == "BUY"
+            assert tags.get("exchange") == "CME"
+            fields = point["fields"]
+            assert fields["status"] == "pending"
+            assert pytest.approx(fields["quantity"], rel=1e-6) == 2.0
+            assert pytest.approx(fields["limit_price"], rel=1e-6) == 4450.5
+            assert fields["order_type"] == "LIMIT"
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_order_update_writes_influx_point(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("services.orders.main.init_influx_client", lambda **_: None)
+
+    async def _scenario() -> None:
+        writer = RecordingWriter()
+        runtime, _ = await _create_runtime(write_fn=writer)
+        try:
+            submission = OrderSubmission(symbol="CL", quantity=1, action="BUY")
+            command_id = await runtime.submit_order(submission)
+            writer.points.clear()
+            payload = {
+                "command_id": command_id,
+                "order_id": "IB123",
+                "status": "Filled",
+                "result": json.dumps(
+                    {
+                        "avg_price": 80.5,
+                        "filled": 1,
+                        "remaining": 0,
+                        "commission": 2.5,
+                        "realizedPnl": 120.0,
+                        "trigger_price": 81.0,
+                        "trigger": "stop_loss",
+                    }
+                ),
+            }
+            updated = await runtime._apply_order_event(payload)
+            assert updated is True
+            assert writer.points
+            point = writer.points[-1]
+            fields = point["fields"]
+            assert pytest.approx(fields["avg_fill_price"], rel=1e-6) == 80.5
+            assert pytest.approx(fields["filled_quantity"], rel=1e-6) == 1.0
+            assert pytest.approx(fields["commission"], rel=1e-6) == 2.5
+            assert pytest.approx(fields["realized_pnl"], rel=1e-6) == 120.0
+            assert pytest.approx(fields["trigger_price"], rel=1e-6) == 81.0
+            assert fields["trigger"] == "stop_loss"
+            tags = point.get("tags", {})
+            assert tags.get("order_id") == "IB123"
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_influx_failures_are_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("services.orders.main.init_influx_client", lambda **_: None)
+    caplog.set_level(logging.INFO, logger="ibbot.services.orders")
+
+    async def _scenario() -> None:
+        writer = _FailingWriter(ValueError("missing bucket configuration"))
+        runtime, _ = await _create_runtime(write_fn=writer)
+        try:
+            submission = OrderSubmission(symbol="NQ", quantity=1, action="BUY")
+            await runtime.submit_order(submission)
+            assert writer.calls == 1
+            await runtime.submit_order(OrderSubmission(symbol="ES", quantity=1, action="SELL"))
+            assert writer.calls == 1
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Influx" in message for message in messages)
