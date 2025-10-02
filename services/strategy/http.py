@@ -8,6 +8,7 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import secrets
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -25,6 +26,24 @@ DEFAULT_RESULT_STREAM = "stream:ib:results"
 DEFAULT_HEALTH_INTERVAL = 15.0
 DEFAULT_EVENT_POLL_INTERVAL = 1.0
 DEFAULT_METADATA_PREFIX = "json:strategy"
+DEFAULT_SETTINGS_KEY = f"{DEFAULT_METADATA_PREFIX}:settings"
+
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "api_endpoint": "/api/strategy",
+    "api_method": "POST",
+    "api_payload_template": {
+        "strategy": "{{strategy_name}}",
+        "symbol": "{{symbol}}",
+        "action": "{{action}}",
+        "qty": "{{quantity}}",
+        "type": "{{order_type}}",
+        "price": "{{price}}",
+    },
+    "strategy_path": "src/strategies/",
+    "enable_auth": False,
+    "auth_token": None,
+    "pause_data_push_on_holidays": True,
+}
 
 
 class StrategyDocument(BaseModel):
@@ -70,6 +89,18 @@ class StrategyRunResponse(BaseModel):
 
     task_id: str
     queue_size: int
+
+
+class StrategySettingsPayload(BaseModel):
+    """Payload describing strategy service configuration settings."""
+
+    api_endpoint: str | None = None
+    api_method: str | None = None
+    api_payload_template: dict[str, Any] | None = None
+    strategy_path: str | None = None
+    enable_auth: bool | None = None
+    auth_token: str | None = None
+    pause_data_push_on_holidays: bool | None = None
 
 
 def _utc_now() -> datetime:
@@ -419,9 +450,85 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="strategy runtime unavailable")
         return runtime_obj
 
+    async def _get_redis(request: Request) -> Any:
+        redis_client: Any | None = getattr(request.app.state, "redis", None)
+        if redis_client is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="strategy redis unavailable")
+        return redis_client
+
+    async def _load_settings(redis_client: Any) -> dict[str, Any]:
+        try:
+            raw = await redis_client.get(DEFAULT_SETTINGS_KEY)
+        except Exception:
+            raw = None
+        payload: dict[str, Any] | None = None
+        if isinstance(raw, str):
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, dict):
+                payload = decoded
+        elif isinstance(raw, Mapping):
+            payload = dict(raw)
+
+        settings = {**DEFAULT_SETTINGS}
+        if payload:
+            for key, value in payload.items():
+                if value is None:
+                    continue
+                settings[key] = value
+        if not isinstance(settings.get("api_payload_template"), dict):
+            settings["api_payload_template"] = dict(DEFAULT_SETTINGS["api_payload_template"])
+        settings["enable_auth"] = bool(settings.get("enable_auth"))
+        settings["pause_data_push_on_holidays"] = bool(settings.get("pause_data_push_on_holidays", True))
+        return settings
+
+    async def _persist_settings(redis_client: Any, settings: dict[str, Any]) -> None:
+        payload = json.dumps(settings, ensure_ascii=False)
+        try:
+            await redis_client.set(DEFAULT_SETTINGS_KEY, payload)
+        except Exception:  # pragma: no cover - defensive guard
+            logger = get_logger("ibbot.services.strategy.http")
+            logger.warning("Failed to persist strategy settings", exc_info=True)
+
     @app.get("/strategy", response_model=list[StrategyDocument])
     async def list_strategies(runtime: StrategyRuntime = Depends(_get_runtime)) -> list[StrategyDocument]:
         return await runtime.list_strategies()
+
+    @app.get("/strategy/settings")
+    async def get_strategy_settings(request: Request) -> dict[str, Any]:
+        redis_client = await _get_redis(request)
+        settings = await _load_settings(redis_client)
+        return {"success": True, "settings": settings}
+
+    @app.post("/strategy/settings")
+    async def update_strategy_settings(
+        payload: StrategySettingsPayload,
+        request: Request,
+    ) -> dict[str, Any]:
+        redis_client = await _get_redis(request)
+        settings = await _load_settings(redis_client)
+        updates = payload.dict(exclude_none=True)
+        if "api_payload_template" in updates and not isinstance(updates["api_payload_template"], dict):
+            updates.pop("api_payload_template")
+        settings.update(updates)
+        settings["enable_auth"] = bool(settings.get("enable_auth"))
+        settings["pause_data_push_on_holidays"] = bool(settings.get("pause_data_push_on_holidays", True))
+        if "auth_token" not in settings:
+            settings["auth_token"] = None
+        await _persist_settings(redis_client, settings)
+        return {"success": True, "settings": settings}
+
+    @app.post("/strategy/settings/generate-token")
+    async def generate_strategy_token(request: Request) -> dict[str, Any]:
+        redis_client = await _get_redis(request)
+        settings = await _load_settings(redis_client)
+        token = secrets.token_urlsafe(24)
+        settings["auth_token"] = token
+        settings["enable_auth"] = True
+        await _persist_settings(redis_client, settings)
+        return {"success": True, "token": token, "settings": settings}
 
     @app.get("/strategy/{name}", response_model=StrategyDocument)
     async def get_strategy(name: str, runtime: StrategyRuntime = Depends(_get_runtime)) -> StrategyDocument:
