@@ -248,10 +248,13 @@ class AccountServiceClient(ServiceClient):
         limit: int,
         offset: int,
         start_date: str | None = None,
+        force_refresh: bool = False,
     ) -> Mapping[str, Any] | list[Any] | None:
         params: Dict[str, Any] = {"limit": int(limit), "offset": int(offset)}
         if start_date:
             params["start_date"] = start_date
+        if force_refresh:
+            params["force_refresh"] = str(force_refresh).lower()
 
         return await self.request(
             "GET",

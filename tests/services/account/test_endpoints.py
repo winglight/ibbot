@@ -127,6 +127,9 @@ def test_get_account_info_success(test_client: TestClient, fake_redis: Any) -> N
     assert data["account_info"] == payload["data"]
     assert data["from_cache"] is True
     assert data["cache_updated_at"] == payload["updated_at"]
+    assert data["snapshot_updated_at"] == payload["updated_at"]
+    assert data["source"] == payload["source"]
+    assert "stale_reason" not in data
 
 
 def test_get_account_info_missing_snapshot_returns_503(test_client: TestClient) -> None:
@@ -149,6 +152,8 @@ def test_get_positions_success(test_client: TestClient, fake_redis: Any) -> None
     body = response.json()
     assert body["positions"] == payload["data"]
     assert body["from_cache"] is True
+    assert body["snapshot_updated_at"] == payload["updated_at"]
+    assert body["source"] == payload["source"]
 
 
 def test_get_positions_missing_returns_503(test_client: TestClient) -> None:
@@ -177,7 +182,17 @@ def test_refresh_endpoint_sets_timestamp(test_client: TestClient, monkeypatch: p
 def test_orders_and_daily_summary_endpoints(test_client: TestClient) -> None:
     orders_response = test_client.get("/account/orders")
     assert orders_response.status_code == 200
-    assert orders_response.json() == {"success": True, "orders": [], "from_cache": True}
+    assert orders_response.json() == {
+        "success": True,
+        "orders": [],
+        "from_cache": True,
+        "source": None,
+        "snapshot_updated_at": "",
+        "stale": False,
+        "cache_updated_at": None,
+        "cache_source": None,
+        "cache_age_seconds": None,
+    }
 
     summary_response = test_client.get("/account/daily-summary")
     assert summary_response.status_code == 200

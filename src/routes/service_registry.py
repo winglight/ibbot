@@ -143,16 +143,6 @@ def _registry() -> Tuple[RegisteredService, ...]:
             missing_detail="通知服务未上报健康数据",
         ),
         RegisteredService(
-            slug="account_snapshot",
-            service_name="account-snapshot",
-            display_name="Account Snapshot",
-            description="账户快照服务 (account-snapshot)",
-            internal=True,
-            health_env_var="ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY",
-            module_name="account_snapshot_probe",
-            missing_detail="账户快照服务未上报健康数据",
-        ),
-        RegisteredService(
             slug="queue_monitor",
             service_name="queue-monitor",
             display_name="Queue Monitor",

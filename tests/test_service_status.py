@@ -44,6 +44,8 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
             "hash:service:health:account-service": {
                 "status": "running",
                 "last_seen": recent,
+                "snapshot_updated_at": "2024-01-01T00:00:00+00:00",
+                "stale": "false",
             },
             "hash:service:health:orders": {
                 "status": "running",
@@ -62,7 +64,6 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
                 "healthy": "true",
                 "last_seen": recent,
             },
-            "hash:service:health:account-snapshot": None,
             "hash:service:health:queue": {
                 "status": "running",
                 "total_queue_length": "2",
@@ -87,7 +88,6 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert status_map["notification"].status == "running"
         assert status_map["ib-gateway"].status == "external"
         assert status_map["cloudflared"].status == "external"
-        assert status_map["account_snapshot"].status == "unhealthy"
         assert status_map["connection_control"].status == "unhealthy"
         assert status_map["ib_feed"].status == "unhealthy"
         assert status_map["market_data"].status == "unhealthy"
@@ -98,6 +98,8 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert "未上报" in (status_map["optimizer"].detail or "")
 
         account_payload = status_map["account"].payload or {}
+        assert account_payload.get("snapshot_updated_at") == "2024-01-01T00:00:00+00:00"
+        assert account_payload.get("stale") in {"false", False}
         assert "readiness" in account_payload
         queue_payload = status_map["queue_monitor"].payload or {}
         assert queue_payload.get("total_queue_length") == "2"

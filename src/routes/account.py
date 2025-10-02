@@ -5,7 +5,6 @@ import os
 import uuid
 
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import JSONResponse
 from loguru import logger
 
 from src.utils import now_local, parse_local_datetime, NY_TZ, ensure_local_timezone
@@ -60,6 +59,7 @@ def _snapshot_response(
     warning: Optional[str] = None,
     data_override: Any = None,
     default: Any = None,
+    source_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     data = default
     if data_override is not None:
@@ -74,6 +74,9 @@ def _snapshot_response(
         "connected": connected,
         "cache_updated_at": snapshot.get("updated_at") if snapshot else None,
         "snapshot_updated_at": snapshot.get("updated_at") if snapshot else None,
+        "source": source_override
+        if source_override is not None
+        else (snapshot.get("source") if snapshot else None),
         "cache_age_seconds": _compute_cache_age(
             snapshot.get("updated_at") if snapshot else None
         ),
@@ -81,8 +84,9 @@ def _snapshot_response(
         "stale": snapshot.get("stale", False) if snapshot else False,
     }
 
-    if snapshot and snapshot.get("stale_reason"):
-        response["stale_reason"] = snapshot.get("stale_reason")
+    stale_reason = snapshot.get("stale_reason") if snapshot else None
+    if stale_reason is not None:
+        response["stale_reason"] = stale_reason
     if snapshot and snapshot.get("stale_at"):
         response["stale_at"] = snapshot.get("stale_at")
     if warning:
@@ -167,35 +171,6 @@ async def _resolve_command_queue_key() -> str:
     return queue_key_str or DEFAULT_COMMAND_QUEUE
 
 
-def _service_unavailable_response(
-    snapshot: Optional[Dict[str, Any]],
-    *,
-    data_key: str,
-    default: Any,
-    message: str,
-) -> JSONResponse:
-    if not snapshot:
-        raise HTTPException(status_code=503, detail=message)
-
-    connected = _determine_connection_state(snapshot.get("data"), snapshot)
-    payload = _snapshot_response(
-        snapshot,
-        data_key=data_key,
-        connected=connected,
-        from_cache=True,
-        default=default,
-        warning=message,
-    )
-    payload["success"] = False
-    return JSONResponse(
-        status_code=503,
-        content={
-            "detail": message,
-            "snapshot": payload,
-        },
-    )
-
-
 @router.post("/api/orders/backfill_commissions")
 async def backfill_commissions(
     days: int = 7, user: Optional[str] = Depends(get_current_user)
@@ -256,31 +231,43 @@ async def get_account_info(
         info = await client.fetch_info(force_refresh=force_refresh)
     except ServiceUnavailableError as exc:
         logger.warning("Account service unavailable for account_info: {}", exc)
-        return _service_unavailable_response(
-            snapshot,
-            data_key="account_info",
-            default={},
-            message="Account service unavailable",
-        )
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="account_info",
+                connected=connected_snapshot,
+                from_cache=True,
+                default={},
+                warning="Account service unavailable",
+            )
+        raise HTTPException(status_code=503, detail="Account service unavailable") from exc
     except ServiceResponseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc.detail)) from exc
     except ServiceClientError as exc:
         logger.error("Account service error while fetching account info", exc_info=True)
-        return _service_unavailable_response(
-            snapshot,
-            data_key="account_info",
-            default={},
-            message="Account service unavailable",
-        )
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="account_info",
+                connected=connected_snapshot,
+                from_cache=True,
+                default={},
+                warning="Account service unavailable",
+            )
+        raise HTTPException(status_code=503, detail="Account service unavailable") from exc
 
     if info is None:
         logger.warning("Account service returned no account_info payload")
-        return _service_unavailable_response(
-            snapshot,
-            data_key="account_info",
-            default={},
-            message="Account service unavailable",
-        )
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="account_info",
+                connected=connected_snapshot,
+                from_cache=True,
+                default={},
+                warning="Account service unavailable",
+            )
+        raise HTTPException(status_code=503, detail="Account service unavailable")
 
     refreshed_snapshot = await read_account_info_snapshot()
     refreshed_data = (
@@ -295,6 +282,7 @@ async def get_account_info(
         from_cache=False,
         default={},
         data_override=info,
+        source_override=refreshed_snapshot.get("source") if isinstance(refreshed_snapshot, dict) else None,
     )
 
 @router.get("/api/positions")
@@ -328,31 +316,43 @@ async def get_positions(
         )
     except ServiceUnavailableError as exc:
         logger.warning("Account service unavailable for positions: {}", exc)
-        return _service_unavailable_response(
-            snapshot,
-            data_key="positions",
-            default=[],
-            message="Account service unavailable",
-        )
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="positions",
+                connected=connected_snapshot,
+                from_cache=True,
+                default=[],
+                warning="Account service unavailable",
+            )
+        raise HTTPException(status_code=503, detail="Account service unavailable") from exc
     except ServiceResponseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc.detail)) from exc
     except ServiceClientError:
         logger.error("Account service error while fetching positions", exc_info=True)
-        return _service_unavailable_response(
-            snapshot,
-            data_key="positions",
-            default=[],
-            message="Account service unavailable",
-        )
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="positions",
+                connected=connected_snapshot,
+                from_cache=True,
+                default=[],
+                warning="Account service unavailable",
+            )
+        raise HTTPException(status_code=503, detail="Account service unavailable")
 
     if positions is None:
         logger.warning("Account service returned no positions payload")
-        return _service_unavailable_response(
-            snapshot,
-            data_key="positions",
-            default=[],
-            message="Account service unavailable",
-        )
+        if snapshot:
+            return _snapshot_response(
+                snapshot,
+                data_key="positions",
+                connected=connected_snapshot,
+                from_cache=True,
+                default=[],
+                warning="Account service unavailable",
+            )
+        raise HTTPException(status_code=503, detail="Account service unavailable")
 
     refreshed_snapshot = await read_positions_snapshot()
     refreshed_data = (
@@ -367,6 +367,7 @@ async def get_positions(
         from_cache=False,
         default=[],
         data_override=positions,
+        source_override=refreshed_snapshot.get("source") if isinstance(refreshed_snapshot, dict) else None,
     )
 
 @router.get("/api/account/daily-summary")

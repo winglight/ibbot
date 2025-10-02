@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator, Dict, Optional, Tuple
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from loguru import logger
 
@@ -331,17 +331,36 @@ async def _shutdown() -> None:
     logger.info("Account service shutdown complete")
 
 
+def _compute_cache_age(updated_at: Optional[str]) -> Optional[float]:
+    dt = parse_local_datetime(updated_at)
+    if not dt:
+        return None
+    try:
+        delta = now_local() - dt
+        seconds = delta.total_seconds()
+    except Exception:  # pragma: no cover - defensive guard
+        return None
+    return max(0.0, seconds)
+
+
 def _snapshot_response(snapshot: Dict[str, Any], *, data_key: str) -> Dict[str, Any]:
-    return {
+    updated_at = snapshot.get("updated_at")
+    stale_reason = snapshot.get("stale_reason")
+    payload: Dict[str, Any] = {
         "success": True,
         data_key: snapshot.get("data"),
         "from_cache": True,
-        "cache_updated_at": snapshot.get("updated_at"),
+        "cache_updated_at": updated_at,
         "cache_source": snapshot.get("source"),
+        "source": snapshot.get("source"),
+        "snapshot_updated_at": updated_at,
         "stale": snapshot.get("stale", False),
-        "stale_reason": snapshot.get("stale_reason"),
+        "stale_reason": stale_reason,
         "stale_at": snapshot.get("stale_at"),
     }
+    if stale_reason is None:
+        payload.pop("stale_reason", None)
+    return payload
 
 
 async def _ensure_snapshot(snapshot: Optional[Dict[str, Any]], *, kind: str) -> Dict[str, Any]:
@@ -351,27 +370,137 @@ async def _ensure_snapshot(snapshot: Optional[Dict[str, Any]], *, kind: str) -> 
     return snapshot
 
 
+def _snapshot_needs_refresh(snapshot: Optional[Dict[str, Any]]) -> bool:
+    if not snapshot:
+        return True
+    if "data" not in snapshot:
+        return True
+    if snapshot.get("data") is None:
+        return True
+    if snapshot.get("stale"):
+        return True
+    if _state.stale:
+        return True
+    return False
+
+
+async def _refresh_account_info(reason: str) -> None:
+    service = _state.snapshot_service
+    if service is None:
+        return
+    try:
+        result = await service.refresh_account_info(reason=reason)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        _state.last_refresh_error = str(exc)
+        logger.warning("Account info refresh failed: %s", exc)
+        return
+    if result is not None:
+        _state.last_refresh_error = None
+        _state.stale = False
+
+
+async def _refresh_positions(reason: str, *, fast: bool) -> None:
+    service = _state.snapshot_service
+    if service is None:
+        return
+    try:
+        result = await service.refresh_positions(reason=reason, fast=fast)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        _state.last_refresh_error = str(exc)
+        logger.warning("Positions refresh failed: %s", exc)
+        return
+    if result is not None:
+        _state.last_refresh_error = None
+        _state.stale = False
+
+
+def _update_state_from_snapshot(
+    *, info_snapshot: Optional[Dict[str, Any]] = None,
+    positions_snapshot: Optional[Dict[str, Any]] = None,
+) -> None:
+    if info_snapshot is None and positions_snapshot is None:
+        return
+    snapshots = [snap for snap in (info_snapshot, positions_snapshot) if snap]
+    if any(snapshot.get("stale") for snapshot in snapshots):
+        _state.stale = True
+    elif snapshots:
+        _state.stale = False
+    if snapshots:
+        info = info_snapshot if isinstance(info_snapshot, dict) else None
+        positions = positions_snapshot if isinstance(positions_snapshot, dict) else None
+        _state.update_snapshot_metadata(info=info, positions=positions)
+
+
 @app.get("/account/info")
-async def get_account_info() -> Dict[str, Any]:
-    snapshot = await _ensure_snapshot(
-        await read_account_info_snapshot(),
-        kind="Account info",
-    )
+async def get_account_info(
+    force_refresh: bool = Query(False, description="Force refresh of account snapshot"),
+) -> Dict[str, Any]:
+    snapshot = await read_account_info_snapshot()
+    if force_refresh or _snapshot_needs_refresh(snapshot):
+        await _refresh_account_info("api-force" if force_refresh else "api-stale")
+        snapshot = await read_account_info_snapshot()
+    snapshot = await _ensure_snapshot(snapshot, kind="Account info")
+    _update_state_from_snapshot(info_snapshot=snapshot)
     return _snapshot_response(snapshot, data_key="account_info")
 
 
 @app.get("/account/positions")
-async def get_account_positions() -> Dict[str, Any]:
-    snapshot = await _ensure_snapshot(
-        await read_positions_snapshot(),
-        kind="Positions",
-    )
+async def get_account_positions(
+    force_refresh: bool = Query(False, description="Force refresh of positions snapshot"),
+    fast: bool = Query(True, description="Use fast positions query"),
+) -> Dict[str, Any]:
+    snapshot = await read_positions_snapshot()
+    if force_refresh or _snapshot_needs_refresh(snapshot):
+        await _refresh_positions(
+            "api-force" if force_refresh else "api-stale",
+            fast=fast,
+        )
+        snapshot = await read_positions_snapshot()
+    snapshot = await _ensure_snapshot(snapshot, kind="Positions")
+    _update_state_from_snapshot(positions_snapshot=snapshot)
     return _snapshot_response(snapshot, data_key="positions")
 
 
 @app.get("/account/orders")
-async def get_account_orders() -> Dict[str, Any]:
-    return {"success": True, "orders": [], "from_cache": True}
+async def get_account_orders(
+    force_refresh: bool = Query(False, description="Force refresh of account orders"),
+    fast: bool = Query(True, description="Use fast positions query when refreshing"),
+) -> Dict[str, Any]:
+    """Return cached order metadata while ensuring snapshots stay fresh."""
+
+    snapshot = await read_positions_snapshot()
+    if force_refresh or _snapshot_needs_refresh(snapshot):
+        await _refresh_positions(
+            "api-orders-force" if force_refresh else "api-orders-stale",
+            fast=fast,
+        )
+        snapshot = await read_positions_snapshot()
+
+    metadata = snapshot if isinstance(snapshot, dict) else None
+    if metadata:
+        _update_state_from_snapshot(positions_snapshot=metadata)
+
+    updated_at = metadata.get("updated_at") if metadata else None
+    response: Dict[str, Any] = {
+        "success": True,
+        "orders": [],
+        "from_cache": True,
+        "source": metadata.get("source") if metadata else None,
+        "snapshot_updated_at": updated_at or "",
+        "stale": metadata.get("stale", False) if metadata else False,
+    }
+
+    response["cache_updated_at"] = updated_at
+    response["cache_source"] = metadata.get("source") if metadata else None
+    response["cache_age_seconds"] = _compute_cache_age(updated_at)
+
+    stale_reason = metadata.get("stale_reason") if metadata else None
+    if stale_reason:
+        response["stale_reason"] = stale_reason
+    if metadata and metadata.get("stale_at"):
+        response["stale_at"] = metadata.get("stale_at")
+
+    return response
 
 
 @app.get("/account/daily-summary")

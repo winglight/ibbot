@@ -137,9 +137,7 @@ async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str,
         payload = await _ACCOUNT_CLIENT.fetch_info(force_refresh=force_refresh)
     except ServiceUnavailableError as exc:
         logger.debug("Account service unavailable: %s", exc)
-        error_payload = _service_unavailable_payload("account_update")
-        error_payload["details"] = str(exc)
-        return error_payload
+        return None
     except ServiceClientError as exc:
         logger.warning("Account service error: %s", exc)
         return None
@@ -162,7 +160,7 @@ async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str,
 
 async def _fetch_positions(
     *, force_refresh: bool = False, fast: bool = True
-) -> Optional[List[Dict[str, Any]]]:
+) -> tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]], Optional[str]]:
     try:
         payload = await _ACCOUNT_CLIENT.fetch_positions(
             force_refresh=force_refresh,
@@ -170,22 +168,32 @@ async def _fetch_positions(
         )
     except ServiceUnavailableError as exc:
         logger.debug("Account service unavailable for positions: %s", exc)
-        error_payload = _service_unavailable_payload("position_update")
-        error_payload["details"] = str(exc)
-        return error_payload
+        return None, None, str(exc)
     except ServiceClientError as exc:
         logger.warning("Account service error fetching positions: %s", exc)
-        return None
+        return None, None, str(exc)
 
     if isinstance(payload, list):
-        return [dict(item) if isinstance(item, Mapping) else item for item in payload]
+        return [dict(item) if isinstance(item, Mapping) else item for item in payload], None, None
     if isinstance(payload, Mapping):
+        if (
+            payload.get("type") == "position_update"
+            and payload.get("success") is False
+        ):
+            unavailable = dict(payload)
+            detail = None
+            for key in ("details", "detail", "message"):
+                value = unavailable.get(key)
+                if isinstance(value, str) and value.strip():
+                    detail = value
+                    break
+            return None, unavailable, detail
         items = payload.get("positions")
         if items is None:
             items = payload.get("data")
         if isinstance(items, list):
-            return [dict(item) if isinstance(item, Mapping) else item for item in items]
-    return None
+            return [dict(item) if isinstance(item, Mapping) else item for item in items], None, None
+    return None, None, None
 
 
 async def _fetch_orders(
@@ -355,10 +363,8 @@ async def _send_json(websocket: WebSocket, payload: Dict[str, Any]) -> bool:
         logger.debug("Websocket disconnected during send")
         return False
     except RuntimeError as exc:
-        if "Cannot call \"send\" once a close message has been sent" in str(exc):
-            logger.debug("Websocket closing; aborting further sends")
-            return False
-        raise
+        logger.debug("Websocket send aborted: %s", exc)
+        return False
 
 
 async def _send_or_disconnect(websocket: WebSocket, payload: Dict[str, Any]) -> None:
@@ -799,9 +805,8 @@ async def websocket_endpoint(websocket: WebSocket):
     # 初次连接后，向该连接单播发送positions快照
     try:
         positions_snapshot = await read_positions_snapshot()
-        positions = await _fetch_positions(force_refresh=False, fast=True)
-        unavailable_positions = _extract_service_unavailable_payload(
-            positions, "position_update"
+        positions, unavailable_positions, positions_error = await _fetch_positions(
+            force_refresh=False, fast=True
         )
         positions_source = "service"
         positions_snapshot_source = None
@@ -827,6 +832,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 unavailable_positions["stale_reason"] = positions_stale_reason
             if positions_stale_at and "stale_at" not in unavailable_positions:
                 unavailable_positions["stale_at"] = positions_stale_at
+            if positions_error and "details" not in unavailable_positions:
+                unavailable_positions["details"] = positions_error
             unavailable_positions.setdefault("stale", positions_stale)
             await websocket.send_text(json.dumps(unavailable_positions))
         else:
@@ -842,29 +849,29 @@ async def websocket_endpoint(websocket: WebSocket):
                     "success": True,
                     "positions": positions,
                     "source": positions_source,
-                "stale": positions_stale,
-            }
-            if positions_updated_at:
-                response_payload["snapshot_updated_at"] = positions_updated_at
-            if positions_stale_reason:
-                response_payload["stale_reason"] = positions_stale_reason
-            if positions_stale_at:
-                response_payload["stale_at"] = positions_stale_at
-            await websocket.send_text(json.dumps(response_payload))
-            if positions_stale:
-                status_payload = {
-                    "type": "account_snapshot_status",
-                    "snapshot": "positions",
-                    "stale": True,
-                    "refresh_in_progress": True,
+                    "stale": positions_stale,
                 }
                 if positions_updated_at:
-                    status_payload["snapshot_updated_at"] = positions_updated_at
+                    response_payload["snapshot_updated_at"] = positions_updated_at
                 if positions_stale_reason:
-                    status_payload["stale_reason"] = positions_stale_reason
+                    response_payload["stale_reason"] = positions_stale_reason
                 if positions_stale_at:
-                    status_payload["stale_at"] = positions_stale_at
-                await websocket.send_text(json.dumps(status_payload))
+                    response_payload["stale_at"] = positions_stale_at
+                await websocket.send_text(json.dumps(response_payload))
+                if positions_stale:
+                    status_payload = {
+                        "type": "account_snapshot_status",
+                        "snapshot": "positions",
+                        "stale": True,
+                        "refresh_in_progress": True,
+                    }
+                    if positions_updated_at:
+                        status_payload["snapshot_updated_at"] = positions_updated_at
+                    if positions_stale_reason:
+                        status_payload["stale_reason"] = positions_stale_reason
+                    if positions_stale_at:
+                        status_payload["stale_at"] = positions_stale_at
+                    await websocket.send_text(json.dumps(status_payload))
             else:
                 await websocket.send_text(
                     json.dumps(
@@ -874,6 +881,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             source="service",
                             stale=positions_stale,
                             snapshot_updated_at=positions_updated_at,
+                            details=positions_error,
                         )
                     )
                 )
@@ -1278,10 +1286,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 fast = bool(fast_flag) if fast_flag is not None else False
 
                 try:
-                    positions = await _fetch_positions(force_refresh=force, fast=fast)
-                    unavailable_positions = _extract_service_unavailable_payload(
-                        positions, "position_update"
-                    )
+                    (
+                        positions,
+                        unavailable_positions,
+                        positions_error,
+                    ) = await _fetch_positions(force_refresh=force, fast=fast)
                     source = "service"
                     if unavailable_positions is not None:
                         unavailable_positions.setdefault("positions", [])
@@ -1289,6 +1298,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         unavailable_positions["fast"] = fast
                         unavailable_positions["connected"] = bool(connected_flag)
                         unavailable_positions["fresh"] = bool(redis_fresh)
+                        if positions_error and "details" not in unavailable_positions:
+                            unavailable_positions["details"] = positions_error
                         last_responses[key] = unavailable_positions
                         await websocket.send_text(json.dumps(unavailable_positions))
                         continue
@@ -1307,10 +1318,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             fast=fast,
                             connected=bool(connected_flag),
                             fresh=bool(redis_fresh),
-                        )
-                        unavailable_payload.setdefault(
-                            "details",
-                            "Positions data unavailable from service or cache",
+                            details=positions_error
+                            or "Positions data unavailable from service or cache",
                         )
                         last_responses[key] = unavailable_payload
                         await websocket.send_text(json.dumps(unavailable_payload))

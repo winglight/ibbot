@@ -17,7 +17,6 @@ implementation status.
 | Risk Manager (`risk`) | ✅ | — | `RISK_SERVICE_HEALTH_KEY` (default `hash:service:health:risk-service`) | Production | 风险控制服务 (risk-service) |
 | Strategy Scheduler (`strategy`) | ✅ | — | `STRATEGY_SERVICE_HEALTH_KEY` (default `hash:service:health:strategy`) | Production | 策略调度服务 (strategy) |
 | Notification Relay (`notification`) | ✅ | — | `NOTIFICATION_SERVICE_HEALTH_KEY` (default `hash:service:health:notification`) | Production | 通知推送服务 (notification) |
-| Account Snapshot (`account_snapshot`) | ✅ | — | `ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY` (default `hash:service:health:account-snapshot`) | Production | 账户快照服务 (account-snapshot) |
 | Queue Monitor (`queue_monitor`) | ✅ | 8011 | `hash:service:health:queue` | Production | 队列监控服务 (queue_monitor) |
 | Optimizer Engine (`optimizer`) | ✅ | 8001 | `hash:service:health:optimizer` | Beta | 优化器 (optimizer) |
 | IB Gateway (`ib-gateway`) | ❌ | 4001/4002/5900 | — | External dependency | IB Gateway 由外部部署提供，需手动确认运行状态。 |
