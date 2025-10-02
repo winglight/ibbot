@@ -177,6 +177,31 @@ services:
       retries: 3
       start_period: 20s
 
+  connection_control:
+    image: ghcr.io/<owner>/ibbot:v1.0.0
+    container_name: ibbot-connection-control
+    env_file:
+      - ./.env
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "services.connection_control.main:create_app",
+        "--factory",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8056",
+      ]
+    ports:
+      - "8056:8056"
+    networks:
+      - ibbot-network
+    depends_on:
+      - redis
+    restart: unless-stopped
+
   strategy:
     image: ghcr.io/<owner>/ibbot:v1.0.0
     container_name: ibbot-strategy

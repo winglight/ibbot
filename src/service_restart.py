@@ -217,6 +217,7 @@ class LocalSupervisorController:
 
 
 DEFAULT_SERVICE_DEPENDENCIES: Mapping[str, Sequence[str]] = {
+    "connection_control": (),
     "queue_monitor": (),
     "ib_command": (),
     "account": (),
