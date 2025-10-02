@@ -31,7 +31,13 @@ async def test_websocket_emits_connection_status(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(websocket_module, "_websocket_manager", lambda: manager)
 
     async def fake_health() -> Dict[str, object]:
-        return {"connected": True, "account_type": "INDIVIDUAL", "stale": False}
+        return {
+            "connected": True,
+            "account_type": "INDIVIDUAL",
+            "stale": False,
+            "ib_connected": True,
+            "ib_connection_error": "",
+        }
 
     async def skip_snapshot(*args, **kwargs):  # pragma: no cover - expected path
         raise RuntimeError("skip snapshot work")
@@ -70,3 +76,69 @@ async def test_websocket_emits_connection_status(monkeypatch: pytest.MonkeyPatch
 
             assert "error" not in message
             websocket.close()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_websocket_emits_disconnected_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = FastAPI()
+    app.include_router(websocket_module.router)
+
+    class DummyWebSocketManager:
+        async def connect(self, websocket) -> None:
+            await websocket.accept()
+
+        async def broadcast(self, payload):  # pragma: no cover - not used
+            return None
+
+        def disconnect(self, websocket) -> None:
+            return None
+
+    manager = DummyWebSocketManager()
+    monkeypatch.setattr(websocket_module, "_websocket_manager", lambda: manager)
+
+    async def fake_health() -> Dict[str, object]:
+        return {
+            "connected": False,
+            "account_type": "INDIVIDUAL",
+            "stale": False,
+            "last_error": "gateway down",
+            "ib_connected": False,
+            "ib_connection_error": "gateway down",
+        }
+
+    async def empty_account_snapshot(*_, **__):
+        return []
+
+    async def empty_positions_snapshot(*_, **__):
+        return []
+
+    async def empty_account_info(*_, **__):
+        return {}
+
+    async def empty_positions(*_, **__):
+        return [], 0
+
+    async def empty_orders(*_, **__):
+        return [], 0
+
+    monkeypatch.setattr(websocket_module, "_load_ib_command_health", fake_health)
+    monkeypatch.setattr(websocket_module, "read_account_info_snapshot", empty_account_snapshot)
+    monkeypatch.setattr(websocket_module, "read_positions_snapshot", empty_positions_snapshot)
+    monkeypatch.setattr(websocket_module, "_fetch_account_info", empty_account_info)
+    monkeypatch.setattr(websocket_module, "_fetch_positions", empty_positions)
+    monkeypatch.setattr(websocket_module, "_fetch_orders", empty_orders)
+    monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_optimization_orchestrator", lambda: None)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as websocket:
+            message = websocket.receive_json()
+            assert message["type"] == "connection_status"
+            assert message["success"] is True
+            assert message["connected"] is False
+            assert message.get("last_error") == "gateway down"
+
+            health = message.get("health")
+            assert isinstance(health, dict)
+            assert health.get("connected") is False
+            assert health.get("last_error") == "gateway down"

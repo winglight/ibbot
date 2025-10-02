@@ -119,6 +119,31 @@ def build_ib_connection_health_payload(
 
     last_error_raw = raw.get("last_error")
     last_error = last_error_raw.strip() if last_error_raw else ""
+
+    ib_connected_raw = raw.get("ib_connected")
+
+    def _coerce_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            cleaned = value.strip().lower()
+            if not cleaned:
+                return None
+            if cleaned in {"1", "true", "yes", "y", "on"}:
+                return True
+            if cleaned in {"0", "false", "no", "n", "off"}:
+                return False
+        return None
+
+    ib_connected = _coerce_bool(ib_connected_raw) if ib_connected_raw is not None else None
+
+    connection_error_raw = raw.get("ib_connection_error")
+    connection_error = connection_error_raw.strip() if connection_error_raw else ""
+    if connection_error:
+        last_error = connection_error
+
     if not last_error:
         last_error = None
 
@@ -132,12 +157,15 @@ def build_ib_connection_health_payload(
 
     has_error = last_error is not None or error_code is not None
 
-    connected = (
-        not stale
-        and not has_error
-        and queue_depth is not None
-        and queue_depth >= 0
-    )
+    if ib_connected is not None:
+        connected = bool(ib_connected) and not stale
+    else:
+        connected = (
+            not stale
+            and not has_error
+            and queue_depth is not None
+            and queue_depth >= 0
+        )
 
     payload = IBCommandHealth(
         connected=connected,

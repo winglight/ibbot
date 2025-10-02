@@ -219,6 +219,8 @@ def test_connection_status_returns_health_payload(connection_app, monkeypatch: p
             "error_code": 10147,
             "stale": False,
             "source": "redis",
+            "ib_connected": True,
+            "ib_connection_error": "",
         }
 
     monkeypatch.setattr(connection_module, "_load_ib_command_health", fake_health)
@@ -232,6 +234,35 @@ def test_connection_status_returns_health_payload(connection_app, monkeypatch: p
     assert payload["account_type"] == "Paper"
     assert payload["stale"] is False
     assert payload["error_code"] == 10147
+
+
+def test_connection_status_marks_disconnected_gateways(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _ = connection_app
+
+    async def fake_health():
+        return {
+            "connected": False,
+            "account_type": "Paper",
+            "last_seen": "2024-01-01T00:00:00+00:00",
+            "queue_depth": 3,
+            "last_error": "gateway down",
+            "error_code": None,
+            "stale": False,
+            "source": "redis",
+            "ib_connected": False,
+            "ib_connection_error": "gateway down",
+        }
+
+    monkeypatch.setattr(connection_module, "_load_ib_command_health", fake_health)
+
+    with TestClient(app) as client:
+        response = client.get("/api/connection_status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["connected"] is False
+    assert payload["last_error"] == "gateway down"
+    assert payload["stale"] is False
 
 
 def test_connection_status_returns_default_when_unavailable(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
