@@ -187,6 +187,9 @@ class IBKRClient:
         self._cached_account_info: Dict[str, Any] = {}
         self._cached_account_info_timestamp: Optional[datetime] = None
 
+        # Track commission/PnL updates when the orders service is unavailable.
+        self._order_fill_cache: Dict[str, Dict[str, Any]] = {}
+
         # Counter for simulated order identifiers when trading is disabled
         self._simulated_order_id = itertools.count(start=-1, step=-1)
 
@@ -2466,30 +2469,45 @@ class IBKRClient:
             connection_logger.error(f"Error handling filled order: {e}")
     
     async def _update_order_commission_pnl(self, order_id, commission, pnl):
-        """更新订单的佣金和PnL到数据库。"""
+        """更新订单的佣金和PnL信息并在服务不可用时缓存结果。"""
+
         oid = str(order_id)
         payload = {"commission": commission, "realized_pnl": pnl}
+        cache_entry = dict(payload)
+        cache_entry["pending_service_sync"] = False
+        self._order_fill_cache[oid] = cache_entry
+
         client = _get_orders_service_client()
         try:
             await client.update_order_fill_metrics(oid, payload)
+        except ServiceUnavailableError as exc:
+            cache_entry["pending_service_sync"] = True
+            connection_logger.warning(
+                "Orders service unavailable for commission update; cached locally",
+                order_id=oid,
+                error=str(exc),
+            )
+        except ServiceResponseError as exc:
+            cache_entry["pending_service_sync"] = True
+            detail = exc.detail or ""
+            connection_logger.warning(
+                "Orders service rejected commission update; cached locally",
+                order_id=oid,
+                detail=detail,
+            )
+        except ServiceClientError as exc:
+            cache_entry["pending_service_sync"] = True
+            connection_logger.warning(
+                "Failed to update order commission/pnl via service; cached locally",
+                order_id=oid,
+                error=str(exc),
+            )
+        else:
             connection_logger.info(
                 "Updated order %s commission=%s, pnl=%s via orders service",
                 oid,
                 commission,
                 pnl,
-            )
-        except ServiceUnavailableError as exc:
-            connection_logger.error(
-                "Orders service unavailable for commission update", error=str(exc)
-            )
-        except ServiceResponseError as exc:
-            detail = exc.detail or ""
-            connection_logger.error(
-                "Orders service rejected commission update", detail=detail
-            )
-        except ServiceClientError as exc:
-            connection_logger.error(
-                "Failed to update order commission/pnl via service", error=str(exc)
             )
     async def backfill_commissions(self, days: int = 7) -> int:
         """Backfill commission and PnL for recent executions by requesting executions from IBKR.
