@@ -88,7 +88,12 @@ def _load_project_env(extra_files: tuple[Path | str, ...] | None = None) -> None
     if base_file:
         load_dotenv(dotenv_path=base_file, override=False)
 
-    if env_local.exists():
+    skip_local_overrides = bool(os.getenv("PYTEST_CURRENT_TEST"))
+    # Pytest injects ``PYTEST_CURRENT_TEST`` for every running test. Skip
+    # developer-specific overrides from `.env.local` when it is present so the
+    # test suite always observes the repository defaults from `.env`.
+
+    if env_local.exists() and not skip_local_overrides:
         _apply_overrides(env_local, original_env)
 
     if extra_files:

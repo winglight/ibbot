@@ -34,6 +34,36 @@ def test_project_env_file_is_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
         assert os.getenv(key) == expected[key]
 
 
+def test_env_local_is_ignored_during_pytest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`.env.local` overrides should be skipped while running under pytest."""
+
+    env_local = Path(__file__).resolve().parents[2] / ".env.local"
+
+    original_contents: str | None
+    if env_local.exists():
+        original_contents = env_local.read_text()
+    else:
+        original_contents = None
+
+    env_local.write_text("WEB_PORT=8005\n")
+
+    try:
+        load_project_env.cache_clear()
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/config/test_env_loading.py::test_env_local_is_ignored_during_pytest")
+        for key in ["WEB_PORT"]:
+            monkeypatch.delenv(key, raising=False)
+
+        load_project_env()
+
+        assert os.getenv("WEB_PORT") == "8000"
+    finally:
+        load_project_env.cache_clear()
+        if original_contents is None:
+            env_local.unlink(missing_ok=True)
+        else:
+            env_local.write_text(original_contents)
+
+
 def test_redis_config_uses_code_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """When Redis variables are absent, code defaults should be applied."""
 
