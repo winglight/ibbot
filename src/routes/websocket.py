@@ -3,7 +3,15 @@ import json
 import math
 import time
 from datetime import timedelta
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Dict,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Tuple,
+)
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -79,6 +87,17 @@ def _service_unavailable_payload(payload_type: str, **fields: Any) -> Dict[str, 
     }
     payload.update(fields)
     return payload
+
+
+class ConnectionContext(NamedTuple):
+    health_payload: Optional[Dict[str, Any]]
+    connected: bool
+    account_type: str
+    last_error: Optional[str]
+    redis_connected: Optional[bool]
+    redis_fresh: bool
+    health_error: Optional[str]
+    error_code: Optional[str]
 
 
 async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
@@ -556,16 +575,7 @@ async def websocket_endpoint(websocket: WebSocket):
         payload: Optional[Mapping[str, Any]] = None,
         *,
         refresh: bool = False,
-    ) -> tuple[
-        Optional[Dict[str, Any]],
-        bool,
-        str,
-        Optional[str],
-        Optional[bool],
-        bool,
-        Optional[str],
-        Optional[str],
-    ]:
+    ) -> ConnectionContext:
         if refresh or payload is None:
             payload = await _load_ib_command_health()
 
@@ -598,7 +608,7 @@ async def websocket_endpoint(websocket: WebSocket):
             error_message = f"{SERVICE_UNAVAILABLE_MESSAGE}：未获取到 ib-command 健康数据"
             last_error = last_error or error_message
 
-        return (
+        return ConnectionContext(
             data if data else None,
             bool(connected_flag),
             account_type,
@@ -610,16 +620,13 @@ async def websocket_endpoint(websocket: WebSocket):
         )
 
     health_payload: Optional[Dict[str, Any]]
-    (
-        health_payload,
-        connected_flag,
-        account_type_label,
-        last_error_value,
-        _,
-        _,
-        health_error,
-        error_code_value,
-    ) = await _resolve_connection_context(refresh=True)
+    context = await _resolve_connection_context(refresh=True)
+    health_payload = context.health_payload
+    connected_flag = context.connected
+    account_type_label = context.account_type
+    last_error_value = context.last_error
+    health_error = context.health_error
+    error_code_value = context.error_code
 
     # 新连接建立后，立即向该客户端单播当前连接状态
     try:
@@ -839,16 +846,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
-                (
-                    health_payload,
-                    connected_flag,
-                    account_type_label,
-                    last_error_value,
-                    redis_connected,
-                    redis_fresh,
-                    health_error,
-                    error_code_value,
-                ) = await _resolve_connection_context(health_payload, refresh=True)
+                context = await _resolve_connection_context(health_payload, refresh=True)
+                health_payload = context.health_payload
+                connected_flag = context.connected
+                account_type_label = context.account_type
+                last_error_value = context.last_error
+                redis_connected = context.redis_connected
+                redis_fresh = context.redis_fresh
+                health_error = context.health_error
+                error_code_value = context.error_code
 
                 payload = {
                     "type": "connection_status",
@@ -1124,16 +1130,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 key = "positions_snapshot"
                 force = bool(message.get("force"))
 
-                (
-                    health_payload,
-                    connected_flag,
-                    account_type_label,
-                    last_error_value,
-                    redis_connected,
-                    redis_fresh,
-                    health_error,
-                    error_code_value,
-                ) = await _resolve_connection_context(health_payload, refresh=True)
+                context = await _resolve_connection_context(health_payload, refresh=True)
+                health_payload = context.health_payload
+                connected_flag = context.connected
+                account_type_label = context.account_type
+                last_error_value = context.last_error
+                redis_connected = context.redis_connected
+                redis_fresh = context.redis_fresh
+                health_error = context.health_error
+                error_code_value = context.error_code
 
                 if health_payload is None:
                     payload = _service_unavailable_payload(
