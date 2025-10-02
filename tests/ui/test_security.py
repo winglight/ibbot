@@ -13,18 +13,26 @@ from src.routes import auth as auth_module
 from src.routes import orders as orders_module
 
 
-class DummyWebSocketManager:
+class StubOrdersClient:
     def __init__(self) -> None:
-        self.messages: list[dict[str, Any]] = []
+        self.place_calls = 0
+        self.response: dict[str, Any] = {"command_id": "cmd-sec", "status": "accepted"}
 
-    async def broadcast(self, message: dict[str, Any]) -> None:
-        self.messages.append(message)
+    async def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.place_calls += 1
+        return dict(self.response)
+
+    async def list_orders(self, **_: Any) -> dict[str, Any]:
+        return {"orders": []}
 
 
 @pytest.fixture()
-def secured_orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+def secured_orders_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, StubOrdersClient]:
     app = FastAPI()
     app.include_router(orders_module.router)
+    orders_module.set_websocket_broadcast_override(None)
+
+    client = StubOrdersClient()
 
     async def operator(request: Request) -> str:
         request.state.is_read_only = False
@@ -32,30 +40,16 @@ def secured_orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
         request.state.username = "operator"
         return "operator"
 
-    async def fake_enqueue(payload: dict[str, Any]) -> None:
-        pass
-
-    monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
-    async def healthy_ib_health() -> dict[str, Any]:
-        return {
-            "connected": True,
-            "queue_depth": 0,
-            "last_error": None,
-            "error_code": None,
-            "stale": False,
-        }
-
-    monkeypatch.setattr(
-        orders_module, "_ensure_ib_command_available", healthy_ib_health
-    )
-    monkeypatch.setattr(orders_module, "websocket_manager", DummyWebSocketManager())
     app.dependency_overrides[orders_module.get_current_user] = operator
-    return app
+    app.dependency_overrides[orders_module.get_orders_service_client] = lambda: client
+    return app, client
 
 
 def test_place_order_audit_logged_for_operator(
-    secured_orders_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+    secured_orders_app: tuple[FastAPI, StubOrdersClient],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    app, client_stub = secured_orders_app
     success_events: list[dict[str, Any]] = []
     failure_events: list[dict[str, Any]] = []
 
@@ -80,7 +74,7 @@ def test_place_order_audit_logged_for_operator(
     monkeypatch.setattr(orders_module, "audit_log_success", record_success)
     monkeypatch.setattr(orders_module, "audit_log_failure", record_failure)
 
-    with TestClient(secured_orders_app) as client:
+    with TestClient(app) as client:
         response = client.post(
             "/api/place_order",
             json={
@@ -96,14 +90,18 @@ def test_place_order_audit_logged_for_operator(
     assert response.status_code == 200
     assert success_events, "expected audit success to be recorded"
     event = success_events[0]
-    assert event["detail"].startswith("queued order")
+    assert event["detail"].startswith("orders command")
     assert event["extra"]["symbol"] == "ES"
     assert failure_events == []
+    assert client_stub.place_calls == 1
 
 
 def test_forbidden_role_records_audit_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     app = FastAPI()
     app.include_router(orders_module.router)
+    orders_module.set_websocket_broadcast_override(None)
+
+    client_stub = StubOrdersClient()
 
     async def auditor(request: Request) -> str:
         request.state.is_read_only = False
@@ -125,6 +123,7 @@ def test_forbidden_role_records_audit_failure(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(auth_module, "log_audit_event", capture_event)
     app.dependency_overrides[orders_module.get_current_user] = auditor
+    app.dependency_overrides[orders_module.get_orders_service_client] = lambda: client_stub
 
     with TestClient(app) as client:
         response = client.post(
@@ -146,6 +145,7 @@ def test_forbidden_role_records_audit_failure(monkeypatch: pytest.MonkeyPatch) -
     record = captured[0]
     assert record["success"] is False
     assert record["action"] == "orders.place"
+    assert client_stub.place_calls == 0
 
 
 def test_frontend_api_call_handles_rbac_forbidden(tmp_path: Path) -> None:

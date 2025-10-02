@@ -368,10 +368,7 @@ def test_order_flow(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def _run_order_flow(monkeypatch: pytest.MonkeyPatch) -> None:
-    redis = InMemoryRedis()
     websocket_manager = DummyWebSocketManager()
-    influx = FakeInflux()
-    fake_ib = FakeIB()
 
     async def allow_user(request: Request) -> str:
         request.state.is_read_only = False
@@ -382,37 +379,23 @@ async def _run_order_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     async def noop(*_: Any, **__: Any) -> None:
         return None
 
-    queue_key = "queue:test:commands"
-    stream_key = "stream:test:results"
-    hash_prefix = "hash:test:result"
-    recorded_payloads: list[dict[str, Any]] = []
+    class StubOrdersClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
 
-    async def fake_enqueue(payload: dict[str, Any]) -> None:
-        recorded_payloads.append(dict(payload))
-        await redis.rpush(queue_key, json.dumps(payload))
+        async def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(dict(payload))
+            return {"command_id": "cmd-test-001", "status": "accepted"}
 
-    class _FakeUUID:
-        hex = "cmd-test-001"
+        async def list_orders(self, **_: Any) -> dict[str, Any]:
+            return {"orders": []}
+
+    client_stub = StubOrdersClient()
 
     app = FastAPI()
     app.include_router(orders_module.router)
     app.dependency_overrides[orders_module.get_current_user] = allow_user
-
-    monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
-    async def healthy_ib_health() -> dict[str, Any]:
-        return {
-            "connected": True,
-            "queue_depth": 0,
-            "last_error": None,
-            "error_code": None,
-            "stale": False,
-        }
-
-    monkeypatch.setattr(
-        orders_module, "_ensure_ib_command_available", healthy_ib_health
-    )
-    monkeypatch.setattr(orders_module, "websocket_manager", websocket_manager)
-    monkeypatch.setattr(orders_module.uuid, "uuid4", lambda: _FakeUUID())
+    app.dependency_overrides[orders_module.get_orders_service_client] = lambda: client_stub
     monkeypatch.setattr(orders_module, "audit_log_success", noop)
     monkeypatch.setattr(orders_module, "audit_log_failure", noop)
     orders_module.set_websocket_broadcast_override(websocket_manager.broadcast)
@@ -434,72 +417,12 @@ async def _run_order_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["command_id"] == "cmd-test-001"
-    assert body["status"] == "queued"
+    assert body["status"] == "accepted"
 
-    assert recorded_payloads and recorded_payloads[0]["command_id"] == "cmd-test-001"
+    assert client_stub.calls and client_stub.calls[0]["symbol"] == "ES"
 
-    executor = IBCommandExecutor(fake_ib, logger_name="tests.ib_command.executor")
-    publisher = ObservedResultPublisher(
-        redis,
-        websocket_manager=websocket_manager,
-        influx=influx,
-        stream_key=stream_key,
-        hash_prefix=hash_prefix,
-    )
-    consumer = CommandConsumer(
-        redis,
-        executor,
-        publisher,
-        queue_key=queue_key,
-        poll_timeout=0.05,
-        default_max_retries=0,
-        retry_delay=0.01,
-        health_key="hash:service:health:test",
-        logger_name="tests.ib_command.consumer",
-    )
-
-    consumer_task = asyncio.create_task(consumer.consume_forever())
-
-    try:
-        result_payload = await _wait_for_result(redis, hash_prefix, "cmd-test-001")
-        await _wait_for_messages(websocket_manager, 2)
-    finally:
-        consumer.stop()
-        await asyncio.wait_for(consumer_task, timeout=2.0)
-
-    assert fake_ib.calls == [
-        {
-            "symbol": "ES",
-            "quantity": 1,
-            "action": "BUY",
-            "exchange": "CME",
-            "sec_type": "FUT",
-        }
-    ]
-
-    assert result_payload["command_id"] == "cmd-test-001"
-    assert result_payload["status"] == "success"
-
-    assert influx.points == [
-        (
-            "order_results",
-            {
-                "command_id": "cmd-test-001",
-                "status": "success",
-                "attempts": 1,
-            },
-        )
-    ]
-
-    assert websocket_manager.messages[0]["type"] == "order_command_enqueued"
+    assert websocket_manager.messages[0]["type"] == "order_submitted"
     assert websocket_manager.messages[0]["command_id"] == "cmd-test-001"
-
-    assert websocket_manager.messages[-1] == {
-        "type": "order_command_result",
-        "command_id": "cmd-test-001",
-        "status": "success",
-        "attempts": 1,
-    }
 
 
 def test_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,16 +1,60 @@
-from typing import Any
+from __future__ import annotations
+
+from typing import Any, Mapping
 
 import pytest
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, status
 from fastapi.testclient import TestClient
 
 from src.routes import orders as orders_module
 
 
+class StubOrdersClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Mapping[str, Any] | None]] = []
+        self.place_order_response: Mapping[str, Any] | Exception = {
+            "command_id": "cmd-123",
+            "status": "accepted",
+        }
+        self.cancel_order_response: Mapping[str, Any] | Exception = {
+            "command_id": "cmd-cancel",
+            "status": "accepted",
+        }
+
+    async def list_orders(self, **_: Any) -> Mapping[str, Any]:
+        return {"orders": [], "updated_at": None}
+
+    async def place_order(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.calls.append(("place_order", payload))
+        if isinstance(self.place_order_response, Exception):
+            raise self.place_order_response
+        return self.place_order_response
+
+    async def cancel_order(self, order_id: str) -> Mapping[str, Any]:
+        self.calls.append(("cancel_order", {"order_id": order_id}))
+        if isinstance(self.cancel_order_response, Exception):
+            raise self.cancel_order_response
+        return self.cancel_order_response
+
+    async def cancel_all(self) -> Mapping[str, Any]:
+        self.calls.append(("cancel_all", {}))
+        return {"command_id": "cmd-all", "status": "accepted"}
+
+    async def close_position(self, symbol: str) -> Mapping[str, Any]:
+        self.calls.append(("close_position", {"symbol": symbol}))
+        return {"command_id": "cmd-close", "status": "accepted"}
+
+    async def reverse_position(self, symbol: str) -> Mapping[str, Any]:
+        self.calls.append(("reverse_position", {"symbol": symbol}))
+        return {"command_id": "cmd-reverse", "status": "accepted"}
+
+
 @pytest.fixture()
-def orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+def orders_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, StubOrdersClient]:
     app = FastAPI()
     app.include_router(orders_module.router)
+
+    client = StubOrdersClient()
 
     async def allow_user(request: Request) -> str:
         request.state.is_read_only = False
@@ -19,18 +63,15 @@ def orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
         return "tester"
 
     app.dependency_overrides[orders_module.get_current_user] = allow_user
+    app.dependency_overrides[orders_module.get_orders_service_client] = lambda: client
 
-    async def noop_audit(*args: Any, **kwargs: Any) -> None:
+    async def noop_audit(*_: Any, **__: Any) -> None:
         return None
 
     monkeypatch.setattr(orders_module, "audit_log_success", noop_audit)
     monkeypatch.setattr(orders_module, "audit_log_failure", noop_audit)
-    async def queue_key() -> str:
-        return "queue:test"
-
-    monkeypatch.setattr(orders_module, "_resolve_command_queue_key", queue_key)
     orders_module.set_websocket_broadcast_override(None)
-    return app
+    return app, client
 
 
 def _order_payload() -> dict[str, Any]:
@@ -44,79 +85,63 @@ def _order_payload() -> dict[str, Any]:
     }
 
 
-def test_place_order_success_enqueues_and_broadcasts(
-    orders_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+def test_place_order_success_returns_command_id(
+    orders_app: tuple[FastAPI, StubOrdersClient]
 ) -> None:
-    recorded: dict[str, Any] = {}
+    app, client_stub = orders_app
 
-    async def fake_enqueue(payload: dict[str, Any]) -> None:
-        recorded["payload"] = dict(payload)
-
-    async def fake_health() -> dict[str, Any]:
-        recorded["health_checked"] = True
-        return {"connected": True, "error_code": None}
-
-    events: list[dict[str, Any]] = []
-
-    async def fake_broadcast(message: dict[str, Any]) -> None:
-        events.append(dict(message))
-
-    class FakeUUID:
-        hex = "cmd-xyz"
-
-    monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
-    monkeypatch.setattr(orders_module, "_ensure_ib_command_available", fake_health)
-    orders_module.set_websocket_broadcast_override(fake_broadcast)
-    monkeypatch.setattr(orders_module.uuid, "uuid4", lambda: FakeUUID())
-
-    with TestClient(orders_app) as client:
+    with TestClient(app) as client:
         response = client.post("/api/place_order", json=_order_payload())
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["success"] is True
-    assert body["command_id"] == "cmd-xyz"
-    assert recorded["payload"]["command_id"] == "cmd-xyz"
-    assert recorded["payload"]["method"] == "place_market_order"
-    assert events and events[0]["command_id"] == "cmd-xyz"
-    assert recorded.get("health_checked") is True
+    assert response.status_code == status.HTTP_200_OK
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["command_id"] == "cmd-123"
+    assert payload["status"] == "accepted"
+    assert client_stub.calls and client_stub.calls[0][0] == "place_order"
 
 
-def test_place_order_queue_failure_returns_503(
-    orders_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+def test_place_order_service_unavailable_returns_503(
+    orders_app: tuple[FastAPI, StubOrdersClient]
 ) -> None:
-    async def failing_enqueue(payload: dict[str, Any]) -> None:
-        raise RuntimeError("queue down")
+    app, client_stub = orders_app
+    client_stub.place_order_response = orders_module.ServiceUnavailableError(
+        "orders", "offline"
+    )
 
-    async def fake_health() -> dict[str, Any]:
-        return {"connected": True, "error_code": None}
-
-    monkeypatch.setattr(orders_module, "_enqueue_command", failing_enqueue)
-    monkeypatch.setattr(orders_module, "_ensure_ib_command_available", fake_health)
-    orders_module.set_websocket_broadcast_override(lambda message: None)
-
-    with TestClient(orders_app) as client:
+    with TestClient(app) as client:
         response = client.post("/api/place_order", json=_order_payload())
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Failed to enqueue order command"
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert response.json()["detail"] == "Orders service unavailable"
 
 
-def test_place_order_returns_503_when_health_missing(
-    orders_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+def test_place_order_propagates_service_error_detail(
+    orders_app: tuple[FastAPI, StubOrdersClient]
 ) -> None:
-    async def fake_health() -> dict[str, Any]:
-        raise HTTPException(status_code=503, detail="ib-command service unavailable")
+    app, client_stub = orders_app
+    client_stub.place_order_response = orders_module.ServiceResponseError(
+        "orders", status_code=422, detail="invalid"
+    )
 
-    async def fake_enqueue(payload: dict[str, Any]) -> None:
-        raise AssertionError("enqueue should not be called when health fails")
-
-    monkeypatch.setattr(orders_module, "_ensure_ib_command_available", fake_health)
-    monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
-    orders_module.set_websocket_broadcast_override(lambda message: None)
-
-    with TestClient(orders_app) as client:
+    with TestClient(app) as client:
         response = client.post("/api/place_order", json=_order_payload())
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "ib-command service unavailable"
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["detail"] == "invalid"
+
+
+def test_cancel_order_uses_client(
+    orders_app: tuple[FastAPI, StubOrdersClient]
+) -> None:
+    app, client_stub = orders_app
+
+    with TestClient(app) as client:
+        response = client.post("/api/cancel_order", json={"order_id": "123"})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["command_id"] == "cmd-cancel"
+    assert client_stub.calls and client_stub.calls[-1] == (
+        "cancel_order",
+        {"order_id": "123"},
+    )

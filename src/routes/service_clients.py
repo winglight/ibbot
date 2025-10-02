@@ -26,6 +26,7 @@ __all__ = [
     "ServiceUnavailableError",
     "ServiceResponseError",
     "AccountServiceClient",
+    "OrdersServiceClient",
     "RiskServiceClient",
     "StrategyServiceClient",
     "MarketDataServiceClient",
@@ -256,6 +257,70 @@ class AccountServiceClient(ServiceClient):
             "GET",
             "/account/orders",
             params=params,
+        )
+
+
+class OrdersServiceClient(ServiceClient):
+    """HTTP client for the Orders microservice."""
+
+    service_name = "orders"
+    env_prefix = "ORDERS"
+    default_base_url = "http://localhost:8050"
+
+    async def list_orders(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int | None = None,
+        start_date: str | None = None,
+    ) -> Any:
+        params: Dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = int(limit)
+        if offset is not None:
+            params["offset"] = int(offset)
+        if start_date:
+            params["start_date"] = start_date
+        return await self.request("GET", "/orders", params=params or None)
+
+    async def place_order(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        return await self.request(
+            "POST",
+            "/orders",
+            json=dict(payload),
+            expected_status=202,
+        )
+
+    async def cancel_order(self, order_id: str) -> Mapping[str, Any]:
+        return await self.request(
+            "POST",
+            f"/orders/{order_id}/cancel",
+            json={},
+            expected_status=202,
+        )
+
+    async def cancel_all(self) -> Mapping[str, Any]:
+        return await self.request(
+            "POST",
+            "/orders/cancel_all",
+            json={},
+            expected_status=202,
+        )
+
+    async def close_position(self, symbol: str) -> Mapping[str, Any]:
+        return await self.request(
+            "POST",
+            f"/positions/{symbol}/close",
+            json={},
+            expected_status=202,
+        )
+
+    async def reverse_position(self, symbol: str) -> Mapping[str, Any]:
+        return await self.request(
+            "POST",
+            f"/positions/{symbol}/reverse",
+            json={},
+            expected_status=202,
         )
 
 
