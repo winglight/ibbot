@@ -735,15 +735,21 @@ class RiskRuntime:
         on_processed: Callable[[datetime], None],
     ) -> None:
         assert self._redis is not None
+        block_ms = max(1, int(self.poll_interval * 1000))
         try:
-            messages = await read_stream(
-                stream_key=stream_key,
-                group=group,
-                consumer=consumer,
-                count=self.batch_size,
-                block=int(self.poll_interval * 1000),
-                redis=self._redis,
+            messages = await asyncio.wait_for(
+                read_stream(
+                    stream_key=stream_key,
+                    group=group,
+                    consumer=consumer,
+                    count=self.batch_size,
+                    block=block_ms,
+                    redis=self._redis,
+                ),
+                timeout=self.poll_interval + 1.0,
             )
+        except asyncio.TimeoutError:
+            messages = []
         except Exception as exc:
             if self._logger:
                 self._logger.warning(
