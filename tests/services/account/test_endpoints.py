@@ -16,6 +16,12 @@ def reset_state() -> None:
     _state.redis = None
     _state.health_interval = 0  # disable background loop for deterministic tests
     _state.health_task = None
+    _state.watchdog_task = None
+    _state.watchdog_stop_event = None
+    _state.snapshot_service = None
+    _state.stale = False
+    _state.last_refresh_error = None
+    _state.snapshot_updated_at = None
 
 
 class _InMemoryRedis:
@@ -72,6 +78,23 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 @pytest.fixture
 def test_client(fake_redis: Any, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    class _StubSnapshotService:
+        def __init__(self) -> None:
+            self.refresh_interval_seconds = 0
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        def request_immediate_refresh(self, reason: str = "connection_restored") -> None:
+            return None
+
+    monkeypatch.setattr(
+        "services.account.main.AccountSnapshotService", _StubSnapshotService
+    )
+
     async def _fake_request_ib_command(*_: Any, **__: Any) -> Dict[str, Any]:
         return {"status": "success"}
 
@@ -82,9 +105,10 @@ def test_client(fake_redis: Any, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def _write_snapshot(client: Any, key: str, payload: Dict[str, Any]) -> None:
-    asyncio.get_event_loop().run_until_complete(
-        client.set(key, json.dumps(payload)),
-    )
+    async def _set() -> None:
+        await client.set(key, json.dumps(payload))
+
+    asyncio.run(_set())
 
 
 def test_get_account_info_success(test_client: TestClient, fake_redis: Any) -> None:

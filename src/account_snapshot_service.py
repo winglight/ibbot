@@ -109,7 +109,7 @@ class AccountSnapshotService:
     # ------------------------------------------------------------------
     # Lifecycle management
 
-    def start(self) -> None:
+    async def start(self) -> None:
         """Start the background refresh loop if it is not running."""
 
         if self._task and not self._task.done():
@@ -125,6 +125,31 @@ class AccountSnapshotService:
 
         self._loop = loop
         self._stop_event = asyncio.Event()
+
+        try:
+            await asyncio.wait_for(
+                self.refresh_both(reason="startup", fast_positions=True),
+                timeout=self._request_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            snapshot_service_logger.warning(
+                "Startup account snapshot refresh timed out"
+            )
+            await self._update_health(
+                healthy=False,
+                last_error="Startup refresh timed out",
+                extra_metrics={"reason": "startup", "state": "timeout"},
+            )
+        except Exception as exc:
+            snapshot_service_logger.warning(
+                "Startup account snapshot refresh failed: {}", exc
+            )
+            await self._update_health(
+                healthy=False,
+                last_error=str(exc),
+                extra_metrics={"reason": "startup", "state": "error"},
+            )
+
         self._task = loop.create_task(self._run_loop())
         snapshot_service_logger.info(
             "Account snapshot service started (refresh_interval={}s, poll={}s)",

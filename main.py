@@ -346,7 +346,7 @@ async def _module_core_managers(context: ModuleRuntimeContext) -> ModuleHandle:
     strategy_risk_manager.start()
     handle.finalizers.append(strategy_risk_manager.stop)
 
-    account_snapshot_service.start()
+    await account_snapshot_service.start()
     handle.finalizers.append(account_snapshot_service.stop)
 
     await queue_manager.start_worker()
