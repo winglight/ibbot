@@ -1,12 +1,9 @@
 import asyncio
 import json
 import math
-import os
 import time
 from datetime import timedelta
-from typing import Any, Dict, List, Optional, Mapping
-
-import httpx
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -19,7 +16,6 @@ from src.account_snapshot_cache import (
 from src.database import get_db_manager
 from src.dom_optimizer import get_dom_optimization_orchestrator
 from src.dom_service import get_dom_service
-from src.order_manager import get_order_manager as _get_order_manager_singleton
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
 from src.routes.monitoring import build_influx_write_rate_payload, get_queue_metrics
@@ -33,89 +29,25 @@ from src.ib_command_health import (
     IB_COMMAND_HEALTH_STALE_AFTER_SEC,
     build_ib_connection_health_payload,
 )
+from src.routes.service_clients import (
+    AccountServiceClient,
+    MarketDataServiceClient,
+    RiskServiceClient,
+    StrategyServiceClient,
+    ServiceClientError,
+    ServiceUnavailableError,
+)
 
 router = APIRouter()
 
 RATE_LIMIT_SECONDS = 15.0
+SERVICE_UNAVAILABLE_MESSAGE = "服务不可用"
+RISK_RULES_CACHE_KEY = "json:risk:rules"
 
-MARKET_SERVICE_URL = os.getenv("MARKET_DATA_SERVICE_URL", "http://localhost:8010").rstrip("/")
-MARKET_SERVICE_TIMEOUT = float(os.getenv("MARKET_DATA_SERVICE_TIMEOUT", "5.0"))
-ACCOUNT_SERVICE_URL = os.getenv("ACCOUNT_SERVICE_URL", "http://localhost:8020").rstrip("/")
-ACCOUNT_SERVICE_TIMEOUT = float(os.getenv("ACCOUNT_SERVICE_TIMEOUT", "10.0"))
-
-
-def _market_service_base_url() -> str:
-    return MARKET_SERVICE_URL or "http://localhost:8010"
-
-
-def _account_service_base_url() -> str:
-    return ACCOUNT_SERVICE_URL or "http://localhost:8020"
-
-
-async def _service_get(
-    *, base_url: str, timeout: float, path: str, params: Optional[Dict[str, Any]] = None
-) -> Optional[Dict[str, Any]]:
-    try:
-        async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
-            response = await client.get(path, params=params)
-            response.raise_for_status()
-            if not response.content:
-                return {}
-            return response.json()
-    except Exception as exc:
-        logger.debug("Service request %s%s failed: %s", base_url, path, exc)
-        return None
-
-
-async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
-    payload = await _service_get(
-        base_url=_market_service_base_url(),
-        timeout=MARKET_SERVICE_TIMEOUT,
-        path=f"/market/{symbol}",
-    )
-    if not isinstance(payload, dict):
-        return None
-    return payload
-
-
-async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str, Any]]:
-    payload = await _service_get(
-        base_url=_account_service_base_url(),
-        timeout=ACCOUNT_SERVICE_TIMEOUT,
-        path="/account/info",
-        params={"force_refresh": str(force_refresh).lower()},
-    )
-    if not isinstance(payload, dict):
-        return None
-    if isinstance(payload.get("account_info"), dict):
-        return payload["account_info"]
-    if isinstance(payload.get("data"), dict):
-        return payload["data"]
-    if isinstance(payload.get("result"), dict):
-        return payload["result"]
-    extracted = {k: v for k, v in payload.items() if k not in {"success", "from_cache"}}
-    return extracted or None
-
-
-async def _fetch_positions(force_refresh: bool = False, fast: bool = True) -> Optional[List[Dict[str, Any]]]:
-    payload = await _service_get(
-        base_url=_account_service_base_url(),
-        timeout=ACCOUNT_SERVICE_TIMEOUT,
-        path="/account/positions",
-        params={
-            "force_refresh": str(force_refresh).lower(),
-            "fast": str(fast).lower(),
-        },
-    )
-    if not isinstance(payload, dict):
-        return None
-    if isinstance(payload.get("positions"), list):
-        return payload["positions"]
-    if isinstance(payload.get("data"), list):
-        return payload["data"]
-    if isinstance(payload.get("result"), list):
-        return payload["result"]
-    return None
+_ACCOUNT_CLIENT = AccountServiceClient()
+_MARKET_CLIENT = MarketDataServiceClient()
+_RISK_CLIENT = RiskServiceClient()
+_STRATEGY_CLIENT = StrategyServiceClient()
 
 
 def _services():
@@ -126,66 +58,134 @@ def _websocket_manager():
     return _services().websocket_manager
 
 
-def _order_manager():
-    try:
-        services = _services()
-    except RuntimeError:
-        services = None
-
-    manager = getattr(services, "order_manager", None) if services is not None else None
-    if manager is not None:
-        return manager
-
-    try:
-        return _get_order_manager_singleton()
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.debug("Order manager fallback initialisation failed: %s", exc)
-        return None
-
-
-def _strategy_manager():
-    services = _services()
-    return getattr(services, "strategy_manager", None)
-
-
-def _risk_manager():
-    services = _services()
-    return getattr(services, "risk_manager", None)
-
-
-def _load_risk_rules_snapshot() -> Optional[Dict[str, Dict[str, Any]]]:
-    db = get_db_manager()
-    try:
-        records = db.load_risk_rules()
-    except Exception as exc:  # pragma: no cover - database access issues
-        logger.warning("Failed to load risk rules from database: %s", exc)
-        return None
-
-    payload: Dict[str, Dict[str, Any]] = {}
-    for rule in records or []:
-        try:
-            symbol = getattr(rule, "symbol", None)
-            if not symbol:
-                continue
-            payload[symbol] = {
-                "symbol": symbol,
-                "stop_loss_price": getattr(rule, "stop_loss_price", None),
-                "take_profit_price": getattr(rule, "take_profit_price", None),
-                "max_loss_percent": getattr(rule, "max_loss_percent", None),
-                "enabled": bool(getattr(rule, "enabled", True)),
-                "max_time_span": getattr(rule, "max_time_span", None),
-                "created_at": getattr(rule, "timestamp", None),
-                "rule_type": getattr(rule, "rule_type", None),
-                "auto_trailing": bool(getattr(rule, "auto_trailing", False)),
-                "atr_params": getattr(rule, "atr_params", {}) or {},
-            }
-        except Exception:  # pragma: no cover - defensive guard
-            continue
+def _service_unavailable_payload(payload_type: str, **fields: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "type": payload_type,
+        "success": False,
+        "error": SERVICE_UNAVAILABLE_MESSAGE,
+    }
+    payload.update(fields)
     return payload
 
 
-def _connection_manager():
-    return core.connection_manager
+async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
+    try:
+        payload = await _MARKET_CLIENT.fetch_current_price(symbol)
+    except ServiceUnavailableError as exc:
+        logger.debug("Market data service unavailable for %s: %s", symbol, exc)
+        return None
+    except ServiceClientError as exc:
+        logger.warning("Market data service error for %s: %s", symbol, exc)
+        return None
+
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return None
+
+
+async def _fetch_account_info(force_refresh: bool = False) -> Optional[Dict[str, Any]]:
+    try:
+        payload = await _ACCOUNT_CLIENT.fetch_info(force_refresh=force_refresh)
+    except ServiceUnavailableError as exc:
+        logger.debug("Account service unavailable: %s", exc)
+        return None
+    except ServiceClientError as exc:
+        logger.warning("Account service error: %s", exc)
+        return None
+
+    if isinstance(payload, Mapping):
+        if isinstance(payload.get("account_info"), Mapping):
+            return dict(payload["account_info"])
+        if isinstance(payload.get("data"), Mapping):
+            return dict(payload["data"])
+        if isinstance(payload.get("result"), Mapping):
+            return dict(payload["result"])
+        extracted = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"success", "from_cache"}
+        }
+        return dict(extracted) if extracted else None
+    return None
+
+
+async def _fetch_positions(
+    *, force_refresh: bool = False, fast: bool = True
+) -> Optional[List[Dict[str, Any]]]:
+    try:
+        payload = await _ACCOUNT_CLIENT.fetch_positions(
+            force_refresh=force_refresh,
+            fast=fast,
+        )
+    except ServiceUnavailableError as exc:
+        logger.debug("Account service unavailable for positions: %s", exc)
+        return None
+    except ServiceClientError as exc:
+        logger.warning("Account service error fetching positions: %s", exc)
+        return None
+
+    if isinstance(payload, list):
+        return [dict(item) if isinstance(item, Mapping) else item for item in payload]
+    if isinstance(payload, Mapping):
+        items = payload.get("positions")
+        if items is None:
+            items = payload.get("data")
+        if isinstance(items, list):
+            return [dict(item) if isinstance(item, Mapping) else item for item in items]
+    return None
+
+
+async def _fetch_orders(
+    *,
+    limit: int,
+    offset: int,
+    start_date: Optional[str] = None,
+) -> Optional[Tuple[List[Dict[str, Any]], Optional[int]]]:
+    try:
+        payload = await _ACCOUNT_CLIENT.fetch_orders(
+            limit=limit,
+            offset=offset,
+            start_date=start_date,
+        )
+    except ServiceUnavailableError as exc:
+        logger.debug("Account service unavailable for orders: %s", exc)
+        return None
+    except ServiceClientError as exc:
+        logger.warning("Account service error fetching orders: %s", exc)
+        return None
+
+    orders_list: List[Dict[str, Any]] = []
+    total_count: Optional[int] = None
+
+    if isinstance(payload, list):
+        orders_list = [dict(item) if isinstance(item, Mapping) else {"raw": item} for item in payload]
+    elif isinstance(payload, Mapping):
+        candidates = None
+        for key in ("orders", "data", "result"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                candidates = value
+                break
+        if candidates is None and isinstance(payload.get("order"), Mapping):
+            candidates = [payload["order"]]
+        if candidates is not None:
+            orders_list = [dict(item) if isinstance(item, Mapping) else {"raw": item} for item in candidates]
+
+        raw_total = payload.get("total") or payload.get("total_count")
+        if raw_total is None:
+            meta = payload.get("meta")
+            if isinstance(meta, Mapping):
+                raw_total = meta.get("total") or meta.get("total_count")
+        try:
+            if raw_total is not None:
+                total_count = int(raw_total)
+        except (TypeError, ValueError):
+            total_count = None
+
+    if not orders_list:
+        return None
+
+    return orders_list, total_count
 
 
 def _decode_redis_mapping(raw: Dict[Any, Any]) -> Dict[str, str]:
@@ -207,6 +207,44 @@ def _decode_redis_mapping(raw: Dict[Any, Any]) -> Dict[str, str]:
             value = str(value)
         result[key] = value
     return result
+
+
+async def _read_json_from_redis(key: str) -> Optional[Dict[str, Any]]:
+    container = core.get_container()
+    redis_client = getattr(container, "redis_client", None) if container else None
+    if redis_client is None:
+        return None
+
+    try:
+        raw = await redis_client.get(key)
+    except Exception as exc:  # pragma: no cover - redis access errors
+        logger.debug("Failed to read Redis key %s: %s", key, exc)
+        return None
+
+    if not raw:
+        return None
+
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:  # pragma: no cover - invalid json
+        logger.debug("Invalid JSON payload in Redis key %s: %s", key, exc)
+        return None
+
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return None
+
+
+async def _load_cached_risk_rules() -> Optional[Dict[str, Any]]:
+    payload = await _read_json_from_redis(RISK_RULES_CACHE_KEY)
+    if payload is None:
+        return None
+    payload.setdefault("success", True)
+    payload.setdefault("source", payload.get("source", "redis"))
+    return payload
 
 
 async def _load_ib_command_health() -> Optional[Dict[str, Any]]:
@@ -257,8 +295,14 @@ async def _send_or_disconnect(websocket: WebSocket, payload: Dict[str, Any]) -> 
         raise WebSocketDisconnect()
 
 
+def _order_value(order: Any, key: str, default: Any = None) -> Any:
+    if isinstance(order, Mapping):
+        return order.get(key, default)
+    return getattr(order, key, default)
+
+
 def _serialise_order(order: Any) -> Dict[str, Any]:
-    raw_type = (getattr(order, "order_type", "") or "").upper()
+    raw_type = (_order_value(order, "order_type", "") or "").upper()
     if raw_type in ("MARKET", "MKT"):
         order_type = "MKT"
     elif raw_type in ("LIMIT", "LMT"):
@@ -268,7 +312,7 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
 
     price_val = 0.0
     try:
-        price = getattr(order, "price", None)
+        price = _order_value(order, "price")
         if price is not None:
             price_val = float(price)
     except Exception:
@@ -276,9 +320,9 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
 
     trigger_type = None
     try:
-        if getattr(order, "order_source", "manual") == "auto":
-            rule_id = getattr(order, "rule_id", None)
-            symbol = getattr(order, "symbol", None)
+        if _order_value(order, "order_source", "manual") == "auto":
+            rule_id = _order_value(order, "rule_id")
+            symbol = _order_value(order, "symbol")
             if rule_id and rule_id != symbol:
                 trigger_type = "strategy"
             else:
@@ -286,7 +330,7 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
     except Exception:
         trigger_type = None
 
-    created_at = getattr(order, "created_at", None)
+    created_at = _order_value(order, "created_at")
     created_iso = None
     try:
         created_iso = to_local_iso(created_at)
@@ -297,27 +341,27 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
             except Exception:
                 created_iso = None
 
-    avg_fill_price = getattr(order, "fill_price", None)
+    avg_fill_price = _order_value(order, "fill_price")
     if avg_fill_price is None and order_type == "MKT" and price_val > 0:
         avg_fill_price = price_val
 
     return {
-        "order_id": getattr(order, "order_id", None),
-        "symbol": getattr(order, "symbol", None),
-        "action": getattr(order, "action", None),
-        "quantity": getattr(order, "quantity", None),
+        "order_id": _order_value(order, "order_id"),
+        "symbol": _order_value(order, "symbol"),
+        "action": _order_value(order, "action"),
+        "quantity": _order_value(order, "quantity"),
         "order_type": order_type,
         "limit_price": price_val if order_type == "LMT" and price_val > 0 else None,
         "avg_fill_price": avg_fill_price,
-        "status": getattr(order, "status", None),
-        "filled": getattr(order, "quantity", 0) if getattr(order, "status", None) == "Filled" else 0,
-        "remaining": 0 if getattr(order, "status", None) == "Filled" else getattr(order, "quantity", 0),
+        "status": _order_value(order, "status"),
+        "filled": _order_value(order, "quantity", 0) if _order_value(order, "status") == "Filled" else 0,
+        "remaining": 0 if _order_value(order, "status") == "Filled" else _order_value(order, "quantity", 0),
         "submit_time": created_iso,
-        "order_source": getattr(order, "order_source", "manual"),
-        "strategy_name": getattr(order, "strategy_name", None),
+        "order_source": _order_value(order, "order_source", "manual"),
+        "strategy_name": _order_value(order, "strategy_name"),
         "trigger_type": trigger_type,
-        "commission": getattr(order, "commission", None),
-        "pnl": getattr(order, "pnl", None),
+        "commission": _order_value(order, "commission"),
+        "pnl": _order_value(order, "pnl"),
     }
 
 
@@ -460,13 +504,15 @@ def _enrich_sizing_history_items(items: List[Dict[str, Any]]) -> List[Dict[str, 
 async def _realtime_price_sender(
     ws: WebSocket,
     symbol: str,
-    conn_manager: Any,
     interval: float = 2.0,
 ):
     try:
         while True:
-            is_connected = getattr(conn_manager, "is_connected", None)
-            if not callable(is_connected) or not is_connected():
+            health = await _load_ib_command_health()
+            if not health or health.get("stale"):
+                await asyncio.sleep(interval)
+                continue
+            if not bool(health.get("connected")):
                 await asyncio.sleep(interval)
                 continue
             try:
@@ -491,11 +537,6 @@ async def _realtime_price_sender(
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    conn_manager = _connection_manager()
-    if conn_manager is None:
-        await websocket.close(code=1011, reason="Connection manager unavailable")
-        return
-
     await _websocket_manager().connect(websocket)
 
     async def _resolve_connection_context(
@@ -505,11 +546,11 @@ async def websocket_endpoint(websocket: WebSocket):
     ) -> tuple[
         Optional[Dict[str, Any]],
         bool,
-        bool,
         str,
         Optional[str],
         Optional[bool],
         bool,
+        Optional[str],
     ]:
         if refresh or payload is None:
             payload = await _load_ib_command_health()
@@ -526,140 +567,150 @@ async def websocket_endpoint(websocket: WebSocket):
         redis_fresh = bool(data) and not bool(data.get("stale", True))
         redis_connected = bool(data.get("connected")) if redis_fresh else None
 
-        try:
-            local_connected = bool(conn_manager.is_connected())
-        except Exception:
-            local_connected = False
-
-        connected_flag = redis_connected if redis_connected is not None else local_connected
-
-        account_type = data.get("account_type")
-        if not account_type:
-            try:
-                account_type = "Paper" if conn_manager.config.paper_trading else "Live"
-            except Exception:
-                account_type = "Paper"
-
+        connected_flag = bool(redis_connected)
+        account_type = str(data.get("account_type") or "Unknown")
         last_error = data.get("last_error") or None
-        if not last_error:
-            try:
-                last_error = conn_manager.get_last_connect_error()
-            except Exception:
-                last_error = None
+
+        error_message = None
+        if not data:
+            error_message = f"{SERVICE_UNAVAILABLE_MESSAGE}：未获取到 ib-command 健康数据"
+            last_error = last_error or error_message
 
         return (
             data if data else None,
             bool(connected_flag),
-            bool(local_connected),
             account_type,
             last_error,
             redis_connected,
             redis_fresh,
+            error_message,
         )
 
     health_payload: Optional[Dict[str, Any]]
     (
         health_payload,
         connected_flag,
-        local_connected_state,
         account_type_label,
         last_error_value,
         _,
         _,
+        health_error,
     ) = await _resolve_connection_context(refresh=True)
 
     # 新连接建立后，立即向该客户端单播当前连接状态
     try:
         payload = {
             "type": "connection_status",
+            "success": health_payload is not None,
             "connected": bool(connected_flag),
             "account_type": account_type_label,
         }
         if last_error_value:
             payload["last_error"] = last_error_value
+        if health_payload is not None:
+            payload["health"] = health_payload
+            if health_payload.get("stale"):
+                payload["stale"] = True
+        if health_error:
+            payload["error"] = health_error
         await websocket.send_text(json.dumps(payload))
     except Exception as e:
         logger.debug(f"Failed to send initial connection status: {e}")
 
     # 初次连接后，向该连接单播账户信息快照
     try:
-        should_fetch_account = connected_flag or local_connected_state
-        if should_fetch_account:
-            info = await _fetch_account_info()
-            if info is None:
-                snapshot = await read_account_info_snapshot()
-                if isinstance(snapshot, dict):
-                    info = snapshot.get("data")
-            if info is not None:
-                payload_info = info
-                if isinstance(info, dict):
-                    payload_info = dict(info)
-                    payload_info.setdefault("connected", True)
-                    if account_type_label:
-                        payload_info.setdefault("account_type", account_type_label)
-                await websocket.send_text(json.dumps({
-                    "type": "account_update",
-                    "account_info": payload_info,
-                }))
-            else:
-                logger.warning("Initial account_info snapshot unavailable on websocket connect")
+        info = await _fetch_account_info()
+        info_source = "service"
+        if info is None:
+            snapshot = await read_account_info_snapshot()
+            if isinstance(snapshot, dict):
+                info = snapshot.get("data")
+                info_source = snapshot.get("source", "redis") or "redis"
+        if info is not None:
+            payload_info = info
+            if isinstance(info, dict):
+                payload_info = dict(info)
+                payload_info.setdefault("connected", bool(connected_flag))
+                if account_type_label:
+                    payload_info.setdefault("account_type", account_type_label)
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "account_update",
+                        "success": True,
+                        "account_info": payload_info,
+                        "source": info_source,
+                    }
+                )
+            )
         else:
-            await websocket.send_text(json.dumps({
-                "type": "account_update",
-                "account_info": {
-                    "connected": False,
-                    "last_error": last_error_value,
-                    "account_type": account_type_label,
-                },
-            }))
+            await websocket.send_text(
+                json.dumps(
+                    _service_unavailable_payload(
+                        "account_update",
+                        account_info={
+                            "connected": bool(connected_flag),
+                            "account_type": account_type_label,
+                            "last_error": last_error_value,
+                        },
+                    )
+                )
+            )
     except Exception as e:
         logger.debug(f"Failed to send initial account_update: {e}")
 
     # 初次连接后，向该连接单播发送订单快照（最多300条）
     try:
-        manager = _order_manager()
-        if manager:
-            loop = asyncio.get_event_loop()
-            initial_limit = 10
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: manager.get_orders(
-                        limit=initial_limit,
-                        offset=0,
-                        return_total=True,
-                    ),
-                ),
-                timeout=5.0
-            )
-            if isinstance(result, tuple):
-                orders, total = result
-            else:
-                orders = result
-                total = len(orders)
-            payload = _orders_payload(orders, limit=initial_limit, page=1, total=total)
-            await websocket.send_text(json.dumps(payload))
+        initial_limit = 10
+        orders_result = await _fetch_orders(limit=initial_limit, offset=0)
+        if orders_result is None:
+            raise RuntimeError("Orders unavailable")
+        orders, total = orders_result
+        payload = _orders_payload(orders, limit=initial_limit, page=1, total=total)
+        await websocket.send_text(json.dumps(payload))
     except Exception as e:
         logger.warning(f"Failed to send initial orders snapshot: {e}")
-    
+        await websocket.send_text(
+            json.dumps(
+                _service_unavailable_payload(
+                    "orders_snapshot",
+                    meta={"limit": 10, "page": 1},
+                )
+            )
+        )
+
     # 初次连接后，向该连接单播发送positions快照
     try:
-        should_fetch_positions = connected_flag or local_connected_state
-        if should_fetch_positions:
-            positions = await _fetch_positions(force_refresh=False, fast=True)
-            if positions is None:
-                snapshot = await read_positions_snapshot()
-                if isinstance(snapshot, dict):
-                    data = snapshot.get("data")
-                    if isinstance(data, list):
-                        positions = data
-            if positions is not None:
-                await websocket.send_text(json.dumps({
-                    "type": "position_update",
-                    "positions": positions,
-                }))
-            else:
-                logger.warning("Initial positions snapshot unavailable on websocket connect")
+        positions = await _fetch_positions(force_refresh=False, fast=True)
+        positions_source = "service"
+        if positions is None:
+            snapshot = await read_positions_snapshot()
+            if isinstance(snapshot, dict):
+                data = snapshot.get("data")
+                if isinstance(data, list):
+                    positions = data
+                    positions_source = snapshot.get("source", "redis") or "redis"
+        if positions is not None:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "position_update",
+                        "success": True,
+                        "positions": positions,
+                        "source": positions_source,
+                    }
+                )
+            )
+        else:
+            await websocket.send_text(
+                json.dumps(
+                    _service_unavailable_payload(
+                        "position_update",
+                        positions=[],
+                        source="service",
+                    )
+                )
+            )
     except Exception as e:
         logger.debug(f"Failed to send initial positions snapshot: {e}")
     
@@ -699,23 +750,32 @@ async def websocket_endpoint(websocket: WebSocket):
                 (
                     health_payload,
                     connected_flag,
-                    local_connected_state,
                     account_type_label,
                     last_error_value,
-                    _,
-                    _,
+                    redis_connected,
+                    redis_fresh,
+                    health_error,
                 ) = await _resolve_connection_context(health_payload, refresh=True)
 
                 payload = {
                     "type": "connection_status",
+                    "success": health_payload is not None,
                     "connected": bool(connected_flag),
                     "account_type": account_type_label,
-                    "success": True,
                     "source": "websocket",
                 }
 
                 if last_error_value:
                     payload["last_error"] = last_error_value
+                if health_payload is not None:
+                    payload["health"] = health_payload
+                    if health_payload.get("stale"):
+                        payload["stale"] = True
+                if health_error:
+                    payload["error"] = health_error
+                if redis_connected is None:
+                    payload["from_cache"] = False
+                payload["fresh"] = bool(redis_fresh)
 
                 last_responses[key] = payload
                 await websocket.send_text(json.dumps(payload))
@@ -775,7 +835,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 symbol = message.get("symbol")
                 if symbol and symbol not in realtime_tasks:
                     realtime_tasks[symbol] = asyncio.create_task(
-                        _realtime_price_sender(websocket, symbol, conn_manager)
+                        _realtime_price_sender(websocket, symbol)
                     )
             elif msg_type == "unsubscribe_realtime":
                 symbol = message.get("symbol")
@@ -783,15 +843,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 if task:
                     task.cancel()
             elif msg_type == "request_orders_snapshot":
-                manager = _order_manager()
-                if not manager:
-                    await websocket.send_text(json.dumps({
-                        "type": "orders_snapshot",
-                        "success": False,
-                        "error": "Order manager unavailable",
-                    }))
-                    continue
-
                 try:
                     limit = int(message.get("limit", 10))
                 except (TypeError, ValueError):
@@ -824,26 +875,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         }))
                     continue
 
-                loop = asyncio.get_event_loop()
-
                 try:
-                    result = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None,
-                            lambda: manager.get_orders(
-                                limit=limit,
-                                start_date=start_dt,
-                                offset=offset,
-                                return_total=True,
-                            ),
-                        ),
-                        timeout=6.0,
+                    result = await _fetch_orders(
+                        limit=limit,
+                        offset=offset,
+                        start_date=start_dt.isoformat() if start_dt else None,
                     )
-                    if isinstance(result, tuple):
-                        orders, total = result
-                    else:
-                        orders = result
-                        total = len(orders)
+                    if result is None:
+                        raise RuntimeError("Orders unavailable")
+                    orders, total = result
                     payload = _orders_payload(
                         orders,
                         limit=limit,
@@ -855,11 +895,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps(payload))
                 except Exception as exc:
                     logger.warning(f"Failed to stream orders snapshot: {exc}")
-                    await websocket.send_text(json.dumps({
-                        "type": "orders_snapshot",
-                        "success": False,
-                        "error": str(exc),
-                    }))
+                    error_payload = _service_unavailable_payload(
+                        "orders_snapshot",
+                        meta={"limit": limit, "page": page, "start_date": start_date_raw},
+                    )
+                    error_payload["details"] = str(exc)
+                    last_responses[key] = error_payload
+                    await websocket.send_text(json.dumps(error_payload))
             elif msg_type == "request_logs_snapshot":
                 range_value = (message.get("range") or "today").strip() or "today"
                 module_value = (message.get("module") or "all").strip() or "all"
@@ -990,23 +1032,24 @@ async def websocket_endpoint(websocket: WebSocket):
                 (
                     health_payload,
                     connected_flag,
-                    local_connected_state,
                     account_type_label,
                     last_error_value,
-                    _,
-                    _,
+                    redis_connected,
+                    redis_fresh,
+                    health_error,
                 ) = await _resolve_connection_context(health_payload, refresh=True)
 
-                if not (connected_flag or local_connected_state):
-                    payload = {
-                        "type": "position_update",
-                        "success": False,
-                        "error": "Not connected to IBKR",
-                        "source": "websocket",
-                        "positions": [],
-                    }
+                if health_payload is None:
+                    payload = _service_unavailable_payload(
+                        "position_update",
+                        positions=[],
+                        source="websocket",
+                    )
+                    if health_error:
+                        payload["error"] = health_error
                     if last_error_value:
                         payload["last_error"] = last_error_value
+                    last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
                     continue
 
@@ -1040,20 +1083,24 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 try:
                     positions = await _fetch_positions(force_refresh=force, fast=fast)
+                    source = "service"
                     if positions is None:
                         snapshot = await read_positions_snapshot()
                         if isinstance(snapshot, dict):
                             data = snapshot.get("data")
                             if isinstance(data, list):
                                 positions = data
+                                source = snapshot.get("source", "redis") or "redis"
                     if positions is None:
                         raise RuntimeError("Positions unavailable")
                     payload = {
                         "type": "position_update",
                         "success": True,
                         "positions": positions,
-                        "source": "websocket",
+                        "source": source,
                         "fast": fast,
+                        "connected": bool(connected_flag),
+                        "fresh": bool(redis_fresh),
                     }
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
@@ -1066,12 +1113,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         cached_payload["error"] = str(exc)
                         await websocket.send_text(json.dumps(cached_payload))
                     else:
-                        await websocket.send_text(json.dumps({
-                            "type": "position_update",
-                            "success": False,
-                            "error": str(exc),
-                            "source": "websocket",
-                        }))
+                        error_payload = _service_unavailable_payload(
+                            "position_update",
+                            positions=[],
+                            source="websocket",
+                        )
+                        error_payload["details"] = str(exc)
+                        await websocket.send_text(json.dumps(error_payload))
             elif msg_type == "request_dom_automation_status":
                 if orchestrator is None:
                     try:
@@ -1364,7 +1412,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 last_responses[key] = payload
                 await _send_or_disconnect(websocket, payload)
             elif msg_type == "request_risk_rules":
-                manager = _risk_manager()
                 key = "risk_rules"
                 force = bool(message.get("force"))
                 if not _allow_request(request_tracker, key, force=force):
@@ -1385,71 +1432,45 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
-                if manager is None:
-                    snapshot = _load_risk_rules_snapshot()
-                    if snapshot is None:
-                        await websocket.send_text(
-                            json.dumps(
-                                {
-                                    "type": "risk_rules",
-                                    "success": False,
-                                    "error": "Risk rules unavailable",
-                                }
-                            )
-                        )
-                        continue
+                try:
+                    service_response = await _RISK_CLIENT.fetch_rules()
+                except ServiceUnavailableError as exc:
+                    logger.debug(f"Risk service unavailable: {exc}")
+                    service_response = None
+                except ServiceClientError as exc:
+                    logger.warning(f"Risk service error: {exc}")
+                    service_response = None
 
-                    payload = {
-                        "type": "risk_rules",
-                        "success": True,
-                        "rules": snapshot,
-                        "source": "database",
-                    }
+                rules_payload: Any = None
+                source = "service"
+
+                if isinstance(service_response, Mapping):
+                    rules_payload = service_response.get("rules", service_response.get("data"))
+                    if rules_payload is None:
+                        rules_payload = service_response
+                elif isinstance(service_response, list):
+                    rules_payload = service_response
+
+                if rules_payload is None:
+                    cached_snapshot = await _load_cached_risk_rules()
+                    if cached_snapshot is not None:
+                        rules_payload = cached_snapshot.get("rules") or cached_snapshot.get("data")
+                        source = cached_snapshot.get("source", "redis") or "redis"
+
+                if rules_payload is None:
+                    payload = _service_unavailable_payload("risk_rules")
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
                     continue
 
-                try:
-                    loop = asyncio.get_event_loop()
-                    rules = await asyncio.wait_for(
-                        loop.run_in_executor(None, manager.get_risk_rules),
-                        timeout=5.0,
-                    )
-                    serialisable = {}
-                    for symbol, rule in (rules or {}).items():
-                        serialisable[symbol] = {
-                            "symbol": getattr(rule, "symbol", symbol),
-                            "stop_loss_price": getattr(rule, "stop_loss_price", None),
-                            "take_profit_price": getattr(rule, "take_profit_price", None),
-                            "max_loss_percent": getattr(rule, "max_loss_percent", None),
-                            "max_time_span": getattr(rule, "max_time_span", None),
-                            "enabled": getattr(rule, "enabled", False),
-                            "created_at": getattr(rule, "created_at", None).isoformat()
-                            if getattr(rule, "created_at", None)
-                            else None,
-                            "rule_type": getattr(rule, "rule_type", "fixed"),
-                            "auto_trailing": getattr(rule, "auto_trailing", False),
-                            "atr_params": getattr(rule, "atr_params", {}) or {},
-                        }
-                    payload = {
-                        "type": "risk_rules",
-                        "success": True,
-                        "rules": serialisable,
-                        "source": "manager",
-                    }
-                    last_responses[key] = payload
-                    await websocket.send_text(json.dumps(payload))
-                except Exception as exc:
-                    logger.warning(f"Failed to stream risk rules: {exc}")
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "type": "risk_rules",
-                                "success": False,
-                                "error": str(exc),
-                            }
-                        )
-                    )
+                payload = {
+                    "type": "risk_rules",
+                    "success": True,
+                    "rules": rules_payload,
+                    "source": source,
+                }
+                last_responses[key] = payload
+                await websocket.send_text(json.dumps(payload))
             elif msg_type == "request_sizing_history":
                 try:
                     limit = int(message.get("limit", 50))
@@ -1520,18 +1541,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         },
                     )
             elif msg_type == "request_strategies":
-                manager = _strategy_manager()
-                if manager is None:
-                    await _send_or_disconnect(
-                        websocket,
-                        {
-                            "type": "strategies_snapshot",
-                            "success": False,
-                            "error": "Strategy manager unavailable",
-                        },
-                    )
-                    continue
-
                 key = "strategies_snapshot"
                 force = bool(message.get("force"))
                 if not _allow_request(request_tracker, key, force=force):
@@ -1552,44 +1561,35 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    loop = asyncio.get_event_loop()
-                    strategies = await asyncio.wait_for(
-                        loop.run_in_executor(None, manager.get_strategies),
-                        timeout=6.0,
-                    )
-                    payload = {
-                        "type": "strategies_snapshot",
-                        "success": True,
-                        "strategies": strategies or [],
-                        "source": "websocket",
-                    }
+                    response = await _STRATEGY_CLIENT.list_strategies()
+                except ServiceUnavailableError as exc:
+                    logger.debug(f"Strategy service unavailable: {exc}")
+                    response = None
+                except ServiceClientError as exc:
+                    logger.warning(f"Strategy service error: {exc}")
+                    response = None
+
+                strategies: Any = []
+                if isinstance(response, Mapping):
+                    strategies = response.get("strategies") or response.get("data") or []
+                elif isinstance(response, list):
+                    strategies = response
+
+                if not strategies:
+                    payload = _service_unavailable_payload("strategies_snapshot")
                     last_responses[key] = payload
                     await _send_or_disconnect(websocket, payload)
-                except WebSocketDisconnect:
-                    raise
-                except Exception as exc:
-                    logger.warning(f"Failed to stream strategies: {exc}")
-                    await _send_or_disconnect(
-                        websocket,
-                        {
-                            "type": "strategies_snapshot",
-                            "success": False,
-                            "error": str(exc),
-                        },
-                    )
-            elif msg_type == "request_strategy_status":
-                manager = _strategy_manager()
-                if manager is None:
-                    await _send_or_disconnect(
-                        websocket,
-                        {
-                            "type": "strategy_status",
-                            "success": False,
-                            "error": "Strategy manager unavailable",
-                        },
-                    )
                     continue
 
+                payload = {
+                    "type": "strategies_snapshot",
+                    "success": True,
+                    "strategies": strategies or [],
+                    "source": "service",
+                }
+                last_responses[key] = payload
+                await _send_or_disconnect(websocket, payload)
+            elif msg_type == "request_strategy_status":
                 name = (message.get("name") or "").strip()
                 if not name:
                     await _send_or_disconnect(
@@ -1623,35 +1623,35 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    loop = asyncio.get_event_loop()
-                    status = await asyncio.wait_for(
-                        loop.run_in_executor(None, manager.get_internal_strategy_status, name),
-                        timeout=5.0,
-                    )
-                    if status is None:
-                        raise ValueError("Strategy status unavailable")
-                    payload = {
-                        "type": "strategy_status",
-                        "success": True,
-                        "name": name,
-                        "status": status,
-                        "source": "websocket",
-                    }
+                    response = await _STRATEGY_CLIENT.fetch_strategy(name)
+                except ServiceUnavailableError as exc:
+                    logger.debug(f"Strategy service unavailable for {name}: {exc}")
+                    response = None
+                except ServiceClientError as exc:
+                    logger.warning(f"Strategy service error for {name}: {exc}")
+                    response = None
+
+                status_payload: Any = None
+                if isinstance(response, Mapping):
+                    status_payload = response.get("status") or response.get("data")
+                if status_payload is None and isinstance(response, Mapping):
+                    status_payload = response
+
+                if status_payload is None:
+                    payload = _service_unavailable_payload("strategy_status", name=name)
                     last_responses[key] = payload
                     await _send_or_disconnect(websocket, payload)
-                except WebSocketDisconnect:
-                    raise
-                except Exception as exc:
-                    logger.warning(f"Failed to fetch strategy status for {name}: {exc}")
-                    await _send_or_disconnect(
-                        websocket,
-                        {
-                            "type": "strategy_status",
-                            "success": False,
-                            "name": name,
-                            "error": str(exc),
-                        },
-                    )
+                    continue
+
+                payload = {
+                    "type": "strategy_status",
+                    "success": True,
+                    "name": name,
+                    "status": status_payload,
+                    "source": "service",
+                }
+                last_responses[key] = payload
+                await _send_or_disconnect(websocket, payload)
             elif msg_type == "request_strategy_performance":
                 name = (message.get("name") or "").strip()
                 if not name:
@@ -1661,19 +1661,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             "type": "strategy_performance",
                             "success": False,
                             "error": "Strategy name is required",
-                        },
-                    )
-                    continue
-
-                manager = _strategy_manager()
-                if manager is None:
-                    await _send_or_disconnect(
-                        websocket,
-                        {
-                            "type": "strategy_performance",
-                            "success": False,
-                            "name": name,
-                            "error": "Strategy manager unavailable",
                         },
                     )
                     continue
@@ -1728,6 +1715,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     cache_stats = await cache_get_strategy_stats(name)
                 except Exception:
                     cache_stats = {}
+                metrics_source = None
                 if cache_stats and not cache_stats.get("stale"):
                     try:
                         metrics = await cache_compute_performance(
@@ -1741,6 +1729,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             "metrics": metrics,
                             "from_cache": True,
                         }
+                        metrics_source = "cache"
                         last_responses[key] = payload
                         await _send_or_disconnect(websocket, payload)
                         continue
@@ -1749,41 +1738,46 @@ async def websocket_endpoint(websocket: WebSocket):
                             f"Cache performance fetch failed for {name}: {exc}"
                         )
 
-                loop = asyncio.get_event_loop()
                 try:
-                    metrics = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None,
-                            lambda: manager.get_strategy_performance(
-                                name,
-                                start_date=start_date,
-                                end_date=end_date,
-                            ),
-                        ),
-                        timeout=6.0,
+                    response = await _STRATEGY_CLIENT.fetch_strategy(name)
+                except ServiceUnavailableError as exc:
+                    logger.debug(f"Strategy service unavailable for {name}: {exc}")
+                    response = None
+                except ServiceClientError as exc:
+                    logger.warning(f"Strategy service error for {name}: {exc}")
+                    response = None
+
+                metrics = None
+                if isinstance(response, Mapping):
+                    metrics = response.get("performance") or response.get("metrics")
+                    if metrics is None:
+                        strategy_payload = response.get("strategy")
+                        if isinstance(strategy_payload, Mapping):
+                            metrics = strategy_payload.get("performance") or strategy_payload.get("metrics")
+                    if metrics is not None and metrics_source is None:
+                        metrics_source = response.get("source", "service") or "service"
+
+                if metrics is None:
+                    payload = _service_unavailable_payload(
+                        "strategy_performance",
+                        name=name,
+                        range=range_value,
                     )
-                    payload = {
-                        "type": "strategy_performance",
-                        "success": True,
-                        "name": name,
-                        "range": range_value,
-                        "metrics": metrics,
-                    }
                     last_responses[key] = payload
                     await _send_or_disconnect(websocket, payload)
-                except WebSocketDisconnect:
-                    raise
-                except Exception as exc:
-                    logger.warning(f"Failed to fetch strategy performance: {exc}")
-                    await _send_or_disconnect(
-                        websocket,
-                        {
-                            "type": "strategy_performance",
-                            "success": False,
-                            "name": name,
-                            "error": str(exc),
-                        },
-                    )
+                    continue
+
+                payload = {
+                    "type": "strategy_performance",
+                    "success": True,
+                    "name": name,
+                    "range": range_value,
+                    "metrics": metrics,
+                }
+                if metrics_source:
+                    payload["source"] = metrics_source
+                last_responses[key] = payload
+                await _send_or_disconnect(websocket, payload)
     except WebSocketDisconnect:
         for task in realtime_tasks.values():
             task.cancel()
