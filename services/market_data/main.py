@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -481,13 +481,6 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
     app = FastAPI(title="Market Data Service", lifespan=lifespan)
     app.state.market_runtime = runtime
 
-    @app.get("/market/{symbol}")
-    async def get_market(symbol: str) -> JSONResponse:
-        snapshot = runtime.get_snapshot(symbol)
-        if snapshot is None:
-            raise HTTPException(status_code=404, detail="Symbol not found")
-        return JSONResponse(snapshot)
-
     @app.websocket("/ws/market")
     async def websocket_market(websocket: WebSocket) -> None:
         await runtime._ws_manager.connect(
@@ -502,8 +495,19 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
         finally:
             await runtime._ws_manager.disconnect(websocket)
 
-    @app.post("/chart_data")
-    async def chart_data(query: ChartDataQuery) -> JSONResponse:
+    async def _ensure_redis(logger: Any) -> Any:
+        redis_client = runtime._redis
+        if redis_client is not None:
+            return redis_client
+        try:
+            redis_client = await runtime.redis_factory()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.exception("Failed to acquire Redis client for chart data", exc_info=True)
+            raise HTTPException(status_code=503, detail="Market data cache unavailable") from exc
+        runtime._redis = redis_client
+        return redis_client
+
+    async def _load_series(query: ChartDataQuery, *, allow_empty: bool) -> dict[str, Any]:
         logger = _get_logger()
         bar_key = query.bar_size.strip().lower()
         interval = _BAR_SIZE_TO_INTERVAL.get(bar_key)
@@ -513,14 +517,7 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
 
         duration_minutes = _parse_duration_to_minutes(query.duration)
 
-        redis_client = runtime._redis
-        if redis_client is None:
-            try:
-                redis_client = await runtime.redis_factory()
-            except Exception as exc:  # pragma: no cover - defensive guard
-                logger.exception("Failed to acquire Redis client for chart data", exc_info=True)
-                raise HTTPException(status_code=503, detail="Market data cache unavailable") from exc
-            runtime._redis = redis_client
+        redis_client = await _ensure_redis(logger)
 
         limit: int | None = None
         if duration_minutes > 0:
@@ -559,6 +556,16 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
 
         candles = _filter_candles_by_duration(candles, duration_minutes)
         if not candles:
+            if allow_empty:
+                return {
+                    "candles": [],
+                    "interval": interval,
+                    "duration_minutes": duration_minutes,
+                    "symbol": query.symbol,
+                    "duration": query.duration,
+                    "bar_size": query.bar_size,
+                    "exchange": query.exchange,
+                }
             logger.info(
                 "Chart data not found for %s interval=%s duration=%s", query.symbol, interval, duration_minutes
             )
@@ -566,17 +573,125 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
 
         payload = _format_candles_for_response(candles)
         if not payload:
+            if allow_empty:
+                return {
+                    "candles": [],
+                    "interval": interval,
+                    "duration_minutes": duration_minutes,
+                    "symbol": query.symbol,
+                    "duration": query.duration,
+                    "bar_size": query.bar_size,
+                    "exchange": query.exchange,
+                }
             logger.warning("No valid candles after formatting for %s interval=%s", query.symbol, interval)
             raise HTTPException(status_code=404, detail="No chart data available")
 
-        response_payload = {
-            "success": True,
-            "data": payload,
+        return {
+            "candles": payload,
+            "interval": interval,
+            "duration_minutes": duration_minutes,
             "symbol": query.symbol,
             "duration": query.duration,
             "bar_size": query.bar_size,
+            "exchange": query.exchange,
+        }
+
+    @app.get("/market/current_price")
+    async def current_price(symbol: str = Query(..., description="Ticker symbol")) -> JSONResponse:
+        resolved_symbol = (symbol or "").strip().upper()
+        if not resolved_symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+
+        snapshot = runtime.get_snapshot(resolved_symbol)
+        if snapshot is None:
+            timestamp = to_local_iso(now_local())
+            return JSONResponse(
+                {
+                    "success": False,
+                    "symbol": resolved_symbol,
+                    "price": None,
+                    "timestamp": timestamp,
+                    "source": "market_data_service",
+                    "error": "No market data available",
+                    "data": None,
+                }
+            )
+
+        price_component = snapshot.get("price")
+        raw_timestamp: Any = snapshot.get("updated_at")
+        price_value: Any = None
+
+        if isinstance(price_component, Mapping):
+            price_value = price_component.get("last")
+            raw_timestamp = price_component.get("timestamp") or raw_timestamp
+        elif price_component is not None:
+            price_value = price_component
+
+        parsed_timestamp = _parse_timestamp(raw_timestamp) if raw_timestamp else None
+        timestamp = to_local_iso(parsed_timestamp) if parsed_timestamp else to_local_iso(now_local())
+
+        numeric_price: float | None
+        try:
+            numeric_price = float(price_value) if price_value is not None else None
+        except (TypeError, ValueError):
+            numeric_price = None
+
+        success = numeric_price is not None
+        response_payload: dict[str, Any] = {
+            "success": success,
+            "symbol": resolved_symbol,
+            "price": numeric_price,
+            "timestamp": timestamp,
+            "source": "market_data_service",
+            "data": price_component if isinstance(price_component, Mapping) else {"value": price_component},
+        }
+
+        if not success:
+            response_payload["error"] = "No market data available"
+
+        return JSONResponse(response_payload)
+
+    @app.post("/market/historical")
+    async def market_historical(query: ChartDataQuery) -> JSONResponse:
+        result = await _load_series(query, allow_empty=True)
+        candles = result.get("candles", [])
+        success = bool(candles)
+        response_payload = {
+            "success": success,
+            "data": candles,
+            "symbol": result.get("symbol", query.symbol),
+            "duration": result.get("duration", query.duration),
+            "bar_size": result.get("bar_size", query.bar_size),
+            "rows": len(candles),
+            "source": "market_data_service",
+            "metadata": {
+                "interval": result.get("interval"),
+                "duration_minutes": result.get("duration_minutes"),
+                "exchange": result.get("exchange"),
+            },
+        }
+        if not success:
+            response_payload["error"] = "No chart data available"
+        return JSONResponse(response_payload)
+
+    @app.post("/chart_data")
+    async def chart_data(query: ChartDataQuery) -> JSONResponse:
+        result = await _load_series(query, allow_empty=False)
+        response_payload = {
+            "success": True,
+            "data": result["candles"],
+            "symbol": result["symbol"],
+            "duration": result["duration"],
+            "bar_size": result["bar_size"],
         }
         return JSONResponse(response_payload)
+
+    @app.get("/market/{symbol}")
+    async def get_market(symbol: str) -> JSONResponse:
+        snapshot = runtime.get_snapshot(symbol)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        return JSONResponse(snapshot)
 
     return app
 
