@@ -9,6 +9,7 @@ from loguru import logger
 
 from src.models import OrderRequest
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
+from src.utils import parse_local_datetime
 
 from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
 from .service_clients import (
@@ -327,21 +328,47 @@ async def list_orders(
 
     offset = (page - 1) * limit
 
+    start_date_iso: Optional[str] = None
+    if isinstance(start_date, str):
+        trimmed_start = start_date.strip()
+        if trimmed_start:
+            parsed = parse_local_datetime(trimmed_start)
+            if parsed is not None:
+                start_date_iso = parsed.isoformat()
+            else:
+                start_date_iso = trimmed_start
+
     payload = await _call_orders_service(
         client.list_orders,
         limit=limit,
         offset=offset,
-        start_date=start_date,
+        start_date=start_date_iso,
     )
 
     if not isinstance(payload, Mapping):
         return {"success": True, "orders": payload}
 
     response = dict(payload)
+    meta_payload = response.get("meta")
+    if isinstance(meta_payload, Mapping):
+        response["meta"] = dict(meta_payload)
+
+    effective_start = response.get("start_date")
+    if not effective_start and start_date_iso:
+        effective_start = start_date_iso
+    if effective_start:
+        response["start_date"] = effective_start
+        if isinstance(response.get("meta"), dict):
+            response["meta"].setdefault("start_date", effective_start)
+    elif isinstance(start_date, str) and start_date.strip():
+        trimmed_start = start_date.strip()
+        response.setdefault("start_date", trimmed_start)
+        if isinstance(response.get("meta"), dict):
+            response["meta"].setdefault("start_date", trimmed_start)
+
     response.setdefault("success", True)
     response.setdefault("limit", limit)
     response.setdefault("page", page)
-    response.setdefault("start_date", start_date)
     return response
 
 

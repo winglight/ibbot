@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, Mapping
 
+from zoneinfo import ZoneInfo
+
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 
@@ -439,11 +441,43 @@ class OrdersRuntime:
         await self._publish_health()
         return command_id
 
-    async def list_orders(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    async def list_orders(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        start_date: datetime | str | None = None,
+        tz: str | None = None,
+    ) -> dict[str, Any]:
         if limit < 0:
             limit = 0
         if offset < 0:
             offset = 0
+
+        start_dt: datetime | None
+        if isinstance(start_date, datetime):
+            start_dt = start_date
+        elif isinstance(start_date, str):
+            start_dt = _parse_datetime(start_date)
+        else:
+            start_dt = None
+
+        tzinfo: ZoneInfo | None = None
+        if tz:
+            try:
+                tzinfo = ZoneInfo(tz)
+            except Exception:
+                tzinfo = None
+
+        if start_dt is not None:
+            if tzinfo is not None:
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=tzinfo)
+                else:
+                    start_dt = start_dt.astimezone(tzinfo)
+            elif start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+
         async with self._lock:
             combined: list[dict[str, Any]] = []
             combined.extend(self._active_orders.values())
@@ -453,6 +487,47 @@ class OrdersRuntime:
                 key=lambda item: item.get("updated_at") or item.get("requested_at") or "",
                 reverse=True,
             )
+
+            if start_dt is not None:
+                threshold = start_dt
+                filtered_orders: list[dict[str, Any]] = []
+
+                def _record_timestamp(record: Mapping[str, Any]) -> datetime | None:
+                    timestamp: datetime | None = None
+                    for key in (
+                        "updated_at",
+                        "submitted_at",
+                        "requested_at",
+                        "completed_at",
+                        "created_at",
+                        "timestamp",
+                    ):
+                        candidate = record.get(key)
+                        parsed = _parse_datetime(candidate)
+                        if parsed is None and isinstance(candidate, str):
+                            try:
+                                parsed = datetime.fromisoformat(candidate)
+                            except Exception:
+                                continue
+                        if parsed is None:
+                            continue
+                        if parsed.tzinfo is None:
+                            if threshold.tzinfo is not None:
+                                parsed = parsed.replace(tzinfo=threshold.tzinfo)
+                            else:
+                                parsed = parsed.replace(tzinfo=timezone.utc)
+                        elif threshold.tzinfo is not None:
+                            parsed = parsed.astimezone(threshold.tzinfo)
+                        timestamp = parsed
+                        break
+                    return timestamp
+
+                for order in ordered:
+                    order_timestamp = _record_timestamp(order)
+                    if order_timestamp is None or order_timestamp >= threshold:
+                        filtered_orders.append(order)
+                ordered = filtered_orders
+
             total = len(ordered)
             if limit:
                 sliced = ordered[offset : offset + limit]
@@ -461,6 +536,7 @@ class OrdersRuntime:
             updated_at = self._last_updated_at
             last_event_id = self._last_message_id or ""
             page = offset // limit if limit else 0
+        start_iso = _serialise_datetime(start_dt) if start_dt is not None else None
         return {
             "orders": sliced,
             "total": total,
@@ -469,6 +545,8 @@ class OrdersRuntime:
             "page": page,
             "updated_at": _serialise_datetime(updated_at),
             "last_event_id": last_event_id,
+            "start_date": start_iso,
+            "start_date_timezone": tz if tz else None,
         }
 
     async def get_order(self, order_id: str) -> dict[str, Any]:
@@ -1130,9 +1208,16 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
     async def list_orders(
         limit: int = 50,
         offset: int = 0,
+        start_date: str | None = None,
+        start_date_tz: str | None = None,
         runtime: OrdersRuntime = Depends(get_runtime),
     ) -> Mapping[str, Any]:
-        return await runtime.list_orders(limit=limit, offset=offset)
+        return await runtime.list_orders(
+            limit=limit,
+            offset=offset,
+            start_date=start_date,
+            tz=start_date_tz,
+        )
 
     @app.get("/orders/{order_id}", status_code=status.HTTP_200_OK)
     async def get_order(

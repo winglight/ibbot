@@ -92,7 +92,10 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
             start_date: str | None = None,
         ) -> dict[str, Any]:
             account_client.orders_calls.append((limit, offset, start_date))
-            return {"orders": [{"order_id": "1", "symbol": "ES"}], "total": 1}
+            payload: dict[str, Any] = {"orders": [{"order_id": "1", "symbol": "ES"}], "total": 1}
+            if start_date:
+                payload["start_date"] = start_date
+            return payload
 
     orders_client = StubOrdersClient()
     monkeypatch.setattr(websocket_module, "_ORDERS_CLIENT", orders_client)
