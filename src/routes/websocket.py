@@ -552,6 +552,54 @@ async def _realtime_price_sender(
 async def websocket_endpoint(websocket: WebSocket):
     await _websocket_manager().connect(websocket)
 
+    account_service_outage_logged = False
+    account_service_readiness: Optional[bool] = None
+
+    def _coerce_readiness(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if not text:
+            return None
+        if text in {"1", "true", "yes", "ready", "online", "healthy"}:
+            return True
+        if text in {"0", "false", "no", "offline", "unready", "down"}:
+            return False
+        return None
+
+    def _update_account_service_readiness(payload: Optional[Mapping[str, Any]]) -> None:
+        nonlocal account_service_readiness
+
+        readiness_value: Optional[bool] = None
+        if isinstance(payload, Mapping):
+            for key in (
+                "account_service_ready",
+                "account_service_online",
+                "account_service_available",
+            ):
+                if key not in payload:
+                    continue
+                readiness_value = _coerce_readiness(payload.get(key))
+                if readiness_value is not None:
+                    break
+
+        account_service_readiness = readiness_value
+
+    def _log_account_service_outage(context: str) -> None:
+        nonlocal account_service_outage_logged
+
+        if account_service_outage_logged:
+            return
+
+        logger.warning(
+            "Account service unavailable during %s (account_service_ready=%s)",
+            context,
+            account_service_readiness,
+        )
+        account_service_outage_logged = True
+
     async def _resolve_connection_context(
         payload: Optional[Mapping[str, Any]] = None,
         *,
@@ -620,6 +668,8 @@ async def websocket_endpoint(websocket: WebSocket):
         health_error,
         error_code_value,
     ) = await _resolve_connection_context(refresh=True)
+
+    _update_account_service_readiness(health_payload)
 
     # 新连接建立后，立即向该客户端单播当前连接状态
     try:
@@ -722,9 +772,16 @@ async def websocket_endpoint(websocket: WebSocket):
         initial_limit = 10
         orders_result = await _fetch_orders(limit=initial_limit, offset=0)
         if orders_result is None:
-            raise RuntimeError("Orders unavailable")
-        orders, total = orders_result
-        payload = _orders_payload(orders, limit=initial_limit, page=1, total=total)
+            _log_account_service_outage("initial orders snapshot")
+            payload = _service_unavailable_payload(
+                "orders_snapshot",
+                meta={"limit": 10, "page": 1},
+            )
+        else:
+            orders, total = orders_result
+            payload = _orders_payload(
+                orders, limit=initial_limit, page=1, total=total
+            )
         await websocket.send_text(json.dumps(payload))
     except Exception as e:
         logger.warning(f"Failed to send initial orders snapshot: {e}")
@@ -849,6 +906,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     health_error,
                     error_code_value,
                 ) = await _resolve_connection_context(health_payload, refresh=True)
+
+                _update_account_service_readiness(health_payload)
 
                 payload = {
                     "type": "connection_status",
@@ -977,15 +1036,24 @@ async def websocket_endpoint(websocket: WebSocket):
                         start_date=start_dt.isoformat() if start_dt else None,
                     )
                     if result is None:
-                        raise RuntimeError("Orders unavailable")
-                    orders, total = result
-                    payload = _orders_payload(
-                        orders,
-                        limit=limit,
-                        start_date=start_date_raw,
-                        page=page,
-                        total=total,
-                    )
+                        _log_account_service_outage("orders snapshot request")
+                        payload = _service_unavailable_payload(
+                            "orders_snapshot",
+                            meta={
+                                "limit": limit,
+                                "page": page,
+                                "start_date": start_date_raw,
+                            },
+                        )
+                    else:
+                        orders, total = result
+                        payload = _orders_payload(
+                            orders,
+                            limit=limit,
+                            start_date=start_date_raw,
+                            page=page,
+                            total=total,
+                        )
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
                 except Exception as exc:
@@ -1134,6 +1202,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     health_error,
                     error_code_value,
                 ) = await _resolve_connection_context(health_payload, refresh=True)
+
+                _update_account_service_readiness(health_payload)
 
                 if health_payload is None:
                     payload = _service_unavailable_payload(

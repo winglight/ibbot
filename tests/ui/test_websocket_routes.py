@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 
 from src.routes import websocket as websocket_module
+from src.routes.service_clients import ServiceUnavailableError
 
 
 @pytest.fixture()
@@ -143,6 +144,42 @@ def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any]
             assert risk_payload["type"] == "risk_rules"
             assert risk_payload["success"] is True
             assert isinstance(risk_payload["rules"], list)
+
+
+def test_websocket_orders_service_unavailable(
+    websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, account_client = websocket_app
+
+    async def failing_fetch_orders(
+        *, limit: int, offset: int, start_date: str | None = None
+    ) -> dict[str, Any]:
+        account_client.orders_calls.append((limit, offset, start_date))
+        raise ServiceUnavailableError("account", "offline")
+
+    monkeypatch.setattr(account_client, "fetch_orders", failing_fetch_orders)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            messages = _drain_initial_messages(ws, 4)
+            types = [msg["type"] for msg in messages]
+            assert types == [
+                "connection_status",
+                "account_update",
+                "orders_snapshot",
+                "position_update",
+            ]
+
+            orders_payload = messages[2]
+            assert orders_payload["success"] is False
+            assert (
+                orders_payload["error"]
+                == websocket_module.SERVICE_UNAVAILABLE_MESSAGE
+            )
+            assert orders_payload.get("meta", {}).get("limit") == 10
+
+            ws.send_json({"type": "ping"})
+            assert ws.receive_json() == {"type": "pong"}
 
 
 def test_websocket_strategy_requests(websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch) -> None:
