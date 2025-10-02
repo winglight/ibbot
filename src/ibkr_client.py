@@ -910,7 +910,195 @@ class IBKRClient:
             order_id,
         )
         return trade
-    
+
+    def _normalise_trade_result(
+        self,
+        trade: Any,
+        *,
+        symbol: str,
+        action: str,
+        quantity: float,
+        order_type: str,
+        limit_price: Optional[float],
+        exchange: Optional[str],
+        sec_type: Optional[str],
+    ) -> Dict[str, Any]:
+        """Convert the raw ``trade`` object returned by IBKR into a JSON-friendly mapping."""
+
+        def _get_attr(obj: Any, attr: str, default: Any = None) -> Any:
+            try:
+                return getattr(obj, attr)
+            except Exception:
+                return default
+
+        order = _get_attr(trade, "order")
+        order_status = _get_attr(trade, "orderStatus")
+        contract = _get_attr(trade, "contract")
+
+        raw_order_id = _get_attr(order, "orderId")
+        if raw_order_id in (None, ""):
+            raw_order_id = _get_attr(order, "permId")
+        if raw_order_id in (None, ""):
+            raw_order_id = _get_attr(order, "id")
+
+        raw_status = _get_attr(order_status, "status")
+        if not raw_status:
+            raw_status = "Submitted"
+
+        contract_symbol = _get_attr(contract, "localSymbol") or _get_attr(contract, "symbol")
+        contract_exchange = _get_attr(contract, "exchange")
+        contract_sec_type = _get_attr(contract, "secType")
+
+        order_type_value = _get_attr(order, "orderType") or order_type
+        if order_type_value:
+            order_type_value = str(order_type_value).upper()
+
+        limit_price_value = _get_attr(order, "lmtPrice")
+        if limit_price_value is None:
+            limit_price_value = limit_price
+        limit_price_value = self._sanitize_float(limit_price_value)
+
+        avg_fill_price = self._sanitize_float(_get_attr(order_status, "avgFillPrice"))
+        filled_quantity = self._sanitize_float(_get_attr(order_status, "filled"))
+        remaining_quantity = self._sanitize_float(_get_attr(order_status, "remaining"))
+        requested_quantity = self._sanitize_float(_get_attr(order, "totalQuantity"))
+        if requested_quantity is None:
+            requested_quantity = self._sanitize_float(quantity)
+
+        submitted_at: Optional[str] = None
+        log_entries = _get_attr(trade, "log")
+        if log_entries:
+            first_entry = log_entries[0]
+            timestamp = _get_attr(first_entry, "time")
+            if timestamp is not None:
+                try:
+                    submitted_at = to_local_time(timestamp)
+                except Exception:
+                    submitted_at = str(timestamp)
+
+        result: Dict[str, Any] = {
+            "order_id": str(raw_order_id) if raw_order_id not in (None, "") else None,
+            "status": str(raw_status),
+            "symbol": contract_symbol or symbol,
+            "exchange": contract_exchange or exchange,
+            "sec_type": (contract_sec_type or sec_type or "").upper() or None,
+            "action": _get_attr(order, "action") or action,
+            "order_type": order_type_value,
+            "limit_price": limit_price_value,
+            "avg_fill_price": avg_fill_price,
+            "quantity": requested_quantity,
+            "filled": filled_quantity,
+            "remaining": remaining_quantity,
+        }
+
+        if submitted_at is not None:
+            result["submitted_at"] = submitted_at
+
+        return result
+
+    async def place_order(self, **kwargs: Any) -> Dict[str, Any]:
+        """High-level entry point for market and limit orders.
+
+        Parameters mirror :class:`services.orders.main.OrderSubmission` so that
+        callers can forward validated payloads directly to the client.
+        """
+
+        symbol = str(kwargs.get("symbol") or "").strip()
+        if not symbol:
+            raise ValueError("place_order requires 'symbol'")
+
+        raw_quantity = kwargs.get("quantity")
+        if raw_quantity is None:
+            raw_quantity = kwargs.get("total_quantity")
+        quantity_value = self._sanitize_float(raw_quantity)
+        if quantity_value is None:
+            raise ValueError("place_order requires numeric 'quantity'")
+        if quantity_value <= 0:
+            raise ValueError("place_order requires a positive quantity")
+        if isinstance(quantity_value, float) and not quantity_value.is_integer():
+            raise ValueError("place_order requires an integer quantity")
+        quantity_int = int(round(quantity_value))
+
+        action = str(kwargs.get("action") or "").strip().upper()
+        if not action:
+            raise ValueError("place_order requires 'action'")
+
+        order_type_raw = kwargs.get("order_type") or kwargs.get("type") or "MARKET"
+        order_type_normalized = str(order_type_raw).strip().upper()
+        if order_type_normalized in {"MARKET", "MKT"}:
+            canonical_order_type = "MARKET"
+        elif order_type_normalized in {"LIMIT", "LMT"}:
+            canonical_order_type = "LIMIT"
+        else:
+            raise ValueError(f"Unsupported order_type '{order_type_raw}'")
+
+        limit_price = kwargs.get("limit_price")
+        if limit_price is None:
+            for key in ("lmt_price", "price", "limitPrice"):
+                if key in kwargs and kwargs[key] is not None:
+                    limit_price = kwargs[key]
+                    break
+        limit_price_value = self._sanitize_float(limit_price)
+        if canonical_order_type == "LIMIT" and limit_price_value is None:
+            raise ValueError("limit orders require 'limit_price'")
+
+        exchange = str(kwargs.get("exchange") or "SMART").strip() or "SMART"
+        sec_type = kwargs.get("sec_type") or kwargs.get("security_type")
+        if not sec_type and symbol.upper() in INDEX_FUTURE_SYMBOLS:
+            sec_type = "FUT"
+        sec_type = str(sec_type or "STK").strip().upper()
+
+        try:
+            if is_trading_disabled():
+                trade = self._simulate_trade(
+                    order_type=canonical_order_type,
+                    symbol=symbol,
+                    quantity=quantity_int,
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type,
+                    price=limit_price_value,
+                )
+            elif canonical_order_type == "MARKET":
+                trade = await self.place_market_order(
+                    symbol=symbol,
+                    quantity=quantity_int,
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type,
+                )
+            else:
+                trade = self.place_limit_order(
+                    symbol=symbol,
+                    quantity=quantity_int,
+                    price=limit_price_value,
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type,
+                )
+        except Exception as exc:
+            ibkr_logger.error(
+                "Failed to place {} order for {}: {}",
+                canonical_order_type.lower(),
+                symbol,
+                exc,
+            )
+            raise
+
+        if trade is None:
+            raise RuntimeError("IBKR returned no trade information for order")
+
+        return self._normalise_trade_result(
+            trade,
+            symbol=symbol,
+            action=action,
+            quantity=quantity_value,
+            order_type=canonical_order_type,
+            limit_price=limit_price_value,
+            exchange=exchange,
+            sec_type=sec_type,
+        )
+
     def get_stock_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD') -> Stock:
         """获取股票合约"""
         return Stock(symbol, exchange, currency)
