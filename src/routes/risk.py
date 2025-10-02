@@ -453,13 +453,14 @@ async def get_sizing_history(
     limit: int = 100,
     user: Optional[str] = Depends(get_current_user),
 ) -> Any:
-    params: Dict[str, Any] = {"limit": max(1, min(int(limit or 1), 500))}
-    if symbol:
-        params["symbol"] = symbol
-    if since:
-        params["since"] = since
+    resolved_limit = max(1, min(int(limit or 1), 500))
     return await _call_risk_service(
-        "fetch_sizing_history", lambda client: client.fetch_sizing_history(params)
+        "fetch_sizing_history",
+        lambda client: client.fetch_sizing_history(
+            symbol=symbol,
+            since=since,
+            limit=resolved_limit,
+        ),
     )
 
 

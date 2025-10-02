@@ -65,8 +65,15 @@ class StubRiskServiceClient:
     async def position_sizing(self, payload: Mapping[str, Any]) -> Any:
         return await self._call("position_sizing", dict(payload))
 
-    async def fetch_sizing_history(self, params: Mapping[str, Any]) -> Any:
-        return await self._call("fetch_sizing_history", dict(params))
+    async def fetch_sizing_history(
+        self,
+        *,
+        symbol: str | None = None,
+        since: str | None = None,
+        limit: int | None = None,
+    ) -> Any:
+        payload = {"symbol": symbol, "since": since, "limit": limit}
+        return await self._call("fetch_sizing_history", payload)
 
     async def fetch_config_rules(self) -> Any:
         return await self._call("fetch_config_rules")
