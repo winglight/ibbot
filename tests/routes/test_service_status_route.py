@@ -121,6 +121,15 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     assert feed_entry.get("status") == "running"
     assert (feed_entry.get("payload") or {}).get("price_updates_total") == "12"
 
+    notification_entry = next(
+        (item for item in services if item.get("service") == "notification"),
+        None,
+    )
+    assert notification_entry is not None
+    assert notification_entry.get("port") == "8060"
+    assert notification_entry.get("default_health_key") == "hash:service:health:notification"
+    assert notification_entry.get("health_key") == "hash:service:health:notification"
+
     account_entry = next(
         (item for item in services if item.get("service") == "account"),
         None,

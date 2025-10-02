@@ -92,14 +92,31 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
             start_date: str | None = None,
         ) -> dict[str, Any]:
             account_client.orders_calls.append((limit, offset, start_date))
-            return {"orders": [{"order_id": "1", "symbol": "ES"}], "total": 1}
+            payload: dict[str, Any] = {"orders": [{"order_id": "1", "symbol": "ES"}], "total": 1}
+            if start_date:
+                payload["start_date"] = start_date
+            return payload
 
     orders_client = StubOrdersClient()
     monkeypatch.setattr(websocket_module, "_ORDERS_CLIENT", orders_client)
 
     class StubRiskClient:
         async def fetch_rules(self) -> dict[str, Any]:
-            return {"rules": [{"symbol": "ES", "enabled": True}]}
+            return {
+                "rules": {
+                    "ES": {
+                        "symbol": "ES",
+                        "enabled": True,
+                        "metadata": {
+                            "rule_type": "trailing",
+                            "atr_params": {
+                                "multiplier_sl": 1.6,
+                                "multiplier_tp": 2.4,
+                            },
+                        },
+                    }
+                }
+            }
 
     monkeypatch.setattr(websocket_module, "_RISK_CLIENT", StubRiskClient())
 
@@ -225,7 +242,14 @@ def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any]
             risk_payload = _receive_until_type(ws, "risk_rules")
             assert risk_payload["type"] == "risk_rules"
             assert risk_payload["success"] is True
-            assert isinstance(risk_payload["rules"], list)
+            assert isinstance(risk_payload["rules"], dict)
+            es_rule = risk_payload["rules"]["ES"]
+            assert es_rule["rule_type"] == "trailing"
+            assert es_rule["atr_params"] == {
+                "multiplier_sl": 1.6,
+                "multiplier_tp": 2.4,
+            }
+            assert "rule_type" not in (es_rule.get("metadata") or {})
 
 
 def test_websocket_orders_service_unavailable(
@@ -356,7 +380,16 @@ def test_websocket_broadcasts_risk_rules_updates(
         with client.websocket_connect("/ws") as ws:
             _drain_initial_messages(ws, 4)
             payload = {
-                "rules": {"CL": {"symbol": "CL", "enabled": True}},
+                "rules": {
+                    "CL": {
+                        "symbol": "CL",
+                        "enabled": True,
+                        "metadata": {
+                            "rule_type": "trailing",
+                            "atr_params": {"multiplier_sl": 1.2},
+                        },
+                    }
+                },
                 "updated_at": "2024-01-01T00:00:00+00:00",
                 "source": "test",
             }
@@ -367,5 +400,8 @@ def test_websocket_broadcasts_risk_rules_updates(
                 )
             )
             message = _receive_until_type(ws, "risk_rules")
-            assert message["rules"] == payload["rules"]
-            assert stub_manager.broadcasts[-1]["rules"] == payload["rules"]
+            assert message["rules"]["CL"]["rule_type"] == "trailing"
+            assert message["rules"]["CL"]["atr_params"]["multiplier_sl"] == 1.2
+            assert "rule_type" not in (message["rules"]["CL"].get("metadata") or {})
+            broadcast_rule = stub_manager.broadcasts[-1]["rules"]["CL"]
+            assert broadcast_rule["rule_type"] == "trailing"

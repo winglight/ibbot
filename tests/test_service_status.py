@@ -79,6 +79,11 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
                 "active": "true",
             },
             "hash:service:health:connection_control": None,
+            "hash:service:health:notification": {
+                "healthy": "true",
+                "last_error": "",
+                "last_seen": recent,
+            },
             "hash:service:health:queue": {
                 "status": "running",
                 "total_queue_length": "2",

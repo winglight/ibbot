@@ -19,6 +19,14 @@ from src.ibbot.config import ConfigProvider
 from src.ibbot.influx import write_points
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
+from src.notification_history import (
+    DEFAULT_HISTORY_KEY,
+    DEFAULT_HISTORY_LIMIT,
+    InvalidHistoryLimitError,
+    InvalidHistoryTimestampError,
+    clear_notification_history,
+    fetch_notification_history,
+)
 
 SERVICE_NAME = "notification"
 DEFAULT_STREAMS = ["stream:ib:results", "stream:risk:events", "stream:strategy:events"]
@@ -119,9 +127,13 @@ async def _default_service_factory() -> tuple[NotificationService, CleanupCallba
     batch_size_value = config.get("command_batch_size")
     command_batch_size = int(batch_size_value) if batch_size_value else 10
 
-    history_key = str(config.get("history_key") or "list:notification:history")
+    history_key = str(config.get("history_key") or DEFAULT_HISTORY_KEY)
     history_max_entries_value = config.get("history_max_entries")
-    history_max_entries = int(history_max_entries_value) if history_max_entries_value else 500
+    history_max_entries = (
+        int(history_max_entries_value)
+        if history_max_entries_value
+        else DEFAULT_HISTORY_LIMIT
+    )
 
     service = NotificationService(
         stream_reader=reader,
@@ -161,8 +173,10 @@ def create_app(service_factory: ServiceFactory | None = None) -> FastAPI:
         app.state.redis = redis
         app.state.command_queue = getattr(service, "command_queue", DEFAULT_COMMAND_QUEUE)
         app.state.command_status_prefix = getattr(service, "command_status_prefix", DEFAULT_STATUS_PREFIX)
-        app.state.history_key = getattr(service, "history_key", "list:notification:history")
-        app.state.history_limit = getattr(service, "history_max_entries", 500)
+        app.state.history_key = getattr(service, "history_key", DEFAULT_HISTORY_KEY)
+        app.state.history_limit = getattr(
+            service, "history_max_entries", DEFAULT_HISTORY_LIMIT
+        )
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -202,25 +216,9 @@ def create_app(service_factory: ServiceFactory | None = None) -> FastAPI:
         redis = getattr(app.state, "redis", None)
         if redis is None:
             raise HTTPException(status_code=503, detail="Notification runtime unavailable")
-        history_key = getattr(app.state, "history_key", "list:notification:history")
-        history_limit = getattr(app.state, "history_limit", 500)
+        history_key = getattr(app.state, "history_key", DEFAULT_HISTORY_KEY)
+        history_limit = getattr(app.state, "history_limit", DEFAULT_HISTORY_LIMIT)
         return redis, history_key, history_limit
-
-    def _parse_timestamp(value: str | None) -> datetime | None:
-        if not value:
-            return None
-        candidate = value.strip()
-        if not candidate:
-            return None
-        if candidate.endswith("Z"):
-            candidate = candidate[:-1] + "+00:00"
-        try:
-            parsed = datetime.fromisoformat(candidate)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid timestamp: {value}") from exc
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
 
     def _normalise_channels(request: NotificationDispatchRequest) -> list[str]:
         result: list[str] = []
@@ -314,59 +312,25 @@ def create_app(service_factory: ServiceFactory | None = None) -> FastAPI:
         redis, history_key, history_limit = _get_history_state()
 
         try:
-            limit_value = max(1, int(limit))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="limit must be an integer")
+            payload = await fetch_notification_history(
+                redis,
+                history_key=history_key,
+                history_limit=history_limit,
+                channel=channel,
+                status=status,
+                since=since,
+                limit=limit,
+            )
+        except InvalidHistoryLimitError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except InvalidHistoryTimestampError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        history_cap = max(0, int(history_limit)) if isinstance(history_limit, int) else 0
-        if history_cap:
-            limit_value = min(limit_value, history_cap)
-            fetch_end = max(history_cap - 1, 0)
-        else:
-            fetch_end = max(limit_value * 5 - 1, limit_value - 1)
-
-        raw_entries = await redis.lrange(history_key, 0, fetch_end)
-
-        parsed_since = _parse_timestamp(since)
-        channel_filter = channel.strip().lower() if isinstance(channel, str) and channel.strip() else None
-        status_filter = status.strip().lower() if isinstance(status, str) and status.strip() else None
-
-        history: list[Mapping[str, Any]] = []
-        for raw in raw_entries:
-            if not isinstance(raw, str):
-                continue
-            try:
-                entry = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if channel_filter and str(entry.get("channel", "")).lower() != channel_filter:
-                continue
-            if status_filter and str(entry.get("status", "")).lower() != status_filter:
-                continue
-            if parsed_since:
-                timestamp = entry.get("timestamp")
-                if isinstance(timestamp, str):
-                    ts_value = timestamp.strip()
-                    if ts_value.endswith("Z"):
-                        ts_value = ts_value[:-1] + "+00:00"
-                    try:
-                        entry_time = datetime.fromisoformat(ts_value)
-                    except ValueError:
-                        entry_time = None
-                    if entry_time is not None and entry_time.tzinfo is None:
-                        entry_time = entry_time.replace(tzinfo=timezone.utc)
-                    if entry_time is not None and entry_time.astimezone(timezone.utc) < parsed_since:
-                        continue
-            history.append(entry)
-            if len(history) >= limit_value:
-                break
-
-        return {"success": True, "history": history}
+        return payload
 
     async def _clear_history() -> Mapping[str, Any]:
         redis, history_key, _ = _get_history_state()
-        removed = await redis.delete(history_key)
-        return {"success": True, "cleared": int(removed or 0)}
+        return await clear_notification_history(redis, history_key=history_key)
 
     @app.delete("/notifications/history")
     async def delete_history() -> Mapping[str, Any]:

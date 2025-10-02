@@ -13,6 +13,7 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 
 from services.risk import RiskRuntime
+from services.risk.engine import RiskRule
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
@@ -299,11 +300,15 @@ def create_app(
         stored_rules = await runtime_instance.load_risk_rules()
         rules_payload = stored_rules or {}
         if not rules_payload and cached and isinstance(cached.get("rules"), Mapping):
-            rules_payload = {
-                _normalise_symbol(str(symbol)): dict(value)
-                for symbol, value in cached["rules"].items()
-                if isinstance(value, Mapping)
-            }
+            normalised_rules: dict[str, dict[str, Any]] = {}
+            for symbol, value in cached["rules"].items():
+                if not isinstance(value, Mapping):
+                    continue
+                symbol_norm = _normalise_symbol(str(symbol))
+                payload = dict(value)
+                payload.setdefault("symbol", symbol_norm)
+                normalised_rules[symbol_norm] = RiskRule.normalise_payload(payload)
+            rules_payload = normalised_rules
         if not rules_payload:
             rules_payload = runtime_instance.get_rules_snapshot()
         response: dict[str, Any] = {

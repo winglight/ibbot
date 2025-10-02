@@ -44,6 +44,7 @@ from src.routes.service_clients import (
     ServiceClientError,
     ServiceUnavailableError,
 )
+from services.risk.engine import RiskRule
 from src.ibbot.redis import PubSubListener
 
 router = APIRouter()
@@ -265,7 +266,7 @@ async def _fetch_orders(
     limit: int,
     offset: int,
     start_date: Optional[str] = None,
-) -> Optional[Tuple[List[Dict[str, Any]], Optional[int]]]:
+) -> Optional[Tuple[List[Dict[str, Any]], Optional[int], Dict[str, Any]]]:
     try:
         payload = await _ORDERS_CLIENT.list_orders(
             limit=limit,
@@ -283,6 +284,9 @@ async def _fetch_orders(
 
     orders_list: List[Dict[str, Any]] = []
     total_count: Optional[int] = None
+    metadata: Dict[str, Any] = {}
+    if start_date:
+        metadata["start_date"] = start_date
 
     if isinstance(payload, list):
         orders_list = [dict(item) if isinstance(item, Mapping) else {"raw": item} for item in payload]
@@ -303,11 +307,23 @@ async def _fetch_orders(
             meta = payload.get("meta")
             if isinstance(meta, Mapping):
                 raw_total = meta.get("total") or meta.get("total_count")
+                start_meta = meta.get("start_date")
+                if start_meta:
+                    metadata["start_date"] = start_meta
         try:
             if raw_total is not None:
                 total_count = int(raw_total)
         except (TypeError, ValueError):
             total_count = None
+
+        payload_start = payload.get("start_date")
+        if payload_start:
+            metadata["start_date"] = payload_start
+        for key in ("limit", "offset", "page", "returned"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            metadata[key] = value
 
     if not orders_list and isinstance(payload, Mapping):
         extra_orders = payload.get("orders")
@@ -318,17 +334,9 @@ async def _fetch_orders(
             ]
 
     if not orders_list:
-        return None
+        orders_list = []
 
-    if total_count is None:
-        total_count = payload.get("total") if isinstance(payload, Mapping) else None
-        try:
-            if total_count is not None:
-                total_count = int(total_count)
-        except (TypeError, ValueError):
-            total_count = None
-
-    return orders_list, total_count
+    return orders_list, total_count, metadata
 
 
 def _decode_redis_mapping(raw: Dict[Any, Any]) -> Dict[str, str]:
@@ -381,12 +389,48 @@ async def _read_json_from_redis(key: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _normalise_rules_payload(rules: Any) -> Any:
+    if isinstance(rules, Mapping):
+        normalised: Dict[str, Dict[str, Any]] = {}
+        for symbol, value in rules.items():
+            if isinstance(value, Mapping):
+                payload = dict(value)
+                symbol_raw = str(payload.get("symbol") or symbol)
+                symbol_norm = symbol_raw.strip().upper() or symbol_raw
+                payload.setdefault("symbol", symbol_norm)
+                normalised[symbol_norm] = RiskRule.normalise_payload(payload)
+            else:
+                symbol_raw = str(symbol)
+                symbol_norm = symbol_raw.strip().upper() or symbol_raw
+                normalised[symbol_norm] = {"symbol": symbol_norm, "value": value}
+        return normalised
+    if isinstance(rules, list):
+        normalised_list: List[Any] = []
+        for item in rules:
+            if isinstance(item, Mapping):
+                payload = dict(item)
+                symbol_raw = str(payload.get("symbol") or "")
+                if symbol_raw:
+                    payload["symbol"] = symbol_raw.strip().upper() or symbol_raw
+                normalised_list.append(RiskRule.normalise_payload(payload))
+            else:
+                normalised_list.append(item)
+        return normalised_list
+    return rules
+
+
 async def _load_cached_risk_rules() -> Optional[Dict[str, Any]]:
     payload = await _read_json_from_redis(RISK_RULES_CACHE_KEY)
     if payload is None:
         return None
     payload.setdefault("success", True)
     payload.setdefault("source", payload.get("source", "redis"))
+    rules_payload = payload.get("rules")
+    if rules_payload is not None:
+        normalised_rules = _normalise_rules_payload(rules_payload)
+        payload["rules"] = normalised_rules
+        if isinstance(normalised_rules, Mapping):
+            payload["count"] = len(normalised_rules)
     return payload
 
 
@@ -420,8 +464,13 @@ async def _handle_risk_rules_pubsub(_: str, message: str) -> None:
                 payload.setdefault("count", snapshot.get("count"))
 
     rules_payload = payload.get("rules")
-    if isinstance(rules_payload, Mapping) and "count" not in payload:
-        payload["count"] = len(rules_payload)
+    if rules_payload is not None:
+        normalised_rules = _normalise_rules_payload(rules_payload)
+        payload["rules"] = normalised_rules
+        if isinstance(normalised_rules, Mapping):
+            payload["count"] = len(normalised_rules)
+        elif "count" not in payload and isinstance(rules_payload, Mapping):
+            payload["count"] = len(rules_payload)
 
     payload.setdefault("type", "risk_rules")
     payload.setdefault("success", True)
@@ -506,6 +555,33 @@ def _order_value(order: Any, key: str, default: Any = None) -> Any:
 
 
 def _serialise_order(order: Any) -> Dict[str, Any]:
+    def _first_value(*keys: str) -> Any:
+        for key in keys:
+            value = _order_value(order, key)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value
+        return None
+
+    def _coerce_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return float(value)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return float(text)
+            except ValueError:
+                return None
+        return None
+
     raw_type = (_order_value(order, "order_type", "") or "").upper()
     if raw_type in ("MARKET", "MKT"):
         order_type = "MKT"
@@ -514,13 +590,9 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
     else:
         order_type = raw_type or "MKT"
 
-    price_val = 0.0
-    try:
-        price = _order_value(order, "price")
-        if price is not None:
-            price_val = float(price)
-    except Exception:
-        price_val = 0.0
+    limit_price_val = _coerce_float(_first_value("limit_price", "price"))
+    if limit_price_val is None:
+        limit_price_val = 0.0
 
     trigger_type = None
     try:
@@ -534,20 +606,37 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
     except Exception:
         trigger_type = None
 
-    created_at = _order_value(order, "created_at")
+    created_at = _first_value("submitted_at", "requested_at", "created_at")
     created_iso = None
-    try:
-        created_iso = to_local_iso(created_at)
-    except Exception:
-        if created_at is not None:
+    if isinstance(created_at, str):
+        parsed_created = parse_local_datetime(created_at)
+        if parsed_created is not None:
+            created_iso = parsed_created.isoformat()
+        else:
             try:
-                created_iso = created_at.isoformat()
+                created_iso = to_local_iso(created_at)  # type: ignore[arg-type]
             except Exception:
-                created_iso = None
+                created_iso = created_at
+    else:
+        try:
+            created_iso = to_local_iso(created_at)
+        except Exception:
+            if created_at is not None:
+                try:
+                    created_iso = created_at.isoformat()
+                except Exception:
+                    created_iso = None
 
-    avg_fill_price = _order_value(order, "fill_price")
-    if avg_fill_price is None and order_type == "MKT" and price_val > 0:
-        avg_fill_price = price_val
+    avg_fill_price_val = _coerce_float(_first_value("avg_fill_price", "fill_price"))
+    if avg_fill_price_val is None and order_type == "MKT" and limit_price_val > 0:
+        avg_fill_price_val = limit_price_val
+
+    filled_quantity = _coerce_float(_first_value("filled_quantity", "filled"))
+    remaining_quantity = _coerce_float(_first_value("remaining_quantity", "remaining"))
+    commission_val = _coerce_float(_first_value("commission"))
+
+    order_source_val = _first_value("source", "order_source")
+    strategy_val = _first_value("strategy", "strategy_name")
 
     return {
         "order_id": _order_value(order, "order_id"),
@@ -555,16 +644,31 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
         "action": _order_value(order, "action"),
         "quantity": _order_value(order, "quantity"),
         "order_type": order_type,
-        "limit_price": price_val if order_type == "LMT" and price_val > 0 else None,
-        "avg_fill_price": avg_fill_price,
+        "limit_price":
+            limit_price_val if order_type == "LMT" and limit_price_val > 0 else None,
+        "avg_fill_price": avg_fill_price_val,
         "status": _order_value(order, "status"),
-        "filled": _order_value(order, "quantity", 0) if _order_value(order, "status") == "Filled" else 0,
-        "remaining": 0 if _order_value(order, "status") == "Filled" else _order_value(order, "quantity", 0),
+        "filled":
+            filled_quantity
+            if filled_quantity is not None
+            else (
+                _order_value(order, "quantity", 0)
+                if _order_value(order, "status") == "Filled"
+                else 0
+            ),
+        "remaining":
+            remaining_quantity
+            if remaining_quantity is not None
+            else (
+                0
+                if _order_value(order, "status") == "Filled"
+                else _order_value(order, "quantity", 0)
+            ),
         "submit_time": created_iso,
-        "order_source": _order_value(order, "order_source", "manual"),
-        "strategy_name": _order_value(order, "strategy_name"),
+        "order_source": order_source_val or "manual",
+        "strategy_name": strategy_val,
         "trigger_type": trigger_type,
-        "commission": _order_value(order, "commission"),
+        "commission": commission_val,
         "pnl": _order_value(order, "pnl"),
     }
 
@@ -959,9 +1063,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 meta={"limit": 10, "page": 1},
             )
         else:
-            orders, total = orders_result
+            orders, total, metadata = orders_result
             payload = _orders_payload(
-                orders, limit=initial_limit, page=1, total=total
+                orders,
+                limit=initial_limit,
+                start_date=metadata.get("start_date"),
+                page=1,
+                total=total,
             )
         await websocket.send_text(json.dumps(payload))
     except Exception as e:
@@ -1271,7 +1379,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 start_date_raw = message.get("start_date")
                 start_dt = parse_local_datetime(start_date_raw)
-                key = f"orders_snapshot:{limit}:{start_date_raw}:{page}"
+                start_date_iso = start_dt.isoformat() if start_dt else None
+                if isinstance(start_date_raw, str):
+                    raw_trimmed = start_date_raw.strip()
+                else:
+                    raw_trimmed = ""
+                start_date_meta_value = start_date_iso or (raw_trimmed or None)
+                cache_key_date = start_date_meta_value or ""
+                key = f"orders_snapshot:{limit}:{cache_key_date}:{page}"
                 force = bool(message.get("force"))
                 if not _allow_request(request_tracker, key, force=force):
                     cached = last_responses.get(key)
@@ -1291,7 +1406,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     result = await _fetch_orders(
                         limit=limit,
                         offset=offset,
-                        start_date=start_dt.isoformat() if start_dt else None,
+                        start_date=start_date_iso,
                     )
                     unavailable_orders = _extract_service_unavailable_payload(
                         result, "orders_snapshot"
@@ -1303,7 +1418,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             {
                                 "limit": limit,
                                 "page": page,
-                                "start_date": start_date_raw,
+                                "start_date": start_date_meta_value,
                             },
                         )
                         payload = unavailable_orders
@@ -1314,15 +1429,22 @@ async def websocket_endpoint(websocket: WebSocket):
                             meta={
                                 "limit": limit,
                                 "page": page,
-                                "start_date": start_date_raw,
+                                "start_date": start_date_meta_value,
                             },
                         )
                     else:
-                        orders, total = result
+                        orders, total, metadata = result
+                        effective_start_date = (
+                            metadata.get("start_date")
+                            if isinstance(metadata, Mapping)
+                            else None
+                        )
+                        if effective_start_date is None:
+                            effective_start_date = start_date_meta_value
                         payload = _orders_payload(
                             orders,
                             limit=limit,
-                            start_date=start_date_raw,
+                            start_date=effective_start_date,
                             page=page,
                             total=total,
                         )
@@ -1939,6 +2061,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
                     continue
+
+                rules_payload = _normalise_rules_payload(rules_payload)
 
                 payload = {
                     "type": "risk_rules",

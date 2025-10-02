@@ -8,6 +8,14 @@ from loguru import logger
 from pydantic import BaseModel
 
 from src.cache import ensure_redis
+from src.notification_history import (
+    DEFAULT_HISTORY_KEY,
+    DEFAULT_HISTORY_LIMIT,
+    InvalidHistoryLimitError,
+    InvalidHistoryTimestampError,
+    clear_notification_history as redis_clear_notification_history,
+    fetch_notification_history as redis_fetch_notification_history,
+)
 from src.routes.service_clients import (
     NotificationServiceClient,
     ServiceClientError,
@@ -583,28 +591,76 @@ async def get_notification_history(
     user: Optional[str] = Depends(get_current_user),
     client: NotificationServiceClient | None = Depends(_get_notification_service_client),
 ) -> Dict[str, Any]:
-    if client is None:
+    fallback_reason: str | None = None
+
+    if client is not None:
+        try:
+            payload = await client.history(
+                channel=channel, status=status, since=since, limit=limit
+            )
+        except ServiceUnavailableError as exc:
+            logger.info(
+                "Notification history service unavailable, using Redis fallback",
+                error=str(exc),
+            )
+            fallback_reason = "service_unavailable"
+        except ServiceResponseError as exc:
+            detail = (
+                exc.detail
+                if isinstance(exc.detail, str)
+                else "Notification service request failed"
+            )
+            logger.error(
+                "Notification history request failed",
+                status=exc.status_code,
+                detail=detail,
+            )
+            raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+        except ServiceClientError as exc:
+            logger.error("Notification history client error", error=str(exc))
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.exception("Unexpected notification history error")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        else:
+            if isinstance(payload, Mapping):
+                return dict(payload)
+            return {"success": True, "history": payload}
+    else:
+        fallback_reason = "client_missing"
+
+    if fallback_reason is None:
         raise HTTPException(status_code=503, detail="Notification service not available")
 
-    try:
-        payload = await client.history(channel=channel, status=status, since=since, limit=limit)
-    except ServiceUnavailableError as exc:
-        logger.info("Notification history unavailable", error=str(exc))
-        raise HTTPException(status_code=503, detail="Notification service not available") from exc
-    except ServiceResponseError as exc:
-        detail = exc.detail if isinstance(exc.detail, str) else "Notification service request failed"
-        logger.error("Notification history request failed", status=exc.status_code, detail=detail)
-        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
-    except ServiceClientError as exc:
-        logger.error("Notification history client error", error=str(exc))
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.exception("Unexpected notification history error")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    redis = await ensure_redis()
+    if redis is None:
+        logger.warning(
+            "Redis unavailable for notification history fallback",
+            reason=fallback_reason,
+        )
+        raise HTTPException(status_code=503, detail="Notification service not available")
 
-    if isinstance(payload, Mapping):
-        return dict(payload)
-    return {"success": True, "history": payload}
+    logger.info(
+        "Serving notification history via Redis fallback",
+        reason=fallback_reason,
+    )
+
+    try:
+        payload = await redis_fetch_notification_history(
+            redis,
+            history_key=DEFAULT_HISTORY_KEY,
+            history_limit=DEFAULT_HISTORY_LIMIT,
+            channel=channel,
+            status=status,
+            since=since,
+            limit=limit,
+        )
+    except InvalidHistoryLimitError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except InvalidHistoryTimestampError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return dict(payload)
 
 
 @router.delete("/api/notifications/history")
@@ -612,24 +668,61 @@ async def clear_notification_history(
     user: Optional[str] = Depends(get_current_user),
     client: NotificationServiceClient | None = Depends(_get_notification_service_client),
 ) -> Dict[str, Any]:
-    if client is None:
+    fallback_reason: str | None = None
+
+    if client is not None:
+        try:
+            payload = await client.clear_history()
+        except ServiceUnavailableError as exc:
+            logger.info(
+                "Notification service unavailable for history clear, using Redis fallback",
+                error=str(exc),
+            )
+            fallback_reason = "service_unavailable"
+        except ServiceResponseError as exc:
+            detail = (
+                exc.detail
+                if isinstance(exc.detail, str)
+                else "Notification service request failed"
+            )
+            logger.error(
+                "Notification history clear failed",
+                status=exc.status_code,
+                detail=detail,
+            )
+            raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+        except ServiceClientError as exc:
+            logger.error("Notification history clear client error", error=str(exc))
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.exception("Unexpected notification history clear error")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        else:
+            if isinstance(payload, Mapping):
+                return dict(payload)
+            return {"success": True, "cleared": payload}
+    else:
+        fallback_reason = "client_missing"
+
+    if fallback_reason is None:
         raise HTTPException(status_code=503, detail="Notification service not available")
 
-    try:
-        payload = await client.clear_history()
-    except ServiceUnavailableError as exc:
-        logger.info("Notification service unavailable for history clear", error=str(exc))
-        raise HTTPException(status_code=503, detail="Notification service not available") from exc
-    except ServiceResponseError as exc:
-        detail = exc.detail if isinstance(exc.detail, str) else "Notification service request failed"
-        logger.error("Notification history clear failed", status=exc.status_code, detail=detail)
-        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
-    except ServiceClientError as exc:
-        logger.error("Notification history clear client error", error=str(exc))
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.exception("Unexpected notification history clear error")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    redis = await ensure_redis()
+    if redis is None:
+        logger.warning(
+            "Redis unavailable for notification history clear fallback",
+            reason=fallback_reason,
+        )
+        raise HTTPException(status_code=503, detail="Notification service not available")
+
+    logger.info(
+        "Clearing notification history via Redis fallback",
+        reason=fallback_reason,
+    )
+
+    payload = await redis_clear_notification_history(
+        redis, history_key=DEFAULT_HISTORY_KEY
+    )
 
     if isinstance(payload, Mapping):
         return dict(payload)

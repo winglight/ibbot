@@ -116,6 +116,16 @@ def _registry() -> Tuple[RegisteredService, ...]:
             port="8030",
         ),
         RegisteredService(
+            slug="notification",
+            service_name="notification",
+            display_name="Notification Service",
+            description="通知推送服务 (notification)",
+            internal=True,
+            health_env_var="NOTIFICATION_SERVICE_HEALTH_KEY",
+            missing_detail="通知服务未上报健康数据",
+            port="8060",
+        ),
+        RegisteredService(
             slug="strategy",
             service_name="strategy",
             display_name="Strategy Scheduler",

@@ -224,6 +224,7 @@ DEFAULT_SERVICE_DEPENDENCIES: Mapping[str, Sequence[str]] = {
     "market_data_feed": (),
     "market_data": ("market_data_feed",),
     "risk": ("orders",),
+    "notification": ("connection_control",),
     "strategy": ("orders",),
     "ibbot": ("account", "orders"),
 }

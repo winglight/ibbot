@@ -21,9 +21,13 @@ class StubOrdersClient:
         self.get_order_events_response: Mapping[str, Any] | None = None
         self.get_order_events_error: Exception | None = None
 
-    async def list_orders(self, **_: Any) -> Mapping[str, Any]:
-        self.calls.append(("list_orders", {}))
-        return {"orders": [], "updated_at": None}
+    async def list_orders(self, **kwargs: Any) -> Mapping[str, Any]:
+        self.calls.append(("list_orders", dict(kwargs)))
+        payload: dict[str, Any] = {"orders": [], "updated_at": None}
+        start = kwargs.get("start_date")
+        if start is not None:
+            payload["start_date"] = start
+        return payload
 
     async def get_order(self, order_id: str) -> Mapping[str, Any]:
         self.calls.append(("get_order", {"order_id": order_id}))
@@ -197,6 +201,28 @@ def test_list_orders_uses_service_client(
 
     assert response.status_code == status.HTTP_200_OK
     assert client_stub.calls and client_stub.calls[-1][0] == "list_orders"
+
+
+def test_list_orders_normalises_start_date(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+
+    with TestClient(app) as client:
+        response = client.get("/api/orders", params={"start_date": "2024-05-01"})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert client_stub.calls and client_stub.calls[-1][0] == "list_orders"
+    call_args = client_stub.calls[-1][1]
+    assert isinstance(call_args, dict)
+    start_arg = call_args.get("start_date")
+    assert isinstance(start_arg, str)
+    assert start_arg.startswith("2024-05-01T00:00:00")
+    payload = response.json()
+    assert payload.get("start_date", "").startswith("2024-05-01T00:00:00")
+    meta = payload.get("meta")
+    if isinstance(meta, dict):
+        assert meta.get("start_date", "").startswith("2024-05-01T00:00:00")
 
 
 def test_get_order_returns_payload(
