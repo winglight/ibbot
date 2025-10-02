@@ -34,6 +34,9 @@ DEFAULT_SERVICES: tuple[str, ...] = (
     "strategy",
     "risk",
     "notification",
+    "market_data",
+    "queue_monitor",
+    "optimizer",
 )
 
 # Mapping of service name -> dedicated Redis URL override environment variable.
@@ -45,6 +48,9 @@ _SERVICE_REDIS_ENV: dict[str, str] = {
     "strategy": "STRATEGY_REDIS_URL",
     "risk": "RISK_REDIS_URL",
     "notification": "NOTIFICATION_REDIS_URL",
+    "market_data": "DATA_LAYER_REDIS_URL",
+    "queue_monitor": "QUEUE_MONITOR_REDIS_URL",
+    "optimizer": "OPTIMIZER_REDIS_URL",
 }
 
 
@@ -264,10 +270,11 @@ def run_services(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    default_services_display = "、".join(DEFAULT_SERVICES)
     parser = argparse.ArgumentParser(
         description=(
-            "按需批量启动多个后台服务。默认启动 ib_command、ib_feed、"
-            "strategy、risk 与 notification。"
+            "按需批量启动多个后台服务。默认启动以下服务："
+            f"{default_services_display}。"
         )
     )
     parser.add_argument(
@@ -276,7 +283,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=list(DEFAULT_SERVICES),
         help=(
             "要启动的服务名称列表。例如：python scripts/run_all.py "
-            "ib_feed strategy。留空则使用默认组合。"
+            "ib_feed strategy。留空则使用默认组合（"
+            f"{default_services_display}）。"
         ),
     )
     parser.add_argument(
