@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping
 
 import pytest
@@ -256,6 +257,47 @@ def test_list_orders_pagination_with_history_and_active() -> None:
             # ensure both active and history orders are reachable via pagination
             ids = {payload_one["orders"][0]["command_id"], payload_two["orders"][0]["command_id"]}
             assert {first_id, second_id} == ids
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_list_orders_filters_by_start_date() -> None:
+    async def _scenario() -> None:
+        runtime, _ = await _create_runtime()
+        try:
+            older = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            newer = datetime(2024, 1, 5, tzinfo=timezone.utc)
+            cutoff = newer - timedelta(days=1)
+
+            async with runtime._lock:
+                runtime._active_orders["recent"] = {
+                    "command_id": "recent",
+                    "order_id": "recent",
+                    "status": "Submitted",
+                    "updated_at": newer.isoformat(),
+                }
+                runtime._history.appendleft(
+                    {
+                        "command_id": "old",
+                        "order_id": "old",
+                        "status": "Filled",
+                        "completed_at": older.isoformat(),
+                    }
+                )
+                runtime._last_updated_at = newer
+
+            result = await runtime.list_orders(
+                limit=50,
+                offset=0,
+                start_date=cutoff.isoformat(),
+            )
+
+            assert result["total"] == 1
+            assert len(result["orders"]) == 1
+            assert result["orders"][0]["command_id"] == "recent"
+            assert result["start_date"] == cutoff.isoformat()
         finally:
             await runtime.stop()
 
