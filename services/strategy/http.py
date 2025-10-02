@@ -486,11 +486,24 @@ def create_app(
 
     async def _persist_settings(redis_client: Any, settings: dict[str, Any]) -> None:
         payload = json.dumps(settings, ensure_ascii=False)
+        updated_at = _utc_now().isoformat()
         try:
             await redis_client.set(DEFAULT_SETTINGS_KEY, payload)
         except Exception:  # pragma: no cover - defensive guard
             logger = get_logger("ibbot.services.strategy.http")
             logger.warning("Failed to persist strategy settings", exc_info=True)
+            return
+
+        try:
+            await update_service_health(
+                redis_client,
+                SERVICE_NAME,
+                healthy=True,
+                metrics={"settings_updated_at": updated_at},
+            )
+        except Exception:  # pragma: no cover - defensive guard
+            logger = get_logger("ibbot.services.strategy.http")
+            logger.debug("Failed to update strategy settings health metrics", exc_info=True)
 
     @app.get("/strategy", response_model=list[StrategyDocument])
     async def list_strategies(runtime: StrategyRuntime = Depends(_get_runtime)) -> list[StrategyDocument]:
