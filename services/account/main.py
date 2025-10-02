@@ -40,6 +40,7 @@ class AccountServiceState:
     stale: bool = False
     last_refresh_error: Optional[str] = None
     snapshot_updated_at: Optional[str] = None
+    stale_reason: Optional[str] = None
 
     def update_snapshot_metadata(
         self, *, info: Optional[Dict[str, Any]], positions: Optional[Dict[str, Any]]
@@ -66,6 +67,7 @@ class AccountServiceState:
             "snapshot_updated_at": self.snapshot_updated_at or "",
             "stale": self.stale,
             "last_refresh_error": self.last_refresh_error or "",
+            "stale_reason": self.stale_reason or "",
         }
         return metrics
 
@@ -242,6 +244,7 @@ async def _snapshot_watchdog_loop() -> None:
         if stale:
             _state.stale = True
             _state.last_refresh_error = reason or "snapshots stale"
+            _state.stale_reason = reason or "snapshots stale"
             try:
                 service.request_immediate_refresh(reason="watchdog-stale")
             except Exception as exc:  # pragma: no cover - defensive guard
@@ -260,6 +263,7 @@ async def _snapshot_watchdog_loop() -> None:
         else:
             _state.stale = False
             _state.last_refresh_error = None
+            _state.stale_reason = None
             if previously_stale and redis_client is not None:
                 await update_service_health(
                     redis_client,
@@ -285,6 +289,7 @@ async def _startup() -> None:
     _state.stale = False
     _state.last_refresh_error = None
     _state.snapshot_updated_at = None
+    _state.stale_reason = None
     try:
         _state.redis = await get_redis_client()
     except Exception as exc:  # pragma: no cover - redis optional for local tests

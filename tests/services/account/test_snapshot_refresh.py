@@ -46,6 +46,7 @@ def reset_account_state() -> None:
     _state.stale = False
     _state.last_refresh_error = None
     _state.snapshot_updated_at = None
+    _state.stale_reason = None
     yield
     _state.redis = None
     _state.health_task = None
@@ -57,6 +58,7 @@ def reset_account_state() -> None:
     _state.stale = False
     _state.last_refresh_error = None
     _state.snapshot_updated_at = None
+    _state.stale_reason = None
 
 
 async def test_startup_manages_snapshot_service_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,6 +181,7 @@ def test_health_metrics_include_snapshot_metadata() -> None:
     positions_snapshot = {"updated_at": "2024-01-01T01:00:00+00:00"}
     _state.stale = True
     _state.last_refresh_error = "unit-test"
+    _state.stale_reason = "unit-test"
 
     metrics = _state.as_metrics(info=info_snapshot, positions=positions_snapshot)
 
@@ -187,3 +190,4 @@ def test_health_metrics_include_snapshot_metadata() -> None:
     assert metrics["snapshot_updated_at"] == positions_snapshot["updated_at"]
     assert metrics["stale"] is True
     assert metrics["last_refresh_error"] == "unit-test"
+    assert metrics["stale_reason"] == "unit-test"

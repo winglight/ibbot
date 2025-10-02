@@ -6,7 +6,7 @@ import asyncio
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, MutableMapping, Sequence
+from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 from loguru import logger
 
@@ -199,6 +199,49 @@ def _normalise_timestamp(value: Any) -> str | None:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+_METRIC_FIELD_NAMES: tuple[str, ...] = (
+    "last_refresh_requested",
+    "account_snapshot_updated_at",
+    "positions_snapshot_updated_at",
+    "snapshot_updated_at",
+    "stale",
+    "stale_reason",
+    "last_refresh_error",
+)
+
+
+def _coerce_metrics_mapping(
+    payload: Mapping[str, Any],
+    metric_keys: Iterable[str] = _METRIC_FIELD_NAMES,
+) -> MutableMapping[str, Any]:
+    """Return a mutable payload mapping with health metrics promoted."""
+
+    data = dict(payload)
+    existing_metrics = data.get("metrics")
+    metrics_map: dict[str, Any]
+    if isinstance(existing_metrics, Mapping):
+        metrics_map = dict(existing_metrics)
+    else:
+        metrics_map = {}
+
+    for key in metric_keys:
+        if key not in data:
+            continue
+        value = data[key]
+        if key == "stale":
+            coerced = _coerce_bool(value)
+            if coerced is not None:
+                value = coerced
+            data[key] = value
+        if key not in metrics_map:
+            metrics_map[key] = value
+
+    if metrics_map:
+        data["metrics"] = metrics_map
+
+    return data
+
+
 async def _load_hash(redis: Any, key: str) -> MutableMapping[str, Any] | None:
     try:
         values = await redis.hgetall(key)
@@ -213,16 +256,18 @@ async def _load_hash(redis: Any, key: str) -> MutableMapping[str, Any] | None:
 def _build_status_from_payload(
     service: str, payload: Mapping[str, Any]
 ) -> ServiceStatus:
+    prepared_payload = _coerce_metrics_mapping(payload)
+
     status_value = _normalize_status_value(
-        payload.get("status") or payload.get("state")
+        prepared_payload.get("status") or prepared_payload.get("state")
     )
-    healthy_flag = _coerce_bool(payload.get("healthy"))
-    stale_flag = _coerce_bool(payload.get("stale"))
-    last_error = payload.get("last_error") or payload.get("error")
+    healthy_flag = _coerce_bool(prepared_payload.get("healthy"))
+    stale_flag = _coerce_bool(prepared_payload.get("stale"))
+    last_error = prepared_payload.get("last_error") or prepared_payload.get("error")
     last_reported = _normalise_timestamp(
-        payload.get("last_seen")
-        or payload.get("checked_at")
-        or payload.get("timestamp")
+        prepared_payload.get("last_seen")
+        or prepared_payload.get("checked_at")
+        or prepared_payload.get("timestamp")
     )
 
     resolved_status = status_value
@@ -251,7 +296,7 @@ def _build_status_from_payload(
         status=resolved_status,
         detail=detail or None,
         last_reported=last_reported,
-        payload=payload,
+        payload=prepared_payload,
     )
 
 
@@ -452,7 +497,7 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
 
         status_obj = _build_status_from_payload(probe.ui_service, payload)
         if probe.ui_service == "account":
-            combined_payload: dict[str, Any] = dict(payload)
+            combined_payload: dict[str, Any] = dict(status_obj.payload or payload)
             if account_readiness_payload is not None:
                 combined_payload["readiness"] = account_readiness_payload
                 status_obj.payload = combined_payload
