@@ -379,7 +379,6 @@ class AccountServiceClient(ServiceClient):
             "POST",
             "/account/refresh",
             json=payload,
-            expected_status=202,
             parse_json=False,
         )
 
