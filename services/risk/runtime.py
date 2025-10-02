@@ -74,6 +74,9 @@ class RiskRuntime:
     _results_last_processed: datetime | None = field(default=None, init=False, repr=False)
     _health_last_error: str = field(default="", init=False, repr=False)
     _last_exception_message: str = field(default="", init=False, repr=False)
+    _config_snapshot: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _rules_snapshot: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _position_last_requested: datetime | None = field(default=None, init=False, repr=False)
 
     async def update_config(self, config: Mapping[str, Any]) -> None:
         snapshot: tuple[dict[str, Any], dict[str, Any], str] | None = None
@@ -100,6 +103,15 @@ class RiskRuntime:
             self._configured = True
 
         if snapshot is not None:
+            config_payload, rules_payload, timestamp = snapshot
+            self._config_snapshot = dict(config_payload)
+            self._rules_snapshot = {
+                str(symbol): dict(payload)
+                for symbol, payload in rules_payload.items()
+            }
+            self._config_snapshot.setdefault("updated_at", timestamp)
+            for payload in self._rules_snapshot.values():
+                payload.setdefault("updated_at", timestamp)
             await self._publish_snapshots(*snapshot)
 
     def _build_snapshots(
@@ -233,6 +245,8 @@ class RiskRuntime:
             metrics["last_exception"] = self._last_exception_message
         if extra:
             metrics.update(extra)
+        if self._position_last_requested is not None:
+            metrics["position_last_requested_at"] = self._position_last_requested.isoformat()
         return metrics
 
     async def _update_health(
@@ -515,3 +529,100 @@ class RiskRuntime:
         except Exception:
             if self._logger:
                 self._logger.debug("Failed to write log point to Influx", exc_info=True)
+
+    def get_config_snapshot(self) -> dict[str, Any]:
+        """Return the latest cached configuration snapshot."""
+
+        return dict(self._config_snapshot)
+
+    def get_rules_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Return the latest cached rule snapshot keyed by symbol."""
+
+        return {symbol: dict(payload) for symbol, payload in self._rules_snapshot.items()}
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """Expose health metrics collected by the runtime."""
+
+        return self._health_metrics()
+
+    async def position_sizing(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Estimate a contract count for the provided payload."""
+
+        symbol = str(payload.get("symbol") or "").strip().upper()
+        stop_distance_raw = payload.get("stop_distance")
+        try:
+            stop_distance = float(stop_distance_raw)
+        except (TypeError, ValueError):
+            stop_distance = 0.0
+        if stop_distance <= 0:
+            raise ValueError("stop_distance must be positive")
+
+        config = self.get_config_snapshot()
+        risk_fraction_raw = (
+            config.get("risk_per_trade_r")
+            or config.get("risk_per_trade")
+            or payload.get("risk_per_trade")
+            or 0.01
+        )
+        try:
+            risk_fraction = float(risk_fraction_raw)
+        except (TypeError, ValueError):
+            risk_fraction = 0.01
+        if risk_fraction < 0:
+            risk_fraction = 0.0
+
+        equity_raw = (
+            payload.get("account_equity")
+            or config.get("account_equity")
+            or config.get("equity")
+            or 100000.0
+        )
+        try:
+            equity = float(equity_raw)
+        except (TypeError, ValueError):
+            equity = 100000.0
+        if equity < 0:
+            equity = 0.0
+
+        point_value_map = config.get("point_value_map")
+        point_value_raw = payload.get("point_value")
+        if point_value_raw is None and isinstance(point_value_map, Mapping):
+            candidate = None
+            if symbol:
+                candidate = point_value_map.get(symbol)
+                if candidate is None:
+                    for key, value in point_value_map.items():
+                        try:
+                            key_str = str(key).upper()
+                        except Exception:
+                            key_str = str(key)
+                        if key_str and symbol.startswith(key_str):
+                            candidate = value
+                            break
+            point_value_raw = candidate
+        try:
+            point_value = float(point_value_raw) if point_value_raw is not None else 1.0
+        except (TypeError, ValueError):
+            point_value = 1.0
+        if point_value <= 0:
+            point_value = 1.0
+
+        risk_capital = max(0.0, equity * risk_fraction)
+        denominator = point_value * stop_distance
+        if denominator <= 0:
+            raise ValueError("invalid sizing inputs")
+
+        raw_contracts = risk_capital / denominator
+        contracts = max(0, int(raw_contracts))
+        self._position_last_requested = _utc_now()
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "contracts": contracts,
+            "risk_capital": risk_capital,
+            "stop_distance": stop_distance,
+            "risk_fraction": risk_fraction,
+            "point_value": point_value,
+            "raw_contracts": raw_contracts,
+        }
