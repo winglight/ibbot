@@ -39,6 +39,24 @@
 ./scripts/deploy.sh restart ibbot
 ```
 
+## 支持的服务与重启方式
+
+后台运行的服务会同时支持 Docker Compose 与本地脚本两种重启机制。控制台会优先调用 `/api/services/restart`
+（Docker 模式），若宿主机未安装 docker compose 会自动切换至 `/api/services/restart/local` 并执行仓库内的
+`scripts/run_service.py`。下表列出了当前监控的服务与对应的端口：
+
+| 服务 | 默认端口 | Docker 重启 | 本地脚本 |
+| --- | --- | --- | --- |
+| Trading Core (`ibbot`) | 8000 | `docker compose restart ibbot` | `python scripts/run_service.py ibbot` |
+| Command Dispatcher (`ib_command`) | — | `docker compose restart ib_command` | `python scripts/run_service.py ib_command` |
+| Connection Control (`connection_control`) | 8056 | `docker compose restart connection_control` | `python scripts/run_service.py connection_control` |
+| Account Service (`account`) | 8020 | `docker compose restart account` | `python scripts/run_service.py account` |
+| Order Gateway (`orders`) | 8050 | `docker compose restart orders` | `python scripts/run_service.py orders` |
+| Market Data Sync (`market_data`) | 8010 | `docker compose restart market_data` | `python scripts/run_service.py market_data` |
+| Risk Manager (`risk`) | 8030 | `docker compose restart risk` | `python scripts/run_service.py risk` |
+| Strategy Scheduler (`strategy`) | 8045 | `docker compose restart strategy` | `python scripts/run_service.py strategy` |
+| Market Data Feed (`market_data_feed`) | — | `docker compose restart market_data_feed` | `python scripts/run_service.py market_data_feed` |
+
 关闭所有容器：
 
 ```bash

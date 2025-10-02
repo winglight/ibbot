@@ -11,8 +11,9 @@ from src.service_status import build_service_status_payload
 
 from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
 from src.service_restart import (
-    DockerExecutionError,
-    DockerCommandResult,
+    CommandExecutionError,
+    RestartCommandResult,
+    RestartMode,
     UnknownServiceError,
     get_service_restart_manager,
 )
@@ -44,25 +45,24 @@ class ServiceRestartPayload(BaseModel):
     include_dependencies: bool = Field(default=True, description="Restart dependencies first")
 
 
-def _serialise_result(result: DockerCommandResult) -> dict[str, object]:
+def _serialise_result(result: RestartCommandResult) -> dict[str, object]:
     return {
         "service": result.service,
         "command": list(result.command),
         "returncode": result.returncode,
         "stdout": result.stdout,
         "stderr": result.stderr,
+        "mode": result.mode.value,
     }
 
 
-@router.post("/api/services/restart")
-async def restart_service(
+async def _perform_restart(
     payload: ServiceRestartPayload,
     request: Request,
-    _user: str | None = Depends(require_roles("admin", action="services.restart")),
+    *,
+    mode: RestartMode | None,
 ) -> dict[str, object]:
-    """Restart a docker-compose managed service and its dependencies."""
-
-    manager = get_service_restart_manager()
+    manager = get_service_restart_manager(mode=mode)
     try:
         results = await manager.restart(
             payload.service, include_dependencies=payload.include_dependencies
@@ -73,7 +73,7 @@ async def restart_service(
             detail=f"unknown service: {payload.service}",
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except DockerExecutionError as exc:
+    except CommandExecutionError as exc:
         result = exc.result
         logger.error(
             "Service restart failed",
@@ -84,7 +84,7 @@ async def restart_service(
         )
         await audit_log_failure(
             request,
-            detail=f"docker restart failed for {result.service}",
+            detail=f"restart failed for {result.service}",
             extra={"returncode": result.returncode},
         )
         raise HTTPException(
@@ -92,11 +92,11 @@ async def restart_service(
             detail=f"Failed to restart {result.service}",
         ) from exc
     except FileNotFoundError as exc:
-        logger.exception("Docker compose command not found")
-        await audit_log_failure(request, detail="docker compose not installed")
+        logger.exception("Restart tooling not found")
+        await audit_log_failure(request, detail="restart tooling not installed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Docker is not available on the server",
+            detail="Restart tooling is not available on the server",
         ) from exc
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Unexpected error during service restart")
@@ -123,5 +123,28 @@ async def restart_service(
         "restarted": restarted,
         "message": message,
         "logs": [_serialise_result(result) for result in results],
+        "mode": manager.mode.value,
     }
+
+
+@router.post("/api/services/restart")
+async def restart_service(
+    payload: ServiceRestartPayload,
+    request: Request,
+    _user: str | None = Depends(require_roles("admin", action="services.restart")),
+) -> dict[str, object]:
+    """Restart a managed service using the auto-detected controller."""
+
+    return await _perform_restart(payload, request, mode=None)
+
+
+@router.post("/api/services/restart/local")
+async def restart_service_local(
+    payload: ServiceRestartPayload,
+    request: Request,
+    _user: str | None = Depends(require_roles("admin", action="services.restart")),
+) -> dict[str, object]:
+    """Restart a managed service using the local supervisor controller."""
+
+    return await _perform_restart(payload, request, mode=RestartMode.LOCAL)
 

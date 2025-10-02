@@ -63,7 +63,11 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     expected = [service.slug for service in SERVICE_REGISTRY]
     assert names[: len(expected)] == expected
 
-    for slug in ("connection_control", "ib_feed", "market_data", "optimizer"):
+    assert payload.get("restart_mode") in {"docker", "local"}
+    endpoint = payload.get("restart_endpoint")
+    assert isinstance(endpoint, str) and endpoint.startswith("/services/restart")
+
+    for slug in ("connection_control", "market_data", "market_data_feed"):
         entry = next((item for item in services if item.get("service") == slug), None)
         assert entry, f"missing service entry for {slug}"
         assert entry.get("status") == "unhealthy"

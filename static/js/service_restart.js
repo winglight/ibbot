@@ -37,6 +37,38 @@
         });
     }
 
+    function normaliseMode(value, fallback = 'docker') {
+        if (typeof value === 'string') {
+            const text = value.trim().toLowerCase();
+            if (text === 'docker' || text === 'local') {
+                return text;
+            }
+        }
+        return fallback;
+    }
+
+    function resolveEndpoints(options = {}, initialPayload = null) {
+        const endpoints = {
+            docker: options.dockerEndpoint
+                || options?.endpoints?.docker
+                || '/services/restart',
+            local: options.localEndpoint
+                || options?.endpoints?.local
+                || '/services/restart/local',
+        };
+
+        if (initialPayload && typeof initialPayload.restart_endpoint === 'string') {
+            const mode = normaliseMode(initialPayload.restart_mode);
+            if (mode === 'local') {
+                endpoints.local = initialPayload.restart_endpoint;
+            } else if (mode === 'docker') {
+                endpoints.docker = initialPayload.restart_endpoint;
+            }
+        }
+
+        return endpoints;
+    }
+
     function applyStatusClass(element, state) {
         if (!element || !element.classList) return;
         const allClasses = new Set(['text-muted', 'text-info', 'text-success', 'text-danger']);
@@ -93,6 +125,10 @@
             throw new Error('fetcher function is required');
         }
 
+        const initialPayload = options.initialPayload || null;
+        const endpoints = resolveEndpoints(options, initialPayload);
+        const initialMode = normaliseMode(options.mode || initialPayload?.restart_mode || 'docker');
+
         const itemSelector = options.itemSelector || '[data-service]';
         const serviceElements = Array.from(container.querySelectorAll(itemSelector));
         if (!serviceElements.length) {
@@ -115,6 +151,8 @@
             container,
             items: {},
             isReadOnly: false,
+            mode: initialMode,
+            endpoints,
             getLabel(serviceName) {
                 const item = this.items[serviceName];
                 if (item?.label) {
@@ -177,6 +215,16 @@
                     });
                 }
             },
+            setMode(value) {
+                this.mode = normaliseMode(value, this.mode);
+                return this.mode;
+            },
+            getEndpoint() {
+                if (this.mode === 'local') {
+                    return this.endpoints.local || this.endpoints.docker;
+                }
+                return this.endpoints.docker;
+            },
             setItemBusy(serviceName, busy) {
                 const item = this.items[serviceName];
                 if (!item) {
@@ -217,11 +265,26 @@
                 this.updateStatus(targetService, 'running', runningMessage, null, { trigger: 'restart' });
 
                 try {
-                    const payload = await fetcher({
-                        service: targetService,
-                        include_dependencies: includeDependencies,
-                    });
+                    const request = {
+                        endpoint: this.getEndpoint(),
+                        payload: {
+                            service: targetService,
+                            include_dependencies: includeDependencies,
+                        },
+                        mode: this.mode,
+                    };
+                    const payload = await fetcher(request);
                     this.lastResult = payload;
+                    if (payload && typeof payload.mode === 'string') {
+                        this.setMode(payload.mode);
+                    }
+                    if (payload && typeof payload.restart_endpoint === 'string') {
+                        if (this.mode === 'local') {
+                            this.endpoints.local = payload.restart_endpoint;
+                        } else {
+                            this.endpoints.docker = payload.restart_endpoint;
+                        }
+                    }
                     const restarted = Array.isArray(payload?.restarted) && payload.restarted.length
                         ? payload.restarted
                         : [targetService];
@@ -368,12 +431,17 @@
         }
 
         const includeDependencies = options.includeDependencies !== false;
+        const initialPayload = options.initialPayload || null;
+        const endpoints = resolveEndpoints(options, initialPayload);
+        const initialMode = normaliseMode(options.mode || initialPayload?.restart_mode || 'docker');
 
         const controller = {
             state: 'idle',
             lastResult: null,
             elements: { button, select, status, spinner },
             options,
+            mode: initialMode,
+            endpoints,
             updateStatus(state, message, payload) {
                 this.state = state;
                 if (status.dataset) {
@@ -386,6 +454,16 @@
                 if (typeof options.onStatusChange === 'function') {
                     options.onStatusChange({ state, message, payload, controller: this });
                 }
+            },
+            setMode(value) {
+                this.mode = normaliseMode(value, this.mode);
+                return this.mode;
+            },
+            getEndpoint() {
+                if (this.mode === 'local') {
+                    return this.endpoints.local || this.endpoints.docker;
+                }
+                return this.endpoints.docker;
             },
             getSelectedService() {
                 return select.value || '';
@@ -415,11 +493,26 @@
                 this.updateStatus('running', runningMessage);
 
                 try {
-                    const payload = await fetcher({
-                        service: targetService,
-                        include_dependencies: includeDependencies,
-                    });
+                    const request = {
+                        endpoint: this.getEndpoint(),
+                        payload: {
+                            service: targetService,
+                            include_dependencies: includeDependencies,
+                        },
+                        mode: this.mode,
+                    };
+                    const payload = await fetcher(request);
                     this.lastResult = payload;
+                    if (payload && typeof payload.mode === 'string') {
+                        this.setMode(payload.mode);
+                    }
+                    if (payload && typeof payload.restart_endpoint === 'string') {
+                        if (this.mode === 'local') {
+                            this.endpoints.local = payload.restart_endpoint;
+                        } else {
+                            this.endpoints.docker = payload.restart_endpoint;
+                        }
+                    }
                     let message;
                     if (payload && typeof payload.message === 'string' && !options.ignoreResponseMessage) {
                         message = payload.message;
