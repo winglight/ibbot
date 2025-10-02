@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+import uuid
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 
 from src.models import OrderRequest
+from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
 
 from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
 from .service_clients import (
@@ -24,6 +27,40 @@ def get_orders_service_client() -> OrdersServiceClient:
     """Return the shared orders service client instance."""
 
     return _ORDERS_SERVICE_CLIENT
+
+
+async def _resolve_command_queue_key() -> str:
+    """Return the Redis list used for IB commands.
+
+    The queue may be overridden by the dependency container at runtime.  We
+    consult the container lazily to avoid importing heavy modules during test
+    collection.
+    """
+
+    try:
+        import core  # type: ignore[import-not-found]
+    except Exception:  # pragma: no cover - optional dependency
+        return DEFAULT_COMMAND_QUEUE
+
+    container = getattr(core, "get_container", lambda: None)()
+    if not container:
+        return DEFAULT_COMMAND_QUEUE
+
+    provider = getattr(container, "config_provider", None)
+    if provider is None:
+        return DEFAULT_COMMAND_QUEUE
+
+    try:
+        queue_key = await provider.get(
+            "ib-command",
+            "queue_key",
+            default=DEFAULT_COMMAND_QUEUE,
+        )
+    except Exception:  # pragma: no cover - config lookup failure
+        return DEFAULT_COMMAND_QUEUE
+
+    queue_key_str = str(queue_key or "").strip()
+    return queue_key_str or DEFAULT_COMMAND_QUEUE
 
 
 def set_websocket_broadcast_override(
@@ -72,45 +109,64 @@ async def _call_orders_service(
         raise HTTPException(status_code=exc.status_code, detail=detail) from exc
 
 
-async def _handle_command_response(
+async def _enqueue_order_command(
     *,
     request: Request,
     action: str,
-    service_call: Callable[[], Awaitable[Mapping[str, Any]]],
+    method: str,
+    kwargs: Mapping[str, Any],
     audit_success_extra: Mapping[str, Any] | None = None,
     broadcast_payload: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
+    """Enqueue an IB command and emit audit/broadcast side-effects."""
+
+    command_id = uuid.uuid4().hex
+    payload = {
+        "command_id": command_id,
+        "method": method,
+        "args": [],
+        "kwargs": json.loads(json.dumps(dict(kwargs))),
+    }
+
     try:
-        result = await service_call()
-    except HTTPException as exc:
+        queue_key = await _resolve_command_queue_key()
+        await enqueue_ib_command(payload, queue_key=queue_key)
+    except Exception as exc:
+        logger.error(
+            "Failed to enqueue order command",
+            action=action,
+            method=method,
+            error=str(exc),
+        )
         await audit_log_failure(
             request,
             action=action,
-            detail=str(exc.detail),
+            detail="failed to enqueue order command",
         )
-        raise
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to enqueue order command",
+        ) from exc
 
-    command_id = str(result.get("command_id") or "").strip()
-    response: dict[str, Any] = {"success": True, "command_id": command_id}
-    if "status" in result:
-        response["status"] = result["status"]
-    if audit_success_extra is not None:
-        extra = dict(audit_success_extra)
-        if command_id:
-            extra.setdefault("command_id", command_id)
-    else:
-        extra = {"command_id": command_id} if command_id else None
+    response: dict[str, Any] = {
+        "success": True,
+        "command_id": command_id,
+        "queue": queue_key,
+        "status": "queued",
+    }
+
+    extra = dict(audit_success_extra or {})
+    extra.setdefault("command_id", command_id)
     await audit_log_success(
         request,
         action=action,
-        detail=f"orders command {command_id}" if command_id else "orders command",
+        detail=f"order command {command_id}",
         extra=extra,
     )
 
     if broadcast_payload:
         payload = dict(broadcast_payload)
-        if command_id:
-            payload.setdefault("command_id", command_id)
+        payload.setdefault("command_id", command_id)
         await _broadcast_event(payload)
 
     return response
@@ -123,28 +179,25 @@ async def place_order(
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.place")
     ),
-    client: OrdersServiceClient = Depends(get_orders_service_client),
 ):
     order_payload = order.model_dump(mode="json", exclude_none=True)
 
-    async def _call() -> Mapping[str, Any]:
-        return await _call_orders_service(client.place_order, order_payload)
+    metadata = {
+        "symbol": order.symbol,
+        "action": order.action,
+        "order_type": order.order_type,
+        "submitted_by": user or "anonymous",
+    }
 
-    return await _handle_command_response(
+    return await _enqueue_order_command(
         request=request,
         action="orders.place",
-        service_call=_call,
-        audit_success_extra={
-            "symbol": order.symbol,
-            "action": order.action,
-            "order_type": order.order_type,
-            "submitted_by": user or "anonymous",
-        },
+        method="place_order",
+        kwargs=order_payload,
+        audit_success_extra=metadata,
         broadcast_payload={
             "type": "order_submitted",
-            "symbol": order.symbol,
-            "action": order.action,
-            "order_type": order.order_type,
+            **metadata,
         },
     )
 
@@ -156,20 +209,20 @@ async def cancel_order(
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.cancel")
     ),
-    client: OrdersServiceClient = Depends(get_orders_service_client),
 ):
     order_id = str(payload.get("order_id") or "").strip()
     if not order_id:
         raise HTTPException(status_code=400, detail="order_id is required")
 
-    async def _call() -> Mapping[str, Any]:
-        return await _call_orders_service(client.cancel_order, order_id)
-
-    return await _handle_command_response(
+    return await _enqueue_order_command(
         request=request,
         action="orders.cancel",
-        service_call=_call,
-        audit_success_extra={"order_id": order_id, "submitted_by": user or "anonymous"},
+        method="cancel_order",
+        kwargs={"order_id": order_id},
+        audit_success_extra={
+            "order_id": order_id,
+            "submitted_by": user or "anonymous",
+        },
         broadcast_payload={"type": "order_cancel_requested", "order_id": order_id},
     )
 
@@ -181,19 +234,19 @@ async def cancel_order_delete(
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.cancel")
     ),
-    client: OrdersServiceClient = Depends(get_orders_service_client),
 ):
     if not order_id:
         raise HTTPException(status_code=400, detail="order_id is required")
 
-    async def _call() -> Mapping[str, Any]:
-        return await _call_orders_service(client.cancel_order, order_id)
-
-    return await _handle_command_response(
+    return await _enqueue_order_command(
         request=request,
         action="orders.cancel",
-        service_call=_call,
-        audit_success_extra={"order_id": order_id, "submitted_by": user or "anonymous"},
+        method="cancel_order",
+        kwargs={"order_id": order_id},
+        audit_success_extra={
+            "order_id": order_id,
+            "submitted_by": user or "anonymous",
+        },
         broadcast_payload={"type": "order_cancel_requested", "order_id": order_id},
     )
 
@@ -204,15 +257,12 @@ async def cancel_all_orders(
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.cancel_all")
     ),
-    client: OrdersServiceClient = Depends(get_orders_service_client),
 ):
-    async def _call() -> Mapping[str, Any]:
-        return await _call_orders_service(client.cancel_all)
-
-    return await _handle_command_response(
+    return await _enqueue_order_command(
         request=request,
         action="orders.cancel_all",
-        service_call=_call,
+        method="cancel_all_orders",
+        kwargs={},
         audit_success_extra={"submitted_by": user or "anonymous"},
         broadcast_payload={"type": "orders_cancel_all"},
     )
@@ -225,19 +275,16 @@ async def close_position(
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.close_position")
     ),
-    client: OrdersServiceClient = Depends(get_orders_service_client),
 ):
     symbol = str(payload.get("symbol") or "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
 
-    async def _call() -> Mapping[str, Any]:
-        return await _call_orders_service(client.close_position, symbol)
-
-    return await _handle_command_response(
+    return await _enqueue_order_command(
         request=request,
         action="orders.close_position",
-        service_call=_call,
+        method="close_position",
+        kwargs={"symbol": symbol},
         audit_success_extra={"symbol": symbol, "submitted_by": user or "anonymous"},
         broadcast_payload={"type": "position_close_requested", "symbol": symbol},
     )
@@ -250,19 +297,16 @@ async def reverse_position(
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.reverse_position")
     ),
-    client: OrdersServiceClient = Depends(get_orders_service_client),
 ):
     symbol = str(payload.get("symbol") or "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
 
-    async def _call() -> Mapping[str, Any]:
-        return await _call_orders_service(client.reverse_position, symbol)
-
-    return await _handle_command_response(
+    return await _enqueue_order_command(
         request=request,
         action="orders.reverse_position",
-        service_call=_call,
+        method="reverse_position",
+        kwargs={"symbol": symbol},
         audit_success_extra={"symbol": symbol, "submitted_by": user or "anonymous"},
         broadcast_payload={"type": "position_reverse_requested", "symbol": symbol},
     )
