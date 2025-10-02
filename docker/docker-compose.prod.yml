@@ -153,7 +153,16 @@ services:
     env_file:
       - ./.env
     command:
-      ["python", "-m", "uvicorn", "services.notification.main:app", "--host", "0.0.0.0", "--port", "8055"]
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "services.notification.main:create_app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8055",
+      ]
     ports:
       - "8055:8055"
     networks:
