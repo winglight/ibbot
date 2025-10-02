@@ -107,6 +107,42 @@ def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
     assert removed is None
 
 
+def test_rest_style_strategy_routes(redis_client: InMemoryRedis) -> None:
+    client = _build_client(redis_client)
+
+    payload = {
+        "name": "rest",
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "YM"},
+        "description": "REST alias",
+    }
+
+    with client:
+        create_resp = client.post("/strategies", json=payload)
+        assert create_resp.status_code == 201
+        created = create_resp.json()
+        assert created["name"] == payload["name"]
+
+        list_resp = client.get("/strategies")
+        assert list_resp.status_code == 200
+        names = [entry["name"] for entry in list_resp.json()]
+        assert payload["name"] in names
+
+        detail_resp = client.get(f"/strategies/{payload['name']}")
+        assert detail_resp.status_code == 200
+        assert detail_resp.json()["description"] == payload["description"]
+
+        mismatch_resp = client.put("/strategies/wrong", json=payload)
+        assert mismatch_resp.status_code == 400
+
+        update_payload = {**payload, "params": {"symbol": "YM", "size": 3}}
+        update_resp = client.put(f"/strategies/{payload['name']}", json=update_payload)
+        assert update_resp.status_code == 200
+        assert update_resp.json()["params"]["size"] == 3
+
+        delete_resp = client.delete(f"/strategies/{payload['name']}")
+        assert delete_resp.status_code == 204
+
 def test_strategy_run_enqueues_tasks(redis_client: InMemoryRedis) -> None:
     client = _build_client(redis_client)
 

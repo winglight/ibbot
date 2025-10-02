@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import secrets
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError, validator
 
 from services.strategy import StrategyTaskConsumer
@@ -506,6 +506,7 @@ def create_app(
             logger.debug("Failed to update strategy settings health metrics", exc_info=True)
 
     @app.get("/strategy", response_model=list[StrategyDocument])
+    @app.get("/strategies", response_model=list[StrategyDocument])
     async def list_strategies(runtime: StrategyRuntime = Depends(_get_runtime)) -> list[StrategyDocument]:
         return await runtime.list_strategies()
 
@@ -543,32 +544,46 @@ def create_app(
         await _persist_settings(redis_client, settings)
         return {"success": True, "token": token, "settings": settings}
 
+    @app.post("/strategy", response_model=StrategyDocument, status_code=status.HTTP_201_CREATED)
+    @app.post("/strategies", response_model=StrategyDocument, status_code=status.HTTP_201_CREATED)
+    async def create_strategy(
+        payload: StrategyUpsertRequest,
+        response: Response,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> StrategyDocument:
+        document, created = await runtime.upsert_strategy(payload)
+        if not created:
+            response.status_code = status.HTTP_200_OK
+        return document
+
+    @app.put("/strategy", response_model=StrategyDocument)
+    @app.put("/strategies/{name}", response_model=StrategyDocument)
+    async def update_strategy(
+        payload: StrategyUpsertRequest,
+        response: Response,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+        name: str | None = None,
+    ) -> StrategyDocument:
+        if name is not None and payload.name != name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="strategy name mismatch",
+            )
+        document, created = await runtime.upsert_strategy(payload)
+        if name is not None and created:
+            response.status_code = status.HTTP_201_CREATED
+        return document
+
     @app.get("/strategy/{name}", response_model=StrategyDocument)
+    @app.get("/strategies/{name}", response_model=StrategyDocument)
     async def get_strategy(name: str, runtime: StrategyRuntime = Depends(_get_runtime)) -> StrategyDocument:
         document = await runtime.get_strategy(name)
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
         return document
 
-    @app.post("/strategy", response_model=StrategyDocument, status_code=status.HTTP_201_CREATED)
-    async def create_strategy(
-        payload: StrategyUpsertRequest,
-        runtime: StrategyRuntime = Depends(_get_runtime),
-    ) -> StrategyDocument:
-        document, created = await runtime.upsert_strategy(payload)
-        if not created:
-            return document
-        return document
-
-    @app.put("/strategy", response_model=StrategyDocument)
-    async def update_strategy(
-        payload: StrategyUpsertRequest,
-        runtime: StrategyRuntime = Depends(_get_runtime),
-    ) -> StrategyDocument:
-        document, _ = await runtime.upsert_strategy(payload)
-        return document
-
     @app.delete("/strategy/{name}", status_code=status.HTTP_204_NO_CONTENT)
+    @app.delete("/strategies/{name}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_strategy(name: str, runtime: StrategyRuntime = Depends(_get_runtime)) -> None:
         deleted = await runtime.delete_strategy(name)
         if not deleted:

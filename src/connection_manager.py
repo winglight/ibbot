@@ -235,15 +235,15 @@ class ConnectionManager:
             except ServiceClientError as exc:
                 detail = getattr(exc, "detail", None)
                 connection_logger.warning(
-                    "Account refresh request failed (%s): %s",
-                    reason,
-                    detail or str(exc),
+                    "Account refresh request failed ({reason}): {error}",
+                    reason=reason,
+                    error=detail or str(exc),
                 )
             except Exception as exc:  # pragma: no cover - defensive guard
                 connection_logger.warning(
-                    "Account refresh request failed (%s): %s",
-                    reason,
-                    exc,
+                    "Account refresh request failed ({reason}): {error}",
+                    reason=reason,
+                    error=str(exc),
                 )
 
         self._schedule_background_task(
