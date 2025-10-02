@@ -106,7 +106,14 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
 
             # 广播账户信息快照，供前端取消HTTP轮询
             try:
-                info = await ibkr_client_local.get_account_info()
+                info = await asyncio.wait_for(
+                    ibkr_client_local.get_account_info(
+                        prefer_snapshot=False,
+                        force_refresh=True,
+                        ib_timeout=8.0,
+                    ),
+                    timeout=9.0,
+                )
                 await websocket_manager.broadcast({
                     "type": "account_update",
                     "account_info": info

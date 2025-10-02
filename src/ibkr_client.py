@@ -38,6 +38,7 @@ import subprocess
 from .connection_manager import connection_manager, connection_logger
 from .database import get_db_manager
 from .restart_utils import restart_program
+from .account_snapshot_cache import read_account_info_snapshot
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -2201,78 +2202,133 @@ class IBKRClient:
             ibkr_logger.error(f"Failed to get orders: {e}")
             return []
 
-    async def get_account_info(self) -> Dict:
-        """获取账户信息"""
+    def _normalise_account_info(self, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge incoming payload with cached defaults to avoid missing fields."""
+
+        base = self._return_cached_account_info() or {}
+        info: Dict[str, Any] = dict(base)
+        if payload and isinstance(payload, dict):
+            try:
+                info.update(payload)
+            except Exception:
+                info = dict(base)
+
+        info.setdefault("account_id", None)
+        info["account_type"] = (
+            "Paper" if connection_manager.config.paper_trading else "Live"
+        )
+        info.setdefault("total_cash", 0.0)
+        info.setdefault("available_funds", 0.0)
+        info.setdefault("buying_power", 0.0)
+        info.setdefault("net_liquidation", 0.0)
+        info.setdefault("unrealized_pnl", 0.0)
+        info.setdefault("realized_pnl", 0.0)
+        return info
+
+    async def get_account_info(
+        self,
+        *,
+        prefer_snapshot: bool = True,
+        allow_stale_snapshot: bool = True,
+        snapshot_timeout: float = 1.5,
+        ib_timeout: float = 10.0,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """获取账户信息，优先返回Redis快照并在必要时从IBKR刷新。"""
+
+        fallback_info = self._return_cached_account_info()
+        snapshot_payload: Optional[Dict[str, Any]] = None
+
+        if prefer_snapshot and not force_refresh:
+            try:
+                snapshot = await asyncio.wait_for(
+                    read_account_info_snapshot(), timeout=snapshot_timeout
+                )
+            except asyncio.TimeoutError:
+                ibkr_logger.debug("Timed out waiting for Redis account snapshot")
+            except Exception as exc:
+                ibkr_logger.debug(
+                    "Failed to read Redis account snapshot", error=str(exc)
+                )
+            else:
+                if snapshot and isinstance(snapshot, dict):
+                    data = snapshot.get("data")
+                    if isinstance(data, dict):
+                        snapshot_payload = data
+                        if not snapshot.get("stale", False) or allow_stale_snapshot:
+                            info = self._normalise_account_info(data)
+                            try:
+                                self._cached_account_info = dict(info)
+                                self._cached_account_info_timestamp = now_local()
+                            except Exception:
+                                pass
+                            return info
+                        fallback_info = self._normalise_account_info(data)
+
         try:
-            # 确保连接
             if not self.is_connected():
                 ibkr_logger.error("Cannot retrieve account info: IBKR is not connected")
-                return self._return_cached_account_info()
+                return fallback_info
 
-            # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
-                ibkr_logger.error(f"IBKR connection lost for get account info")
-                return self._return_cached_account_info()
+                ibkr_logger.error("IBKR connection lost for get account info")
+                return fallback_info
 
-            # Use synchronous methods in async context
-            account_values = ib.accountValues()
+            fetch_timeout = max(1.0, float(ib_timeout))
+            try:
+                account_values = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.connection_manager.run_in_connection_thread,
+                        ib.accountValues,
+                        timeout=fetch_timeout,
+                    ),
+                    timeout=fetch_timeout + 1.0,
+                )
+            except asyncio.TimeoutError:
+                ibkr_logger.error(
+                    "Fetching account info from IBKR timed out after %.1f seconds",
+                    fetch_timeout,
+                )
+                return fallback_info
+            except Exception as exc:
+                ibkr_logger.error(f"Failed to execute accountValues in connection thread: {exc}")
+                return fallback_info
 
-            # Start from the last cached snapshot when available so that we don't
-            # accidentally wipe fields to zero if IBKR returns a partial update.
-            info = self._return_cached_account_info() or {}
-            info = dict(info)  # ensure we don't mutate the cached reference
+            info = self._normalise_account_info({})
 
-            # Guarantee all expected keys exist even when we start from a cached
-            # snapshot created by an earlier version of the code.
-            info.setdefault('account_id', None)
-            info['account_type'] = (
-                'Paper' if connection_manager.config.paper_trading else 'Live'
-            )
-            info.setdefault('total_cash', 0.0)
-            info.setdefault('available_funds', 0.0)
-            info.setdefault('buying_power', 0.0)
-            info.setdefault('net_liquidation', 0.0)
-            info.setdefault('unrealized_pnl', 0.0)
-            info.setdefault('realized_pnl', 0.0)
-            
-            # Get account ID from account values
             def _parse_float(val: Any) -> float:
                 try:
                     return float(val)
                 except (TypeError, ValueError):
                     return 0.0
 
-            for item in account_values:
+            for item in account_values or []:
                 try:
-                    currency = (item.currency or '').upper()
+                    currency = (item.currency or "").upper()
                 except AttributeError:
-                    currency = ''
+                    currency = ""
 
-                # Account id may be stored either in AccountCode value or the account field itself
-                if item.tag == 'AccountCode' and item.value:
-                    info['account_id'] = item.value
-                elif not info['account_id'] and getattr(item, 'account', None):
-                    info['account_id'] = item.account
+                if item.tag == "AccountCode" and getattr(item, "value", None):
+                    info["account_id"] = item.value
+                elif not info["account_id"] and getattr(item, "account", None):
+                    info["account_id"] = item.account
 
-                # IBKR may report base currency values using either USD or BASE depending on
-                # account configuration, so accept both to avoid zeroing out valid data.
-                currency_ok = currency in ('USD', 'BASE', '')
+                currency_ok = currency in ("USD", "BASE", "")
 
-                if item.tag == 'TotalCashValue' and currency_ok:
-                    info['total_cash'] = _parse_float(item.value)
-                elif item.tag == 'AvailableFunds' and currency_ok:
-                    info['available_funds'] = _parse_float(item.value)
-                elif item.tag == 'BuyingPower' and currency_ok:
-                    info['buying_power'] = _parse_float(item.value)
-                elif item.tag == 'NetLiquidation' and currency_ok:
-                    info['net_liquidation'] = _parse_float(item.value)
-                elif item.tag == 'UnrealizedPnL' and currency_ok:
-                    info['unrealized_pnl'] = _parse_float(item.value)
-                elif item.tag == 'RealizedPnL' and currency_ok:
-                    info['realized_pnl'] = _parse_float(item.value)
+                if item.tag == "TotalCashValue" and currency_ok:
+                    info["total_cash"] = _parse_float(getattr(item, "value", 0.0))
+                elif item.tag == "AvailableFunds" and currency_ok:
+                    info["available_funds"] = _parse_float(getattr(item, "value", 0.0))
+                elif item.tag == "BuyingPower" and currency_ok:
+                    info["buying_power"] = _parse_float(getattr(item, "value", 0.0))
+                elif item.tag == "NetLiquidation" and currency_ok:
+                    info["net_liquidation"] = _parse_float(getattr(item, "value", 0.0))
+                elif item.tag == "UnrealizedPnL" and currency_ok:
+                    info["unrealized_pnl"] = _parse_float(getattr(item, "value", 0.0))
+                elif item.tag == "RealizedPnL" and currency_ok:
+                    info["realized_pnl"] = _parse_float(getattr(item, "value", 0.0))
 
-            # Persist snapshot for downstream consumers (risk manager, summaries)
             try:
                 self._cached_account_info = dict(info)
                 self._cached_account_info_timestamp = now_local()
@@ -2280,11 +2336,15 @@ class IBKRClient:
                 pass
 
             return info
-        except Exception as e:
-            ibkr_logger.error(f"Failed to get account info: {e}")
-            return self._return_cached_account_info()
-    
-    async def get_account_summary(self) -> List[Dict]:
+        except Exception as exc:
+            ibkr_logger.error(f"Failed to get account info: {exc}")
+            if snapshot_payload is not None:
+                return self._normalise_account_info(snapshot_payload)
+            return fallback_info
+
+    async def get_account_summary(
+        self, *, timeout: float = 10.0
+    ) -> List[Dict[str, Any]]:
         """兼容方法：返回与 ib.accountSummary() 类似的结构，用于资金充足性校验等逻辑。
         返回格式：[{'tag': str, 'value': Any, 'currency': str|None, 'account': str|None}, ...]
         """
@@ -2299,7 +2359,27 @@ class IBKRClient:
                 ibkr_logger.error("IBKR connection lost for get_account_summary")
                 return []
 
-            summary_items = ib.accountSummary()
+            fetch_timeout = max(1.0, float(timeout))
+            try:
+                summary_items = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.connection_manager.run_in_connection_thread,
+                        ib.accountSummary,
+                        timeout=fetch_timeout,
+                    ),
+                    timeout=fetch_timeout + 1.0,
+                )
+            except asyncio.TimeoutError:
+                ibkr_logger.error(
+                    "Fetching account summary from IBKR timed out after %.1f seconds",
+                    fetch_timeout,
+                )
+                return []
+            except Exception as exc:
+                ibkr_logger.error(
+                    f"Failed to execute accountSummary in connection thread: {exc}"
+                )
+                return []
             result: List[Dict] = []
             for it in summary_items or []:
                 try:

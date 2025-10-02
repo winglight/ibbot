@@ -147,7 +147,11 @@ class AccountSnapshotService:
         if ib_client is None:
             return None
 
-        info = await ib_client.get_account_info()
+        info = await ib_client.get_account_info(
+            prefer_snapshot=False,
+            force_refresh=True,
+            ib_timeout=float(self._request_timeout_seconds),
+        )
         if info is not None:
             await write_account_info_snapshot(info, reason)
             self._last_account_refresh = now_local()
@@ -176,7 +180,11 @@ class AccountSnapshotService:
         if ib_client is None:
             return {"account_info": None, "positions": None}
 
-        info = await ib_client.get_account_info()
+        info = await ib_client.get_account_info(
+            prefer_snapshot=False,
+            force_refresh=True,
+            ib_timeout=float(self._request_timeout_seconds),
+        )
         positions = await ib_client.get_positions(fast=fast_positions)
 
         await write_account_info_snapshot(info, reason)

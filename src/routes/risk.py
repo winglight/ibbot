@@ -19,6 +19,7 @@ from src.models import (
     PositionSizingRequest,
 )
 from src.database import get_db_manager
+from src.account_snapshot_cache import read_account_info_snapshot
 
 from .orders import (
     _validate_g7_basic_params,
@@ -299,18 +300,52 @@ async def api_position_sizing(payload: PositionSizingRequest, user: Optional[str
     
     try:
         # 获取实时账户信息
-        account_info = {}
+        account_info: Dict[str, Any] = {}
         if connection_manager.is_connected():
+            info: Optional[Dict[str, Any]] = None
             try:
-                account_response = await asyncio.wait_for(
-                    core.ibkr_client.get_account_info(),
-                    timeout=5.0
+                info = await asyncio.wait_for(
+                    core.ibkr_client.get_account_info(
+                        prefer_snapshot=True,
+                        snapshot_timeout=2.0,
+                        ib_timeout=4.0,
+                    ),
+                    timeout=5.0,
                 )
-                if account_response:
-                    account_info = account_response
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Position sizing account info request timed out (5s limit)"
+                )
             except Exception as e:
                 logger.warning(f"Failed to get account info for position sizing: {e}")
-        
+
+            if not info:
+                try:
+                    snapshot = await asyncio.wait_for(
+                        read_account_info_snapshot(), timeout=2.0
+                    )
+                except asyncio.TimeoutError:
+                    snapshot = None
+                    logger.debug(
+                        "Redis snapshot unavailable for position sizing fallback"
+                    )
+                except Exception as exc:
+                    snapshot = None
+                    logger.debug(
+                        "Redis snapshot error for position sizing fallback",
+                        error=str(exc),
+                    )
+                if snapshot and isinstance(snapshot.get("data"), dict):
+                    try:
+                        info = core.ibkr_client._normalise_account_info(snapshot["data"])
+                    except Exception:
+                        info = dict(snapshot["data"])
+
+            if not info:
+                info = dict(getattr(core.ibkr_client, "_cached_account_info", {}) or {})
+
+            account_info = info
+
         # 更新风险管理器的账户状态
         if account_info:
             risk_manager.update_equity_state(account_info)
