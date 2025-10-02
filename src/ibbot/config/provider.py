@@ -141,6 +141,35 @@ class ConfigProvider:
             )
             return default
 
+    async def set_module(self, module: str, values: Mapping[str, Any]) -> Mapping[str, str]:
+        """Persist *values* for *module* into Redis and refresh the local cache."""
+
+        module = module.strip()
+        if not module:
+            raise ValueError("module name must be provided")
+
+        serialised = self._stringify_mapping(values)
+
+        async with self._lock:
+            if self._redis is not None:
+                key = f"{self._hash_prefix}:{module}"
+                if serialised:
+                    await self._redis.hset(key, mapping=serialised)
+                else:
+                    await self._redis.delete(key)
+
+            merged = {**self._env_defaults, **serialised}
+            self._cache[module] = merged
+
+        if self._redis is not None:
+            try:
+                await self._redis.publish(self.update_channel, module)
+            except Exception as exc:  # pragma: no cover - redis publish failure depends on environment
+                logger.warning("Failed to publish config update", module=module, error=str(exc))
+
+        await self._emit(module, self._cache[module])
+        return deepcopy(self._cache[module])
+
     def subscribe(self, module: str | None, listener: Listener) -> None:
         """Register a listener that is invoked when *module* config changes."""
 
@@ -198,6 +227,27 @@ class ConfigProvider:
             logger.warning("Failed to load config from Redis", key=key, error=str(exc))
             return {}
         return {str(k): str(v) for k, v in values.items()}
+
+    def _stringify_mapping(self, values: Mapping[str, Any]) -> Dict[str, str]:
+        result: Dict[str, str] = {}
+        for raw_key, raw_value in values.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            if raw_value is None:
+                continue
+            if isinstance(raw_value, bool):
+                result[key] = "true" if raw_value else "false"
+            elif isinstance(raw_value, (int, float)):
+                result[key] = str(raw_value)
+            elif isinstance(raw_value, (dict, list, tuple)):
+                try:
+                    result[key] = json.dumps(raw_value, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    result[key] = str(raw_value)
+            else:
+                result[key] = str(raw_value)
+        return result
 
     async def _pubsub_worker(self) -> None:
         assert self._pubsub is not None

@@ -25,6 +25,7 @@ from src.ibbot.redis import DEFAULT_REDIS_URL, DEFAULT_REDIS_URL_ENV
 
 
 DEFAULT_SERVICES: tuple[str, ...] = (
+    "connection_control",
     "account",
     "ib_command",
     "ib_feed",
@@ -36,6 +37,7 @@ DEFAULT_SERVICES: tuple[str, ...] = (
 # Mapping of service name -> dedicated Redis URL override environment variable.
 # If a service is not listed here it falls back to ``IBBOT_REDIS_URL``.
 _SERVICE_REDIS_ENV: dict[str, str] = {
+    "connection_control": "CONNECTION_CONTROL_REDIS_URL",
     "ib_command": "IB_COMMAND_REDIS_URL",
     "ib_feed": "IB_FEED_REDIS_URL",
     "strategy": "STRATEGY_REDIS_URL",
