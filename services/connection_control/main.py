@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Mapping
 
 from fastapi import FastAPI, HTTPException, status
@@ -256,12 +257,10 @@ async def _health_loop(app: FastAPI, interval: float) -> None:
 
 
 def create_app(*, health_interval: float = HEALTH_INTERVAL) -> FastAPI:
-    app = FastAPI(title="Connection Control Service", version="1.0.0")
-
     logger = get_logger(SERVICE_NAME)
 
-    @app.on_event("startup")
-    async def _startup() -> None:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
         redis_url = _resolve_redis_url()
         redis = await get_redis_client(redis_url)
         provider = ConfigProvider(redis_client=redis, hash_prefix="hash:config")
@@ -273,32 +272,36 @@ def create_app(*, health_interval: float = HEALTH_INTERVAL) -> FastAPI:
         app.state.cached_config = None
 
         if health_interval > 0:
-            app.state.health_task = asyncio.create_task(_health_loop(app, float(health_interval)))
+            health_task = asyncio.create_task(_health_loop(app, float(health_interval)))
         else:
-            app.state.health_task = None
+            health_task = None
+        app.state.health_task = health_task
 
         await _load_config(app)
         await _publish_health(app)
 
         logger.info("Connection control service started", extra={"redis_url": redis_url})
 
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        task = getattr(app.state, "health_task", None)
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:  # pragma: no cover - depends on runtime timing
-                pass
+        try:
+            yield
+        finally:
+            task = getattr(app.state, "health_task", None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:  # pragma: no cover - depends on runtime timing
+                    pass
 
-        provider: ConfigProvider | None = getattr(app.state, "config_provider", None)
-        if provider is not None:
-            await provider.close()
+            provider_ctx: ConfigProvider | None = getattr(app.state, "config_provider", None)
+            if provider_ctx is not None:
+                await provider_ctx.close()
 
-        await close_global_client()
+            await close_global_client()
 
-        logger.info("Connection control service stopped")
+            logger.info("Connection control service stopped")
+
+    app = FastAPI(title="Connection Control Service", version="1.0.0", lifespan=lifespan)
 
     @app.get("/connection/config")
     async def get_connection_config() -> Mapping[str, Any]:
