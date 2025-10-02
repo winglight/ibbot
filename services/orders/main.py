@@ -1,10 +1,12 @@
 import asyncio
+import copy
 import json
 import logging
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping
+from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, Mapping
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict
@@ -25,6 +27,21 @@ def _serialise_datetime(value: datetime | None) -> str:
     return value.isoformat()
 
 
+def _maybe_json_loads(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except Exception:
+            return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return value
+        return parsed
+    return value
+
+
 def _normalise_stream_payload(data: Mapping[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     for key, value in data.items():
@@ -40,6 +57,137 @@ def _normalise_stream_payload(data: Mapping[str, Any]) -> dict[str, Any]:
         else:
             payload[key] = value
     return payload
+
+
+_REQUEST_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "symbol": ("symbol", "ticker"),
+    "action": ("action", "side"),
+    "quantity": ("quantity", "total_quantity", "totalQuantity", "qty"),
+    "order_type": ("order_type", "orderType", "type"),
+    "limit_price": ("limit_price", "lmt_price", "limitPrice", "price"),
+    "stop_price": ("stop_price", "aux_price", "stopPrice"),
+    "source": ("source",),
+    "strategy": ("strategy", "strategy_id"),
+    "time_in_force": ("time_in_force", "tif", "tif_code"),
+}
+
+
+_RESULT_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "order_id": ("order_id", "ib_order_id", "permid", "permId", "id"),
+    "status": ("order_status", "status", "orderStatus"),
+    "filled_quantity": ("filled", "filled_quantity", "filledQuantity"),
+    "remaining_quantity": (
+        "remaining",
+        "remaining_quantity",
+        "remainingQuantity",
+        "left",
+    ),
+    "avg_fill_price": ("avg_fill_price", "avg_price", "avgPrice"),
+    "limit_price": ("limit_price", "lmt_price", "limitPrice"),
+    "stop_price": ("stop_price", "aux_price", "stopPrice"),
+    "commission": ("commission",),
+    "realized_pnl": ("realized_pnl", "realizedPnl"),
+    "unrealized_pnl": ("unrealized_pnl", "unrealizedPnl"),
+    "submitted_at": ("submitted_at", "submitted", "submittedTime"),
+    "completed_at": (
+        "completed_at",
+        "filled_at",
+        "filledTime",
+        "completion_time",
+    ),
+    "updated_at": ("timestamp", "updated_at", "time", "last_update"),
+    "strategy": ("strategy", "strategy_id"),
+    "source": ("source",),
+}
+
+
+def _coerce_mapping(value: Any) -> dict[str, Any] | None:
+    value = _maybe_json_loads(value)
+    if isinstance(value, Mapping):
+        return dict(value)
+    return None
+
+
+def _apply_field_aliases(record: dict[str, Any], data: Mapping[str, Any], *, aliases: Mapping[str, Iterable[str]]) -> None:
+    for canonical, options in aliases.items():
+        for key in options:
+            if key in data:
+                candidate = data[key]
+                if candidate is not None and candidate != "":
+                    record[canonical] = candidate
+                break
+
+
+def _initial_order_record(command_id: str, request_data: Mapping[str, Any]) -> dict[str, Any]:
+    now = _utc_now()
+    timestamp = _serialise_datetime(now)
+    record: dict[str, Any] = {
+        "id": command_id,
+        "command_id": command_id,
+        "status": "pending",
+        "requested_at": timestamp,
+        "updated_at": timestamp,
+        "request": dict(request_data),
+        "events": [],
+    }
+    _apply_field_aliases(record, request_data, aliases=_REQUEST_FIELD_ALIASES)
+    record.setdefault("symbol", request_data.get("symbol"))
+    record.setdefault("action", request_data.get("action"))
+    record.setdefault("quantity", request_data.get("quantity"))
+    submission_event = {
+        "type": "submission",
+        "timestamp": timestamp,
+        "payload": dict(request_data),
+    }
+    record["events"].append(submission_event)
+    return record
+
+
+def _clone_order_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    return copy.deepcopy(dict(record))
+
+
+def _event_timestamp(payload: Mapping[str, Any]) -> str:
+    for key in ("timestamp", "time", "created_at", "event_time", "updated_at"):
+        value = payload.get(key)
+        if value:
+            if isinstance(value, datetime):
+                return _serialise_datetime(value)
+            if isinstance(value, str):
+                return value
+    return _serialise_datetime(_utc_now())
+
+
+_TERMINAL_STATUSES = {
+    "filled",
+    "completed",
+    "cancelled",
+    "inactive",
+    "rejected",
+    "failed",
+    "expired",
+}
+
+
+def _record_matches(
+    record: Mapping[str, Any],
+    identifier: str,
+    order_id: str | None,
+    command_id: str | None,
+) -> bool:
+    candidates = {
+        str(record.get("id") or ""),
+        str(record.get("order_id") or ""),
+        str(record.get("command_id") or ""),
+    }
+    candidates = {value for value in candidates if value}
+    if identifier and identifier in candidates:
+        return True
+    if order_id and order_id in candidates:
+        return True
+    if command_id and command_id in candidates:
+        return True
+    return False
 
 
 class OrderSubmission(BaseModel):
@@ -63,10 +211,16 @@ class OrdersRuntime:
     history_key: str = "list:orders:history"
     stream_poll_interval: float = 1.0
     health_interval: float = 15.0
+    history_limit: int = 200
     logger: logging.Logger = field(default_factory=lambda: LOGGER)
 
     _redis: Any = field(default=None, init=False, repr=False)
-    _orders: Dict[str, Dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _active_orders: Dict[str, Dict[str, Any]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _history: Deque[Dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=200), init=False, repr=False
+    )
     _command_to_order: Dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _last_message_id: str | None = field(default=None, init=False, repr=False)
     _last_updated_at: datetime | None = field(default=None, init=False, repr=False)
@@ -74,6 +228,9 @@ class OrdersRuntime:
     _health_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._history = deque(maxlen=self.history_limit)
 
     async def start(self) -> None:
         if self._stream_task is not None or self._redis is not None:
@@ -117,15 +274,10 @@ class OrdersRuntime:
         }
         await enqueue_ib_command(payload, redis=self._redis, queue_key=self.command_queue)
 
-        entry = {
-            "id": command_id,
-            "command_id": command_id,
-            "status": "pending",
-            "requested_at": _serialise_datetime(_utc_now()),
-            "request": request.model_dump(mode="json"),
-        }
+        request_payload = request.model_dump(mode="json")
+        entry = _initial_order_record(command_id, request_payload)
         async with self._lock:
-            self._orders[command_id] = entry
+            self._active_orders[command_id] = entry
             self._command_to_order[command_id] = command_id
             self._last_updated_at = _utc_now()
             await self._persist_snapshot()
@@ -160,15 +312,79 @@ class OrdersRuntime:
         await self._publish_health()
         return command_id
 
-    async def list_orders(self) -> dict[str, Any]:
+    async def list_orders(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        if limit < 0:
+            limit = 0
+        if offset < 0:
+            offset = 0
         async with self._lock:
-            orders = list(self._orders.values())
+            combined: list[dict[str, Any]] = []
+            combined.extend(self._active_orders.values())
+            combined.extend(self._history)
+            ordered = sorted(
+                (_clone_order_record(order) for order in combined),
+                key=lambda item: item.get("updated_at") or item.get("requested_at") or "",
+                reverse=True,
+            )
+            total = len(ordered)
+            if limit:
+                sliced = ordered[offset : offset + limit]
+            else:
+                sliced = ordered[offset:]
             updated_at = self._last_updated_at
+            last_event_id = self._last_message_id or ""
+            page = offset // limit if limit else 0
         return {
-            "orders": orders,
+            "orders": sliced,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "page": page,
             "updated_at": _serialise_datetime(updated_at),
-            "last_event_id": self._last_message_id or "",
+            "last_event_id": last_event_id,
         }
+
+    async def get_order(self, order_id: str) -> dict[str, Any]:
+        if not order_id:
+            raise KeyError(order_id)
+        async with self._lock:
+            record = self._find_order_unlocked(order_id)
+            updated_at = _serialise_datetime(self._last_updated_at)
+            last_event_id = self._last_message_id or ""
+        if record is None and self._redis is not None:
+            await self._load_snapshot()
+            async with self._lock:
+                record = self._find_order_unlocked(order_id)
+                updated_at = _serialise_datetime(self._last_updated_at)
+                last_event_id = self._last_message_id or last_event_id
+        if record is None:
+            raise KeyError(order_id)
+        return {
+            "order": _clone_order_record(record),
+            "updated_at": updated_at,
+            "last_event_id": last_event_id,
+        }
+
+    def _find_order_unlocked(self, order_id: str) -> dict[str, Any] | None:
+        identifier = str(order_id).strip()
+        if not identifier:
+            return None
+        direct = self._command_to_order.get(identifier)
+        if direct:
+            if direct in self._active_orders:
+                return self._active_orders[direct]
+            for entry in self._history:
+                if _record_matches(entry, direct, direct, direct):
+                    return entry
+        if identifier in self._active_orders:
+            return self._active_orders[identifier]
+        for record in self._active_orders.values():
+            if _record_matches(record, identifier, identifier, identifier):
+                return record
+        for record in self._history:
+            if _record_matches(record, identifier, identifier, identifier):
+                return record
+        return None
 
     async def poll_stream_once(self) -> int:
         if self._redis is None:
@@ -225,15 +441,27 @@ class OrdersRuntime:
             payload = json.loads(raw)
         except Exception:
             return
-        orders = payload.get("orders")
-        if isinstance(orders, Mapping):
-            items = list(orders.values())
-        elif isinstance(orders, Iterable):
-            items = list(orders)
+        active_payload = payload.get("active_orders")
+        history_payload = payload.get("history")
+        if active_payload is None and payload.get("orders") is not None:
+            active_payload = payload.get("orders")
+        active_items: Iterable[Any]
+        if isinstance(active_payload, Mapping):
+            active_items = active_payload.values()
+        elif isinstance(active_payload, Iterable):
+            active_items = active_payload
         else:
-            items = []
+            active_items = []
+        history_items: Iterable[Any]
+        if isinstance(history_payload, Iterable):
+            history_items = history_payload
+        else:
+            history_items = []
         async with self._lock:
-            for item in items:
+            self._active_orders = {}
+            self._history = deque(maxlen=self.history_limit)
+            self._command_to_order = {}
+            for item in active_items:
                 if not isinstance(item, Mapping):
                     continue
                 identifier = str(
@@ -247,22 +475,50 @@ class OrdersRuntime:
                     continue
                 record = dict(item)
                 record.setdefault("command_id", identifier)
-                self._orders[identifier] = record
+                if "events" not in record or not isinstance(record["events"], list):
+                    record["events"] = []
+                self._active_orders[identifier] = record
                 if record.get("command_id"):
                     self._command_to_order[str(record["command_id"])] = identifier
+                if record.get("order_id"):
+                    self._command_to_order[str(record["order_id"])] = identifier
+            for item in history_items:
+                if not isinstance(item, Mapping):
+                    continue
+                record = dict(item)
+                if "events" not in record or not isinstance(record["events"], list):
+                    record["events"] = []
+                identifier = str(
+                    record.get("id")
+                    or record.get("order_id")
+                    or record.get("command_id")
+                    or ""
+                )
+                if identifier:
+                    self._command_to_order[str(record.get("command_id", identifier))] = identifier
+                if record.get("order_id"):
+                    self._command_to_order[str(record["order_id"])] = identifier
+                self._history.appendleft(record)
             timestamp = payload.get("updated_at")
             if isinstance(timestamp, str) and timestamp:
                 try:
                     self._last_updated_at = datetime.fromisoformat(timestamp)
                 except Exception:
                     self._last_updated_at = None
+            last_event_id = payload.get("last_event_id")
+            if isinstance(last_event_id, str) and last_event_id:
+                self._last_message_id = last_event_id
 
     async def _persist_snapshot(self) -> None:
         if self._redis is None:
             return
+        active_orders = [_clone_order_record(order) for order in self._active_orders.values()]
+        history_orders = [_clone_order_record(order) for order in list(self._history)]
         snapshot = {
-            "orders": list(self._orders.values()),
+            "active_orders": active_orders,
+            "history": history_orders,
             "updated_at": _serialise_datetime(self._last_updated_at),
+            "last_event_id": self._last_message_id or "",
         }
         try:
             await self._redis.set(self.snapshot_key, json.dumps(snapshot))
@@ -284,7 +540,7 @@ class OrdersRuntime:
             return
         async with self._lock:
             metrics = {
-                "active_orders": len(self._orders),
+                "active_orders": len(self._active_orders),
                 "last_event_id": self._last_message_id or "",
                 "updated_at": _serialise_datetime(self._last_updated_at),
             }
@@ -330,51 +586,122 @@ class OrdersRuntime:
             await self._append_history({"event": "stream", "message_id": message_id, "payload": payload})
 
     async def _apply_order_event(self, payload: Mapping[str, Any]) -> bool:
-        command_id = str(payload.get("command_id") or payload.get("ib_command_id") or "").strip()
-        result = payload.get("result") if isinstance(payload.get("result"), Mapping) else None
-        order_id = self._extract_order_id(payload, result, command_id)
-        status = self._extract_status(payload, result)
+        command_id = str(
+            payload.get("command_id") or payload.get("ib_command_id") or ""
+        ).strip()
+        parsed_payload = dict(payload)
+        result_mapping = _coerce_mapping(parsed_payload.get("result"))
+        if result_mapping is not None:
+            parsed_payload["result"] = result_mapping
+        response_mapping = _coerce_mapping(parsed_payload.get("response"))
+        if response_mapping is not None:
+            parsed_payload["response"] = response_mapping
+        order_id = self._extract_order_id(parsed_payload, result_mapping, command_id)
+        status = self._extract_status(parsed_payload, result_mapping)
         if not (command_id or order_id):
-            descriptor = str(payload.get("type") or payload.get("category") or "").lower()
+            descriptor = str(parsed_payload.get("type") or parsed_payload.get("category") or "").lower()
             if "order" not in descriptor:
                 return False
         identifier = order_id or command_id
         if not identifier:
             return False
+        event_time = _event_timestamp(parsed_payload)
+        updated = False
         async with self._lock:
-            record = self._orders.get(identifier)
+            record_identifier = identifier
+            record = self._active_orders.get(record_identifier)
+            from_history = False
             if record is None and command_id and command_id in self._command_to_order:
-                identifier = self._command_to_order[command_id]
-                record = self._orders.get(identifier)
+                record_identifier = self._command_to_order[command_id]
+                record = self._active_orders.get(record_identifier)
+            if record is None and order_id and order_id in self._command_to_order:
+                record_identifier = self._command_to_order[order_id]
+                record = self._active_orders.get(record_identifier)
             if record is None:
+                for item in self._history:
+                    if _record_matches(item, identifier, order_id, command_id):
+                        record = item
+                        record_identifier = str(item.get("id") or identifier)
+                        from_history = True
+                        break
+            if record is None:
+                record_identifier = identifier
                 record = {
                     "id": identifier,
                     "command_id": command_id or identifier,
+                    "events": [],
                 }
+            if "events" not in record or not isinstance(record["events"], list):
+                record["events"] = list(record.get("events", []))
+            record.setdefault("id", record_identifier)
+            self._command_to_order.setdefault(record_identifier, record_identifier)
             if command_id:
                 record["command_id"] = command_id
-                self._command_to_order[command_id] = identifier
+                self._command_to_order[command_id] = record_identifier
             if order_id:
                 record["order_id"] = order_id
-            if isinstance(result, Mapping):
+                self._command_to_order[order_id] = record_identifier
+            record.setdefault("request", {})
+            request_mapping = _coerce_mapping(parsed_payload.get("request"))
+            if request_mapping is not None:
+                record["request"] = request_mapping
+                _apply_field_aliases(record, request_mapping, aliases=_REQUEST_FIELD_ALIASES)
+            if result_mapping is not None:
                 record.setdefault("result", {})
-                if isinstance(record["result"], Mapping):
-                    merged = dict(record["result"])
-                    merged.update(result)
-                    record["result"] = merged
-                else:
-                    record["result"] = dict(result)
-            record.setdefault("events", [])
-            record["events"].append(dict(payload))
+                existing_result = (
+                    dict(record["result"])
+                    if isinstance(record.get("result"), Mapping)
+                    else {}
+                )
+                existing_result.update(result_mapping)
+                record["result"] = existing_result
+            if response_mapping is not None:
+                record["response"] = response_mapping
+                _apply_field_aliases(record, response_mapping, aliases=_RESULT_FIELD_ALIASES)
+            _apply_field_aliases(record, parsed_payload, aliases=_REQUEST_FIELD_ALIASES)
+            if result_mapping is not None:
+                _apply_field_aliases(record, result_mapping, aliases=_REQUEST_FIELD_ALIASES)
+                _apply_field_aliases(record, result_mapping, aliases=_RESULT_FIELD_ALIASES)
+            _apply_field_aliases(record, parsed_payload, aliases=_RESULT_FIELD_ALIASES)
+            status_lower = status.lower() if isinstance(status, str) else ""
             if status:
                 record["status"] = status
-            self._orders[identifier] = record
-            terminal = {"filled", "cancelled", "inactive", "completed", "rejected", "failed"}
-            if status and status.lower() in terminal:
-                self._orders.pop(identifier, None)
-            elif status:
-                record["status"] = status
-            return True
+            record["updated_at"] = event_time
+            if status_lower in {"filled", "cancelled"}:
+                record.setdefault("completed_at", event_time)
+            elif status_lower in _TERMINAL_STATUSES:
+                record.setdefault("completed_at", event_time)
+            record.setdefault("events", [])
+            record["events"].append(
+                {
+                    "type": parsed_payload.get("type") or parsed_payload.get("category") or "event",
+                    "timestamp": event_time,
+                    "payload": parsed_payload,
+                }
+            )
+            if from_history and status_lower not in _TERMINAL_STATUSES:
+                retained = [
+                    _clone_order_record(item)
+                    for item in self._history
+                    if not _record_matches(item, record_identifier, order_id, command_id)
+                ]
+                self._history = deque(retained, maxlen=self.history_limit)
+                from_history = False
+                self._active_orders[record_identifier] = record
+            if not from_history:
+                self._active_orders[record_identifier] = record
+            if status_lower in _TERMINAL_STATUSES:
+                self._active_orders.pop(record_identifier, None)
+                # remove duplicates from history then add latest snapshot
+                existing_history = [
+                    _clone_order_record(item)
+                    for item in self._history
+                    if not _record_matches(item, record_identifier, order_id, command_id)
+                ]
+                existing_history.insert(0, _clone_order_record(record))
+                self._history = deque(existing_history, maxlen=self.history_limit)
+            updated = True
+        return updated
 
     def _extract_order_id(
         self,
@@ -443,8 +770,22 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
             await runtime_instance.stop()
 
     @app.get("/orders", status_code=status.HTTP_200_OK)
-    async def list_orders(runtime: OrdersRuntime = Depends(get_runtime)) -> Mapping[str, Any]:
-        return await runtime.list_orders()
+    async def list_orders(
+        limit: int = 50,
+        offset: int = 0,
+        runtime: OrdersRuntime = Depends(get_runtime),
+    ) -> Mapping[str, Any]:
+        return await runtime.list_orders(limit=limit, offset=offset)
+
+    @app.get("/orders/{order_id}", status_code=status.HTTP_200_OK)
+    async def get_order(
+        order_id: str,
+        runtime: OrdersRuntime = Depends(get_runtime),
+    ) -> Mapping[str, Any]:
+        try:
+            return await runtime.get_order(order_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="order not found")
 
     @app.post("/orders", status_code=status.HTTP_202_ACCEPTED)
     async def place_order(
