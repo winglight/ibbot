@@ -202,7 +202,8 @@ async def test_app_routes_available_without_ib(monkeypatch: pytest.MonkeyPatch) 
         assert payload.get("connected") is False
         assert payload.get("source") == "http"
         assert "account_type" in payload
-        assert payload.get("stale") is False
+        assert payload.get("stale") is True
+        assert payload.get("error_code") is None
 
         docs_response = await client.get("/api-docs.json")
         assert docs_response.status_code == 200
@@ -239,6 +240,7 @@ async def test_connection_status_prefers_redis_when_fresh(
             "last_seen": now_iso,
             "queue_depth": "0",
             "last_error": "",
+            "last_error_code": "",
         },
     )
 
@@ -259,6 +261,7 @@ async def test_connection_status_prefers_redis_when_fresh(
                 "last_seen": now_iso,
                 "queue_depth": "0",
                 "last_error": "",
+                "last_error_code": "",
             },
         )
 
@@ -271,5 +274,6 @@ async def test_connection_status_prefers_redis_when_fresh(
         assert payload.get("queue_depth") == 0
         assert payload.get("last_error") is None
         assert isinstance(payload.get("last_seen"), str)
+        assert payload.get("error_code") is None
 
     await core.shutdown()

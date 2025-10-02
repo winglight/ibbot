@@ -216,6 +216,7 @@ def test_connection_status_returns_health_payload(connection_app, monkeypatch: p
             "last_seen": "2024-01-01T00:00:00+00:00",
             "queue_depth": 1,
             "last_error": None,
+            "error_code": 10147,
             "stale": False,
             "source": "redis",
         }
@@ -230,6 +231,7 @@ def test_connection_status_returns_health_payload(connection_app, monkeypatch: p
     assert payload["connected"] is True
     assert payload["account_type"] == "Paper"
     assert payload["stale"] is False
+    assert payload["error_code"] == 10147
 
 
 def test_connection_status_returns_default_when_unavailable(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,3 +252,4 @@ def test_connection_status_returns_default_when_unavailable(connection_app, monk
     assert payload["stale"] is True
     assert payload["account_type"] == "Live"
     assert payload["last_error"] == "ib-command health unavailable"
+    assert payload["error_code"] is None

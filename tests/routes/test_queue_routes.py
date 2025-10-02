@@ -67,32 +67,40 @@ def _create_client(redis_client: Any) -> QueueMonitorClient:
 
 def test_queue_status_returns_snapshot(queue_app: FastAPI) -> None:
     redis_client = _make_redis_client()
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(redis_client.flushdb())
-    loop.run_until_complete(redis_client.rpush("queue:ib:commands", "a", "b"))
-    snapshot = {
-        "timestamp": "2024-01-01T00:00:00+00:00",
-        "queue:ib-commands": json.dumps(
-            {
-                "name": "ib-commands",
-                "queue_key": "queue:ib:commands",
-                "length": 5,
-                "consumption_rate": 1.5,
-                "stale_seconds": 0,
-            }
-        ),
-        "stream:orders": json.dumps(
-            {
-                "name": "orders",
-                "stream_key": "stream:orders",
-                "group": "orders-group",
-                "pending": 7,
-                "consumption_rate": 2.5,
-                "stale_seconds": 10,
-            }
-        ),
-    }
-    loop.run_until_complete(redis_client.hset("hash:service:queue-monitor", mapping=snapshot))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(redis_client.flushdb())
+        loop.run_until_complete(redis_client.rpush("queue:ib:commands", "a", "b"))
+        snapshot = {
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "queue:ib-commands": json.dumps(
+                {
+                    "name": "ib-commands",
+                    "queue_key": "queue:ib:commands",
+                    "length": 5,
+                    "consumption_rate": 1.5,
+                    "stale_seconds": 0,
+                }
+            ),
+            "stream:orders": json.dumps(
+                {
+                    "name": "orders",
+                    "stream_key": "stream:orders",
+                    "group": "orders-group",
+                    "pending": 7,
+                    "consumption_rate": 2.5,
+                    "stale_seconds": 10,
+                }
+            ),
+        }
+        loop.run_until_complete(
+            redis_client.hset("hash:service:queue-monitor", mapping=snapshot)
+        )
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+        asyncio.set_event_loop(None)
 
     queue_module.set_queue_monitor_client(_create_client(redis_client))
 
@@ -118,22 +126,30 @@ def test_queue_status_returns_snapshot(queue_app: FastAPI) -> None:
 
 def test_queue_tasks_and_single_queue(queue_app: FastAPI) -> None:
     redis_client = _make_redis_client()
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(redis_client.flushdb())
-    loop.run_until_complete(redis_client.lpush("queue:ib:commands", "x"))
-    snapshot = {
-        "timestamp": "2024-02-02T00:00:00+00:00",
-        "queue:ib-commands": json.dumps(
-            {
-                "name": "ib-commands",
-                "queue_key": "queue:ib:commands",
-                "length": 4,
-                "consumption_rate": 0.2,
-                "stale_seconds": 5,
-            }
-        ),
-    }
-    loop.run_until_complete(redis_client.hset("hash:service:queue-monitor", mapping=snapshot))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(redis_client.flushdb())
+        loop.run_until_complete(redis_client.lpush("queue:ib:commands", "x"))
+        snapshot = {
+            "timestamp": "2024-02-02T00:00:00+00:00",
+            "queue:ib-commands": json.dumps(
+                {
+                    "name": "ib-commands",
+                    "queue_key": "queue:ib:commands",
+                    "length": 4,
+                    "consumption_rate": 0.2,
+                    "stale_seconds": 5,
+                }
+            ),
+        }
+        loop.run_until_complete(
+            redis_client.hset("hash:service:queue-monitor", mapping=snapshot)
+        )
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+        asyncio.set_event_loop(None)
 
     queue_module.set_queue_monitor_client(_create_client(redis_client))
 
@@ -164,8 +180,14 @@ def test_queue_tasks_and_single_queue(queue_app: FastAPI) -> None:
 
 def test_queue_routes_when_snapshot_missing(queue_app: FastAPI) -> None:
     redis_client = _make_redis_client()
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(redis_client.flushdb())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(redis_client.flushdb())
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+        asyncio.set_event_loop(None)
 
     queue_module.set_queue_monitor_client(_create_client(redis_client))
 

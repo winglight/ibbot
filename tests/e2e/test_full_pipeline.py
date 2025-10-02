@@ -184,6 +184,7 @@ def test_websocket_handshake_with_mock_manager(monkeypatch: pytest.MonkeyPatch) 
         assert initial["type"] == "connection_status"
         assert initial["connected"] is False
         assert initial["account_type"] == "Paper"
+        assert initial.get("error_code") is None
 
 
 class FakeInflux:
@@ -398,10 +399,23 @@ async def _run_order_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     app.dependency_overrides[orders_module.get_current_user] = allow_user
 
     monkeypatch.setattr(orders_module, "_enqueue_command", fake_enqueue)
+    async def healthy_ib_health() -> dict[str, Any]:
+        return {
+            "connected": True,
+            "queue_depth": 0,
+            "last_error": None,
+            "error_code": None,
+            "stale": False,
+        }
+
+    monkeypatch.setattr(
+        orders_module, "_ensure_ib_command_available", healthy_ib_health
+    )
     monkeypatch.setattr(orders_module, "websocket_manager", websocket_manager)
     monkeypatch.setattr(orders_module.uuid, "uuid4", lambda: _FakeUUID())
     monkeypatch.setattr(orders_module, "audit_log_success", noop)
     monkeypatch.setattr(orders_module, "audit_log_failure", noop)
+    orders_module.set_websocket_broadcast_override(websocket_manager.broadcast)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:

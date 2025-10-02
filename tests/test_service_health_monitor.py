@@ -10,6 +10,7 @@ def _payload(last_seen: datetime, **overrides):
         "last_seen": last_seen.isoformat(),
         "queue_depth": 0,
         "last_error": None,
+        "error_code": None,
         "stale": False,
         "source": "redis",
         "type": "connection_status",

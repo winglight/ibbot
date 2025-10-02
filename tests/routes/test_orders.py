@@ -54,7 +54,7 @@ def test_place_order_success_enqueues_and_broadcasts(
 
     async def fake_health() -> dict[str, Any]:
         recorded["health_checked"] = True
-        return {"connected": True}
+        return {"connected": True, "error_code": None}
 
     events: list[dict[str, Any]] = []
 
@@ -89,7 +89,7 @@ def test_place_order_queue_failure_returns_503(
         raise RuntimeError("queue down")
 
     async def fake_health() -> dict[str, Any]:
-        return {"connected": True}
+        return {"connected": True, "error_code": None}
 
     monkeypatch.setattr(orders_module, "_enqueue_command", failing_enqueue)
     monkeypatch.setattr(orders_module, "_ensure_ib_command_available", fake_health)

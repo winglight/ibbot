@@ -77,24 +77,29 @@ pip install -r requirements.txt
 
 ### 2. 配置环境变量
 
-根目录提供 `.env.example` 模板，包含全部默认值及注释。首次启动前请执行以下步骤：
+根目录提供 `.env.example` 模板，包含全部默认值及注释。首次启动前建议：
 
 ```bash
-cp .env.example .env        # （可选）创建共享默认配置
-cp .env.example .env.local  # 建议创建，仅保存本地覆写
+cp .env.example .env        # 团队共享的基础默认值
+cp .env.example .env.local  # 本地覆写，保存凭据与私有配置
 ```
 
-`src.config.load_project_env` 会优先加载 `.env.local`，随后回退到 `.env`。如果两者均不存在，则自动尝试读取模板并提示创建实际文件，以便对敏感凭据进行覆盖。
+`src.config.load_project_env` 会同时加载 `.env` 与 `.env.local`（若存在），因此请将敏感配置写入 `.env.local` 并按需覆盖 `.env` 中的公共默认值。
 
-在 `.env.local` 中修改关键变量，例如：
+常用环境变量速查表：
 
-- `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `JWT_SECRET`：后台认证与安全。
-- `VISITOR_USERNAME` / `VISITOR_PASSWORD`：访客只读账号（可留空）。
-- `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING`：IBKR 连接配置。
-- `AUTO_CONNECT` / `IBBOT_DISABLE_TRADING`：启动时自动连接与交易禁用开关。
-- `IBBOT_REDIS_URL`：缓存与队列的主连接串。`REDIS_URL`、`IB_COMMAND_REDIS_URL`、`IB_FEED_REDIS_URL`、`STRATEGY_REDIS_URL`、`NOTIFICATION_REDIS_URL`、`ACCOUNT_CACHE_REDIS_URL` 与 `DATA_LAYER_REDIS_URL` 在留空时会继承该值。
-- `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB`：当未提供连接串时自动拼接备用地址。
-- `DATA_LAYER_*`、`TELEGRAM_*` 等按需启用的可选能力。
+| 变量 | 用途 | 关联模块/服务 |
+| --- | --- | --- |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `JWT_SECRET` | 配置后台登录与 JWT 密钥 | Web API |
+| `VISITOR_USERNAME` / `VISITOR_PASSWORD` | 可选访客账号，提供只读界面 | Web API |
+| `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING` | IBKR 连接主机、端口、客户端 ID 与交易环境 | 连接管理、`ib_command` |
+| `AUTO_CONNECT` / `IBBOT_DISABLE_TRADING` | 控制启动时是否自动连接 IBKR、是否禁用交易 | Web API、策略/订单模块 |
+| `IBBOT_REDIS_URL` | 全局 Redis 连接串，未单独指定时供各服务共用 | 全部后台服务 |
+| `IB_COMMAND_REDIS_URL` / `IB_FEED_REDIS_URL` / `STRATEGY_REDIS_URL` 等 | 覆盖对应微服务的 Redis 连接 | `ib_command`、`ib_feed`、`strategy`、`notification` 等 |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | 当使用分散配置时拼接 Redis 地址 | Redis 客户端封装 |
+| `IB_COMMAND_HEALTH_POLL_INTERVAL_SEC` / `IB_COMMAND_HEALTH_STALE_AFTER_SEC` | 控制 ib-command 健康检查的轮询频率与过期阈值 | 主进程、`ib_command` |
+| `IB_COMMAND_ACCOUNT_TYPE` / `IB_ACCOUNT_TYPE` | 覆写连接状态响应中的账户类型标签 | Web API |
+| `DATA_LAYER_*`、`TELEGRAM_*` | 行情落地、通知推送等可选能力 | Market Data、Notification |
 
 ### 3. 启动服务
 
@@ -110,7 +115,7 @@ uvicorn main:app --reload
 
 ### 3.1 直接运行后台服务（可选）
 
-`scripts/run_service.py` 与 `scripts/run_all.py` 提供了“开箱即用”的服务启动封装，会在执行前自动加载 `.env.local`（若缺失则回退到 `.env`）。
+`scripts/run_service.py` 与 `scripts/run_all.py` 提供了“开箱即用”的服务启动封装，执行前会自动加载 `.env` 与 `.env.local` 配置。
 
 ```bash
 # 检查某个服务是否可以直接启动（不会连接外部依赖）
@@ -142,13 +147,26 @@ python scripts/run_all.py --dry-run ib_command
 | `notification` | `python scripts/run_service.py notification` | Redis（事件队列） | 推送通知到浏览器/Telegram。 |
 | `optimizer` | `python scripts/run_service.py optimizer` | Redis、InfluxDB | 需要历史数据（InfluxDB）与事件流（Redis）。 |
 
+### Redis 健康键约定
+
+| Redis 键 | 默认来源 | 主要字段 |
+| --- | --- | --- |
+| `hash:service:health:ib-command` | `ib_command` 服务（可由 `IB_COMMAND_HEALTH_KEY` 覆写） | `queue_depth`、`last_seen`、`last_error`、`last_error_code`、`stale` |
+| `hash:service:health:risk-service` | `risk` 服务（`RISK_SERVICE_HEALTH_KEY`） | `status`、`last_seen`、`last_error` |
+| `hash:service:health:strategy` | `strategy` 服务（`STRATEGY_SERVICE_HEALTH_KEY`） | `status`/`healthy`、`last_error`、`last_seen` |
+| `hash:service:health:account-snapshot` | 账户快照服务（`ACCOUNT_SNAPSHOT_SERVICE_HEALTH_KEY`） | `status`、`healthy`、`last_error` |
+| `hash:service:health:queue` | 队列监控守护进程（`QUEUE_SERVICE_HEALTH_KEY`） | `status`、`last_seen` |
+| `hash:service:queue-monitor` | `queue_monitor` 服务 | `timestamp`、队列统计字段 |
+
+这些健康键由 `src/service_status.py` 汇总，前端“Service Health”与连接状态接口均依赖其结构。新增的 `last_error_code` 字段会出现在 ib-command 健康记录与 `/api/connection_status` 响应中，用于暴露最新的 IBKR 错误码。
+
 若本地尚未安装 Redis/InfluxDB，可使用最小化的 docker compose 组合快速拉起：
 
 ```bash
 docker compose up redis influxdb
 ```
 
-完成后，服务脚本会自动复用 `.env.local` 中的连接配置。
+完成后，服务脚本会复用 `.env`/`.env.local` 中声明的连接配置。
 
 ### 4. 基本操作
 
@@ -164,15 +182,34 @@ docker compose up redis influxdb
 - `/ws/dom/{symbol}`：推送特定标的的 DOM 深度与指标。
 - Notification Center 支持浏览器与 Telegram 通道，配置接口为 `/api/notifications/settings`。
 
+### 前端连接状态契约
+
+前端“Connection”面板与 WebSocket 首条 `connection_status` 消息共用同一响应结构：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `connected` | `bool` | 当前是否已建立可用的 ib-command 连接。 |
+| `account_type` | `str` | “Paper”/“Live”等账户标签，受 `IB_COMMAND_ACCOUNT_TYPE`、`IB_ACCOUNT_TYPE` 控制。 |
+| `queue_depth` | `int` \| `null` | ib-command 队列深度，未知时返回 `null`。 |
+| `last_seen` | `str` \| `null` | 最近一次健康心跳的 ISO8601 时间戳。 |
+| `last_error` | `str` \| `null` | 最近错误描述，无错误时为 `null`。 |
+| `error_code` | `int` \| `null` | 最近一次 IBKR 错误码（新增字段），用于前端提示具体拒单/断连原因。 |
+| `stale` | `bool` | 健康数据是否已过期。 |
+| `source` | `str` | 数据来源，`redis`/`http` 等。 |
+
+当 Redis 健康键缺失时，接口会返回 `connected=false`、`stale=true`、`error_code=null` 以及默认的 `last_error` 提示，前端可据此展示“等待 ib-command 服务”的状态。
+
 ## 🧪 测试
 
-更新后的测试用例覆盖 JWT 登录、连接状态、通知配置与 DOM 配置。运行方式：
+更新后的测试用例覆盖 JWT 登录、连接状态（含 `error_code` 字段）、通知配置与 DOM 配置。运行方式：
 
 ```bash
 pytest
+
+npm test
 ```
 
-测试会自动生成独立的 SQLite 文件并跳过真实 IBKR/Redis 依赖。
+`pytest` 会自动生成独立的 SQLite 文件并跳过真实 IBKR/Redis 依赖。`npm test` 运行 Playwright 端到端脚本（默认检查静态前端契约），首次使用前请执行 `npm install` 安装依赖。
 
 ## 🐳 Docker 与远程部署
 

@@ -86,6 +86,8 @@ class IBKRConnectionManager {
             connected: status.connected,
             account_type: status.accountType,
             last_error: status.lastError,
+            error_code: status.errorCode,
+            errorCode: status.errorCode,
             queue_depth: status.queueDepth,
             last_seen: status.lastSeen,
             redis: status.redis ? { ...status.redis } : undefined,
@@ -607,6 +609,24 @@ class IBKRConnectionManager {
     }
 
     normalizeConnectionStatus(payload = {}) {
+        const parseErrorCode = (value) => {
+            if (value === undefined || value === null) {
+                return null;
+            }
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                return value;
+            }
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (!trimmed) return null;
+                const numeric = Number(trimmed);
+                if (Number.isFinite(numeric)) {
+                    return numeric;
+                }
+            }
+            return null;
+        };
+
         const result = {
             connected: false,
             accountType: '',
@@ -615,6 +635,7 @@ class IBKRConnectionManager {
             lastError: null,
             queueDepth: null,
             lastSeen: null,
+            errorCode: null,
             redis: null,
             receivedAt: null,
         };
@@ -626,6 +647,13 @@ class IBKRConnectionManager {
         const redisData = safe.redis && typeof safe.redis === 'object'
             ? { ...safe.redis }
             : null;
+
+        const primaryErrorCode = parseErrorCode(
+            safe.error_code ?? safe.errorCode ?? safe.last_error_code ?? safe.lastErrorCode
+        );
+        if (primaryErrorCode !== null) {
+            result.errorCode = primaryErrorCode;
+        }
 
         if (typeof safe.connected === 'boolean') {
             result.connected = safe.connected;
@@ -698,6 +726,19 @@ class IBKRConnectionManager {
         if (redisData) {
             redisData.source = this._normalizeSource(redisData.source || 'redis');
             redisData.stale = Boolean(redisData.stale);
+            const redisErrorCode = parseErrorCode(
+                redisData.error_code ?? redisData.errorCode ?? redisData.last_error_code ?? redisData.lastErrorCode
+            );
+            redisData.error_code = redisErrorCode;
+            if (redisData.last_error_code !== undefined) {
+                redisData.last_error_code = redisErrorCode;
+            }
+            if (redisData.lastErrorCode !== undefined) {
+                redisData.lastErrorCode = redisErrorCode;
+            }
+            if (result.errorCode === null && redisErrorCode !== null) {
+                result.errorCode = redisErrorCode;
+            }
             if (!Number.isFinite(result.receivedAt)) {
                 const redisReceived = redisData.received_at ?? redisData.receivedAt;
                 if (redisReceived !== undefined && redisReceived !== null) {

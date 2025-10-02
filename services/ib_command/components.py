@@ -24,6 +24,10 @@ except Exception:  # pragma: no cover - fallback when redis is unavailable
 class IBCommandError(Exception):
     """Base exception for command execution errors."""
 
+    def __init__(self, message: str, *, error_code: int | None = None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
 
 class RetryableIBCommandError(IBCommandError):
     """Exception raised when a command should be retried."""
@@ -42,6 +46,7 @@ class ExecutionResult:
     result: Any | None
     attempts: int
     error: str | None = None
+    error_code: int | None = None
 
 
 class IBCommandExecutor:
@@ -150,6 +155,8 @@ class ResultPublisher:
             message["result"] = self._serialize(payload.result)
         if payload.error:
             message["error"] = payload.error
+        if payload.error_code is not None:
+            message["error_code"] = str(payload.error_code)
         return message
 
     def _serialize(self, value: Any) -> str:
@@ -186,6 +193,7 @@ class CommandConsumer:
         self._logger = get_logger(logger_name)
         self._stopping = asyncio.Event()
         self._last_error: str = ""
+        self._last_error_code: int | None = None
 
     async def consume_forever(self) -> None:
         self._stopping.clear()
@@ -219,6 +227,7 @@ class CommandConsumer:
         max_retries = int(command.get("max_retries", self._default_max_retries))
         attempts = 0
         last_error: str | None = None
+        last_error_code: int | None = None
 
         while True:
             attempts += 1
@@ -226,8 +235,11 @@ class CommandConsumer:
                 result = await self._executor.execute(command, attempts=attempts)
             except RetryableIBCommandError as exc:
                 last_error = str(exc)
+                last_error_code = getattr(exc, "error_code", None)
                 if attempts > max_retries:
-                    await self._publish_failure(command_id, attempts, last_error)
+                    await self._publish_failure(
+                        command_id, attempts, last_error, last_error_code
+                    )
                     break
                 self._logger.warning(
                     "Retryable IB command failure",
@@ -242,38 +254,68 @@ class CommandConsumer:
                 continue
             except IBCommandError as exc:
                 last_error = str(exc)
-                await self._publish_failure(command_id, attempts, last_error)
+                last_error_code = getattr(exc, "error_code", None)
+                await self._publish_failure(
+                    command_id, attempts, last_error, last_error_code
+                )
                 break
             except Exception as exc:  # pragma: no cover - defensive guard
                 last_error = str(exc)
-                await self._publish_failure(command_id, attempts, last_error)
+                last_error_code = getattr(exc, "error_code", None)
+                await self._publish_failure(
+                    command_id, attempts, last_error, last_error_code
+                )
                 break
             else:
                 await self._publisher.publish(result)
                 self._last_error = ""
+                self._last_error_code = None
                 await self._update_health()
                 return
 
-        await self._update_health(last_error=last_error)
+        await self._update_health(
+            last_error=last_error,
+            last_error_code=last_error_code,
+        )
 
-    async def _publish_failure(self, command_id: str, attempts: int, error: str | None) -> None:
+    async def _publish_failure(
+        self,
+        command_id: str,
+        attempts: int,
+        error: str | None,
+        error_code: int | None,
+    ) -> None:
         payload = ExecutionResult(
             command_id=command_id,
             status="failed",
             result=None,
             attempts=attempts,
             error=error,
+            error_code=error_code,
         )
         await self._publisher.publish(payload)
 
-    async def _update_health(self, *, last_error: str | None = None) -> None:
+    async def _update_health(
+        self,
+        *,
+        last_error: str | None = None,
+        last_error_code: int | None = None,
+    ) -> None:
         queue_depth = await self._safe_queue_depth()
         if last_error is not None:
             self._last_error = last_error or ""
+        if last_error_code is not None:
+            try:
+                self._last_error_code = int(last_error_code)
+            except (TypeError, ValueError):
+                self._last_error_code = None
         values = {
             "last_seen": datetime.now(timezone.utc).isoformat(),
             "queue_depth": str(queue_depth),
             "last_error": self._last_error,
+            "last_error_code": ""
+            if self._last_error_code is None
+            else str(self._last_error_code),
         }
         try:
             await self._redis.hset(self._health_key, mapping=values)

@@ -18,6 +18,19 @@ def orders_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     app.include_router(orders_module.router)
     orders_module.set_websocket_broadcast_override(None)
 
+    async def healthy_ib_command() -> dict[str, Any]:
+        return {
+            "connected": True,
+            "queue_depth": 0,
+            "last_error": None,
+            "error_code": None,
+            "stale": False,
+        }
+
+    monkeypatch.setattr(
+        orders_module, "_ensure_ib_command_available", healthy_ib_command
+    )
+
     async def allow_user(request: Request) -> str:
         request.state.is_read_only = False
         request.state.user_role = "admin"
