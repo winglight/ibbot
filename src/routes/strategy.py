@@ -17,7 +17,8 @@ from src.utils.strategy_cache import (
     rebuild_strategy_cache as cache_rebuild_strategy_cache,
 )
 
-from core import strategy_manager, queue_manager, order_manager
+import core
+from core import queue_manager, order_manager
 from .auth import get_current_user
 from src.database import get_db_manager
 from src.models import (
@@ -66,6 +67,8 @@ def _make_performance_cache_key(
 async def _ensure_strategy_cache_populated(name: str) -> Dict[str, Any]:
     """Ensure Redis-backed caches for ``name`` exist before expensive queries."""
 
+    manager = _get_strategy_manager()
+
     stats = await cache_get_strategy_stats(name)
     if stats:
         return stats
@@ -101,6 +104,13 @@ async def _ensure_strategy_cache_populated(name: str) -> Dict[str, Any]:
                 error=str(exc),
             )
 
+        # Ensure future consumers see the rebuilt state immediately by touching
+        # the manager's in-memory cache when available.
+        try:
+            manager._invalidate_strategies_cache()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
         return await cache_get_strategy_stats(name)
 
 
@@ -113,6 +123,8 @@ async def _load_strategy_performance(
     end_date: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     await _ensure_strategy_cache_populated(name)
+
+    manager = _get_strategy_manager()
 
     try:
         metrics = await cache_compute_performance(
@@ -129,7 +141,7 @@ async def _load_strategy_performance(
     if not metrics:
         try:
             metrics = await asyncio.to_thread(
-                strategy_manager.get_strategy_performance,
+                manager.get_strategy_performance,
                 name,
                 start_date,
                 end_date,
@@ -168,12 +180,32 @@ _performance_fetch_tasks: Dict[str, asyncio.Task] = {}
 _strategy_cache_rebuild_locks: Dict[str, asyncio.Lock] = {}
 
 
+def _get_strategy_manager(*, for_http: bool = False):
+    """Fetch the current strategy manager instance from ``core``.
+
+    ``core.strategy_manager`` may be reassigned during application startup or
+    hot-reload cycles, so always look it up dynamically instead of relying on a
+    module-level import that might have captured ``None`` during a partial
+    import. When ``for_http`` is True, raise ``HTTPException`` so the caller can
+    surface a proper API error response.
+    """
+
+    manager = getattr(core, "strategy_manager", None)
+    if manager is None:
+        if for_http:
+            raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+        raise RuntimeError("Strategy manager not initialized")
+    return manager
+
+
 async def _load_strategy_executions(
     name: str,
     limit: int,
     cache_key: Tuple[str, int],
 ) -> Dict[str, Any]:
-    executions = await asyncio.to_thread(strategy_manager.get_executions, name, limit)
+    manager = _get_strategy_manager()
+
+    executions = await asyncio.to_thread(manager.get_executions, name, limit)
     formatted = [
         asdict(exec_item) if hasattr(exec_item, "__dict__") else exec_item
         for exec_item in executions
@@ -323,15 +355,13 @@ def schedule_strategy_cache_invalidation(strategy_name: Optional[str] = None) ->
 
 @router.get("/api/strategy/settings")
 async def get_strategy_settings(user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    return {"success": True, "settings": strategy_manager.get_settings()}
+    manager = _get_strategy_manager(for_http=True)
+    return {"success": True, "settings": manager.get_settings()}
 
 @router.post("/api/strategy/settings")
 async def update_strategy_settings(settings: StrategySettingsRequest, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    strategy_manager.update_settings(settings.model_dump())
+    manager = _get_strategy_manager(for_http=True)
+    manager.update_settings(settings.model_dump())
     return {"success": True}
 
 # --- Strategy Auth Token Generation Endpoint ---
@@ -339,17 +369,16 @@ from fastapi import Header
 
 @router.post("/api/strategy/settings/generate-token")
 async def generate_strategy_token(user: Optional[str] = Depends(get_current_user)):
-    token = strategy_manager.generate_auth_token()
+    token = _get_strategy_manager(for_http=True).generate_auth_token()
     return {"success": True, "token": token}
 
 @router.get("/api/strategy/files")
 async def list_strategy_files(user: Optional[str] = Depends(get_current_user)):
     """Get list of available strategy files from strategy directory"""
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    manager = _get_strategy_manager(for_http=True)
     try:
         files = []
-        strategy_dir = strategy_manager.strategy_dir
+        strategy_dir = manager.strategy_dir
         for file_path in strategy_dir.glob("*.py"):
             if file_path.is_file():
                 files.append(file_path.name)
@@ -360,41 +389,38 @@ async def list_strategy_files(user: Optional[str] = Depends(get_current_user)):
 
 @router.get("/api/strategies")
 async def list_strategies(user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    manager = _get_strategy_manager(for_http=True)
     loop = asyncio.get_event_loop()
     try:
         strategies = await asyncio.wait_for(
-            loop.run_in_executor(None, strategy_manager.get_strategies),
+            loop.run_in_executor(None, manager.get_strategies),
             timeout=6.0,
         )
     except asyncio.TimeoutError:
         logger.warning("list_strategies timed out; returning cached result")
-        strategies = strategy_manager.get_strategies()
+        strategies = manager.get_strategies()
     return {"success": True, "strategies": strategies}
 
 @router.post("/api/strategies")
 async def add_strategy_api(strategy: StrategyRequest, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    success = strategy_manager.add_strategy(strategy.model_dump())
+    manager = _get_strategy_manager(for_http=True)
+    success = manager.add_strategy(strategy.model_dump())
     if not success:
         raise HTTPException(status_code=400, detail="Failed to add strategy")
     return {"success": True}
 
 @router.get("/api/strategies/{name}")
 async def get_strategy_api(name: str, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    manager = _get_strategy_manager(for_http=True)
     loop = asyncio.get_running_loop()
     try:
         strategy = await asyncio.wait_for(
-            loop.run_in_executor(None, strategy_manager.get_strategy, name),
+            loop.run_in_executor(None, manager.get_strategy, name),
             timeout=5.0,
         )
     except asyncio.TimeoutError:
         logger.warning(f"get_strategy timed out for {name}; returning cached snapshot")
-        strategy = strategy_manager.get_strategy_snapshot(name)
+        strategy = manager.get_strategy_snapshot(name)
     except Exception as exc:
         logger.error(f"Failed to load strategy {name}: {exc}")
         raise HTTPException(status_code=500, detail="Failed to load strategy") from exc
@@ -404,19 +430,18 @@ async def get_strategy_api(name: str, user: Optional[str] = Depends(get_current_
 
 @router.get("/api/strategies/{name}/internal-info")
 async def get_internal_strategy_info_api(name: str, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    manager = _get_strategy_manager(for_http=True)
     loop = asyncio.get_running_loop()
     try:
         info = await asyncio.wait_for(
-            loop.run_in_executor(None, strategy_manager.get_internal_strategy_info, name),
+            loop.run_in_executor(None, manager.get_internal_strategy_info, name),
             timeout=6.0,
         )
     except asyncio.TimeoutError:
         logger.warning(
             "get_internal_strategy_info timed out; serving cached snapshot", strategy=name
         )
-        cached = strategy_manager.get_cached_internal_strategy_info(name)
+        cached = manager.get_cached_internal_strategy_info(name)
         if cached:
             return {"success": True, "strategy": cached, "cached": True}
         raise HTTPException(status_code=504, detail="Timed out loading strategy info")
@@ -425,7 +450,7 @@ async def get_internal_strategy_info_api(name: str, user: Optional[str] = Depend
         raise HTTPException(status_code=500, detail="Failed to load strategy info") from exc
 
     if not info:
-        cached = strategy_manager.get_cached_internal_strategy_info(name)
+        cached = manager.get_cached_internal_strategy_info(name)
         if cached:
             return {"success": True, "strategy": cached, "cached": True}
         raise HTTPException(status_code=404, detail="Strategy not found")
@@ -438,11 +463,10 @@ async def update_strategy_parameter_api(
     payload: StrategyParameterUpdateRequest,
     user: Optional[str] = Depends(get_current_user),
 ):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    manager = _get_strategy_manager(for_http=True)
 
     try:
-        parameter = strategy_manager.update_strategy_parameter(
+        parameter = manager.update_strategy_parameter(
             name, payload.parameter_name, payload.value
         )
     except ValueError as exc:
@@ -456,11 +480,10 @@ async def update_strategy_parameter_api(
 
 @router.get("/api/strategies/{name}/risk-settings")
 async def get_strategy_risk_settings_api(name: str, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    if name not in strategy_manager.strategies:
+    manager = _get_strategy_manager(for_http=True)
+    if name not in manager.strategies:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    settings = strategy_manager.get_strategy_risk_settings(name)
+    settings = manager.get_strategy_risk_settings(name)
     return {"success": True, "settings": settings}
 
 
@@ -469,13 +492,12 @@ async def update_strategy_risk_settings_api(
     name: str,
     payload: StrategyRiskSettings,
     user: Optional[str] = Depends(get_current_user),
-): 
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    if name not in strategy_manager.strategies:
+):
+    manager = _get_strategy_manager(for_http=True)
+    if name not in manager.strategies:
         raise HTTPException(status_code=404, detail="Strategy not found")
     try:
-        updated = strategy_manager.update_strategy_risk_settings(name, payload.model_dump(exclude_unset=True))
+        updated = manager.update_strategy_risk_settings(name, payload.model_dump(exclude_unset=True))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -486,17 +508,16 @@ async def update_strategy_risk_settings_api(
 
 @router.get("/api/strategies/{name}/status")
 async def get_internal_strategy_status_api(name: str, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    manager = _get_strategy_manager(for_http=True)
     loop = asyncio.get_event_loop()
     try:
         status = await asyncio.wait_for(
-            loop.run_in_executor(None, strategy_manager.get_internal_strategy_status, name),
+            loop.run_in_executor(None, manager.get_internal_strategy_status, name),
             timeout=5.0,
         )
     except asyncio.TimeoutError:
         logger.warning(f"get_internal_strategy_status timed out for {name}; returning cached state")
-        status = strategy_manager.get_internal_strategy_status(name)
+        status = manager.get_internal_strategy_status(name)
     if status is None:
         raise HTTPException(status_code=404, detail="Strategy status unavailable")
     return {"success": True, "status": status}
@@ -507,9 +528,8 @@ async def set_strategy_data_push_api(
     payload: StrategyDataPushRequest,
     user: Optional[str] = Depends(get_current_user),
 ):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    set_data_push = strategy_manager.set_data_push
+    manager = _get_strategy_manager(for_http=True)
+    set_data_push = manager.set_data_push
     call_kwargs = {
         "enabled": payload.enabled,
         "subscription": payload.subscription,
@@ -524,7 +544,7 @@ async def set_strategy_data_push_api(
     if signature and "force_restart" in signature.parameters:
         call_kwargs["force_restart"] = bool(payload.force_restart)
 
-    timeout_seconds = getattr(strategy_manager, "data_push_request_timeout", 8.0)
+    timeout_seconds = getattr(manager, "data_push_request_timeout", 8.0)
     timed_out = False
     result: Optional[Dict[str, Any]] = None
     background_task: Optional[asyncio.Task] = None
@@ -568,7 +588,7 @@ async def set_strategy_data_push_api(
     if result is None:
         result = {}
 
-    state_snapshot = strategy_manager.get_data_push_state(name) or {}
+    state_snapshot = manager.get_data_push_state(name) or {}
     if not state_snapshot:
         state_snapshot = result
     if not state_snapshot:
@@ -613,18 +633,16 @@ async def set_strategy_data_push_api(
 
 @router.put("/api/strategies/{name}")
 async def update_strategy_api(name: str, updates: Dict[str, Any], user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    success = await strategy_manager.update_strategy(name, updates)
+    manager = _get_strategy_manager(for_http=True)
+    success = await manager.update_strategy(name, updates)
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update strategy")
     return {"success": True}
 
 @router.post("/api/strategies/{name}/rename")
 async def rename_strategy_api(name: str, payload: StrategyRenameRequest, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    ok = strategy_manager.rename_strategy(name, payload.new_name, rename_file=payload.rename_file or False)
+    manager = _get_strategy_manager(for_http=True)
+    ok = manager.rename_strategy(name, payload.new_name, rename_file=payload.rename_file or False)
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to rename strategy")
     await invalidate_strategy_cache(name)
@@ -633,9 +651,8 @@ async def rename_strategy_api(name: str, payload: StrategyRenameRequest, user: O
 
 @router.delete("/api/strategies/{name}")
 async def delete_strategy_api(name: str, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    success = strategy_manager.delete_strategy(name)
+    manager = _get_strategy_manager(for_http=True)
+    success = manager.delete_strategy(name)
     if not success:
         raise HTTPException(status_code=404, detail="Strategy not found")
     await invalidate_strategy_cache(name)
@@ -643,9 +660,8 @@ async def delete_strategy_api(name: str, user: Optional[str] = Depends(get_curre
 
 @router.post("/api/strategies/{name}/toggle")
 async def toggle_strategy_api(name: str, enabled: bool, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    success = await strategy_manager.update_strategy(name, {"enabled": enabled})
+    manager = _get_strategy_manager(for_http=True)
+    success = await manager.update_strategy(name, {"enabled": enabled})
     if not success:
         raise HTTPException(status_code=400, detail="Failed to toggle strategy")
     return {"success": True}
@@ -653,10 +669,9 @@ async def toggle_strategy_api(name: str, enabled: bool, user: Optional[str] = De
 
 @router.post("/api/strategies/{name}/reset")
 async def reset_strategy_data_api(name: str, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    manager = _get_strategy_manager(for_http=True)
     try:
-        result = strategy_manager.reset_strategy_data(name)
+        result = manager.reset_strategy_data(name)
         await invalidate_strategy_cache(name)
         return {
             "success": True,
@@ -672,8 +687,7 @@ async def reset_strategy_data_api(name: str, user: Optional[str] = Depends(get_c
 
 @router.get("/api/strategies/{name}/performance")
 async def get_strategy_performance_api(name: str, range: str = "1d", start: Optional[str] = None, end: Optional[str] = None, user: Optional[str] = Depends(get_current_user)):
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    manager = _get_strategy_manager(for_http=True)
 
     range_value = range or "custom"
 
@@ -933,12 +947,11 @@ async def get_strategy_daily_pnl(
 @router.post("/api/strategy")
 async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Request):
     """策略订单接口 - 立即返回200，异步处理"""
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    
+    manager = _get_strategy_manager(for_http=True)
+
     # Auth check - strategy interface uses token in body or headers when enabled
     # Do this check FIRST to avoid any IBKR calls for unauthorized requests
-    settings = strategy_manager.get_settings()
+    settings = manager.get_settings()
     if settings.get('enable_auth', False):
         # 1) Prefer body token
         token = payload.token
@@ -950,21 +963,21 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
         # 3) Fallback to X-Strategy-Token header
         if not token:
             token = req.headers.get('X-Strategy-Token')
-        if not token or not strategy_manager.validate_auth_token(token):
+        if not token or not manager.validate_auth_token(token):
             raise HTTPException(status_code=401, detail="Unauthorized")
-    
+
     # Validate strategy exists and enabled - also before IBKR calls
-    strategy = strategy_manager.get_strategy(payload.strategy)
+    strategy = manager.get_strategy(payload.strategy)
     if not strategy or not strategy.get('enabled', False):
         raise HTTPException(status_code=400, detail="Strategy disabled or not found")
-    
+
     # 基本参数验证
     if payload.type.upper() == "LIMIT" and not payload.price:
         raise HTTPException(status_code=400, detail="Price required for limit order")
-    
+
     if payload.type.upper() not in ["MARKET", "LIMIT"]:
         raise HTTPException(status_code=400, detail="Invalid order type")
-    
+
     # 将任务加入队列
     task_payload = {
         "strategy": payload.strategy,
@@ -976,12 +989,12 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
         "exchange": payload.exchange,
         "sec_type": payload.sec_type
     }
-    
+
     # 确保队列worker已启动
     await queue_manager.start_worker()
-    
+
     task_id = queue_manager.add_task("strategy_order", task_payload)
-    
+
     # 立即返回200
     return {
         "success": True,
@@ -989,6 +1002,7 @@ async def external_strategy_order(payload: ExternalStrategyOrderRequest, req: Re
         "message": "Strategy order queued for processing",
         "status": "queued"
     }
+
 @router.get("/api/strategies/{name}/executions")
 async def get_strategy_executions(
     name: str,
@@ -997,8 +1011,7 @@ async def get_strategy_executions(
     user: Optional[str] = Depends(get_current_user),
 ):
     """Get strategy execution logs"""
-    if not strategy_manager:
-        raise HTTPException(status_code=500, detail="Strategy manager not initialized")
+    manager = _get_strategy_manager(for_http=True)
 
     effective_limit = max(1, min(int(limit or 1), 1000))
 
