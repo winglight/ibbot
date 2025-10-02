@@ -32,6 +32,7 @@ class _FakeRedis:
         self.store: dict[str, str] = {}
         self.hashes: dict[str, dict[str, str]] = {}
         self.hset_calls: list[tuple[str, dict[str, str]]] = []
+        self.published: list[tuple[str, str]] = []
 
     async def get(self, key: str) -> str | None:
         return self.store.get(key)
@@ -50,10 +51,15 @@ class _FakeRedis:
         self.hset_calls.append((key, dict(payload)))
         return len(mapping)
 
+    async def publish(self, channel: str, message: str) -> int:
+        self.published.append((channel, message))
+        return 1
+
 
 class StubRuntime:
     config_cache_key = "json:risk:config"
     rules_cache_key = "json:risk:rules"
+    rules_update_channel = "pubsub:risk:rules:update"
 
     def __init__(self, redis: _FakeRedis) -> None:
         self._redis = redis
@@ -97,6 +103,19 @@ class StubRuntime:
             self.rules_cache_key,
             json.dumps(
                 {
+                    "success": True,
+                    "rules": self._rules,
+                    "updated_at": timestamp,
+                    "source": SERVICE_NAME,
+                    "count": len(self._rules),
+                }
+            ),
+        )
+        await self._redis.publish(
+            self.rules_update_channel,
+            json.dumps(
+                {
+                    "type": "risk_rules",
                     "success": True,
                     "rules": self._rules,
                     "updated_at": timestamp,
@@ -216,6 +235,30 @@ def test_rule_crud_operations() -> None:
 
         response = client.get("/risk/rules")
         assert "ES" not in response.json()["rules"]
+
+
+def test_create_rule_updates_cache_and_publishes_event() -> None:
+    redis = _FakeRedis()
+    runtime = StubRuntime(redis)
+    client = _build_app(runtime, initial_config={})
+
+    with client:
+        response = client.post(
+            "/risk/rules",
+            json={"symbol": "CL", "stop_loss_price": 12.5},
+        )
+        assert response.status_code == 200
+
+    cached_rules = json.loads(redis.store[runtime.rules_cache_key])
+    assert cached_rules["rules"]["CL"]["stop_loss_price"] == 12.5
+
+    assert redis.published, "Expected a pubsub message for rule update"
+    channel, message = redis.published[-1]
+    assert channel == runtime.rules_update_channel
+    payload = json.loads(message)
+    assert payload["type"] == "risk_rules"
+    assert payload["rules"]["CL"]["stop_loss_price"] == 12.5
+    assert payload["count"] == len(cached_rules["rules"])
 
 
 def test_position_sizing_uses_config_defaults() -> None:

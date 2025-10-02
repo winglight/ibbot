@@ -42,12 +42,14 @@ from src.routes.service_clients import (
     ServiceClientError,
     ServiceUnavailableError,
 )
+from src.ibbot.redis import PubSubListener
 
 router = APIRouter()
 
 RATE_LIMIT_SECONDS = 15.0
 SERVICE_UNAVAILABLE_MESSAGE = "服务不可用"
 RISK_RULES_CACHE_KEY = "json:risk:rules"
+RISK_RULES_UPDATE_CHANNEL = "pubsub:risk:rules:update"
 
 _ACCOUNT_CLIENT = AccountServiceClient()
 _MARKET_CLIENT = MarketDataServiceClient()
@@ -311,6 +313,67 @@ async def _load_cached_risk_rules() -> Optional[Dict[str, Any]]:
     return payload
 
 
+_risk_rules_listener: PubSubListener | None = None
+_risk_rules_listener_started = False
+_risk_rules_listener_lock = asyncio.Lock()
+
+
+async def _handle_risk_rules_pubsub(_: str, message: str) -> None:
+    try:
+        data: Any = json.loads(message) if message else {}
+    except Exception:
+        logger.debug("Invalid risk rules pubsub payload: %s", message)
+        data = {}
+
+    payload: Dict[str, Any]
+    if isinstance(data, Mapping):
+        payload = dict(data)
+    else:
+        payload = {}
+
+    if "rules" not in payload or not payload.get("rules"):
+        snapshot = await _load_cached_risk_rules()
+        if snapshot is not None:
+            payload.setdefault("rules", snapshot.get("rules"))
+            if snapshot.get("updated_at") is not None:
+                payload.setdefault("updated_at", snapshot.get("updated_at"))
+            if snapshot.get("source"):
+                payload.setdefault("source", snapshot.get("source"))
+            if snapshot.get("count") is not None:
+                payload.setdefault("count", snapshot.get("count"))
+
+    rules_payload = payload.get("rules")
+    if isinstance(rules_payload, Mapping) and "count" not in payload:
+        payload["count"] = len(rules_payload)
+
+    payload.setdefault("type", "risk_rules")
+    payload.setdefault("success", True)
+    payload.setdefault("source", "pubsub")
+
+    await _websocket_manager().broadcast(payload)
+
+
+async def _ensure_risk_rules_listener() -> None:
+    global _risk_rules_listener_started, _risk_rules_listener
+    if _risk_rules_listener_started:
+        return
+
+    async with _risk_rules_listener_lock:
+        if _risk_rules_listener_started:
+            return
+
+        listener = PubSubListener()
+        listener.register_callback(RISK_RULES_UPDATE_CHANNEL, _handle_risk_rules_pubsub)
+        try:
+            await listener.start()
+        except Exception:
+            logger.warning("Failed to start risk rules pubsub listener", exc_info=True)
+            return
+
+        _risk_rules_listener = listener
+        _risk_rules_listener_started = True
+
+
 async def _load_ib_command_health() -> Optional[Dict[str, Any]]:
     """Load ib-command service health details from Redis if available."""
 
@@ -527,6 +590,7 @@ async def _realtime_price_sender(
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    await _ensure_risk_rules_listener()
     await _websocket_manager().connect(websocket)
 
     account_service_outage_logged = False

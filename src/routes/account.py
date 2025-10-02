@@ -514,29 +514,6 @@ async def get_account_daily_summary(
                     )
                     net_snapshot_written = True
 
-        if net_liquidation is None:
-            fallback_values = [
-                getattr(core.risk_manager, "equity_last", None),
-                getattr(core.risk_manager, "sod_equity", None),
-            ]
-            for candidate in fallback_values:
-                if candidate is None:
-                    continue
-                try:
-                    net_liquidation = float(candidate)
-                    surplus_source = "risk_manager"
-                    net_liquidation_timestamp = now_local()
-                    if not net_snapshot_written:
-                        await write_net_liquidation_snapshot(
-                            net_liquidation,
-                            source="risk_manager",
-                            timestamp=net_liquidation_timestamp,
-                        )
-                        net_snapshot_written = True
-                    break
-                except (TypeError, ValueError):
-                    continue
-
         total_pnl = sum(
             float(daily_stats.get(day, {}).get("pnl", 0.0)) for day in ordered_dates
         )
