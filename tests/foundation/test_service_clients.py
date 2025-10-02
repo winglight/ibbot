@@ -107,6 +107,22 @@ async def test_account_service_positions_handles_list(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.anyio("asyncio")
+async def test_account_service_refresh_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ACCOUNT_SERVICE_URL", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/account/refresh"
+        return httpx.Response(200, json={"success": True})
+
+    client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
+
+    result = await client.request_refresh()
+
+    assert result is True
+
+
+@pytest.mark.anyio("asyncio")
 async def test_risk_service_post_rule_invokes_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RISK_SERVICE_URL", raising=False)
     captured: Dict[str, Any] = {}
@@ -123,7 +139,7 @@ async def test_risk_service_post_rule_invokes_endpoint(monkeypatch: pytest.Monke
 
     assert captured == {
         "method": "POST",
-        "path": "/risk_rules",
+        "path": "/risk/rules",
         "payload": {"symbol": "ES"},
     }
     assert result == {"success": True}

@@ -242,6 +242,12 @@ class AccountServiceClient(ServiceClient):
                     return list(value)
         return None
 
+    async def request_refresh(self) -> bool:
+        payload = await self.request("POST", "/account/refresh")
+        if isinstance(payload, Mapping):
+            return bool(payload.get("success"))
+        return False
+
     async def fetch_orders(
         self,
         *,

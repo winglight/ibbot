@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Any, Awaitable, Dict, Optional
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -10,6 +10,8 @@ from loguru import logger
 
 from .utils import now_local
 from .restart_utils import restart_program
+from src.account_snapshot_cache import mark_all_snapshots_stale
+from src.routes.service_clients import AccountServiceClient, ServiceClientError
 
 # 为connection模块创建专用logger
 connection_logger = logger.bind(module="connection", request_id="-")
@@ -25,6 +27,63 @@ from pathlib import Path
 
 
 load_project_env()
+
+_ACCOUNT_SERVICE_CLIENT: AccountServiceClient | None = None
+
+_CONNECTION_LOSS_CODES = {1100, 1300, 2103, 2105, 2110}
+_CONNECTION_RESTORE_CODES = {1101, 1102, 1301, 2104, 2106, 2111}
+
+
+def _get_account_service_client() -> AccountServiceClient:
+    global _ACCOUNT_SERVICE_CLIENT
+    if _ACCOUNT_SERVICE_CLIENT is None:
+        _ACCOUNT_SERVICE_CLIENT = AccountServiceClient()
+    return _ACCOUNT_SERVICE_CLIENT
+
+
+async def _mark_snapshots_stale(reason: str) -> None:
+    try:
+        await mark_all_snapshots_stale(reason)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        connection_logger.warning(
+            "Failed to mark account snapshots as stale: {}", exc
+        )
+
+
+async def _request_account_refresh(reason: str) -> None:
+    try:
+        client = _get_account_service_client()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        connection_logger.warning(
+            "Failed to initialise account service client for refresh (reason={}): {}",
+            reason,
+            exc,
+        )
+        return
+
+    try:
+        success = await client.request_refresh()
+    except ServiceClientError as exc:
+        connection_logger.warning(
+            "Account service refresh request failed (reason={}): {}",
+            reason,
+            exc,
+        )
+        return
+    except Exception as exc:  # pragma: no cover - defensive guard
+        connection_logger.warning(
+            "Unexpected error while requesting account refresh (reason={}): {}",
+            reason,
+            exc,
+        )
+        return
+
+    if not success:
+        connection_logger.warning(
+            "Account service did not acknowledge refresh request (reason={})",
+            reason,
+        )
+
 
 # Robust env int parser to tolerate inline comments and invalid values
 # Examples:
@@ -387,6 +446,30 @@ class ConnectionManager:
             pass
         connection_logger.debug("Patched ib_insync wrapper.updateMktDepthL2 to guard DOM depth indexes")
 
+    def _schedule_account_task(self, coro: Awaitable[Any]) -> None:
+        loop = self._loop
+        if loop and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(asyncio.create_task, coro)
+                return
+            except Exception as exc:  # pragma: no cover - defensive guard
+                connection_logger.debug(
+                    "Failed to submit account coroutine to connection loop: {}",
+                    exc,
+                )
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop and running_loop.is_running():
+            running_loop.create_task(coro)
+        else:
+            connection_logger.debug(
+                "Unable to schedule account coroutine (no running loop available)"
+            )
+
     def _ensure_error_handler_installed(self, wrapper: Any) -> None:
         """Install enhanced error handler once to capture client ID conflicts early."""
 
@@ -446,25 +529,12 @@ class ConnectionManager:
                         pass
                 return
 
-            try:
-                import core  # 延迟导入避免循环依赖
-
-                snapshot_service = getattr(core, "account_snapshot_service", None)
-                if snapshot_service:
-                    connection_loss_codes = {1100, 1300, 2103, 2105, 2110}
-                    connection_restore_codes = {1101, 1102, 1301, 2104, 2106, 2111}
-
-                    if errorCode in connection_loss_codes:
-                        snapshot_service.flag_connection_loss(
-                            errorString or f"IBKR error {errorCode}"
-                        )
-                    elif errorCode in connection_restore_codes:
-                        snapshot_service.request_immediate_refresh(
-                            reason="connection_restored"
-                        )
-            except Exception as snapshot_err:  # pragma: no cover - 防御性日志
-                connection_logger.debug(
-                    f"Snapshot service notification failed: {snapshot_err}"
+            if errorCode in _CONNECTION_LOSS_CODES:
+                reason = errorString or f"IBKR error {errorCode}"
+                self._schedule_account_task(_mark_snapshots_stale(reason))
+            elif errorCode in _CONNECTION_RESTORE_CODES:
+                self._schedule_account_task(
+                    _request_account_refresh("connection_restored")
                 )
 
             if errorCode in {2103, 2105}:
@@ -741,18 +811,9 @@ class ConnectionManager:
                 account_type = "Paper" if self.config.paper_trading else "Live"
                 connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
 
-                try:
-                    import core
-
-                    snapshot_service = getattr(core, "account_snapshot_service", None)
-                    if snapshot_service:
-                        snapshot_service.request_immediate_refresh(
-                            reason="connection_established"
-                        )
-                except Exception as notify_err:  # pragma: no cover - defensive logging
-                    connection_logger.debug(
-                        f"Failed to notify snapshot service after connect: {notify_err}"
-                    )
+                self._schedule_account_task(
+                    _request_account_refresh("connection_established")
+                )
                 
                 # 保存事件循环引用
                 self._loop = loop
@@ -1200,16 +1261,7 @@ class ConnectionManager:
             self._loop = None
             self._connection_thread = None
 
-            try:
-                import core
-
-                snapshot_service = getattr(core, "account_snapshot_service", None)
-                if snapshot_service:
-                    snapshot_service.flag_connection_loss("disconnected")
-            except Exception as notify_err:  # pragma: no cover - defensive logging
-                connection_logger.debug(
-                    f"Failed to notify snapshot service on disconnect: {notify_err}"
-                )
+            self._schedule_account_task(_mark_snapshots_stale("disconnected"))
         except Exception as e:
             connection_logger.error(f"Disconnect error: {e}")
 

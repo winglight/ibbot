@@ -29,7 +29,6 @@ class CoreContainer:
     strategy_risk_manager: Any | None = None
     strategy_manager: Any | None = None
     queue_manager: Any | None = None
-    account_snapshot_service: Any | None = None
 
 
 _container: CoreContainer | None = None

@@ -136,8 +136,6 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
         assert container.strategy_manager is not None
         assert container.strategy_risk_manager is not None
         assert container.queue_manager is not None and container.queue_manager.is_running
-        assert container.account_snapshot_service is None
-
     await core.shutdown()
 
 

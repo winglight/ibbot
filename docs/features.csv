@@ -16,7 +16,7 @@ DOM分析,参数调优,集成优化器与自动化调度接口,已完成,中,sci
 通知系统,统一通知控制台,集中管理浏览器与Telegram通知配置及发送历史,已完成,中,FastAPI + SQLite,src/notification_manager.py; src/routes/notifications.py
 消息推送,Telegram机器人,可选的Telegram推送通道及自检接口,已完成,中,python-telegram-bot,src/telegram_notifier.py; src/routes/notifications.py
 队列系统,异步任务队列,持久化FIFO队列支持失败重试与队列心跳监控,已完成,高,asyncio,src/queue_manager.py; src/routes/queue.py
-数据层,数据库管理器,统一管理订单、风控、策略等SQLite存储并提供快照服务,已完成,高,SQLite + dataclasses,src/database.py; src/account_snapshot_service.py
+数据层,数据库管理器,统一管理订单、风控、策略等SQLite存储并提供快照服务,已完成,高,SQLite + dataclasses,src/database.py
 缓存,Redis可选缓存,在Redis可用时提供共享缓存与流水记录,部分可用,中,redis.asyncio,src/cache.py
 WebSocket,实时消息聚合,多频道推送账户、队列、DOM与策略事件,已完成,中,FastAPI + websockets,src/websocket_manager.py; src/routes/websocket.py
 部署,容器化部署,提供开发与生产docker-compose及Cloudflare隧道示例,已完成,中,Docker,docker/Dockerfile; docker/local.compose.yml; docker/prod.compose.yml
