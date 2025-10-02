@@ -20,9 +20,7 @@ def _python_files() -> list[Path]:
 FORBIDDEN_RULES = {
     "core.connection_manager": {
         "pattern": re.compile(r"(?m)^\s*(?:from\s+core\s+import\s+connection_manager|import\s+core\.connection_manager)"),
-        "allowed": {
-            "test/test_market_data_fallback.py",
-        },
+        "allowed": set(),
     },
     "get_db_manager": {
         "pattern": re.compile(r"(?m)^\s*from\s+src\.database\s+import\s+get_db_manager"),
@@ -34,11 +32,8 @@ FORBIDDEN_RULES = {
             "src/order_manager.py",
             "src/optimizer_service/routes.py",
             "src/risk_manager.py",
-            "src/routes/market_data.py",
             "src/routes/notifications.py",
             "src/strategy_manager.py",
-            "tests/routes/market_data/test_market_routes.py",
-            "test/test_market_data_fallback.py",
         },
     },
     "sqlite3": {

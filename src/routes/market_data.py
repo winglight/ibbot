@@ -8,12 +8,10 @@ from typing import Dict, Any, Optional, List, Mapping
 import httpx
 import websockets
 
-import pandas as pd
 from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from src.database import get_db_manager
 from .auth import get_current_user
 from src.models import (
     HistoricalDataRequest,
@@ -229,56 +227,16 @@ async def get_historical_data(
         cache_key = f"{request.symbol}_{request.duration}_{request.bar_size}_{request.exchange}"
         now = now_local()
 
-        if cache_key in historical_data_cache:
-            cache_entry = historical_data_cache[cache_key]
-            if cache_entry.get("expires_at", now) > now:
-                logger.debug(f"Using memory cache for {request.symbol}")
-                cached_data = cache_entry["data"]
-                return {
-                    "success": True,
-                    "data": cached_data,
-                    "filename": f"data/{request.symbol}_historical.csv",
-                    "rows": len(cached_data),
-                    "source": "memory_cache",
-                }
-
-        db_manager = get_db_manager()
-        interval = db_manager._normalize_interval(request.bar_size)
-        minutes = _parse_duration_to_minutes(request.duration)
-        start_dt = now - timedelta(minutes=minutes)
-
-        cache_df = db_manager.query_historical_cache(
-            request.symbol,
-            interval=interval,
-            start_dt=start_dt.isoformat(timespec="seconds"),
-            end_dt=now.isoformat(timespec="seconds"),
-        )
-
-        if not db_manager.detect_missing_ranges(
-            cache_df, start_dt.isoformat(), now.isoformat(), interval
-        ):
-            logger.debug(f"Using database cache for {request.symbol}")
-            data_dict = cache_df.to_dict("records")
-            expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
-            historical_data_cache[cache_key] = {
-                "data": data_dict,
-                "timestamp": now,
-                "expires_at": expires_at,
-            }
-            filename = f"data/{request.symbol}_historical.csv"
-            try:
-                os.makedirs(os.path.dirname(filename), exist_ok=True)
-                cache_df.to_csv(filename, index=False)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to write CSV backup for historical data (cache): {e}"
-                )
+        cache_entry = historical_data_cache.get(cache_key)
+        if cache_entry and cache_entry.get("expires_at", now) > now:
+            logger.debug(f"Using memory cache for {request.symbol}")
+            cached_data = cache_entry.get("data", [])
             return {
                 "success": True,
-                "data": data_dict,
-                "filename": filename,
-                "rows": len(cache_df),
-                "source": "database_cache",
+                "data": cached_data,
+                "filename": None,
+                "rows": len(cached_data),
+                "source": cache_entry.get("source", "memory_cache"),
             }
 
         # Unified data layer attempt ----------------------------------
@@ -317,6 +275,7 @@ async def get_historical_data(
                         "data": records,
                         "timestamp": now,
                         "expires_at": now + timedelta(minutes=CACHE_DURATION_MINUTES),
+                        "source": "data_layer",
                     }
                     return {
                         "success": True,
@@ -366,35 +325,16 @@ async def get_historical_data(
                 "data": records,
                 "timestamp": now,
                 "expires_at": expires_at,
+                "source": "market_data_service",
             }
 
-            if records:
-                try:
-                    df = pd.DataFrame(records)
-                    if not df.empty:
-                        db_manager.save_historical_data(
-                            request.symbol, df, bar_size=request.bar_size
-                        )
-                        filename = f"data/{request.symbol}_historical.csv"
-                        try:
-                            os.makedirs(os.path.dirname(filename), exist_ok=True)
-                            df.to_csv(filename, index=False)
-                            service_result.setdefault("filename", filename)
-                        except Exception as exc:
-                            logger.warning(
-                                "Failed to write CSV backup for historical data: {}",
-                                exc,
-                            )
-                except Exception as exc:
-                    logger.debug(
-                        "Skipping historical data persistence for %s due to %s",
-                        request.symbol,
-                        exc,
-                    )
-
         service_result.setdefault("success", True)
-        service_result.setdefault("rows", len(service_result.get("data", [])) if isinstance(service_result.get("data"), list) else 0)
+        if isinstance(records, list):
+            service_result.setdefault("rows", len(records))
+        else:
+            service_result.setdefault("rows", 0)
         service_result.setdefault("source", "market_data_service")
+        service_result.setdefault("filename", None)
         return service_result
 
     except HTTPException as exc:
@@ -439,58 +379,7 @@ async def get_chart_data(
                     "bar_size": request.bar_size,
                 }
 
-        # 2) 数据库缓存（覆盖请求范围且不强制刷新时）
-        db_manager = get_db_manager()
-        interval = db_manager._normalize_interval(request.bar_size)
-        minutes = _parse_duration_to_minutes(request.duration)
-        start_dt = now - timedelta(minutes=minutes)
-
-        cache_df = db_manager.query_historical_cache(
-            request.symbol,
-            interval=interval,
-            start_dt=start_dt.isoformat(timespec="seconds"),
-            end_dt=now.isoformat(timespec="seconds"),
-        )
-
-        if use_cache and not force_refresh and not db_manager.detect_missing_ranges(
-            cache_df, start_dt.isoformat(), now.isoformat(), interval
-        ):
-            logger.debug(f"Using chart database cache for {request.symbol}")
-            chart_data = []
-            try:
-                records = cache_df.to_dict("records")
-                for row in records:
-                    raw_time = row.get("date") or row.get("time")
-                    t = to_local_time(raw_time)
-                    chart_data.append(
-                        {
-                            "time": t,
-                            "open": float(row.get("open", 0) or 0),
-                            "high": float(row.get("high", 0) or 0),
-                            "low": float(row.get("low", 0) or 0),
-                            "close": float(row.get("close", 0) or 0),
-                            "volume": int(row.get("volume", 0) or 0),
-                        }
-                    )
-            except Exception:
-                chart_data = []
-
-            if chart_data:
-                expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
-                historical_data_cache[cache_key] = {
-                    "data": chart_data,
-                    "timestamp": now,
-                    "expires_at": expires_at,
-                }
-                return {
-                    "success": True,
-                    "data": chart_data,
-                    "symbol": request.symbol,
-                    "duration": request.duration,
-                    "bar_size": request.bar_size,
-                }
-
-        # 3) 需要拉取新数据（强制刷新或缓存不足）
+        # 2) 需要拉取新数据（强制刷新或缓存不足）
         interval_key = _map_bar_size_to_interval(request.bar_size)
         duration_minutes = _parse_duration_to_minutes(request.duration)
 
@@ -544,6 +433,7 @@ async def get_chart_data(
                 "data": unified_chart,
                 "timestamp": now,
                 "expires_at": expires_at,
+                "source": "data_layer",
             }
             return {
                 "success": True,
@@ -551,6 +441,7 @@ async def get_chart_data(
                 "symbol": request.symbol,
                 "duration": request.duration,
                 "bar_size": request.bar_size,
+                "source": "data_layer",
             }
 
         client = _get_market_data_service_client()
@@ -597,49 +488,17 @@ async def get_chart_data(
                     "data": chart_data,
                     "timestamp": now,
                     "expires_at": expires_at,
+                    "source": "market_data_service",
                 }
             service_result.setdefault("rows", len(chart_data))
         service_result.setdefault("success", True)
         service_result.setdefault("symbol", request.symbol)
         service_result.setdefault("duration", request.duration)
         service_result.setdefault("bar_size", request.bar_size)
+        service_result.setdefault("source", "market_data_service")
 
         if chart_data is not None:
             return service_result
-
-        # 5) API返回空，回退数据库load_historical_data
-        fallback_df = None
-        try:
-            fallback_df = db_manager.load_historical_data(
-                request.symbol, bar_size=request.bar_size
-            )
-        except Exception:
-            fallback_df = None
-        if fallback_df is not None and not fallback_df.empty:
-            chart_data = []
-            try:
-                for ts, row in fallback_df.iterrows():
-                    t = to_local_time(ts)
-                    chart_data.append(
-                        {
-                            "time": t,
-                            "open": float(row.get("open", 0) or 0),
-                            "high": float(row.get("high", 0) or 0),
-                            "low": float(row.get("low", 0) or 0),
-                            "close": float(row.get("close", 0) or 0),
-                            "volume": int(row.get("volume", 0) or 0),
-                        }
-                    )
-            except Exception:
-                chart_data = []
-            if chart_data:
-                return {
-                    "success": True,
-                    "data": chart_data,
-                    "symbol": request.symbol,
-                    "duration": request.duration,
-                    "bar_size": request.bar_size,
-                }
 
         raise HTTPException(status_code=404, detail="No chart data found")
 

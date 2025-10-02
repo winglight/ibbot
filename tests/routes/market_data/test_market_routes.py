@@ -1,8 +1,5 @@
-from __future__ import annotations
-
 from typing import Any, Mapping
 
-import pandas as pd
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -12,26 +9,6 @@ from src.routes.service_clients import (
     ServiceResponseError,
     ServiceUnavailableError,
 )
-
-
-class StubDatabaseManager:
-    def __init__(self) -> None:
-        self.saved: list[tuple[str, pd.DataFrame]] = []
-
-    def _normalize_interval(self, bar_size: str) -> str:
-        return bar_size or "1m"
-
-    def query_historical_cache(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
-        return pd.DataFrame()
-
-    def detect_missing_ranges(self, *args: Any, **kwargs: Any) -> bool:
-        return True
-
-    def save_historical_data(self, symbol: str, df: pd.DataFrame, *, bar_size: str) -> None:
-        self.saved.append((symbol, df.copy()))
-
-    def load_historical_data(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
-        return pd.DataFrame()
 
 
 @pytest.fixture()
@@ -44,8 +21,6 @@ def market_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
     app.dependency_overrides[market_data_module.get_current_user] = allow_user
 
-    db_manager = StubDatabaseManager()
-    monkeypatch.setattr(market_data_module, "get_db_manager", lambda: db_manager)
     monkeypatch.setattr(market_data_module, "_get_data_layer_manager", lambda: None)
     monkeypatch.setattr(market_data_module, "historical_data_cache", {})
     monkeypatch.setattr(market_data_module, "CURRENT_PRICE_CACHE_ONLY", False)
