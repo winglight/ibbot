@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 from pydantic import BaseModel, Field
+
+from src.account_service_readiness import refresh_account_service_status
 from src.service_status import build_service_status_payload
 
 from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
@@ -17,6 +19,16 @@ from src.service_restart import (
 
 
 router = APIRouter()
+
+
+@router.on_event("startup")
+async def _warm_account_service_status() -> None:
+    """Perform an early readiness probe for the account service."""
+
+    try:
+        await refresh_account_service_status(max_age=None, log_failure=False)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Account service readiness warmup failed: %s", exc)
 
 
 @router.get("/api/services/status")

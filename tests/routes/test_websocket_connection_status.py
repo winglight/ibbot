@@ -142,3 +142,86 @@ async def test_websocket_emits_disconnected_status(monkeypatch: pytest.MonkeyPat
             assert isinstance(health, dict)
             assert health.get("connected") is False
             assert health.get("last_error") == "gateway down"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_websocket_handles_service_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = FastAPI()
+    app.include_router(websocket_module.router)
+
+    class DummyWebSocketManager:
+        async def connect(self, websocket) -> None:
+            await websocket.accept()
+
+        async def broadcast(self, payload):  # pragma: no cover - not used
+            return None
+
+        def disconnect(self, websocket) -> None:
+            return None
+
+    manager = DummyWebSocketManager()
+    monkeypatch.setattr(websocket_module, "_websocket_manager", lambda: manager)
+
+    async def fake_health() -> Dict[str, object]:
+        return {
+            "connected": True,
+            "account_type": "INDIVIDUAL",
+            "stale": False,
+        }
+
+    async def empty_snapshot(*_, **__):
+        return {}
+
+    async def fail_fetch_info(*_, **__):
+        raise websocket_module.ServiceUnavailableError(
+            "account-service", "account offline"
+        )
+
+    async def fail_fetch_positions(*_, **__):
+        raise websocket_module.ServiceUnavailableError(
+            "account-service", "positions offline"
+        )
+
+    async def fail_list_orders(*_, **__):
+        raise websocket_module.ServiceUnavailableError(
+            "orders-service", "orders offline"
+        )
+
+    monkeypatch.setattr(websocket_module, "_load_ib_command_health", fake_health)
+    monkeypatch.setattr(websocket_module, "read_account_info_snapshot", empty_snapshot)
+    monkeypatch.setattr(websocket_module, "read_positions_snapshot", empty_snapshot)
+    monkeypatch.setattr(websocket_module._ACCOUNT_CLIENT, "fetch_info", fail_fetch_info)
+    monkeypatch.setattr(
+        websocket_module._ACCOUNT_CLIENT, "fetch_positions", fail_fetch_positions
+    )
+    monkeypatch.setattr(websocket_module._ORDERS_CLIENT, "list_orders", fail_list_orders)
+    monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_optimization_orchestrator", lambda: None)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as websocket:
+            connection_status = websocket.receive_json()
+            assert connection_status["type"] == "connection_status"
+            assert connection_status["success"] is True
+
+            account_message = websocket.receive_json()
+            assert account_message["type"] == "account_update"
+            assert account_message["success"] is False
+            assert account_message["error"] == websocket_module.SERVICE_UNAVAILABLE_MESSAGE
+            account_info = account_message.get("account_info")
+            assert isinstance(account_info, dict)
+            assert account_info.get("connected") is True
+
+            orders_message = websocket.receive_json()
+            assert orders_message["type"] == "orders_snapshot"
+            assert orders_message["success"] is False
+            assert orders_message["error"] == websocket_module.SERVICE_UNAVAILABLE_MESSAGE
+
+            positions_message = websocket.receive_json()
+            assert positions_message["type"] == "position_update"
+            assert positions_message["success"] is False
+            assert positions_message["error"] == websocket_module.SERVICE_UNAVAILABLE_MESSAGE
+
+            websocket.send_json({"type": "ping"})
+            pong = websocket.receive_json()
+            assert pong == {"type": "pong"}
