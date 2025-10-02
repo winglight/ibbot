@@ -121,6 +121,39 @@ def _snapshot_response(
     return response
 
 
+def _extract_snapshot_metadata(
+    snapshot: Optional[Mapping[str, Any]]
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {}
+    if not isinstance(snapshot, Mapping):
+        return metadata
+
+    metadata_keys = AccountServiceClient._METADATA_KEYS  # type: ignore[attr-defined]
+
+    for key in metadata_keys:
+        value = snapshot.get(key)
+        if value is None:
+            continue
+        metadata[key] = value
+
+    for nested_key in ("metadata", "meta", "snapshot", "snapshot_metadata"):
+        nested = snapshot.get(nested_key)
+        if not isinstance(nested, Mapping):
+            continue
+        for key in metadata_keys:
+            if key in metadata:
+                continue
+            value = nested.get(key)
+            if value is None:
+                continue
+            metadata[key] = value
+
+    if "snapshot_updated_at" not in metadata and isinstance(metadata.get("updated_at"), str):
+        metadata["snapshot_updated_at"] = metadata["updated_at"]
+
+    return metadata
+
+
 def _get_account_service_client() -> AccountServiceClient:
     return _ACCOUNT_SERVICE_CLIENT
 
@@ -300,19 +333,23 @@ async def get_account_info(
     snapshot = await read_account_info_snapshot()
     snapshot_data = snapshot.get("data") if isinstance(snapshot, dict) else None
     connected_snapshot = _determine_connection_state(snapshot_data, snapshot)
+    snapshot_metadata = _extract_snapshot_metadata(snapshot)
+    stale_snapshot = AccountServiceClient.is_metadata_stale(snapshot_metadata)
+    effective_force_refresh = force_refresh or stale_snapshot
 
-    if snapshot and not force_refresh:
+    if snapshot and not effective_force_refresh:
         return _snapshot_response(
             snapshot,
             data_key="account_info",
             connected=connected_snapshot,
             from_cache=True,
             default={},
+            metadata=snapshot_metadata,
         )
 
     client = _get_account_service_client()
     try:
-        info_result = await client.fetch_info(force_refresh=force_refresh)
+        info_result = await client.fetch_info(force_refresh=effective_force_refresh)
     except ServiceUnavailableError as exc:
         logger.warning("Account service unavailable for account_info: {}", exc)
         cached = await _fallback_snapshot_response(
@@ -372,11 +409,17 @@ async def get_account_info(
     refreshed_data = (
         refreshed_snapshot.get("data") if isinstance(refreshed_snapshot, dict) else None
     )
-    metadata = dict(info_result.metadata)
-    if "snapshot_updated_at" not in metadata and isinstance(refreshed_snapshot, dict):
-        updated_at = refreshed_snapshot.get("updated_at")
-        if updated_at:
-            metadata["snapshot_updated_at"] = updated_at
+    metadata = _extract_snapshot_metadata(refreshed_snapshot)
+    for key, value in info_result.metadata.items():
+        if value is None:
+            continue
+        metadata[key] = value
+    if (
+        "snapshot_updated_at" not in metadata
+        and isinstance(refreshed_snapshot, dict)
+        and refreshed_snapshot.get("updated_at")
+    ):
+        metadata["snapshot_updated_at"] = refreshed_snapshot["updated_at"]
     connected = _determine_connection_state(
         info_result.data,
         refreshed_data,
@@ -406,22 +449,25 @@ async def get_positions(
     snapshot = await read_positions_snapshot()
     snapshot_data = snapshot.get("data") if isinstance(snapshot, dict) else None
     connected_snapshot = _determine_connection_state(snapshot_data, snapshot)
-    force_refresh = force_refresh or not use_cache
+    snapshot_metadata = _extract_snapshot_metadata(snapshot)
+    stale_snapshot = AccountServiceClient.is_metadata_stale(snapshot_metadata)
+    effective_force_refresh = force_refresh or not use_cache or stale_snapshot
 
-    if snapshot and not force_refresh:
+    if snapshot and not effective_force_refresh:
         return _snapshot_response(
             snapshot,
             data_key="positions",
             connected=connected_snapshot,
             from_cache=True,
             default=[],
+            metadata=snapshot_metadata,
         )
 
     client = _get_account_service_client()
     try:
         positions_result = await client.fetch_positions(
             fast=fast,
-            force_refresh=force_refresh,
+            force_refresh=effective_force_refresh,
         )
     except ServiceUnavailableError as exc:
         logger.warning("Account service unavailable for positions: {}", exc)
@@ -482,11 +528,17 @@ async def get_positions(
     refreshed_data = (
         refreshed_snapshot.get("data") if isinstance(refreshed_snapshot, dict) else None
     )
-    metadata = dict(positions_result.metadata)
-    if "snapshot_updated_at" not in metadata and isinstance(refreshed_snapshot, dict):
-        updated_at = refreshed_snapshot.get("updated_at")
-        if updated_at:
-            metadata["snapshot_updated_at"] = updated_at
+    metadata = _extract_snapshot_metadata(refreshed_snapshot)
+    for key, value in positions_result.metadata.items():
+        if value is None:
+            continue
+        metadata[key] = value
+    if (
+        "snapshot_updated_at" not in metadata
+        and isinstance(refreshed_snapshot, dict)
+        and refreshed_snapshot.get("updated_at")
+    ):
+        metadata["snapshot_updated_at"] = refreshed_snapshot["updated_at"]
 
     positions_payload = positions_result.data
     if not isinstance(positions_payload, list):
