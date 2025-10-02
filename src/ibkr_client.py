@@ -2215,8 +2215,20 @@ class IBKRClient:
                 ibkr_logger.error(f"IBKR connection lost for get account info")
                 return self._return_cached_account_info()
 
-            # Use synchronous methods in async context
-            account_values = ib.accountValues()
+            fetch_task = asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
+                ib.accountValues,
+                timeout=10.0,
+            )
+            try:
+                account_values = await asyncio.wait_for(fetch_task, timeout=12.0)
+            except asyncio.TimeoutError:
+                ibkr_logger.error("Timed out waiting for accountValues response from IBKR")
+                return self._return_cached_account_info()
+
+            if account_values is None:
+                ibkr_logger.warning("accountValues returned no data; falling back to cached snapshot")
+                return self._return_cached_account_info()
 
             # Start from the last cached snapshot when available so that we don't
             # accidentally wipe fields to zero if IBKR returns a partial update.
@@ -2235,7 +2247,7 @@ class IBKRClient:
             info.setdefault('net_liquidation', 0.0)
             info.setdefault('unrealized_pnl', 0.0)
             info.setdefault('realized_pnl', 0.0)
-            
+
             # Get account ID from account values
             def _parse_float(val: Any) -> float:
                 try:
@@ -2299,7 +2311,17 @@ class IBKRClient:
                 ibkr_logger.error("IBKR connection lost for get_account_summary")
                 return []
 
-            summary_items = ib.accountSummary()
+            fetch_task = asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
+                ib.accountSummary,
+                timeout=10.0,
+            )
+            try:
+                summary_items = await asyncio.wait_for(fetch_task, timeout=12.0)
+            except asyncio.TimeoutError:
+                ibkr_logger.error("Timed out waiting for accountSummary response from IBKR")
+                return []
+
             result: List[Dict] = []
             for it in summary_items or []:
                 try:

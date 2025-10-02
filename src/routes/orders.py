@@ -14,6 +14,7 @@ risk_manager = getattr(core, "risk_manager", None)
 from .auth import get_current_user
 from src.models import OrderRequest
 from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
+from src.account_snapshot_cache import read_account_info_snapshot
 from ibbot.redis import enqueue_ib_command, wait_for_command_result
 from src.ib_command_service import (
     IBCommandServiceConfig,
@@ -491,23 +492,48 @@ async def _validate_g2_capital_adequacy(order: OrderRequest) -> dict:
             if ib_client is None:
                 errors.append("Not connected to IBKR")
             else:
-                # 获取账户信息
-                account_info = await ib_client.get_account_summary()
+                # 获取账户信息，优先使用快照缓存
+                account_info_data: Optional[Dict[str, Any]] = None
+                try:
+                    snapshot = await asyncio.wait_for(
+                        read_account_info_snapshot(),
+                        timeout=1.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug("Account info snapshot timed out during capital adequacy check")
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to read account info snapshot during capital adequacy check",
+                        error=str(exc),
+                    )
+                else:
+                    if snapshot and isinstance(snapshot.get("data"), dict):
+                        account_info_data = snapshot.get("data")
 
-                if account_info:
-                    # 检查可用资金
-                    available_funds = 0
-                    for item in account_info:
-                        if item.get('tag') == 'AvailableFunds':
-                            available_funds = float(item.get('value', 0))
-                            break
+                if account_info_data is None:
+                    try:
+                        account_info_data = await asyncio.wait_for(
+                            ib_client.get_account_info(),
+                            timeout=8.0,
+                        )
+                    except asyncio.TimeoutError:
+                        errors.append("Timed out while fetching account info from IBKR")
+                    except Exception as exc:
+                        errors.append(f"Failed to fetch account info: {exc}")
+
+                if isinstance(account_info_data, dict):
+                    available_funds = float(account_info_data.get('available_funds', 0) or 0)
 
                     # 计算订单所需资金
                     if order.action.upper() == "BUY" and order.price and order.quantity:
                         required_funds = order.price * order.quantity
 
                         if required_funds > available_funds:
-                            errors.append(f"Insufficient funds: required ${required_funds:,.2f}, available ${available_funds:,.2f}")
+                            errors.append(
+                                f"Insufficient funds: required ${required_funds:,.2f}, available ${available_funds:,.2f}"
+                            )
+                else:
+                    errors.append("Unable to determine available funds for validation")
 
     except Exception as e:
         errors.append(f"Capital adequacy check failed: {str(e)}")

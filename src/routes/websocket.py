@@ -591,30 +591,62 @@ async def websocket_endpoint(websocket: WebSocket):
         await _send_initial_snapshots(websocket, redis_client)
     else:
         # Redis 不可用时回退到本地查询逻辑
+        account_snapshot: Optional[Dict[str, Any]] = None
         try:
-            if connection_manager.is_connected():
-                try:
-                    info = await asyncio.wait_for(core.ibkr_client.get_account_info(), timeout=8.0)
+            account_snapshot = await asyncio.wait_for(read_account_info_snapshot(), timeout=1.0)
+        except asyncio.TimeoutError:
+            logger.debug("Account snapshot read timed out during websocket init fallback")
+        except Exception as exc:
+            logger.debug(
+                "Failed to read account snapshot for websocket fallback",
+                error=str(exc),
+            )
+
+        if account_snapshot and isinstance(account_snapshot.get("data"), dict):
+            payload = {
+                "type": "account_update",
+                "account_info": account_snapshot.get("data"),
+                "updated_at": account_snapshot.get("updated_at"),
+                "stale": account_snapshot.get("stale"),
+                "source": "redis",
+            }
+            try:
+                await websocket.send_text(json.dumps(payload))
+            except Exception as exc:
+                logger.debug(
+                    "Failed to send cached account snapshot over websocket",
+                    error=str(exc),
+                )
+        else:
+            try:
+                if connection_manager.is_connected():
+                    try:
+                        info = await asyncio.wait_for(
+                            core.ibkr_client.get_account_info(),
+                            timeout=8.0,
+                        )
+                        await websocket.send_text(json.dumps({
+                            "type": "account_update",
+                            "account_info": info
+                        }))
+                    except asyncio.TimeoutError:
+                        logger.warning("Initial account_info snapshot timed out on websocket connect")
+                    except Exception as exc:
+                        logger.warning(
+                            f"Failed to get/send initial account_info snapshot: {exc}"
+                        )
+                else:
+                    last_err = None
+                    try:
+                        last_err = connection_manager.get_last_connect_error()
+                    except Exception:
+                        last_err = None
                     await websocket.send_text(json.dumps({
                         "type": "account_update",
-                        "account_info": info
+                        "account_info": {"connected": False, "last_error": last_err}
                     }))
-                except asyncio.TimeoutError:
-                    logger.warning("Initial account_info snapshot timed out on websocket connect")
-                except Exception as e:
-                    logger.warning(f"Failed to get/send initial account_info snapshot: {e}")
-            else:
-                last_err = None
-                try:
-                    last_err = connection_manager.get_last_connect_error()
-                except Exception:
-                    last_err = None
-                await websocket.send_text(json.dumps({
-                    "type": "account_update",
-                    "account_info": {"connected": False, "last_error": last_err}
-                }))
-        except Exception as e:
-            logger.debug(f"Failed to send initial account_update: {e}")
+            except Exception as exc:
+                logger.debug(f"Failed to send initial account_update: {exc}")
 
         try:
             if 'order_manager' in globals() and order_manager:
@@ -641,20 +673,52 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as e:
             logger.warning(f"Failed to send initial orders snapshot: {e}")
 
+        positions_snapshot: Optional[Dict[str, Any]] = None
         try:
-            if connection_manager.is_connected():
-                try:
-                    positions = await asyncio.wait_for(core.ibkr_client.get_positions(fast=True), timeout=8.0)
-                    await websocket.send_text(json.dumps({
-                        "type": "position_update",
-                        "positions": positions
-                    }))
-                except asyncio.TimeoutError:
-                    logger.warning("Initial positions snapshot timed out on websocket connect")
-                except Exception as e:
-                    logger.warning(f"Failed to get/send initial positions snapshot: {e}")
-        except Exception as e:
-            logger.debug(f"Failed to send initial positions snapshot: {e}")
+            positions_snapshot = await asyncio.wait_for(read_positions_snapshot(), timeout=1.0)
+        except asyncio.TimeoutError:
+            logger.debug("Positions snapshot read timed out during websocket init fallback")
+        except Exception as exc:
+            logger.debug(
+                "Failed to read positions snapshot for websocket fallback",
+                error=str(exc),
+            )
+
+        if positions_snapshot and isinstance(positions_snapshot.get("data"), list):
+            payload = {
+                "type": "position_update",
+                "positions": positions_snapshot.get("data"),
+                "updated_at": positions_snapshot.get("updated_at"),
+                "stale": positions_snapshot.get("stale"),
+                "source": "redis",
+            }
+            try:
+                await websocket.send_text(json.dumps(payload))
+            except Exception as exc:
+                logger.debug(
+                    "Failed to send cached positions snapshot over websocket",
+                    error=str(exc),
+                )
+        else:
+            try:
+                if connection_manager.is_connected():
+                    try:
+                        positions = await asyncio.wait_for(
+                            core.ibkr_client.get_positions(fast=True),
+                            timeout=8.0,
+                        )
+                        await websocket.send_text(json.dumps({
+                            "type": "position_update",
+                            "positions": positions
+                        }))
+                    except asyncio.TimeoutError:
+                        logger.warning("Initial positions snapshot timed out on websocket connect")
+                    except Exception as exc:
+                        logger.warning(
+                            f"Failed to get/send initial positions snapshot: {exc}"
+                        )
+            except Exception as exc:
+                logger.debug(f"Failed to send initial positions snapshot: {exc}")
     
     realtime_tasks: Dict[str, asyncio.Task] = {}
     redis_tasks: List[asyncio.Task] = []

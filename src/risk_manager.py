@@ -20,6 +20,7 @@ from .notification_manager import NotificationManager
 from .database import DatabaseManager, Order, get_db_manager
 from .database import RiskRule as DatabaseRiskRule
 from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
+from .account_snapshot_cache import read_account_info_snapshot
 
 load_dotenv()
 
@@ -294,6 +295,59 @@ class RiskManager:
         if ensure_ready:
             raise RuntimeError("IBKR client is not initialized")
         return None
+
+    async def _load_account_info(
+        self,
+        *,
+        client: Optional[Any] = None,
+        prefer_snapshot: bool = True,
+        snapshot_timeout: float = 1.5,
+        ib_timeout: float = 10.0,
+    ) -> Dict[str, Any]:
+        """Load account information preferring cached Redis snapshots when available."""
+
+        if prefer_snapshot:
+            try:
+                snapshot = await asyncio.wait_for(
+                    read_account_info_snapshot(),
+                    timeout=snapshot_timeout,
+                )
+            except asyncio.TimeoutError:
+                risk_logger.debug(
+                    "Reading account snapshot from Redis timed out",
+                    timeout=snapshot_timeout,
+                )
+            except Exception as exc:
+                risk_logger.debug(
+                    "Failed to read account snapshot from Redis",
+                    error=str(exc),
+                )
+            else:
+                if snapshot and isinstance(snapshot.get("data"), dict):
+                    return dict(snapshot["data"])  # shallow copy to isolate callers
+
+        active_client = client or self._get_ibkr_client()
+        if active_client is not None:
+            try:
+                info = await asyncio.wait_for(
+                    active_client.get_account_info(),
+                    timeout=ib_timeout,
+                )
+            except asyncio.TimeoutError:
+                risk_logger.warning(
+                    f"Timed out waiting for IBKR account info after {ib_timeout:.1f}s"
+                )
+            except Exception as exc:
+                risk_logger.warning(f"Failed to load account info from IBKR: {exc}")
+            else:
+                if isinstance(info, dict):
+                    return info
+
+            cached = getattr(active_client, "_cached_account_info", None)
+            if isinstance(cached, dict):
+                return dict(cached)
+
+        return {}
 
     def _load_from_database(self):
         """从数据库加载风险规则和订单记录到内存缓存"""
@@ -910,7 +964,7 @@ class RiskManager:
 
             # 设置fast=False确保获取最新实时价格，而不是使用缓存
             positions = await client.get_positions(fast=False)
-            account_info = await client.get_account_info()
+            account_info = await self._load_account_info(client=client)
             
             risk_logger.info(f"Found {len(positions)} positions to monitor")
             risk_logger.info(f"Active risk rules: {len([r for r in self.risk_rules.values() if r.enabled])}")
@@ -1747,8 +1801,8 @@ class RiskManager:
             if client is None:
                 risk_logger.debug('IBKR client not ready, skip daily summary')
                 return
-            account_info = await client.get_account_info()
-            positions = await client.get_positions(Fast=True)
+            account_info = await self._load_account_info(client=client)
+            positions = await client.get_positions(fast=True)
 
             await self.notification_manager.send_daily_summary_notification(account_info, positions)
 
@@ -2208,7 +2262,7 @@ class RiskManager:
         account_info = {}
         client = self._get_ibkr_client(ensure_ready=True)
         positions = await client.get_positions(fast=True)
-        account_info = await client.get_account_info()
+        account_info = await self._load_account_info(client=client, prefer_snapshot=False)
         self.update_equity_state(account_info)
         risk_logger.info(f"[PS] After update_equity_state: equity_last={self.equity_last}, account_info={account_info}")
 
