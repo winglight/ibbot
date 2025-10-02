@@ -183,6 +183,37 @@ services:
       - stack
     restart: unless-stopped
 
+  connection_control:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-connection-control
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "services.connection_control.main:create_app",
+        "--factory",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8056",
+      ]
+    ports:
+      - "8056:8056"
+    env_file:
+      - ./.env
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+    depends_on:
+      - redis
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
   notification:
     build:
       context: ..

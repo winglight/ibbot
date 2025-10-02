@@ -140,6 +140,39 @@ services:
     profiles:
       - ib-services
 
+  connection_control:
+    <<: *app-environment
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IBBOT_IMAGE:-ibbot/local}
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "services.connection_control.main:create_app",
+        "--factory",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8056",
+      ]
+    container_name: ibbot-connection-control
+    ports:
+      - "8056:8056"
+    volumes:
+      - ./data/logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ibbot-network
+    restart: unless-stopped
+    profiles:
+      - ib-services
+
   market-data:
     <<: *app-environment
     build:
