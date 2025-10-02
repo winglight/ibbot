@@ -18,6 +18,7 @@ class FakeRedis:
         self.stream_entries: list[dict[str, Any]] = []
         self.series: dict[str, list[str]] = {}
         self.fail_lrange = False
+        self.hashes: dict[str, dict[str, str]] = {}
 
     async def xadd(
         self,
@@ -58,6 +59,12 @@ class FakeRedis:
         if end_idx < start_idx:
             return []
         return series[start_idx : end_idx + 1]
+
+    async def hset(self, key: str, *, mapping: Mapping[str, Any]) -> int:
+        values = self.hashes.setdefault(key, {})
+        for field, value in mapping.items():
+            values[str(field)] = str(value)
+        return len(mapping)
 
     def set_series(self, key: str, values: Iterable[Mapping[str, Any]]) -> None:
         payloads: list[str] = []
@@ -166,6 +173,10 @@ def test_market_snapshot_available_via_rest() -> None:
         time.sleep(0.1)
         metrics = [point for point in writer.points if point.get("measurement") == "service_metrics"]
         assert metrics, "Expected service metrics to be written"
+
+        health = redis.hashes.get("hash:service:health:market-data") or {}
+        assert health.get("status") == "running"
+        assert "price_updates" in health
 
 
 def test_market_websocket_broadcasts_updates() -> None:

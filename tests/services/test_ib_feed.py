@@ -99,6 +99,7 @@ async def _run_price_update_flow() -> None:
         write_fn=writer,
         reconnect_delay=0.05,
         logger_name="tests.ib_feed",
+        health_interval=0.05,
     )
 
     await service.start()
@@ -113,7 +114,7 @@ async def _run_price_update_flow() -> None:
             "volume": 1500,
         },
     )
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.1)
 
     assert service.price_updates == 1
     assert redis.published
@@ -133,7 +134,15 @@ async def _run_price_update_flow() -> None:
     assert last_point["measurement"] == "market_price"
     assert last_point["fields"]["bid"] == 199.5
 
+    health = redis.hashes.get("hash:service:health:ib-feed") or {}
+    assert health.get("status") == "running"
+    assert health.get("healthy") == "true"
+    assert health.get("price_updates_total") is not None
+
     await service.stop()
+    stopped_health = redis.hashes.get("hash:service:health:ib-feed") or {}
+    assert stopped_health.get("status") == "offline"
+    assert stopped_health.get("healthy") == "false"
 
 
 def test_price_updates_publish_and_persist() -> None:
@@ -151,6 +160,7 @@ async def _run_dom_serialisation_flow() -> None:
         write_fn=writer,
         reconnect_delay=0.05,
         logger_name="tests.ib_feed",
+        health_interval=0.05,
     )
 
     await service.start()
@@ -195,6 +205,7 @@ async def _run_throughput_flow() -> None:
         write_fn=writer,
         reconnect_delay=0.01,
         logger_name="tests.ib_feed",
+        health_interval=0.05,
     )
 
     await service.start()
@@ -218,6 +229,8 @@ async def _run_throughput_flow() -> None:
     assert len(redis.published) >= 50
 
     await service.stop()
+    final_health = redis.hashes.get("hash:service:health:ib-feed") or {}
+    assert final_health.get("status") == "offline"
 
 
 def test_service_handles_high_throughput() -> None:
@@ -235,6 +248,7 @@ async def _run_reconnect_flow() -> None:
         write_fn=writer,
         reconnect_delay=0.05,
         logger_name="tests.ib_feed",
+        health_interval=0.05,
     )
 
     await service.start()

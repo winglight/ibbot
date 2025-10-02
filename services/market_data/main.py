@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from src.ibbot import update_service_health
 from src.ibbot.influx import build_service_metric_point, write_points
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import PubSubListener, get_redis_client
@@ -245,6 +246,8 @@ class MarketDataRuntime:
     stream_key: str = STREAM_KEY
     metrics_interval: float = 5.0
     service_name: str = "market-data-service"
+    health_service_name: str = "market-data"
+    health_key: str | None = None
     stream_maxlen: int = 5000
 
     _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
@@ -271,6 +274,7 @@ class MarketDataRuntime:
         self._stop_metrics.clear()
         self._last_metrics_at = _now()
         self._metrics_task = asyncio.create_task(self._metrics_loop(), name="market-metrics")
+        await self._publish_health(status="running", healthy=True)
 
     async def stop(self) -> None:
         if self._metrics_task is not None:
@@ -282,6 +286,7 @@ class MarketDataRuntime:
         if self._pubsub is not None:
             await self._pubsub.stop()
             self._pubsub = None
+        await self._publish_health(status="offline", healthy=False)
         self._redis = None
         self._loop = None
 
@@ -385,6 +390,7 @@ class MarketDataRuntime:
             elapsed = self.metrics_interval
         self._last_metrics_at = now
         points = []
+        health_metrics: dict[str, Any] = {"interval": elapsed, "final": final}
         for metric, count in list(self._metrics_counts.items()):
             if count <= 0 and not final:
                 continue
@@ -408,6 +414,10 @@ class MarketDataRuntime:
                     extra_fields={"max_latency": max_latency, "updates": count},
                 )
             )
+            health_metrics[f"{metric}_updates"] = int(count)
+            health_metrics[f"{metric}_throughput"] = throughput
+            health_metrics[f"{metric}_latency_avg_ms"] = round(avg_latency * 1000, 3)
+            health_metrics[f"{metric}_latency_max_ms"] = round(max_latency * 1000, 3)
             self._metrics_counts[metric] = 0.0
             self._metrics_latency[metric] = 0.0
             self._metrics_latency_max[metric] = 0.0
@@ -416,6 +426,30 @@ class MarketDataRuntime:
                 await _maybe_await(self.write_fn(points))
             except Exception:
                 self._logger.warning("Failed to write service metrics", exc_info=True)
+        await self._publish_health(status="running", healthy=True, metrics=health_metrics)
+
+    async def _publish_health(
+        self,
+        *,
+        status: str | None = None,
+        healthy: bool | None = None,
+        metrics: Mapping[str, Any] | None = None,
+    ) -> None:
+        if self._redis is None:
+            return
+        try:
+            await update_service_health(
+                self._redis,
+                self.health_service_name,
+                status=status,
+                healthy=healthy,
+                metrics=metrics,
+                key=self.health_key,
+                logger=self._logger,
+            )
+        except Exception:
+            if self._logger:
+                self._logger.warning("Failed to publish market data health", exc_info=True)
 
     def get_snapshot(self, symbol: str) -> Dict[str, Any] | None:
         symbol = symbol.upper()

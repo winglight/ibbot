@@ -15,43 +15,29 @@ class MockRestartManager:
     def __init__(self) -> None:
         self.calls: list[tuple[str, bool]] = []
         self.mode = RestartMode.DOCKER
+        self.plans: dict[str, tuple[str, ...]] = {
+            "ibbot": ("account", "orders", "ibbot"),
+            "market_data": ("market_data_feed", "market_data"),
+            "market_data_feed": ("market_data_feed",),
+            "queue_monitor": ("queue_monitor",),
+        }
 
     async def restart(self, service: str, *, include_dependencies: bool = True) -> list[RestartCommandResult]:
         self.calls.append((service, include_dependencies))
-        return [
-            RestartCommandResult(
-                service="connection_control",
-                command=("docker", "compose", "restart", "connection_control"),
-                returncode=0,
-                stdout="connection ok",
-                stderr="",
-                mode=self.mode,
-            ),
-            RestartCommandResult(
-                service="account",
-                command=("docker", "compose", "restart", "account"),
-                returncode=0,
-                stdout="account ok",
-                stderr="",
-                mode=self.mode,
-            ),
-            RestartCommandResult(
-                service="orders",
-                command=("docker", "compose", "restart", "orders"),
-                returncode=0,
-                stdout="orders ok",
-                stderr="",
-                mode=self.mode,
-            ),
-            RestartCommandResult(
-                service="ibbot",
-                command=("docker", "compose", "restart", "ibbot"),
-                returncode=0,
-                stdout="bot ok",
-                stderr="",
-                mode=self.mode,
-            ),
-        ]
+        plan = self.plans.get(service, (service,)) if include_dependencies else (service,)
+        results: list[RestartCommandResult] = []
+        for name in plan:
+            results.append(
+                RestartCommandResult(
+                    service=name,
+                    command=("docker", "compose", "restart", name),
+                    returncode=0,
+                    stdout=f"{name} ok",
+                    stderr="",
+                    mode=self.mode,
+                )
+            )
+        return results
 
 
 class LocalMockRestartManager(MockRestartManager):
@@ -63,9 +49,9 @@ class LocalMockRestartManager(MockRestartManager):
         self, service: str, *, include_dependencies: bool = True
     ) -> list[RestartCommandResult]:
         self.calls.append((service, include_dependencies))
-        services = ("connection_control", "account", "orders", "ibbot")
+        plan = self.plans.get(service, (service,)) if include_dependencies else (service,)
         results: list[RestartCommandResult] = []
-        for name in services:
+        for name in plan:
             results.append(
                 RestartCommandResult(
                     service=name,
@@ -99,14 +85,15 @@ def restart_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
 def test_restart_endpoint_invokes_manager(restart_app: FastAPI) -> None:
     manager: MockRestartManager = restart_app.state._mock_restart_manager  # type: ignore[attr-defined]
+    manager.calls.clear()
     with TestClient(restart_app) as client:
         response = client.post("/api/services/restart", json={"service": "ibbot"})
 
     assert response.status_code == 200
     assert manager.calls == [("ibbot", True)]
     payload = response.json()
-    assert payload["restarted"] == ["connection_control", "account", "orders", "ibbot"]
-    assert payload["logs"][0]["stdout"] == "connection ok"
+    assert payload["restarted"] == ["account", "orders", "ibbot"]
+    assert payload["logs"][0]["stdout"] == "account ok"
     assert payload["mode"] == RestartMode.DOCKER.value
     assert payload["message"]
 
@@ -158,8 +145,44 @@ def test_restart_local_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == RestartMode.LOCAL.value
-    assert payload["restarted"] == ["connection_control", "account", "orders", "ibbot"]
+    assert payload["restarted"] == ["account", "orders", "ibbot"]
     assert all(log.get("mode") == RestartMode.LOCAL.value for log in payload["logs"])
+
+
+def test_restart_market_data_plan(restart_app: FastAPI) -> None:
+    manager: MockRestartManager = restart_app.state._mock_restart_manager  # type: ignore[attr-defined]
+    manager.calls.clear()
+    with TestClient(restart_app) as client:
+        response = client.post("/api/services/restart", json={"service": "market_data"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["restarted"] == ["market_data_feed", "market_data"]
+    assert manager.calls[-1] == ("market_data", True)
+
+
+def test_restart_market_data_feed_plan(restart_app: FastAPI) -> None:
+    manager: MockRestartManager = restart_app.state._mock_restart_manager  # type: ignore[attr-defined]
+    manager.calls.clear()
+    with TestClient(restart_app) as client:
+        response = client.post("/api/services/restart", json={"service": "market_data_feed"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["restarted"] == ["market_data_feed"]
+    assert manager.calls[-1] == ("market_data_feed", True)
+
+
+def test_restart_queue_monitor_plan(restart_app: FastAPI) -> None:
+    manager: MockRestartManager = restart_app.state._mock_restart_manager  # type: ignore[attr-defined]
+    manager.calls.clear()
+    with TestClient(restart_app) as client:
+        response = client.post("/api/services/restart", json={"service": "queue_monitor"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["restarted"] == ["queue_monitor"]
+    assert manager.calls[-1] == ("queue_monitor", True)
 
 
 def test_frontend_controller_updates_status() -> None:
@@ -219,7 +242,7 @@ const controller = context.appModules.serviceRestart.createController({{
         context.fetchCalls.push(request);
         return {{
             message: '所有服务重启完成',
-            restarted: ['connection_control', 'account', 'orders', 'ibbot'],
+            restarted: ['account', 'orders', 'ibbot'],
             mode: 'docker',
             restart_endpoint: '/services/restart',
         }};
