@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 from fastapi.testclient import TestClient
 
-from src.ibbot.redis import IBCommandTimeout
+from src.ibbot.redis import IBCommandError, IBCommandTimeout
 
 from services.account.main import (
     DEFAULT_DAILY_SUMMARY_COMMAND,
@@ -96,6 +96,36 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(pnl_cache, "ensure_redis", _fake_ensure_client)
 
     return client
+
+
+@pytest.fixture
+def capture_service_health(monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
+    calls: List[Dict[str, Any]] = []
+
+    async def _capture(
+        redis: Any,
+        service_name: str,
+        *,
+        healthy: Optional[bool] = None,
+        status: Optional[str] = None,
+        last_error: Optional[str] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        key: Optional[str] = None,
+        logger: Any | None = None,
+    ) -> None:
+        calls.append(
+            {
+                "service": service_name,
+                "healthy": healthy,
+                "status": status,
+                "last_error": last_error,
+                "metrics": dict(metrics or {}),
+                "key": key,
+            }
+        )
+
+    monkeypatch.setattr("services.account.main.update_service_health", _capture)
+    return calls
 
 
 @pytest.fixture
@@ -249,8 +279,10 @@ def test_refresh_endpoint_sets_timestamp(test_client: TestClient, monkeypatch: p
     assert triggered["called"] is True
 
 
-def test_orders_and_daily_summary_endpoints(
-    test_client: TestClient, fake_redis: Any
+def test_account_orders_snapshot_success_updates_metrics(
+    capture_service_health: List[Dict[str, Any]],
+    test_client: TestClient,
+    fake_redis: Any,
 ) -> None:
     orders_snapshot = {
         "active_orders": [
@@ -266,6 +298,59 @@ def test_orders_and_daily_summary_endpoints(
     }
     _write_orders_snapshot(fake_redis, orders_snapshot)
 
+    response = test_client.get("/account/orders")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert len(payload["orders"]) == 3
+    assert payload["orders"][0]["symbol"] == "AAPL"
+    assert payload["meta"] == {
+        "page": 1,
+        "limit": DEFAULT_ORDER_LIMIT,
+        "total": 3,
+        "returned": 3,
+        "has_more": False,
+    }
+    assert payload["source"] == "orders-service"
+    assert payload["snapshot_updated_at"] == orders_snapshot["updated_at"]
+    assert payload["from_cache"] is True
+    assert payload.get("stale") is False
+
+    assert capture_service_health
+    metrics = capture_service_health[-1]["metrics"]
+    assert metrics.get("orders_last_refreshed_at") == orders_snapshot["updated_at"]
+    assert metrics.get("orders_source") == "orders-service"
+
+
+def test_account_orders_missing_sources_returns_503(
+    capture_service_health: List[Dict[str, Any]],
+    test_client: TestClient,
+    fake_redis: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _error(method: str, **_: Any) -> Dict[str, Any]:
+        raise IBCommandError("orders failed", command_id="orders", payload={"method": method})
+
+    monkeypatch.setattr("services.account.main.request_ib_command", _error)
+
+    response = test_client.get("/account/orders")
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert "orders command" in detail.lower()
+    assert "orders failed" in detail.lower()
+
+    assert capture_service_health
+    metrics = capture_service_health[-1]["metrics"]
+    assert metrics.get("orders_last_error")
+    assert "orders failed" in str(metrics.get("orders_last_error", "")).lower()
+    assert metrics.get("orders_stale") is True
+
+
+def test_account_daily_summary_cache_success_updates_metrics(
+    capture_service_health: List[Dict[str, Any]],
+    test_client: TestClient,
+    fake_redis: Any,
+) -> None:
     daily_totals = {"2024-01-01": {"pnl": 125.5, "orders": 3}}
     net_liq = {
         "value": 150000.0,
@@ -274,36 +359,23 @@ def test_orders_and_daily_summary_endpoints(
     }
     _write_daily_summary_cache(fake_redis, daily_totals, net_liq)
 
-    orders_response = test_client.get("/account/orders")
-    assert orders_response.status_code == 200
-    orders_payload = orders_response.json()
-    assert orders_payload["success"] is True
-    assert len(orders_payload["orders"]) == 3
-    assert orders_payload["orders"][0]["symbol"] == "AAPL"
-    assert orders_payload["meta"] == {
-        "page": 1,
-        "limit": DEFAULT_ORDER_LIMIT,
-        "total": 3,
-        "returned": 3,
-        "has_more": False,
-    }
-    assert orders_payload["source"] == "orders-service"
-    assert orders_payload["snapshot_updated_at"] == orders_snapshot["updated_at"]
-    assert orders_payload["from_cache"] is True
-    assert orders_payload.get("stale") is False
-
-    summary_response = test_client.get("/account/daily-summary")
-    assert summary_response.status_code == 200
-    summary_payload = summary_response.json()
-    assert summary_payload["success"] is True
-    assert summary_payload["daily_summary"] == [
+    response = test_client.get("/account/daily-summary")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["daily_summary"] == [
         {"date": "2024-01-01", "pnl": 125.5, "orders": 3}
     ]
-    assert summary_payload["net_liquidation"] == net_liq
-    assert summary_payload["from_cache"] is True
-    assert summary_payload["source"] == net_liq["source"]
-    assert summary_payload["snapshot_updated_at"] == net_liq["timestamp"]
-    assert summary_payload.get("stale") in {False, None}
+    assert payload["net_liquidation"] == net_liq
+    assert payload["from_cache"] is True
+    assert payload["source"] == net_liq["source"]
+    assert payload["snapshot_updated_at"] == net_liq["timestamp"]
+    assert payload.get("stale") in {False, None}
+
+    assert capture_service_health
+    metrics = capture_service_health[-1]["metrics"]
+    assert metrics.get("daily_summary_last_refreshed_at") == net_liq["timestamp"]
+    assert metrics.get("daily_summary_source") == "account-service"
 
 
 def test_account_info_force_refresh_triggers_service(
@@ -341,7 +413,9 @@ def test_account_info_force_refresh_triggers_service(
 
 
 def test_account_info_stale_snapshot_refreshes_automatically(
-    test_client: TestClient, fake_redis: Any
+    capture_service_health: List[Dict[str, Any]],
+    test_client: TestClient,
+    fake_redis: Any,
 ) -> None:
     stale_snapshot = {
         "data": {"equity": 100},
@@ -370,8 +444,17 @@ def test_account_info_stale_snapshot_refreshes_automatically(
     assert response.status_code == 200
     payload = response.json()
     assert payload["account_info"] == refreshed["data"]
+    assert payload["source"] == "fresh"
+    assert payload["snapshot_updated_at"] == refreshed["updated_at"]
+    assert payload["from_cache"] is True
+    assert payload["stale"] is False
     assert service.refresh_account_info_calls
     assert service.refresh_account_info_calls[-1]["reason"] == "api-stale"
+
+    assert capture_service_health
+    metrics = capture_service_health[-1]["metrics"]
+    assert metrics.get("account_snapshot_updated_at") == refreshed["updated_at"]
+    assert metrics.get("snapshot_updated_at") == refreshed["updated_at"]
 
 
 def test_positions_force_refresh_respects_fast_flag(
@@ -410,6 +493,51 @@ def test_positions_force_refresh_respects_fast_flag(
     last_call = service.refresh_positions_calls[-1]
     assert last_call["reason"] == "api-force-refresh"
     assert last_call["fast"] is False
+
+
+def test_positions_stale_snapshot_refreshes_metadata_and_metrics(
+    capture_service_health: List[Dict[str, Any]],
+    test_client: TestClient,
+    fake_redis: Any,
+) -> None:
+    stale_snapshot = {
+        "data": [{"symbol": "MSFT", "position": 2}],
+        "updated_at": "2023-12-31T23:30:00+00:00",
+        "source": "old",
+        "stale": True,
+        "stale_reason": "positions-stale",
+    }
+    refreshed = {
+        "data": [{"symbol": "MSFT", "position": 4}],
+        "updated_at": "2024-01-01T02:30:00+00:00",
+        "source": "fresh-positions",
+        "stale": False,
+    }
+    _write_snapshot(fake_redis, "account:positions", stale_snapshot)
+
+    service = _state.snapshot_service
+    assert service is not None
+
+    async def _refresh_positions(**_: Any) -> None:
+        await fake_redis.set("account:positions", json.dumps(refreshed))
+
+    service.on_refresh_positions = _refresh_positions
+
+    response = test_client.get("/account/positions")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["positions"] == refreshed["data"]
+    assert payload["source"] == "fresh-positions"
+    assert payload["snapshot_updated_at"] == refreshed["updated_at"]
+    assert payload["from_cache"] is True
+    assert payload["stale"] is False
+    assert service.refresh_positions_calls
+    assert service.refresh_positions_calls[-1]["reason"] == "api-stale"
+
+    assert capture_service_health
+    metrics = capture_service_health[-1]["metrics"]
+    assert metrics.get("positions_snapshot_updated_at") == refreshed["updated_at"]
+    assert metrics.get("snapshot_updated_at") == refreshed["updated_at"]
 
 
 def test_account_orders_snapshot_pagination(
@@ -483,7 +611,10 @@ def test_account_orders_command_timeout_returns_504(
 
 
 def test_daily_summary_missing_triggers_command_and_returns_503(
-    test_client: TestClient, fake_redis: Any, monkeypatch: pytest.MonkeyPatch
+    capture_service_health: List[Dict[str, Any]],
+    test_client: TestClient,
+    fake_redis: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called: Dict[str, Any] = {}
 
@@ -498,3 +629,9 @@ def test_daily_summary_missing_triggers_command_and_returns_503(
     detail = response.json()["detail"].lower()
     assert "unavailable" in detail
     assert called["method"] == DEFAULT_DAILY_SUMMARY_COMMAND
+
+    assert capture_service_health
+    metrics = capture_service_health[-1]["metrics"]
+    assert metrics.get("daily_summary_last_error")
+    assert "unavailable" in str(metrics.get("daily_summary_last_error", "")).lower()
+    assert metrics.get("daily_summary_stale") is True
