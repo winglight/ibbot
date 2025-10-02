@@ -78,6 +78,12 @@ def _prepare_strategy_orders(redis: InMemoryRedis, name: str, orders: list[dict[
     asyncio.run(redis.hset(key, mapping=mapping))
 
 
+def _prepare_recent_fills(redis: InMemoryRedis, name: str, fills: list[dict[str, object]]) -> None:
+    key = f"strategy:{name}:recent"
+    for fill in fills:
+        asyncio.run(redis.rpush(key, json.dumps(fill)))
+
+
 def test_discovered_strategy_available_on_start(redis_client: InMemoryRedis) -> None:
     asyncio.run(sync_strategy_metadata(redis_client, {}))
     client = _build_client(redis_client)
@@ -484,3 +490,165 @@ def test_strategy_files_endpoint_merges_sources(
         response = client.get("/strategy/files")
         files = response.json()["files"]
         assert "gamma.py" in files
+
+
+def test_strategy_executions_endpoint_returns_recent_fills(
+    redis_client: InMemoryRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_strategy_cache_stubs(redis_client, monkeypatch)
+    client = _build_client(redis_client)
+
+    strategy_name = "exec-demo"
+    now = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    orders = [
+        {
+            "order_id": "200",
+            "symbol": "ES",
+            "action": "SELL",
+            "quantity": 1,
+            "price": 4250.0,
+            "fill_price": 4250.5,
+            "executed_at": (now.replace(minute=55)).isoformat(),
+            "created_at": (now.replace(minute=54)).isoformat(),
+        },
+        {
+            "order_id": "100",
+            "symbol": "ES",
+            "action": "BUY",
+            "quantity": 2,
+            "price": 4200.0,
+            "fill_price": 4201.0,
+            "executed_at": (now.replace(minute=50)).isoformat(),
+            "created_at": (now.replace(minute=49)).isoformat(),
+        },
+    ]
+    fills = [
+        {
+            "order_id": "300",
+            "symbol": "NQ",
+            "action": "BUY",
+            "quantity": 1,
+            "price": 16000.0,
+            "fill_price": 16001.25,
+            "executed_at": (now.replace(minute=59)).isoformat(),
+            "created_at": (now.replace(minute=58)).isoformat(),
+        },
+        {
+            "order_id": "200",
+            "symbol": "ES",
+            "action": "SELL",
+            "quantity": 1,
+            "price": 4250.0,
+            "fill_price": 4250.5,
+            "executed_at": (now.replace(minute=55)).isoformat(),
+            "created_at": (now.replace(minute=54)).isoformat(),
+        },
+    ]
+
+    _prepare_strategy_orders(redis_client, strategy_name, orders)
+    _prepare_recent_fills(redis_client, strategy_name, fills)
+
+    payload = {
+        "name": strategy_name,
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "ES"},
+    }
+
+    with client:
+        assert client.post("/strategy", json=payload).status_code == 201
+
+        response = client.get(f"/strategies/{strategy_name}/executions", params={"limit": 2})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert len(data["executions"]) == 2
+        ids = [entry.get("order_id") for entry in data["executions"]]
+        assert ids == ["300", "200"]
+        assert all(entry.get("timestamp") for entry in data["executions"])
+
+        stats_key = f"strategy:{strategy_name}:stats"
+        assert asyncio.run(redis_client.hgetall(stats_key)) == {}
+
+        refresh_response = client.get(
+            f"/strategies/{strategy_name}/executions",
+            params={"limit": 5, "force_refresh": "true"},
+        )
+        assert refresh_response.status_code == 200
+        stats = asyncio.run(redis_client.hgetall(stats_key))
+        assert stats.get("stale") == "1"
+
+
+def test_clear_strategy_executions_endpoint_purges_cache(
+    redis_client: InMemoryRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_strategy_cache_stubs(redis_client, monkeypatch)
+    client = _build_client(redis_client)
+
+    strategy_name = "cleanup"
+    now = datetime(2024, 1, 2, 15, 0, tzinfo=timezone.utc)
+    orders = [
+        {
+            "order_id": "10",
+            "symbol": "CL",
+            "action": "BUY",
+            "quantity": 1,
+            "price": 75.5,
+            "fill_price": 75.6,
+            "executed_at": now.isoformat(),
+            "created_at": now.isoformat(),
+        }
+    ]
+    fills = [
+        {
+            "order_id": "11",
+            "symbol": "CL",
+            "action": "SELL",
+            "quantity": 1,
+            "price": 76.0,
+            "fill_price": 76.1,
+            "executed_at": (now.replace(minute=1)).isoformat(),
+            "created_at": (now.replace(minute=1)).isoformat(),
+        }
+    ]
+
+    _prepare_strategy_orders(redis_client, strategy_name, orders)
+    _prepare_recent_fills(redis_client, strategy_name, fills)
+    asyncio.run(
+        redis_client.hset(
+            f"strategy:{strategy_name}:stats",
+            mapping={"filled_count": "1", "stale": "0"},
+        )
+    )
+    asyncio.run(
+        redis_client.hset(
+            f"strategy:{strategy_name}:daily",
+            mapping={"2024-01-02": "12.5"},
+        )
+    )
+
+    payload = {
+        "name": strategy_name,
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "CL"},
+    }
+
+    with client:
+        assert client.post("/strategy", json=payload).status_code == 201
+
+        response = client.delete(f"/strategies/{strategy_name}/executions")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["executions"] == []
+
+        orders_hash = asyncio.run(redis_client.hgetall(f"strategy:{strategy_name}:orders"))
+        recent_entries = asyncio.run(redis_client.lrange(f"strategy:{strategy_name}:recent", 0, -1))
+        stats = asyncio.run(redis_client.hgetall(f"strategy:{strategy_name}:stats"))
+        daily = asyncio.run(redis_client.hgetall(f"strategy:{strategy_name}:daily"))
+
+        assert orders_hash == {}
+        assert recent_entries == []
+        assert stats == {}
+        assert daily == {}

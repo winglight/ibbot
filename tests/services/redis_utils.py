@@ -92,6 +92,9 @@ class InMemoryRedis:
             if key in self._streams:
                 del self._streams[key]
                 removed += 1
+            if key in self._hashes and key != "__kv__":
+                del self._hashes[key]
+                removed += 1
             if key in kv:
                 del kv[key]
                 removed += 1

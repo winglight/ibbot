@@ -22,8 +22,10 @@ from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_cl
 from src.utils import now_local, parse_local_datetime
 from src.utils.strategy_cache import (
     compute_performance_metrics,
+    get_recent_fills,
     get_strategy_orders,
     get_strategy_orders_in_range,
+    mark_strategy_cache_stale,
 )
 
 SERVICE_NAME = "strategy"
@@ -367,6 +369,168 @@ class StrategyRuntime:
         self.pending_tasks = await self._get_queue_length()
         self._health_signal.set()
         return StrategyRunResponse(task_id=task_id, queue_size=self.pending_tasks)
+
+    async def get_executions(
+        self,
+        name: str,
+        *,
+        limit: int = 20,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+
+        try:
+            limit_value = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("limit must be an integer") from exc
+        if limit_value <= 0:
+            limit_value = 1
+
+        if force_refresh:
+            try:
+                await mark_strategy_cache_stale(name)
+            except Exception:
+                self._logger.debug("Failed to mark strategy cache as stale", exc_info=True)
+
+        snapshots: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        try:
+            recent = await get_recent_fills(name, limit=limit_value)
+        except Exception:
+            self._logger.debug("Failed to fetch recent strategy fills", exc_info=True)
+            recent = []
+
+        try:
+            orders = await get_strategy_orders(name)
+        except Exception:
+            self._logger.debug("Failed to fetch strategy orders", exc_info=True)
+            orders = []
+
+        for entry in recent + orders:
+            normalised = self._normalise_execution_payload(name, entry)
+            if normalised is None:
+                continue
+            identity = self._execution_identity(normalised)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            snapshots.append(normalised)
+
+        snapshots.sort(key=self._execution_sort_key, reverse=True)
+        limited = snapshots[:limit_value] if limit_value else snapshots
+        return {"success": True, "executions": limited}
+
+    async def clear_executions(self, name: str) -> dict[str, Any]:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+
+        keys = self._strategy_cache_keys(name)
+        try:
+            await self._redis.delete(*keys)
+        except Exception:
+            self._logger.debug("Failed to delete strategy execution cache", exc_info=True)
+        return {"success": True, "executions": []}
+
+    @staticmethod
+    def _strategy_cache_keys(name: str) -> list[str]:
+        base = f"strategy:{name}"
+        return [
+            f"{base}:orders",
+            f"{base}:orders:zset",
+            f"{base}:stats",
+            f"{base}:recent",
+            f"{base}:daily",
+            f"{base}:daily:zset",
+        ]
+
+    @staticmethod
+    def _serialise_datetime(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
+
+    def _normalise_execution_payload(
+        self,
+        strategy: str,
+        entry: Any,
+    ) -> dict[str, Any] | None:
+        if not isinstance(entry, Mapping):
+            return None
+        payload: dict[str, Any] = {str(key): value for key, value in entry.items()}
+        order_id = payload.get("order_id") or payload.get("id")
+        if order_id is not None:
+            payload["order_id"] = str(order_id)
+        payload.setdefault("strategy", strategy)
+
+        timestamp = (
+            payload.get("timestamp")
+            or payload.get("executed_at")
+            or payload.get("created_at")
+        )
+        serialised_timestamp = self._serialise_datetime(timestamp)
+        if serialised_timestamp is not None:
+            payload["timestamp"] = serialised_timestamp
+
+        created = self._serialise_datetime(payload.get("created_at"))
+        executed = self._serialise_datetime(payload.get("executed_at"))
+        if created is not None:
+            payload["created_at"] = created
+        if executed is not None:
+            payload["executed_at"] = executed
+
+        quantity = payload.get("quantity")
+        try:
+            if quantity is not None:
+                payload["quantity"] = int(quantity)
+        except (TypeError, ValueError):
+            pass
+
+        return payload
+
+    @staticmethod
+    def _execution_identity(payload: Mapping[str, Any]) -> tuple[str, str, str]:
+        order_id = str(payload.get("order_id") or "")
+        timestamp = str(
+            payload.get("timestamp")
+            or payload.get("executed_at")
+            or payload.get("created_at")
+            or ""
+        )
+        symbol = str(payload.get("symbol") or "")
+        return order_id, timestamp, symbol
+
+    @staticmethod
+    def _execution_sort_key(payload: Mapping[str, Any]) -> tuple[float, str]:
+        raw_timestamp = (
+            payload.get("timestamp")
+            or payload.get("executed_at")
+            or payload.get("created_at")
+        )
+        moment: datetime | None = None
+        if isinstance(raw_timestamp, datetime):
+            moment = raw_timestamp
+        elif isinstance(raw_timestamp, str):
+            moment = parse_local_datetime(raw_timestamp)
+            if moment is None:
+                try:
+                    moment = datetime.fromisoformat(raw_timestamp)
+                except ValueError:
+                    moment = None
+        if moment is None:
+            return 0.0, str(payload.get("order_id") or "")
+        try:
+            timestamp_value = float(moment.timestamp())
+        except Exception:
+            timestamp_value = 0.0
+        return timestamp_value, str(payload.get("order_id") or "")
 
     async def _get_queue_length(self) -> int:
         try:
@@ -804,6 +968,36 @@ def create_app(
             end_date=end_date,
         )
         return {"success": True, "name": name, "metrics": metrics}
+
+    @app.get("/strategy/{name}/executions")
+    @app.get("/strategies/{name}/executions")
+    async def get_strategy_executions(
+        name: str,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+        limit: int = Query(20, ge=1, alias="limit"),
+        force_refresh: bool = Query(False, alias="force_refresh"),
+    ) -> dict[str, Any]:
+        try:
+            return await runtime.get_executions(
+                name,
+                limit=limit,
+                force_refresh=force_refresh,
+            )
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.delete("/strategy/{name}/executions")
+    @app.delete("/strategies/{name}/executions")
+    async def clear_strategy_executions(
+        name: str,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return await runtime.clear_executions(name)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @app.delete("/strategy/{name}", status_code=status.HTTP_204_NO_CONTENT)
     @app.delete("/strategies/{name}", status_code=status.HTTP_204_NO_CONTENT)
