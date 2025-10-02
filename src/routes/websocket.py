@@ -144,6 +144,49 @@ def _merge_metadata(*sources: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     return merged
 
 
+def _extract_positions_payload(
+    result: Any,
+) -> Tuple[Optional[List[Any]], Dict[str, Any]]:
+    """Normalize positions payload and extract associated metadata."""
+
+    metadata: Dict[str, Any] = {}
+
+    if isinstance(result, AccountServiceResult):
+        metadata = {
+            key: value
+            for key, value in result.metadata.items()
+            if key in _METADATA_KEYS and value is not None
+        }
+        data = result.data
+        if isinstance(data, list):
+            normalized = [
+                dict(item) if isinstance(item, Mapping) else item for item in data
+            ]
+            return normalized, metadata
+        return None, metadata
+
+    if isinstance(result, Mapping):
+        metadata = {
+            key: value
+            for key, value in result.items()
+            if key in _METADATA_KEYS and value is not None
+        }
+        raw_positions = result.get("positions") or result.get("data")
+        if isinstance(raw_positions, list):
+            normalized = [
+                dict(item) if isinstance(item, Mapping) else item
+                for item in raw_positions
+            ]
+            return normalized, metadata
+        return None, metadata
+
+    if isinstance(result, list):
+        normalized = [dict(item) if isinstance(item, Mapping) else item for item in result]
+        return normalized, metadata
+
+    return None, metadata
+
+
 async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         payload = await _MARKET_CLIENT.fetch_current_price(symbol)
@@ -1460,32 +1503,56 @@ async def websocket_endpoint(websocket: WebSocket):
                 fast = bool(fast_flag) if fast_flag is not None else False
 
                 try:
-                    positions = await _fetch_positions(force_refresh=force, fast=fast)
-                    unavailable_positions = _extract_service_unavailable_payload(
-                        positions, "position_update"
+                    positions_result = await _fetch_positions(
+                        force_refresh=force, fast=fast
                     )
-                    source = "service"
+                    unavailable_positions = (
+                        _extract_service_unavailable_payload(
+                            positions_result, "position_update"
+                        )
+                        if isinstance(positions_result, Mapping)
+                        else None
+                    )
                     if unavailable_positions is not None:
-                        unavailable_positions.setdefault("positions", [])
-                        unavailable_positions.setdefault("source", "service")
-                        unavailable_positions["fast"] = fast
-                        unavailable_positions["connected"] = bool(connected_flag)
-                        unavailable_positions["fresh"] = bool(redis_fresh)
-                        last_responses[key] = unavailable_positions
-                        await websocket.send_text(json.dumps(unavailable_positions))
+                        payload = dict(unavailable_positions)
+                        payload.setdefault("positions", [])
+                        payload.setdefault("source", "service")
+                        payload["fast"] = fast
+                        payload["connected"] = bool(connected_flag)
+                        payload["fresh"] = bool(redis_fresh)
+                        last_responses[key] = payload
+                        await websocket.send_text(json.dumps(payload))
                         continue
-                    if positions is None:
+
+                    positions_payload, positions_metadata = _extract_positions_payload(
+                        positions_result
+                    )
+
+                    snapshot_metadata: Dict[str, Any] = {}
+                    source_value = positions_metadata.get("source")
+
+                    if positions_payload is None:
                         snapshot = await read_positions_snapshot()
-                        if isinstance(snapshot, dict):
+                        if isinstance(snapshot, Mapping):
+                            snapshot_metadata = _merge_metadata(snapshot)
+                            if not source_value:
+                                source_value = snapshot.get("source") or "redis"
                             data = snapshot.get("data")
                             if isinstance(data, list):
-                                positions = data
-                                source = snapshot.get("source", "redis") or "redis"
-                    if positions is None:
+                                positions_payload = [
+                                    dict(item) if isinstance(item, Mapping) else item
+                                    for item in data
+                                ]
+
+                    combined_meta = _merge_metadata(positions_metadata, snapshot_metadata)
+
+                    if positions_payload is None:
                         unavailable_payload = _service_unavailable_payload(
                             "position_update",
                             positions=[],
-                            source=source,
+                            source=combined_meta.get("source")
+                            or source_value
+                            or "service",
                             fast=fast,
                             connected=bool(connected_flag),
                             fresh=bool(redis_fresh),
@@ -1497,15 +1564,30 @@ async def websocket_endpoint(websocket: WebSocket):
                         last_responses[key] = unavailable_payload
                         await websocket.send_text(json.dumps(unavailable_payload))
                         continue
+
+                    source_field = (
+                        combined_meta.get("source") or source_value or "service"
+                    )
+                    stale_flag = AccountServiceClient.is_metadata_stale(combined_meta)
+
                     payload = {
                         "type": "position_update",
                         "success": True,
-                        "positions": positions,
-                        "source": source,
+                        "positions": positions_payload,
+                        "source": source_field,
                         "fast": fast,
                         "connected": bool(connected_flag),
                         "fresh": bool(redis_fresh),
+                        "stale": stale_flag,
                     }
+
+                    if combined_meta.get("snapshot_updated_at"):
+                        payload["snapshot_updated_at"] = combined_meta["snapshot_updated_at"]
+                    if combined_meta.get("stale_reason"):
+                        payload["stale_reason"] = combined_meta["stale_reason"]
+                    if combined_meta.get("stale_at"):
+                        payload["stale_at"] = combined_meta["stale_at"]
+
                     last_responses[key] = payload
                     await websocket.send_text(json.dumps(payload))
                 except Exception as exc:
