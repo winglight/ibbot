@@ -344,6 +344,8 @@ def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("DATA_LAYER_REDIS_URL", raising=False)
     monkeypatch.delenv("IBBOT_REDIS_URL", raising=False)
     monkeypatch.setenv("DATA_LAYER_REDIS_PREFIX", "market-data")
+    monkeypatch.setenv("DATA_LAYER_CANDLE_INTERVALS", "1s,5m")
+    monkeypatch.setenv("DATA_LAYER_CANDLE_HISTORY_LIMIT", "10")
 
     async def _produce_candles() -> None:
         manager = bootstrap.get_data_source_manager()
@@ -375,6 +377,14 @@ def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) ->
     series_key = "market-data:series:market.candle.1s:AAPL"
     stored_entries = sync_client.lrange(series_key, 0, -1)
     assert stored_entries, "Expected candle series to be written to Redis"
+    latest_1s = json.loads(stored_entries[-1])
+    assert latest_1s["interval"] == "1s"
+
+    series_key_5m = "market-data:series:market.candle.5m:AAPL"
+    stored_entries_5m = sync_client.lrange(series_key_5m, 0, -1)
+    assert stored_entries_5m, "Expected 5m candle series to be written to Redis"
+    latest_5m = json.loads(stored_entries_5m[-1])
+    assert latest_5m["interval"] == "5m"
 
     async def _redis_factory() -> Any:
         return async_client
@@ -396,6 +406,21 @@ def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) ->
         assert payload["success"] is True
         assert payload["symbol"] == "AAPL"
         assert payload["data"], "Expected chart data to be returned"
+
+        response_5m = client.post(
+            "/chart_data",
+            json={
+                "symbol": "AAPL",
+                "duration": "1 D",
+                "barSize": "5 min",
+                "exchange": "SMART",
+            },
+        )
+        assert response_5m.status_code == 200
+        payload_5m = response_5m.json()
+        assert payload_5m["success"] is True
+        assert payload_5m["symbol"] == "AAPL"
+        assert payload_5m["data"], "Expected 5m chart data to be returned"
 
 
 def test_unknown_symbol_returns_404() -> None:
