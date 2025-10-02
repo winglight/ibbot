@@ -14,6 +14,7 @@ import inspect
 import json
 import logging
 import os
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping
@@ -49,6 +50,23 @@ DEFAULT_COMMAND_QUEUE = "queue:ib:commands"
 DEFAULT_MARKET_STREAM = "stream:ib:market"
 DEFAULT_STREAM_GROUP = "group:ib:market"
 DEFAULT_MARKET_CHANNEL = "pubsub:ib:market"
+
+
+class IBCommandError(Exception):
+    """Base exception for IB command request errors."""
+
+    def __init__(self, message: str, *, command_id: str, payload: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.command_id = command_id
+        self.payload = dict(payload or {})
+
+
+class IBCommandTimeout(IBCommandError):
+    """Raised when waiting for an IB command result times out."""
+
+
+class IBCommandExecutionError(IBCommandError):
+    """Raised when the IB command reports an execution failure."""
 
 _pool_lock = asyncio.Lock()
 _pool: ConnectionPool | None = None
@@ -162,6 +180,123 @@ async def enqueue_ib_command(
     payload = json.dumps(command)
     length = await client.rpush(queue_key, payload)
     return int(length or 0)
+
+
+def _normalise_mapping(data: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(key, (bytes, bytearray)):
+            key = key.decode("utf-8", errors="ignore")
+        else:
+            key = str(key)
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", errors="ignore")
+        result[key] = value
+    return result
+
+
+def _parse_result_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return ""
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+async def request_ib_command(
+    method: str,
+    *,
+    args: Iterable[Any] | None = None,
+    kwargs: Mapping[str, Any] | None = None,
+    timeout: float = 15,
+    redis: Redis | None = None,
+    queue_key: str = DEFAULT_COMMAND_QUEUE,
+    result_prefix: str = "hash:ib:result",
+    stream_key: str = "stream:ib:results",
+) -> dict[str, Any]:
+    """Enqueue an IB command and await its result from Redis.
+
+    The function waits for the corresponding result hash ``{result_prefix}:{command_id}``
+    to be populated by the IB command service. On success a dictionary mirroring
+    the stored hash (with the ``result`` value JSON-decoded when possible) is
+    returned. If the command reports a failure an :class:`IBCommandExecutionError`
+    is raised, while timeouts raise :class:`IBCommandTimeout`.
+    """
+
+    client = await _ensure_client(redis)
+    command_id = uuid.uuid4().hex
+    payload: dict[str, Any] = {
+        "command_id": command_id,
+        "method": method,
+        "args": list(args or []),
+        "kwargs": dict(kwargs or {}),
+    }
+    await enqueue_ib_command(payload, redis=client, queue_key=queue_key)
+
+    loop = asyncio.get_running_loop()
+    timeout = max(0.0, float(timeout))
+    deadline = loop.time() + timeout
+    result_key = f"{result_prefix.rstrip(':')}:{command_id}"
+    last_stream_id = "$"
+
+    async def _read_hash() -> dict[str, Any]:
+        data = await client.hgetall(result_key)
+        if not data:
+            return {}
+        return _normalise_mapping(data)
+
+    while True:
+        if timeout == 0:
+            remaining = 0.0
+        else:
+            remaining = deadline - loop.time()
+        if remaining < 0:
+            remaining = 0.0
+
+        record = await _read_hash()
+        status = record.get("status")
+        if status:
+            normalised_status = str(status).lower()
+            record.setdefault("command_id", command_id)
+            if "result" in record:
+                record["result"] = _parse_result_value(record["result"])
+            if normalised_status == "success":
+                return record
+            error_message = str(record.get("error") or "IB command failed")
+            raise IBCommandExecutionError(
+                error_message,
+                command_id=command_id,
+                payload=record,
+            )
+
+        if remaining <= 0:
+            break
+
+        block_ms = max(1, int(min(remaining, 1.0) * 1000))
+        try:
+            entries = await client.xread({stream_key: last_stream_id}, block=block_ms, count=1)
+        except (ResponseError, RedisError, AttributeError):
+            await asyncio.sleep(min(remaining, 0.1))
+            continue
+
+        if entries:
+            _, stream_entries = entries[-1]
+            if stream_entries:
+                last_stream_id = stream_entries[-1][0]
+        else:
+            await asyncio.sleep(min(remaining, 0.1))
+
+    raise IBCommandTimeout(
+        f"Timed out waiting for IB command {command_id}",
+        command_id=command_id,
+        payload={"method": method, "command_id": command_id},
+    )
 
 
 async def publish_market_update(
