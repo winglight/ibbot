@@ -154,7 +154,34 @@ async def _lifespan(
                 config_payload = {}
 
         runtime = runtime_factory(redis)
-        await runtime.update_config(config_payload)
+
+        stored_config = await runtime.load_risk_config()
+        if not stored_config and config_payload:
+            await runtime.save_risk_config(config_payload)
+            stored_config = await runtime.load_risk_config()
+
+        stored_rules = await runtime.load_risk_rules()
+        if not stored_rules:
+            rules_candidate = config_payload.get("rules") if isinstance(config_payload, Mapping) else None
+            if rules_candidate:
+                try:
+                    rule_payloads = list(_iter_rule_payloads(rules_candidate))
+                except ValueError:
+                    rule_payloads = []
+                for rule_payload in rule_payloads:
+                    symbol = str(rule_payload.get("symbol") or "")
+                    if not symbol:
+                        continue
+                    await runtime.save_risk_rule(symbol, rule_payload)
+                stored_rules = await runtime.load_risk_rules()
+
+        combined_config = dict(config_payload)
+        if stored_config:
+            combined_config.update(stored_config)
+        if stored_rules:
+            combined_config["rules"] = list(stored_rules.values())
+
+        await runtime.update_config(combined_config)
         await runtime.start()
 
         app.state.redis = redis
@@ -232,39 +259,17 @@ def create_app(
             raise HTTPException(status_code=503, detail="Redis unavailable")
         return redis_client
 
-    async def _refresh_runtime(
-        runtime_instance: RiskRuntime,
-        *,
-        config_updates: Mapping[str, Any] | None = None,
-        rule_updates: dict[str, Mapping[str, Any]] | None = None,
-        replace_rules: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-        config_snapshot = runtime_instance.get_config_snapshot()
-        rules_snapshot = runtime_instance.get_rules_snapshot()
-        if config_updates:
-            config_snapshot.update({k: v for k, v in config_updates.items() if v is not None})
-        if rule_updates is not None:
-            if replace_rules:
-                rules_snapshot = {k: dict(v) for k, v in rule_updates.items()}
-            else:
-                rules_snapshot.update({k: dict(v) for k, v in rule_updates.items()})
-        payload = dict(config_snapshot)
-        payload["rules"] = list(rules_snapshot.values())
-        await runtime_instance.update_config(payload)
-        updated_config = runtime_instance.get_config_snapshot()
-        updated_rules = runtime_instance.get_rules_snapshot()
-        return dict(updated_config), {k: dict(v) for k, v in updated_rules.items()}
-
     @app.get("/risk/config", status_code=status.HTTP_200_OK)
     @app.get("/risk-config", status_code=status.HTTP_200_OK)
     async def get_config(redis = Depends(_get_redis), runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:  # type: ignore[override]
+        stored = await runtime_instance.load_risk_config()
         cached = await _load_json(redis, runtime_instance.config_cache_key)
-        config = _strip_metadata(cached) or runtime_instance.get_config_snapshot()
-        response: dict[str, Any] = {"success": True, "config": dict(config)}
-        response.update(config)
+        base_config = stored or _strip_metadata(cached) or runtime_instance.get_config_snapshot()
+        response: dict[str, Any] = {"success": True, "config": dict(base_config)}
+        response.update(base_config)
         if cached:
-            response.update({k: v for k, v in cached.items() if k not in config})
-        response.setdefault("updated_at", _utc_now().isoformat())
+            response.update({k: v for k, v in cached.items() if k not in response})
+        response.setdefault("updated_at", str(response.get("updated_at") or _utc_now().isoformat()))
         return response
 
     @app.post("/risk/config", status_code=status.HTTP_200_OK)
@@ -277,9 +282,8 @@ def create_app(
     ) -> dict[str, Any]:
         updates = {str(k): v for k, v in payload.items()}
         try:
-            config_snapshot, _ = await _refresh_runtime(
-                runtime_instance, config_updates=updates
-            )
+            await runtime_instance.save_risk_config(updates)
+            config_snapshot, _ = await runtime_instance.reload_from_storage()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -292,8 +296,9 @@ def create_app(
     @app.get("/risk_rules", status_code=status.HTTP_200_OK)
     async def get_rules(redis = Depends(_get_redis), runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:  # type: ignore[override]
         cached = await _load_json(redis, runtime_instance.rules_cache_key)
-        rules_payload = {}
-        if cached and isinstance(cached.get("rules"), Mapping):
+        stored_rules = await runtime_instance.load_risk_rules()
+        rules_payload = stored_rules or {}
+        if not rules_payload and cached and isinstance(cached.get("rules"), Mapping):
             rules_payload = {
                 _normalise_symbol(str(symbol)): dict(value)
                 for symbol, value in cached["rules"].items()
@@ -315,15 +320,11 @@ def create_app(
         updates: Mapping[str, Any],
         runtime_instance: RiskRuntime,
     ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-        symbol_normalised = _normalise_symbol(symbol)
-        rules_snapshot = runtime_instance.get_rules_snapshot()
-        existing = rules_snapshot.get(symbol_normalised, {"symbol": symbol_normalised})
-        merged = _merge_rule(existing, updates)
-        _, rules_snapshot = await _refresh_runtime(
-            runtime_instance, rule_updates={symbol_normalised: merged}
-        )
-        rule_payload = rules_snapshot.get(symbol_normalised, dict(merged))
-        return dict(rule_payload), rules_snapshot
+        rule_payload = await runtime_instance.save_risk_rule(symbol, updates)
+        _, rules_snapshot = await runtime_instance.reload_from_storage()
+        symbol_normalised = _normalise_symbol(rule_payload.get("symbol"))
+        rule_snapshot = rules_snapshot.get(symbol_normalised, dict(rule_payload))
+        return dict(rule_snapshot), rules_snapshot
 
     @app.post("/risk/rules", status_code=status.HTTP_200_OK)
     @app.post("/risk_rules", status_code=status.HTTP_200_OK)
@@ -376,15 +377,10 @@ def create_app(
         runtime_instance: RiskRuntime = Depends(_get_runtime),
     ) -> dict[str, Any]:
         symbol_normalised = _normalise_symbol(symbol)
-        rules_snapshot = runtime_instance.get_rules_snapshot()
-        if symbol_normalised not in rules_snapshot:
+        removed = await runtime_instance.delete_risk_rule(symbol_normalised)
+        if not removed:
             raise HTTPException(status_code=404, detail="risk rule not found")
-        rules_snapshot.pop(symbol_normalised)
-        _, updated_rules = await _refresh_runtime(
-            runtime_instance,
-            rule_updates=rules_snapshot,
-            replace_rules=True,
-        )
+        _, updated_rules = await runtime_instance.reload_from_storage()
         return {
             "success": True,
             "removed": symbol_normalised,
@@ -411,6 +407,7 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=500, detail="Failed to load order queue status") from exc
 
+    @app.get("/risk/sizing-history", status_code=status.HTTP_200_OK)
     @app.get("/sizing/history", status_code=status.HTTP_200_OK)
     async def sizing_history(
         runtime_instance: RiskRuntime = Depends(_get_runtime),
@@ -433,9 +430,29 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=500, detail="Failed to load sizing history") from exc
 
+    @app.get("/risk/rules/history", status_code=status.HTTP_200_OK)
+    async def rules_history(
+        runtime_instance: RiskRuntime = Depends(_get_runtime),
+        symbol: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        try:
+            limit_value = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="limit must be an integer") from exc
+        try:
+            return await runtime_instance.fetch_rules_history(
+                symbol=symbol,
+                limit=limit_value,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to load rules history") from exc
+
     @app.get("/config/rules", status_code=status.HTTP_200_OK)
     async def get_config_rules(runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:
-        rules_snapshot = runtime_instance.get_rules_snapshot()
+        rules_snapshot = await runtime_instance.load_risk_rules()
+        if not rules_snapshot:
+            rules_snapshot = runtime_instance.get_rules_snapshot()
         return {
             "success": True,
             "rules": rules_snapshot,
@@ -456,11 +473,14 @@ def create_app(
             merged = _merge_rule({"symbol": rule_payload.get("symbol")}, rule_payload)
             updates[merged["symbol"]] = merged
         try:
-            _, rules_snapshot = await _refresh_runtime(
-                runtime_instance,
-                rule_updates=updates,
-                replace_rules=True,
-            )
+            existing = await runtime_instance.load_risk_rules()
+            existing_symbols = set(existing.keys())
+            new_symbols = set(updates.keys())
+            for symbol in existing_symbols - new_symbols:
+                await runtime_instance.delete_risk_rule(symbol)
+            for symbol, payload in updates.items():
+                await runtime_instance.save_risk_rule(symbol, payload)
+            _, rules_snapshot = await runtime_instance.reload_from_storage()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:

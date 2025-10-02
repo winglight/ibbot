@@ -18,7 +18,6 @@ from src.ibbot.redis import (
     enqueue_ib_command,
     read_stream,
     ResponseError,
-    get_redis_client,
 )
 from src.ibbot.influx import write_points
 
@@ -30,9 +29,6 @@ except Exception:  # pragma: no cover - redis might be unavailable in CI
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-SIZING_HISTORY_KEY = os.getenv("RISK_SIZING_HISTORY_KEY", "list:risk:sizing_history")
 
 
 async def _maybe_await(result: Awaitable[Any] | Any) -> Any:
@@ -61,6 +57,12 @@ class RiskRuntime:
     config_cache_key: str = "json:risk:config"
     rules_cache_key: str = "json:risk:rules"
     rules_update_channel: str = "pubsub:risk:rules:update"
+    config_hash_key: str = "hash:risk:config"
+    rules_hash_key: str = "hash:risk:rules"
+    rules_history_stream: str = "stream:risk:rules_history"
+    sizing_history_stream: str = "stream:risk:sizing_history"
+    rules_history_maxlen: int = 2000
+    sizing_history_maxlen: int = 5000
     cache_source: str = "risk-service"
     config_measurement: str = "risk_config_snapshot"
     rules_measurement: str = "risk_rule_snapshot"
@@ -82,6 +84,271 @@ class RiskRuntime:
     _config_snapshot: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _rules_snapshot: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _position_last_requested: datetime | None = field(default=None, init=False, repr=False)
+    _config_snapshot_timestamp: str | None = field(default=None, init=False, repr=False)
+    _rules_snapshot_timestamp: str | None = field(default=None, init=False, repr=False)
+    _sizing_history_length: int = field(default=0, init=False, repr=False)
+    _rules_history_length: int = field(default=0, init=False, repr=False)
+
+    # ------------------------------------------------------------------
+    # redis helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalise_symbol(value: str | None) -> str:
+        return value.strip().upper() if value else ""
+
+    def _encode_value(self, value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, default=self._json_default)
+
+    @staticmethod
+    def _decode_value(raw: Any) -> Any:
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8", errors="ignore")
+        else:
+            text = str(raw)
+        if text == "":
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+
+    def _stream_fields(self, payload: Mapping[str, Any]) -> dict[str, str]:
+        fields: dict[str, str] = {}
+        for key, value in payload.items():
+            if value is None:
+                continue
+            key_str = str(key)
+            if isinstance(value, (str, bytes)):
+                if isinstance(value, bytes):
+                    fields[key_str] = value.decode("utf-8", errors="ignore")
+                else:
+                    fields[key_str] = value
+            else:
+                fields[key_str] = self._encode_value(value)
+        return fields
+
+    async def load_risk_config(self) -> dict[str, Any]:
+        redis = await self._get_cache_redis()
+        if redis is None:
+            return dict(self._config_snapshot)
+        try:
+            payload = await redis.hgetall(self.config_hash_key)
+        except Exception:
+            return dict(self._config_snapshot)
+        if not payload:
+            return dict(self._config_snapshot)
+        config: dict[str, Any] = {}
+        for key, value in payload.items():
+            key_str = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            config[key_str] = self._decode_value(value)
+        return config
+
+    async def save_risk_config(self, updates: Mapping[str, Any]) -> dict[str, Any]:
+        config = await self.load_risk_config()
+        timestamp = _utc_now().isoformat()
+        removed_fields: list[str] = []
+        for key, value in updates.items():
+            key_str = str(key)
+            if key_str in {"rules", "updated_at"}:
+                continue
+            if value is None:
+                if key_str in config:
+                    config.pop(key_str, None)
+                removed_fields.append(key_str)
+            else:
+                config[key_str] = value
+        config["updated_at"] = timestamp
+
+        redis = await self._get_cache_redis()
+        if redis is not None:
+            mapping = {key: self._encode_value(value) for key, value in config.items()}
+            await redis.hset(self.config_hash_key, mapping=mapping)
+            if removed_fields:
+                try:
+                    await redis.hdel(self.config_hash_key, *removed_fields)
+                except TypeError:
+                    for field in removed_fields:
+                        await redis.hdel(self.config_hash_key, field)
+        return config
+
+    async def load_risk_rules(self) -> dict[str, dict[str, Any]]:
+        redis = await self._get_cache_redis()
+        if redis is None:
+            return self.get_rules_snapshot()
+        try:
+            payload = await redis.hgetall(self.rules_hash_key)
+        except Exception:
+            return self.get_rules_snapshot()
+        if not payload:
+            return {}
+        rules: dict[str, dict[str, Any]] = {}
+        for key, value in payload.items():
+            symbol = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            data = self._decode_value(value)
+            if isinstance(data, Mapping):
+                payload_dict = {str(k): v for k, v in data.items()}
+                payload_dict.setdefault("symbol", symbol)
+                rules[self._normalise_symbol(symbol)] = payload_dict
+        return rules
+
+    def _merge_rule_payload(
+        self, existing: Mapping[str, Any], updates: Mapping[str, Any], symbol: str
+    ) -> dict[str, Any]:
+        merged = {str(k): v for k, v in existing.items() if k != "updated_at"}
+        for key, value in updates.items():
+            key_str = str(key)
+            if key_str in {"symbol", "updated_at"}:
+                continue
+            if value is None:
+                merged.pop(key_str, None)
+            else:
+                merged[key_str] = value
+        merged["symbol"] = symbol
+        return merged
+
+    async def save_risk_rule(
+        self, symbol: str, updates: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        symbol_normalised = self._normalise_symbol(symbol)
+        if not symbol_normalised:
+            symbol_normalised = self._normalise_symbol(str(updates.get("symbol")))
+        if not symbol_normalised:
+            raise ValueError("risk rule requires a symbol")
+        existing_rules = await self.load_risk_rules()
+        existing = existing_rules.get(symbol_normalised, {"symbol": symbol_normalised})
+        merged = self._merge_rule_payload(existing, updates, symbol_normalised)
+        timestamp = _utc_now().isoformat()
+        merged["updated_at"] = timestamp
+
+        redis = await self._get_cache_redis()
+        if redis is not None:
+            mapping = {symbol_normalised: self._encode_value(merged)}
+            await redis.hset(self.rules_hash_key, mapping=mapping)
+            history_payload = {
+                "event": "upsert",
+                "symbol": symbol_normalised,
+                "payload": self._encode_value(merged),
+                "updated_at": timestamp,
+            }
+            try:
+                await redis.xadd(
+                    self.rules_history_stream,
+                    self._stream_fields(history_payload),
+                    maxlen=self.rules_history_maxlen,
+                    approximate=True,
+                )
+                self._rules_history_length = int(
+                    await redis.xlen(self.rules_history_stream)
+                )
+            except Exception:
+                pass
+        return merged
+
+    async def delete_risk_rule(self, symbol: str) -> bool:
+        symbol_normalised = self._normalise_symbol(symbol)
+        if not symbol_normalised:
+            return False
+        redis = await self._get_cache_redis()
+        removed = False
+        if redis is not None:
+            try:
+                removed = bool(await redis.hdel(self.rules_hash_key, symbol_normalised))
+            except Exception:
+                removed = False
+            if removed:
+                timestamp = _utc_now().isoformat()
+                history_payload = {
+                    "event": "delete",
+                    "symbol": symbol_normalised,
+                    "updated_at": timestamp,
+                }
+                try:
+                    await redis.xadd(
+                        self.rules_history_stream,
+                        self._stream_fields(history_payload),
+                        maxlen=self.rules_history_maxlen,
+                        approximate=True,
+                    )
+                    self._rules_history_length = int(
+                        await redis.xlen(self.rules_history_stream)
+                    )
+                except Exception:
+                    pass
+        return removed
+
+    async def reload_from_storage(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        config = await self.load_risk_config()
+        rules = await self.load_risk_rules()
+        payload = dict(config)
+        payload["rules"] = list(rules.values())
+        await self.update_config(payload)
+        return self.get_config_snapshot(), self.get_rules_snapshot()
+
+    async def append_sizing_history(
+        self, payload: Mapping[str, Any]
+    ) -> str | None:
+        redis = await self._get_cache_redis()
+        if redis is None:
+            return None
+        timestamp = str(payload.get("timestamp") or payload.get("created_at") or "")
+        if not timestamp:
+            timestamp = _utc_now().isoformat()
+        entry = dict(payload)
+        entry.setdefault("timestamp", timestamp)
+        try:
+            message_id = await redis.xadd(
+                self.sizing_history_stream,
+                self._stream_fields(entry),
+                maxlen=self.sizing_history_maxlen,
+                approximate=True,
+            )
+            self._sizing_history_length = int(
+                await redis.xlen(self.sizing_history_stream)
+            )
+            return str(message_id)
+        except Exception:
+            return None
+
+    async def fetch_rules_history(
+        self, *, symbol: str | None = None, limit: int = 100
+    ) -> dict[str, Any]:
+        redis = await self._get_cache_redis()
+        limit_clamped = max(1, min(int(limit or 1), 500))
+        symbol_filter = self._normalise_symbol(symbol)
+        if redis is None:
+            return {"success": True, "items": [], "count": 0}
+        try:
+            entries = await redis.xrevrange(
+                self.rules_history_stream,
+                count=limit_clamped * 4,
+            )
+        except Exception:
+            entries = []
+        results: list[dict[str, Any]] = []
+        for entry_id, fields in entries or []:
+            if isinstance(fields, Mapping):
+                payload = {
+                    str(k if not isinstance(k, bytes) else k.decode("utf-8")): self._decode_value(v)
+                    for k, v in fields.items()
+                }
+            else:
+                payload = {}
+            payload.setdefault("id", entry_id if isinstance(entry_id, str) else str(entry_id))
+            payload_symbol = self._normalise_symbol(
+                str(payload.get("symbol") or "")
+            )
+            if symbol_filter and payload_symbol != symbol_filter:
+                continue
+            results.append(payload)
+            if len(results) >= limit_clamped:
+                break
+        results.reverse()
+        return {"success": True, "items": results, "count": len(results)}
 
     async def update_config(self, config: Mapping[str, Any]) -> None:
         snapshot: tuple[dict[str, Any], dict[str, Any], str] | None = None
@@ -117,6 +384,16 @@ class RiskRuntime:
             self._config_snapshot.setdefault("updated_at", timestamp)
             for payload in self._rules_snapshot.values():
                 payload.setdefault("updated_at", timestamp)
+            self._config_snapshot_timestamp = str(self._config_snapshot.get("updated_at") or timestamp)
+            rule_timestamps = [
+                str(value.get("updated_at"))
+                for value in self._rules_snapshot.values()
+                if value.get("updated_at")
+            ]
+            if rule_timestamps:
+                self._rules_snapshot_timestamp = max(rule_timestamps)
+            else:
+                self._rules_snapshot_timestamp = self._config_snapshot_timestamp
             await self._publish_snapshots(*snapshot)
 
     def _build_snapshots(
@@ -285,6 +562,12 @@ class RiskRuntime:
             metrics.update(extra)
         if self._position_last_requested is not None:
             metrics["position_last_requested_at"] = self._position_last_requested.isoformat()
+        if self._config_snapshot_timestamp:
+            metrics["config_snapshot_at"] = self._config_snapshot_timestamp
+        if self._rules_snapshot_timestamp:
+            metrics["rules_snapshot_at"] = self._rules_snapshot_timestamp
+        metrics["sizing_history_events"] = self._sizing_history_length
+        metrics["rules_history_events"] = self._rules_history_length
         return metrics
 
     async def _update_health(
@@ -610,7 +893,7 @@ class RiskRuntime:
         """Load persisted sizing recommendations from Redis."""
 
         limit_clamped = max(1, min(int(limit or 1), 500))
-        symbol_key = (symbol or "").strip().upper()
+        symbol_filter = self._normalise_symbol(symbol)
         since_dt = None
         if since:
             try:
@@ -618,29 +901,34 @@ class RiskRuntime:
             except Exception:
                 since_dt = None
 
+        redis = await self._get_cache_redis()
+        if redis is None:
+            return {"success": True, "items": [], "count": 0}
+
         try:
-            client = await get_redis_client()
-            # Fetch a few extra entries to allow filtering.
-            entries = await client.lrange(SIZING_HISTORY_KEY, 0, limit_clamped * 4)
-        except Exception as exc:  # pragma: no cover - defensive guard
-            if self._logger:
-                self._logger.debug("Failed to read sizing history", error=str(exc))
+            entries = await redis.xrevrange(
+                self.sizing_history_stream,
+                count=limit_clamped * 4,
+            )
+            self._sizing_history_length = int(
+                await redis.xlen(self.sizing_history_stream)
+            )
+        except Exception:
             entries = []
 
         results: list[dict[str, Any]] = []
-        for raw in entries:
-            try:
-                item = json.loads(raw)
-            except (TypeError, ValueError):
+        for entry_id, fields in entries or []:
+            if isinstance(fields, Mapping):
+                payload = {
+                    str(k if not isinstance(k, bytes) else k.decode("utf-8")): self._decode_value(v)
+                    for k, v in fields.items()
+                }
+            else:
+                payload = {}
+            payload.setdefault("id", entry_id if isinstance(entry_id, str) else str(entry_id))
+            item_symbol = self._normalise_symbol(str(payload.get("symbol") or ""))
+            if symbol_filter and item_symbol != symbol_filter:
                 continue
-            if not isinstance(item, Mapping):
-                continue
-
-            payload = dict(item)
-            item_symbol = str(payload.get("symbol") or "").strip().upper()
-            if symbol_key and item_symbol != symbol_key:
-                continue
-
             if since_dt is not None:
                 ts_raw = payload.get("timestamp") or payload.get("created_at")
                 ts_value = None
@@ -651,11 +939,10 @@ class RiskRuntime:
                         ts_value = None
                 if ts_value is not None and ts_value < since_dt:
                     continue
-
             results.append(payload)
             if len(results) >= limit_clamped:
                 break
-
+        results.reverse()
         return {"success": True, "items": results, "count": len(results)}
 
     async def position_sizing(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -729,7 +1016,8 @@ class RiskRuntime:
         contracts = max(0, int(raw_contracts))
         self._position_last_requested = _utc_now()
 
-        return {
+        timestamp = _utc_now().isoformat()
+        result = {
             "success": True,
             "symbol": symbol,
             "contracts": contracts,
@@ -738,4 +1026,7 @@ class RiskRuntime:
             "risk_fraction": risk_fraction,
             "point_value": point_value,
             "raw_contracts": raw_contracts,
+            "timestamp": timestamp,
         }
+        await self.append_sizing_history(result)
+        return result
