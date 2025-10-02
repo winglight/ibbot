@@ -7,6 +7,7 @@ import contextlib
 import inspect
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
@@ -140,6 +141,9 @@ def _normalise_stream_targets(
     return tuple(result)
 
 
+QUEUE_MONITOR_HEALTH_HASH = os.getenv("QUEUE_SERVICE_HEALTH_KEY", "hash:service:health:queue")
+
+
 @dataclass(slots=True)
 class QueueMonitorRuntime:
     """Monitor Redis queue metrics and expose them for dashboards."""
@@ -154,6 +158,7 @@ class QueueMonitorRuntime:
     hash_key: str = "hash:service:queue-monitor"
     pubsub_channel: str | None = "pubsub:service:queue-monitor"
     service_name: str = "queue-monitor"
+    health_hash_key: str = field(default_factory=lambda: QUEUE_MONITOR_HEALTH_HASH)
     logger_name: str = "ibbot.services.queue_monitor"
 
     _queue_targets: tuple[QueueTarget, ...] = field(init=False, repr=False)
@@ -256,7 +261,7 @@ class QueueMonitorRuntime:
             self.service_name,
             healthy=True,
             metrics=metrics,
-            key="hash:service:health:queue",
+            key=self.health_hash_key,
             logger=self._logger,
         )
 

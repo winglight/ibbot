@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, MutableMapping, Sequence
@@ -29,6 +30,16 @@ __all__ = [
 
 SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
     (
+        "account_service_probe",
+        "account-service",
+        os.getenv("ACCOUNT_SERVICE_HEALTH_KEY", "hash:service:health:account-service"),
+    ),
+    (
+        "orders_service_probe",
+        "orders",
+        os.getenv("ORDERS_SERVICE_HEALTH_KEY", "hash:service:health:orders"),
+    ),
+    (
         "risk_service_probe",
         "risk-service",
         os.getenv("RISK_SERVICE_HEALTH_KEY", "hash:service:health:risk-service"),
@@ -37,6 +48,11 @@ SERVICE_HEALTH_PROBES: tuple[tuple[str, str, str], ...] = (
         "strategy_service_probe",
         "strategy",
         os.getenv("STRATEGY_SERVICE_HEALTH_KEY", "hash:service:health:strategy"),
+    ),
+    (
+        "notification_service_probe",
+        "notification",
+        os.getenv("NOTIFICATION_SERVICE_HEALTH_KEY", "hash:service:health:notification"),
     ),
     (
         "account_snapshot_probe",
@@ -102,17 +118,34 @@ _STATUS_NORMALISATION = {
 }
 
 
-_PLACEHOLDER_SERVICES: dict[str, str] = {
-    "ib-gateway": "IB Gateway 状态未接入健康检查，假定运行中。",
-    "ib_feed": "行情订阅服务未上报健康信息，默认显示运行中。",
-    "optimizer": "Optimizer Engine 未提供健康接口，默认显示运行中。",
-    "cloudflared": "Cloudflare Tunnel 状态未接入健康检查，默认显示运行中。",
-    "notification": "通知服务未集成统一健康检查，默认显示运行中。",
-    "market_data": "行情落地服务未接入健康检查，默认显示运行中。",
+_PLACEHOLDER_SERVICES: dict[str, tuple[str, Mapping[str, Any] | None]] = {
+    "ib-gateway": (
+        "IB Gateway 状态未接入健康检查，标记为外部服务。",
+        {"external": True},
+    ),
+    "cloudflared": (
+        "Cloudflare Tunnel 状态未接入健康检查，标记为外部服务。",
+        {"external": True},
+    ),
+    "ib_feed": (
+        "行情订阅服务未上报健康信息，默认显示运行中。",
+        None,
+    ),
+    "optimizer": (
+        "Optimizer Engine 未提供健康接口，默认显示运行中。",
+        None,
+    ),
+    "market_data": (
+        "行情落地服务未接入健康检查，默认显示运行中。",
+        None,
+    ),
 }
 
 _SERVICE_ALIASES: dict[str, str] = {
     "queue-monitor": "queue_monitor",
+    "account-service": "account",
+    "orders": "orders",
+    "notification": "notification",
 }
 
 
@@ -305,20 +338,45 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
         client = await get_redis_client()
         close_client = True
 
-    statuses: list[ServiceStatus] = [
+    statuses: "OrderedDict[str, ServiceStatus]" = OrderedDict()
+
+    def _set_status(
+        status: ServiceStatus, *, overwrite: bool = True, merge_payload: bool = False
+    ) -> None:
+        existing = statuses.get(status.service)
+        if existing is not None:
+            if not overwrite:
+                return
+            if merge_payload:
+                merged_payload: dict[str, Any] = {}
+                if existing.payload is not None:
+                    merged_payload.update(existing.payload)
+                if status.payload is not None:
+                    merged_payload.update(status.payload)
+                statuses[status.service] = ServiceStatus(
+                    service=status.service,
+                    status=status.status,
+                    detail=status.detail,
+                    last_reported=status.last_reported,
+                    payload=merged_payload or None,
+                )
+                return
+        statuses[status.service] = status
+
+    _set_status(
         ServiceStatus(
             service="ibbot",
             status="running",
             detail="主程序运行中",
             last_reported=datetime.now(timezone.utc).isoformat(),
         )
-    ]
+    )
 
     try:
-        statuses.append(await _build_ib_command_status(client))
+        _set_status(await _build_ib_command_status(client))
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Failed to build ib_command health payload: %s", exc)
-        statuses.append(
+        _set_status(
             ServiceStatus(
                 service="ib_command",
                 status="unhealthy",
@@ -330,12 +388,13 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
         readiness = await refresh_account_service_status(max_age=60.0, log_failure=False)
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Failed to refresh account service readiness: %s", exc)
-        statuses.append(
+        _set_status(
             ServiceStatus(
-                service="account-service",
+                service=_SERVICE_ALIASES.get("account-service", "account-service"),
                 status="unhealthy",
                 detail=f"无法刷新账户服务状态: {exc}",
-            )
+            ),
+            overwrite=False,
         )
     else:
         readiness_payload = readiness.as_payload()
@@ -346,14 +405,15 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
             detail = "账户服务尚未执行连通性检查"
         else:
             detail = f"无法连接账户服务: {readiness.error or '未知错误'}"
-        statuses.append(
+        _set_status(
             ServiceStatus(
-                service="account-service",
+                service=_SERVICE_ALIASES.get("account-service", "account-service"),
                 status="running" if readiness.ready else "unhealthy",
                 detail=detail,
                 last_reported=checked_at,
                 payload=readiness_payload,
-            )
+            ),
+            overwrite=False,
         )
 
     for _, service_name, redis_key in SERVICE_HEALTH_PROBES:
@@ -362,7 +422,7 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
         ui_service = _SERVICE_ALIASES.get(service_name, service_name)
         payload = await _load_hash(client, redis_key)
         if not payload:
-            statuses.append(
+            _set_status(
                 ServiceStatus(
                     service=ui_service,
                     status="unhealthy",
@@ -370,13 +430,13 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
                 )
             )
             continue
-        statuses.append(_build_status_from_payload(ui_service, payload))
+        _set_status(_build_status_from_payload(ui_service, payload))
 
     try:
-        statuses.append(await _build_queue_monitor_status(client))
+        _set_status(await _build_queue_monitor_status(client), merge_payload=True)
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Failed to build queue monitor status: %s", exc)
-        statuses.append(
+        _set_status(
             ServiceStatus(
                 service="queue_monitor",
                 status="unhealthy",
@@ -384,19 +444,21 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
             )
         )
 
-    for service, message in _PLACEHOLDER_SERVICES.items():
-        statuses.append(
+    for service, (message, payload) in _PLACEHOLDER_SERVICES.items():
+        _set_status(
             ServiceStatus(
                 service=service,
                 status="running",
                 detail=message,
-            )
+                payload=dict(payload) if payload is not None else None,
+            ),
+            overwrite=False,
         )
 
     if close_client and client is not None:
         await _close_redis(client)
 
-    return statuses
+    return list(statuses.values())
 
 
 async def build_service_status_payload(redis: Any | None = None) -> Mapping[str, Any]:
