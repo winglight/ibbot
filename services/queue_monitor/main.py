@@ -253,7 +253,7 @@ class QueueMonitorRuntime:
         }
         await update_service_health(
             self._redis,
-            "queue",
+            self.service_name,
             healthy=True,
             metrics=metrics,
             logger=self._logger,
