@@ -325,45 +325,65 @@ class OrdersServiceClient(ServiceClient):
 
 
 class RiskServiceClient(ServiceClient):
+    """HTTP client for the Risk microservice."""
+
     service_name = "risk"
     env_prefix = "RISK"
     default_base_url = "http://localhost:8030"
 
     async def fetch_rules(self) -> Any:
-        return await self.request("GET", "/risk_rules")
+        """Return the latest snapshot of configured risk rules."""
+
+        return await self.request("GET", "/risk/rules")
 
     async def post_rule(self, payload: Mapping[str, Any]) -> Any:
-        return await self.request("POST", "/risk_rules", json=dict(payload))
+        """Create a new risk rule."""
+
+        return await self.request("POST", "/risk/rules", json=dict(payload))
 
     async def update_rule(self, symbol: str, payload: Mapping[str, Any]) -> Any:
-        return await self.request(
-            "PUT",
-            f"/risk_rules/{symbol}",
-            json=dict(payload),
-        )
+        """Update an existing risk rule identified by *symbol*."""
+
+        return await self.request("PUT", f"/risk/rules/{symbol}", json=dict(payload))
 
     async def delete_rule(self, symbol: str) -> Any:
-        return await self.request("DELETE", f"/risk_rules/{symbol}")
+        """Delete the rule for *symbol*."""
+
+        return await self.request("DELETE", f"/risk/rules/{symbol}")
 
     async def fetch_config(self) -> Any:
-        return await self.request("GET", "/risk-config")
+        """Retrieve the persisted risk configuration."""
+
+        return await self.request("GET", "/risk/config")
 
     async def update_config(self, payload: Mapping[str, Any]) -> Any:
-        return await self.request("PUT", "/risk-config", json=dict(payload))
+        """Apply updates to the risk configuration."""
+
+        return await self.request("PUT", "/risk/config", json=dict(payload))
 
     async def fetch_order_queue_status(self) -> Any:
+        """Fetch the current order queue approval status."""
+
         return await self.request("GET", "/order_queue_status")
 
     async def position_sizing(self, payload: Mapping[str, Any]) -> Any:
+        """Calculate position sizing via the risk service."""
+
         return await self.request("POST", "/position-sizing", json=dict(payload))
 
     async def fetch_sizing_history(self, params: Mapping[str, Any]) -> Any:
+        """Return historical sizing recommendations."""
+
         return await self.request("GET", "/sizing/history", params=dict(params))
 
     async def fetch_config_rules(self) -> Any:
+        """Retrieve the S-rule configuration payload."""
+
         return await self.request("GET", "/config/rules")
 
     async def update_config_rules(self, payload: Mapping[str, Any]) -> Any:
+        """Update the S-rule configuration payload."""
+
         return await self.request("PUT", "/config/rules", json=dict(payload))
 
 

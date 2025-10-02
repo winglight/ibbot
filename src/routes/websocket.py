@@ -22,7 +22,6 @@ from src.account_snapshot_cache import (
     read_positions_snapshot,
 )
 from src.connection_manager import connection_manager
-from src.database import get_db_manager
 from src.dom_optimizer import get_dom_optimization_orchestrator
 from src.dom_service import get_dom_service
 from src.utils import now_local, parse_local_datetime, to_local_iso
@@ -493,88 +492,14 @@ def _allow_request(tracker: Dict[str, float], key: str, *, force: bool = False) 
     return False
 
 
-def _normalise_rule_status(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        passed = bool(value.get("passed", True))
-        message = value.get("message")
-        if not message:
-            errors = value.get("errors")
-            if isinstance(errors, list):
-                message = " | ".join(str(err) for err in errors if err)
-            elif errors:
-                message = str(errors)
-        if not message:
-            message = "正常" if passed else "违规"
-        return {"passed": passed, "message": message}
-    return {"passed": True, "message": "正常"}
-
-
 def _enrich_sizing_history_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not items:
-        return items
+    """Return sizing history items unchanged.
 
-    db = get_db_manager()
-    try:
-        s_rules_config = db.get_config("s_rules", {}) or {}
-    except Exception as exc:
-        logger.warning(f"Failed to load S rules config for sizing history: {exc}")
-        s_rules_config = {}
-
-    for item in items:
-        g_rules_checked = item.get("g_rules_checked", [])
-        if isinstance(g_rules_checked, str):
-            try:
-                g_rules_checked = json.loads(g_rules_checked)
-            except (json.JSONDecodeError, TypeError):
-                g_rules_checked = []
-
-        g_rules_status: Dict[str, Dict[str, Any]] = {}
-        if isinstance(g_rules_checked, list):
-            for idx, rule_result in enumerate(g_rules_checked):
-                if isinstance(rule_result, dict):
-                    g_rules_status[f"g{idx}"] = _normalise_rule_status(rule_result)
-
-        if not g_rules_status:
-            for idx in range(6):
-                g_rules_status[f"g{idx}"] = {"passed": True, "message": "正常"}
-
-        s_rules_status: Dict[str, Dict[str, Any]] = {}
-        try:
-            s0_method = s_rules_config.get("s0_position_sizing", "fixed")
-            method_map = {"fixed": "固定金额", "percentage": "百分比", "shares": "股数"}
-            s_rules_status["s0"] = {
-                "passed": True,
-                "message": method_map.get(s0_method, s0_method),
-            }
-
-            s1_value = s_rules_config.get("s1_risk_percentage", 1.0)
-            suffix = "%" if s0_method == "percentage" else (" 股" if s0_method == "shares" else "$")
-            s_rules_status["s1"] = {
-                "passed": True,
-                "message": f"{s1_value}{suffix}",
-            }
-
-            s2_max = s_rules_config.get("s2_max_positions", 10)
-            s_rules_status["s2"] = {"passed": True, "message": str(s2_max)}
-
-            s3_enabled = s_rules_config.get("s3_volatility_adjustment", True)
-            s_rules_status["s3"] = {
-                "passed": True,
-                "message": "启用" if s3_enabled else "禁用",
-            }
-
-            s4_enabled = s_rules_config.get("s4_volatility_adjustment", True)
-            s_rules_status["s4"] = {
-                "passed": True,
-                "message": "启用" if s4_enabled else "禁用",
-            }
-        except Exception as exc:
-            logger.warning(f"Failed to derive S rules status: {exc}")
-            for idx in range(5):
-                s_rules_status[f"s{idx}"] = {"passed": True, "message": "正常"}
-
-        item["g_rules_status"] = g_rules_status
-        item["s_rules_status"] = s_rules_status
+    The risk microservice now returns fully hydrated entries so the websocket
+    layer no longer needs to enrich the payload using the legacy SQLite
+    database.  The helper is retained for backwards compatibility with the
+    surrounding call sites but simply passes values through.
+    """
 
     return items
 
@@ -1795,40 +1720,61 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    db = get_db_manager()
-                    items = db.load_sizing_history(symbol=symbol, since=since_raw, limit=limit)
-                    enriched = _enrich_sizing_history_items(items)
-                    meta = {
-                        "limit": limit,
-                        "symbol": symbol,
-                        "since": since_raw,
-                        "generated_at": to_local_iso(now_local()),
-                        "source": "websocket",
-                    }
+                    response = await _RISK_CLIENT.fetch_sizing_history(
+                        {
+                            "limit": limit,
+                            "symbol": symbol,
+                            "since": since_raw,
+                        }
+                    )
+                except ServiceUnavailableError as exc:
+                    logger.debug(f"Risk service unavailable for sizing history: {exc}")
+                    response = None
+                except ServiceClientError as exc:
+                    logger.warning(f"Risk service error for sizing history: {exc}")
+                    response = None
+
+                base_payload: Dict[str, Any] | None = None
+                if isinstance(response, Mapping):
+                    base_payload = {"type": "sizing_history", **dict(response)}
+                    data = base_payload.get("data")
+                    if isinstance(data, list):
+                        base_payload["data"] = _enrich_sizing_history_items(
+                            [dict(item) if isinstance(item, Mapping) else item for item in data]
+                        )
+                elif isinstance(response, list):
                     base_payload = {
                         "type": "sizing_history",
                         "success": True,
-                        "data": enriched,
-                        "meta": meta,
+                        "data": _enrich_sizing_history_items(
+                            [dict(item) if isinstance(item, Mapping) else item for item in response]
+                        ),
                     }
-                    last_responses[key] = base_payload
-                    payload = dict(base_payload)
+
+                if base_payload is None:
+                    fallback = _service_unavailable_payload("sizing_history")
+                    last_responses[key] = fallback
+                    payload = dict(fallback)
                     if context is not None:
                         payload["context"] = context
                     await _send_or_disconnect(websocket, payload)
-                except WebSocketDisconnect:
-                    raise
-                except Exception as exc:
-                    logger.warning(f"Failed to stream sizing history: {exc}")
-                    await _send_or_disconnect(
-                        websocket,
-                        {
-                            "type": "sizing_history",
-                            "success": False,
-                            "error": str(exc),
-                            "context": context,
-                        },
-                    )
+                    continue
+
+                base_payload.setdefault("success", True)
+                base_payload.setdefault("data", [])
+                base_payload.setdefault(
+                    "meta",
+                    {
+                        "limit": limit,
+                        "symbol": symbol,
+                        "since": since_raw,
+                    },
+                )
+                last_responses[key] = base_payload
+                payload = dict(base_payload)
+                if context is not None:
+                    payload["context"] = context
+                await _send_or_disconnect(websocket, payload)
             elif msg_type == "request_strategies":
                 key = "strategies_snapshot"
                 force = bool(message.get("force"))
