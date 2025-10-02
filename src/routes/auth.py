@@ -9,7 +9,16 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from jose import JWTError, jwt
 from pydantic import BaseModel
 
+from src.config import load_project_env
 from src.utils.audit import log_audit_event
+
+# Ensure environment configuration from `.env` is available before reading
+# credentials or JWT settings at import time.  When running the application via
+# ``python main.py`` the environment would previously be populated only after
+# this module was imported, causing the default ``admin/change_me`` credentials
+# to be used instead of values from `.env`.  Loading here guarantees that the
+# configured credentials are available consistently across entrypoints.
+load_project_env()
 
 router = APIRouter()
 
