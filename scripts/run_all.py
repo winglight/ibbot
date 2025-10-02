@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -71,7 +72,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, f"uvicorn services.account.main:app --port {port}"
+        return cmd, shlex.join(cmd)
 
     if service == "orders":
         port = os.getenv("ORDERS_SERVICE_PORT", "8050")
@@ -85,7 +86,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, f"uvicorn services.orders.main:app --port {port}"
+        return cmd, shlex.join(cmd)
 
     if service == "risk":
         port = os.getenv("RISK_SERVICE_PORT", "8030")
@@ -100,7 +101,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, f"uvicorn {app_path} --port {port}"
+        return cmd, shlex.join(cmd)
 
     if service == "strategy":
         port = os.getenv("STRATEGY_SERVICE_PORT", "8045")
@@ -115,11 +116,99 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-        return cmd, f"uvicorn {app_path} --port {port}"
+        return cmd, shlex.join(cmd)
 
-    module = f"services.{service}.main"
-    cmd = [sys.executable, "-m", module]
-    return cmd, module
+    if service == "connection_control":
+        port = os.getenv("CONNECTION_CONTROL_PORT", "8056")
+        app_path = "services.connection_control.main:create_app"
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            app_path,
+            "--factory",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        return cmd, shlex.join(cmd)
+
+    if service == "market_data":
+        port = os.getenv("MARKET_DATA_PORT", "8010")
+        app_path = "services.market_data.main:create_app"
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            app_path,
+            "--factory",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        return cmd, shlex.join(cmd)
+
+    if service == "queue_monitor":
+        port = os.getenv("QUEUE_MONITOR_PORT", "8011")
+        app_path = "services.queue_monitor.main:create_app"
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            app_path,
+            "--factory",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        return cmd, shlex.join(cmd)
+
+    if service == "notification":
+        port = os.getenv("NOTIFICATION_SERVICE_PORT", "8055")
+        app_path = "services.notification.main:create_app"
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            app_path,
+            "--factory",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        return cmd, shlex.join(cmd)
+
+    if service == "optimizer":
+        port = os.getenv("OPTIMIZER_PORT", "8001")
+        app_path = "services.optimizer.main:create_app"
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            app_path,
+            "--factory",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        return cmd, shlex.join(cmd)
+
+    if service == "ib_command":
+        module = "services.ib_command.main"
+        cmd = [sys.executable, "-m", module]
+        return cmd, shlex.join(cmd)
+
+    if service == "ib_feed":
+        module = "services.ib_feed.main"
+        cmd = [sys.executable, "-m", module]
+        return cmd, shlex.join(cmd)
+
+    raise ValueError(f"Unknown service: {service}")
 
 
 def _load_env() -> Path | None:
@@ -234,26 +323,35 @@ def run_services(
             "启动命令示例：",
         ]
         for service in services:
-            message.append(f"  python -m services.{service}.main")
+            try:
+                _, label = _build_service_command(service)
+            except ValueError as exc:
+                print(f"[ERROR] {exc}", file=sys.stderr)
+                return 2
+            message.append(f"  {label}")
         print("\n".join(message))
         return 0
 
-    processes: list[tuple[str, subprocess.Popen[str]]] = []
+    processes: list[tuple[str, subprocess.Popen[str], str]] = []
     env = os.environ.copy()
 
     try:
         for service in services:
-            cmd, label = _build_service_command(service)
+            try:
+                cmd, label = _build_service_command(service)
+            except ValueError as exc:
+                print(f"[ERROR] {exc}", file=sys.stderr)
+                return 2
             print(f"[INFO] 启动 {service}: {label}")
             process = subprocess.Popen(cmd, cwd=PROJECT_ROOT, env=env)
-            processes.append((service, process))
+            processes.append((service, process, label))
 
         exit_code = 0
-        for service, process in processes:
+        for service, process, label in processes:
             return_code = process.wait()
             if return_code != 0:
                 print(
-                    f"[ERROR] 服务 services.{service}.main 退出码 {return_code}，提前结束其余进程。",
+                    f"[ERROR] 服务 {service} ({label}) 退出码 {return_code}，提前结束其余进程。",
                     file=sys.stderr,
                 )
                 exit_code = return_code
@@ -262,7 +360,7 @@ def run_services(
         print("[INFO] 接收到中断信号，准备停止所有服务。")
         exit_code = 0
     finally:
-        for service, process in processes:
+        for service, process, _ in processes:
             if process.poll() is None:
                 process.terminate()
 
