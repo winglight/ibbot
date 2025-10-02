@@ -15,6 +15,7 @@ from tests.services.redis_utils import InMemoryRedis
 
 async def _create_runtime(
     write_fn: Callable[[Iterable[Mapping[str, Any]]], int] | None = None,
+    **runtime_kwargs: Any,
 ) -> tuple[OrdersRuntime, InMemoryRedis]:
     redis = InMemoryRedis()
 
@@ -28,6 +29,7 @@ async def _create_runtime(
     }
     if write_fn is not None:
         kwargs["write_fn"] = write_fn
+    kwargs.update(runtime_kwargs)
     runtime = OrdersRuntime(**kwargs)
     await runtime.start()
     return runtime, redis
@@ -298,6 +300,108 @@ def test_list_orders_filters_by_start_date() -> None:
             assert len(result["orders"]) == 1
             assert result["orders"][0]["command_id"] == "recent"
             assert result["start_date"] == cutoff.isoformat()
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_snapshot_reload_normalises_cached_records() -> None:
+    async def _scenario() -> None:
+        runtime, redis = await _create_runtime()
+        try:
+            snapshot_payload = {
+                "active_orders": [
+                    {
+                        "id": "active-1",
+                        "request": {
+                            "ticker": "ESU4",
+                            "qty": "2",
+                            "side": "BUY",
+                            "lmt_price": "4350.5",
+                        },
+                        "result": {
+                            "avgPrice": "4349.75",
+                            "strategy_id": "alpha",
+                            "source": "web",
+                        },
+                        "events": [
+                            {
+                                "timestamp": "2024-05-10T02:00:00+00:00",
+                                "payload": {"status": "Submitted"},
+                            }
+                        ],
+                    }
+                ],
+                "history": [
+                    {
+                        "ib_order_id": "hist-1",
+                        "response": {
+                            "symbol": "CL",
+                            "action": "SELL",
+                            "limit_price": "80.5",
+                        },
+                        "result": {"avg_price": "79.75"},
+                    }
+                ],
+                "updated_at": "2024-05-10T03:00:00+00:00",
+                "last_event_id": "1-1",
+            }
+            await redis.set(runtime.snapshot_key, json.dumps(snapshot_payload))
+
+            await runtime._load_snapshot()
+
+            async with runtime._lock:
+                active = runtime._active_orders.get("active-1")
+                history = runtime._history[0] if runtime._history else None
+
+            assert active is not None
+            assert active["symbol"] == "ESU4"
+            assert active["action"] == "BUY"
+            assert active["limit_price"] == 4350.5
+            assert active["avg_fill_price"] == 4349.75
+            assert active["source"] == "web"
+            assert active["strategy"] == "alpha"
+            assert isinstance(active.get("events"), list)
+            assert active["events"]
+
+            assert history is not None
+            assert history["symbol"] == "CL"
+            assert history["action"] == "SELL"
+            assert history["limit_price"] == 80.5
+            assert history["avg_fill_price"] == 79.75
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_list_orders_defaults_to_configured_midnight(monkeypatch: pytest.MonkeyPatch) -> None:
+    fixed_now = datetime(2024, 5, 10, 10, 15, tzinfo=timezone.utc)
+    monkeypatch.setattr("services.orders.main._utc_now", lambda: fixed_now)
+
+    async def _scenario() -> None:
+        runtime, _ = await _create_runtime(default_timezone="America/New_York")
+        try:
+            async with runtime._lock:
+                runtime._active_orders["recent"] = {
+                    "command_id": "recent",
+                    "updated_at": "2024-05-10T08:00:00+00:00",
+                }
+                runtime._history.appendleft(
+                    {
+                        "command_id": "older",
+                        "completed_at": "2024-05-09T20:00:00+00:00",
+                    }
+                )
+
+            result = await runtime.list_orders()
+
+            assert result["total"] == 1
+            assert len(result["orders"]) == 1
+            assert result["orders"][0]["command_id"] == "recent"
+            assert result["start_date"] == "2024-05-10T00:00:00-04:00"
+            assert result["start_date_timezone"] == "America/New_York"
         finally:
             await runtime.stop()
 

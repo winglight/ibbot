@@ -84,6 +84,9 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
     monkeypatch.setattr(websocket_module, "_ACCOUNT_CLIENT", account_client)
 
     class StubOrdersClient:
+        def __init__(self) -> None:
+            self.default_start_date = "2024-05-10T00:00:00+00:00"
+
         async def list_orders(
             self,
             *,
@@ -95,6 +98,8 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
             payload: dict[str, Any] = {"orders": [{"order_id": "1", "symbol": "ES"}], "total": 1}
             if start_date:
                 payload["start_date"] = start_date
+            elif self.default_start_date:
+                payload["start_date"] = self.default_start_date
             return payload
 
     orders_client = StubOrdersClient()

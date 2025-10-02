@@ -351,24 +351,27 @@ async def list_orders(
     response = dict(payload)
     meta_payload = response.get("meta")
     if isinstance(meta_payload, Mapping):
-        response["meta"] = dict(meta_payload)
+        meta = dict(meta_payload)
+    else:
+        meta = {}
+    response["meta"] = meta
 
     effective_start = response.get("start_date")
     if not effective_start and start_date_iso:
         effective_start = start_date_iso
     if effective_start:
         response["start_date"] = effective_start
-        if isinstance(response.get("meta"), dict):
-            response["meta"].setdefault("start_date", effective_start)
+        meta.setdefault("start_date", effective_start)
     elif isinstance(start_date, str) and start_date.strip():
         trimmed_start = start_date.strip()
         response.setdefault("start_date", trimmed_start)
-        if isinstance(response.get("meta"), dict):
-            response["meta"].setdefault("start_date", trimmed_start)
+        meta.setdefault("start_date", trimmed_start)
 
     response.setdefault("success", True)
     response.setdefault("limit", limit)
     response.setdefault("page", page)
+    meta.setdefault("limit", limit)
+    meta.setdefault("page", page)
     return response
 
 

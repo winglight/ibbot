@@ -20,6 +20,7 @@ class StubOrdersClient:
         self.get_order_error: Exception | None = None
         self.get_order_events_response: Mapping[str, Any] | None = None
         self.get_order_events_error: Exception | None = None
+        self.default_start_date: str | None = None
 
     async def list_orders(self, **kwargs: Any) -> Mapping[str, Any]:
         self.calls.append(("list_orders", dict(kwargs)))
@@ -27,6 +28,8 @@ class StubOrdersClient:
         start = kwargs.get("start_date")
         if start is not None:
             payload["start_date"] = start
+        elif self.default_start_date is not None:
+            payload["start_date"] = self.default_start_date
         return payload
 
     async def get_order(self, order_id: str) -> Mapping[str, Any]:
@@ -223,6 +226,23 @@ def test_list_orders_normalises_start_date(
     meta = payload.get("meta")
     if isinstance(meta, dict):
         assert meta.get("start_date", "").startswith("2024-05-01T00:00:00")
+
+
+def test_list_orders_includes_service_start_date_in_meta(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+    client_stub.default_start_date = "2024-05-10T00:00:00+00:00"
+
+    with TestClient(app) as client:
+        response = client.get("/api/orders")
+
+    assert response.status_code == status.HTTP_200_OK
+    payload = response.json()
+    assert payload.get("start_date") == "2024-05-10T00:00:00+00:00"
+    meta = payload.get("meta")
+    assert isinstance(meta, dict)
+    assert meta.get("start_date") == "2024-05-10T00:00:00+00:00"
 
 
 def test_get_order_returns_payload(

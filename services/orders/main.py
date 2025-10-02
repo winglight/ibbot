@@ -3,6 +3,7 @@ import copy
 import inspect
 import json
 import logging
+import os
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -23,6 +24,10 @@ LOGGER = logging.getLogger("ibbot.services.orders")
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _configured_timezone() -> str:
+    return os.getenv("TIME_ZONE", "Asia/Shanghai")
 
 
 def _serialise_datetime(value: datetime | None) -> str:
@@ -253,6 +258,63 @@ def _normalise_order_record(record: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _normalise_cached_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    payload = _clone_order_record(record)
+
+    request_mapping = _coerce_mapping(payload.get("request"))
+    if request_mapping is None:
+        request_mapping = {}
+    payload["request"] = request_mapping
+
+    result_mapping = _coerce_mapping(payload.get("result"))
+    if result_mapping is not None:
+        payload["result"] = result_mapping
+
+    response_mapping = _coerce_mapping(payload.get("response"))
+    if response_mapping is not None:
+        payload["response"] = response_mapping
+
+    sources: list[Mapping[str, Any]] = [payload, request_mapping]
+    if result_mapping is not None:
+        sources.append(result_mapping)
+    if response_mapping is not None:
+        sources.append(response_mapping)
+
+    for source in sources:
+        _apply_field_aliases(payload, source, aliases=_REQUEST_FIELD_ALIASES)
+        _apply_field_aliases(payload, source, aliases=_RESULT_FIELD_ALIASES)
+
+    for key in ("symbol", "action", "source", "strategy", "order_type"):
+        if key in payload:
+            coerced = _coerce_str(payload.get(key))
+            if coerced is not None:
+                payload[key] = coerced
+
+    for key in ("limit_price", "avg_fill_price", "stop_price"):
+        if key in payload:
+            coerced_float = _coerce_float(payload.get(key))
+            if coerced_float is not None:
+                payload[key] = coerced_float
+
+    for key in ("command_id", "order_id", "id"):
+        if key in payload:
+            coerced_id = _coerce_str(payload.get(key))
+            if coerced_id is not None:
+                payload[key] = coerced_id
+
+    events = payload.get("events")
+    if isinstance(events, Iterable) and not isinstance(events, (str, bytes, bytearray)):
+        normalised_events: list[dict[str, Any]] = []
+        for event in events:
+            if isinstance(event, Mapping):
+                normalised_events.append(dict(event))
+        payload["events"] = normalised_events
+    else:
+        payload["events"] = []
+
+    return payload
+
+
 def _event_timestamp(payload: Mapping[str, Any]) -> str:
     for key in ("timestamp", "time", "created_at", "event_time", "updated_at"):
         value = payload.get(key)
@@ -320,6 +382,7 @@ class OrdersRuntime:
     health_interval: float = 15.0
     history_limit: int = 200
     logger: logging.Logger = field(default_factory=lambda: LOGGER)
+    default_timezone: str = field(default_factory=_configured_timezone)
 
     _redis: Any = field(default=None, init=False, repr=False)
     _active_orders: Dict[str, Dict[str, Any]] = field(
@@ -462,18 +525,37 @@ class OrdersRuntime:
         else:
             start_dt = None
 
+        effective_timezone = tz if tz else None
         tzinfo: ZoneInfo | None = None
-        if tz:
-            try:
-                tzinfo = ZoneInfo(tz)
-            except Exception:
-                tzinfo = None
-
-        if start_dt is not None:
+        if start_dt is None:
+            timezone_candidates = [tz, self.default_timezone, "UTC"]
+            for candidate in timezone_candidates:
+                if not candidate:
+                    continue
+                try:
+                    tzinfo = ZoneInfo(candidate)
+                except Exception:
+                    continue
+                else:
+                    effective_timezone = candidate
+                    break
+            if tzinfo is not None:
+                now = _utc_now().astimezone(tzinfo)
+            else:
+                now = _utc_now()
+            start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            if tz:
+                try:
+                    tzinfo = ZoneInfo(tz)
+                except Exception:
+                    tzinfo = None
+                else:
+                    effective_timezone = tz
             if tzinfo is not None:
                 if start_dt.tzinfo is None:
                     start_dt = start_dt.replace(tzinfo=tzinfo)
-                else:
+                elif tz:
                     start_dt = start_dt.astimezone(tzinfo)
             elif start_dt.tzinfo is None:
                 start_dt = start_dt.replace(tzinfo=timezone.utc)
@@ -483,7 +565,7 @@ class OrdersRuntime:
             combined.extend(self._active_orders.values())
             combined.extend(self._history)
             ordered = sorted(
-                (_clone_order_record(order) for order in combined),
+                (_normalise_order_record(order) for order in combined),
                 key=lambda item: item.get("updated_at") or item.get("requested_at") or "",
                 reverse=True,
             )
@@ -546,7 +628,7 @@ class OrdersRuntime:
             "updated_at": _serialise_datetime(updated_at),
             "last_event_id": last_event_id,
             "start_date": start_iso,
-            "start_date_timezone": tz if tz else None,
+            "start_date_timezone": effective_timezone if effective_timezone else None,
         }
 
     async def get_order(self, order_id: str) -> dict[str, Any]:
@@ -705,19 +787,17 @@ class OrdersRuntime:
             for item in active_items:
                 if not isinstance(item, Mapping):
                     continue
+                record = _normalise_cached_record(item)
                 identifier = str(
-                    item.get("id")
-                    or item.get("order_id")
-                    or item.get("command_id")
-                    or item.get("ib_order_id")
+                    record.get("id")
+                    or record.get("order_id")
+                    or record.get("command_id")
+                    or record.get("ib_order_id")
                     or ""
                 )
                 if not identifier:
                     continue
-                record = dict(item)
                 record.setdefault("command_id", identifier)
-                if "events" not in record or not isinstance(record["events"], list):
-                    record["events"] = []
                 self._active_orders[identifier] = record
                 if record.get("command_id"):
                     self._command_to_order[str(record["command_id"])] = identifier
@@ -726,9 +806,7 @@ class OrdersRuntime:
             for item in history_items:
                 if not isinstance(item, Mapping):
                     continue
-                record = dict(item)
-                if "events" not in record or not isinstance(record["events"], list):
-                    record["events"] = []
+                record = _normalise_cached_record(item)
                 identifier = str(
                     record.get("id")
                     or record.get("order_id")
