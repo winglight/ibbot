@@ -20,14 +20,13 @@ pytest
 测试使用 `fastapi.testclient.TestClient` 启动应用，并自动：
 
 - 固定管理员/访客账号，避免依赖本地 `.env`。
-- 使用临时 SQLite 文件，不修改生产数据。
+- 使用内存桩件替代远程服务，不修改生产数据。
 - 跳过真实 IBKR 和 Redis 连接，保持测试快速稳定。
 
 ## 常见问题
 
 | 现象 | 原因/解决方式 |
 | --- | --- |
-| `sqlite3.OperationalError: database is locked` | 确保未同时运行主应用；或删除 `data/trading_bot.db` 重新生成。 |
 | Redis 相关警告 | 测试环境默认未安装 `redis-py`，警告可忽略。 |
 | `fastapi` 版本差异导致 schema 变化 | 若更新依赖导致 OpenAPI 有变化，请重新执行 `python tools/export_api_doc.py` 或直接运行 `pytest` 让快照测试失败后更新 `docs/api_doc.json`。 |
 

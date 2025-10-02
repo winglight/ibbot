@@ -10,13 +10,13 @@ DOM分析,参数调优,集成优化器与自动化调度接口,已完成,中,sci
 订单管理,订单历史同步,支持佣金补录与外部同步策略,已完成,中,Orders Service + Redis,src/routes/orders.py; services/orders/main.py
 风险控制,风险规则管理,提供风控规则CRUD、阈值与ATR跟踪,已完成,高,FastAPI + APScheduler,src/risk_manager.py; src/routes/risk.py
 风险控制,动态仓位计算,根据风险预算与波动率自动计算下单手数,已完成,高,Python,src/risk_manager.py
-策略系统,内部策略管理,加载内置策略、启停、重置与绩效统计,已完成,高,FastAPI + SQLite,src/strategy_manager.py; src/routes/strategy.py
+策略系统,内部策略管理,加载内置策略、启停、重置与绩效统计,已完成,高,Strategy Service API + Redis,src/strategy_manager.py; src/routes/strategy.py
 策略系统,外部策略入队,对外暴露签名验证的下单接口并接入任务队列,已完成,高,FastAPI,src/routes/strategy.py; src/queue_manager.py
 策略系统,策略风险联动,策略风险监控与通知集成,已完成,中,Python,src/strategy_risk.py; src/routes/strategy.py
-通知系统,统一通知控制台,集中管理浏览器与Telegram通知配置及发送历史,已完成,中,FastAPI + SQLite,src/notification_manager.py; src/routes/notifications.py
+通知系统,统一通知控制台,集中管理浏览器与Telegram通知配置及发送历史,已完成,中,Notification Service API + Redis,src/notification_manager.py; src/routes/notifications.py
 消息推送,Telegram机器人,可选的Telegram推送通道及自检接口,已完成,中,python-telegram-bot,src/telegram_notifier.py; src/routes/notifications.py
 队列系统,异步任务队列,持久化FIFO队列支持失败重试与队列心跳监控,已完成,高,asyncio,src/queue_manager.py; src/routes/queue.py
-数据层,数据库管理器,统一管理订单、风控、策略等SQLite存储并提供快照服务,已完成,高,SQLite + dataclasses,src/database.py; src/account_snapshot_service.py
+数据层,服务编排,通过 Orders/Risk/Strategy 微服务与 Redis 提供快照与缓存,已完成,高,HTTP APIs + Redis,src/account_snapshot_service.py; src/routes
 缓存,Redis可选缓存,在Redis可用时提供共享缓存与流水记录,部分可用,中,redis.asyncio,src/cache.py
 WebSocket,实时消息聚合,多频道推送账户、队列、DOM与策略事件,已完成,中,FastAPI + websockets,src/websocket_manager.py; src/routes/websocket.py
 部署,容器化部署,提供开发与生产docker-compose及Cloudflare隧道示例,已完成,中,Docker,docker/Dockerfile; docker/local.compose.yml; docker/prod.compose.yml

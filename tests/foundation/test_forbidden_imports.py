@@ -24,9 +24,7 @@ FORBIDDEN_RULES = {
     },
     "sqlite3": {
         "pattern": re.compile(r"(?m)^\s*import\s+sqlite3"),
-        "allowed": {
-            "scripts/migrate_risk_rule_type.py",
-        },
+        "allowed": set(),
     },
 }
 
