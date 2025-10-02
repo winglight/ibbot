@@ -20,6 +20,7 @@ from .notification_manager import NotificationManager
 from .database import DatabaseManager, Order, get_db_manager
 from .database import RiskRule as DatabaseRiskRule
 from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
+from .account_snapshot_cache import read_account_info_snapshot
 
 load_dotenv()
 
@@ -294,6 +295,65 @@ class RiskManager:
         if ensure_ready:
             raise RuntimeError("IBKR client is not initialized")
         return None
+
+    async def _fetch_account_info(
+        self,
+        *,
+        prefer_snapshot: bool = True,
+        allow_stale_snapshot: bool = True,
+        timeout: float = 10.0,
+        ibkr_client=None,
+    ) -> Dict[str, Any]:
+        """Load account info preferring Redis snapshots and respecting timeouts."""
+
+        client = ibkr_client or self._get_ibkr_client()
+        if client is None:
+            return {}
+
+        snapshot_timeout = min(3.0, max(0.5, timeout / 2))
+        try:
+            info = await asyncio.wait_for(
+                client.get_account_info(
+                    prefer_snapshot=prefer_snapshot,
+                    allow_stale_snapshot=allow_stale_snapshot,
+                    snapshot_timeout=snapshot_timeout,
+                    ib_timeout=timeout,
+                    force_refresh=not prefer_snapshot,
+                ),
+                timeout=timeout + 2.0,
+            )
+            if isinstance(info, dict):
+                return info
+        except asyncio.TimeoutError:
+            risk_logger.warning(
+                "Timed out fetching account info in risk manager (%.1fs)",
+                timeout,
+            )
+        except Exception as exc:
+            risk_logger.error(f"Error fetching account info in risk manager: {exc}")
+
+        if prefer_snapshot:
+            try:
+                snapshot = await asyncio.wait_for(
+                    read_account_info_snapshot(), timeout=snapshot_timeout
+                )
+            except asyncio.TimeoutError:
+                risk_logger.debug(
+                    "Fallback Redis account snapshot timed out in risk manager"
+                )
+            except Exception as exc:
+                risk_logger.debug(
+                    "Failed to load Redis snapshot for account info fallback",
+                    error=str(exc),
+                )
+            else:
+                if snapshot and isinstance(snapshot.get("data"), dict):
+                    try:
+                        return client._normalise_account_info(snapshot["data"])
+                    except Exception:
+                        return dict(snapshot["data"])
+
+        return dict(getattr(client, "_cached_account_info", {}) or {})
 
     def _load_from_database(self):
         """从数据库加载风险规则和订单记录到内存缓存"""
@@ -910,7 +970,7 @@ class RiskManager:
 
             # 设置fast=False确保获取最新实时价格，而不是使用缓存
             positions = await client.get_positions(fast=False)
-            account_info = await client.get_account_info()
+            account_info = await self._fetch_account_info(ibkr_client=client)
             
             risk_logger.info(f"Found {len(positions)} positions to monitor")
             risk_logger.info(f"Active risk rules: {len([r for r in self.risk_rules.values() if r.enabled])}")
@@ -1747,7 +1807,7 @@ class RiskManager:
             if client is None:
                 risk_logger.debug('IBKR client not ready, skip daily summary')
                 return
-            account_info = await client.get_account_info()
+            account_info = await self._fetch_account_info(ibkr_client=client)
             positions = await client.get_positions(Fast=True)
 
             await self.notification_manager.send_daily_summary_notification(account_info, positions)
@@ -2208,7 +2268,11 @@ class RiskManager:
         account_info = {}
         client = self._get_ibkr_client(ensure_ready=True)
         positions = await client.get_positions(fast=True)
-        account_info = await client.get_account_info()
+        account_info = await self._fetch_account_info(
+            ibkr_client=client,
+            prefer_snapshot=True,
+            allow_stale_snapshot=False,
+        )
         self.update_equity_state(account_info)
         risk_logger.info(f"[PS] After update_equity_state: equity_last={self.equity_last}, account_info={account_info}")
 

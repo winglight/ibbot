@@ -24,6 +24,7 @@ from src.utils.strategy_cache import (
     compute_performance_metrics as cache_compute_performance,
     get_strategy_stats as cache_get_strategy_stats,
 )
+from src.account_snapshot_cache import read_account_info_snapshot
 
 router = APIRouter()
 
@@ -289,16 +290,55 @@ async def websocket_endpoint(websocket: WebSocket):
     # 初次连接后，向该连接单播账户信息快照
     try:
         if connection_manager.is_connected():
+            info: Optional[Dict[str, Any]] = None
             try:
-                info = await asyncio.wait_for(core.ibkr_client.get_account_info(), timeout=8.0)
-                await websocket.send_text(json.dumps({
-                    "type": "account_update",
-                    "account_info": info
-                }))
+                info = await asyncio.wait_for(
+                    core.ibkr_client.get_account_info(
+                        prefer_snapshot=True,
+                        snapshot_timeout=2.0,
+                        ib_timeout=6.0,
+                    ),
+                    timeout=8.0,
+                )
             except asyncio.TimeoutError:
-                logger.warning("Initial account_info snapshot timed out on websocket connect")
+                logger.warning(
+                    "Initial account_info snapshot timed out on websocket connect"
+                )
             except Exception as e:
-                logger.warning(f"Failed to get/send initial account_info snapshot: {e}")
+                logger.warning(f"Failed to get initial account_info snapshot: {e}")
+
+            if not info:
+                try:
+                    snapshot = await asyncio.wait_for(
+                        read_account_info_snapshot(), timeout=2.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug(
+                        "Redis account snapshot unavailable during websocket init"
+                    )
+                    snapshot = None
+                except Exception as exc:
+                    logger.debug(
+                        "Redis account snapshot error during websocket init",
+                        error=str(exc),
+                    )
+                    snapshot = None
+
+                if snapshot and isinstance(snapshot.get("data"), dict):
+                    try:
+                        info = core.ibkr_client._normalise_account_info(snapshot["data"])
+                    except Exception:
+                        info = dict(snapshot["data"])
+
+            if not info:
+                info = dict(getattr(core.ibkr_client, "_cached_account_info", {}) or {})
+
+            await websocket.send_text(
+                json.dumps({
+                    "type": "account_update",
+                    "account_info": info,
+                })
+            )
         else:
             # 未连接时也发送一个占位 account_update，便于前端立即渲染“未连接”状态
             last_err = None

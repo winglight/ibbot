@@ -716,7 +716,11 @@ class OrderManager:
                             write_positions_snapshot,
                         )
 
-                        account_info = await ib_client.get_account_info()
+                        account_info = await ib_client.get_account_info(
+                            prefer_snapshot=False,
+                            force_refresh=True,
+                            ib_timeout=8.0,
+                        )
                         positions = await ib_client.get_positions(fast=True)
                         await write_account_info_snapshot(
                             account_info or {}, "fill_event"

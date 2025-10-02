@@ -201,7 +201,12 @@ async def get_account_info(
             )
         else:
             info = await asyncio.wait_for(
-                ib_client.get_account_info(), timeout=10.0
+                ib_client.get_account_info(
+                    prefer_snapshot=False,
+                    force_refresh=True,
+                    ib_timeout=9.0,
+                ),
+                timeout=10.0,
             )
             await write_account_info_snapshot(info or {}, reason)
     except asyncio.TimeoutError:
@@ -459,7 +464,12 @@ async def get_account_daily_summary(
         if connection_manager.is_connected() and ib_client is not None:
             try:
                 account_info = await asyncio.wait_for(
-                    ib_client.get_account_info(), timeout=5.0
+                    ib_client.get_account_info(
+                        prefer_snapshot=True,
+                        snapshot_timeout=2.0,
+                        ib_timeout=4.0,
+                    ),
+                    timeout=5.0,
                 )
                 resolved = resolve_net(account_info)
                 if resolved is not None:
