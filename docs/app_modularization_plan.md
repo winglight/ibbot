@@ -41,7 +41,7 @@
 | 订单与执行 | `this.orders`, `this.internalStrategyOrders`, `this.executionsPagination`, `this.cancellingOrders` | 追踪订单、执行与分页信息 | `static/js/app.js` L371-L383, L391-L395 |
 | 风险与提醒 | `this.currentRiskSettings`, `this.riskSettingsSaving`, `this.startReminderTimeout`, `this.endReminderTimeout` | 风险规则编辑状态与交易提醒定时器 | `static/js/app.js` L379-L433 |
 | UI 与配置 | `this.isReadOnly`, `this.authRole`, `this.summaryControlsInitialized`, `this.panelLoadingStates` | 控制界面交互、权限、加载指示器 | `static/js/app.js` L426-L458 |
-| 管理器依赖 | `LoginManager`, `IBKRConnectionManager`, `OrderManager`, `NotificationsManager` 等 | 依赖外部模块提供的业务逻辑 | `static/js/app.js` L459-L474 |
+| 管理器依赖 | `LoginManager`, `IBKRConnectionManager`, `OrdersServiceClient`, `NotificationsManager` 等 | 依赖外部模块提供的业务逻辑 | `static/js/app.js` L459-L474 |
 
 这些字段为模块切割提供边界：例如监控相关状态与方法可以与策略、风险模块分离，连接与通知可独立管理。
 
