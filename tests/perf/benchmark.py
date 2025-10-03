@@ -37,7 +37,9 @@ class BenchmarkResult:
     p95_latency: float
     duration: float
     total_events: int
-    write_batches: int
+    persistence_batches: int
+    persistence_duration: float
+    avg_persistence_latency: float
     service_metric_samples: list[MetricSample] = field(default_factory=list)
     thresholds: BenchmarkThresholds = field(default_factory=BenchmarkThresholds)
 
@@ -62,14 +64,17 @@ class _EventSink:
 
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
-        self.write_calls = 0
+        self.persistence_calls = 0
+        self.total_persistence_time = 0.0
 
-    def write_batch(self, batch: Iterable[dict[str, Any]]) -> None:
+    def persist_batch(self, batch: Iterable[dict[str, Any]]) -> None:
         materialised = [dict(entry) for entry in batch]
         if not materialised:
             return
-        self.write_calls += 1
+        start = time.perf_counter()
+        self.persistence_calls += 1
         self.events.extend(materialised)
+        self.total_persistence_time += time.perf_counter() - start
 
 
 def _percentile(latencies: Sequence[float], percentile: float) -> float:
@@ -121,10 +126,10 @@ async def _consume_events(
         processed += 1
         queue.task_done()
         if len(batch) >= batch_size:
-            sink.write_batch(batch)
+            sink.persist_batch(batch)
             batch.clear()
     if batch:
-        sink.write_batch(batch)
+        sink.persist_batch(batch)
 
 
 async def _run_async(
@@ -184,7 +189,27 @@ async def _run_async(
             status=status,
             details={"p95": p95_latency},
         ),
+        MetricSample(
+            service="perf-benchmark",
+            metric="persistence_latency",
+            value=(
+                sink.total_persistence_time / sink.persistence_calls
+                if sink.persistence_calls
+                else 0.0
+            ),
+            status=status,
+            details={
+                "batches": sink.persistence_calls,
+                "total_time": sink.total_persistence_time,
+            },
+        ),
     ]
+
+    persistence_avg = (
+        sink.total_persistence_time / sink.persistence_calls
+        if sink.persistence_calls
+        else 0.0
+    )
 
     return BenchmarkResult(
         throughput=throughput,
@@ -192,7 +217,9 @@ async def _run_async(
         p95_latency=p95_latency,
         duration=duration,
         total_events=len(sink.events),
-        write_batches=sink.write_calls,
+        persistence_batches=sink.persistence_calls,
+        persistence_duration=sink.total_persistence_time,
+        avg_persistence_latency=persistence_avg,
         service_metric_samples=metric_samples,
         thresholds=thresholds,
     )

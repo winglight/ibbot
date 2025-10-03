@@ -45,7 +45,9 @@ def main() -> int:
         "p95_latency": result.p95_latency,
         "duration": result.duration,
         "total_events": result.total_events,
-        "write_batches": result.write_batches,
+        "persistence_batches": result.persistence_batches,
+        "persistence_duration": result.persistence_duration,
+        "avg_persistence_latency": result.avg_persistence_latency,
         "thresholds": {
             "min_throughput": thresholds.min_throughput,
             "max_avg_latency": thresholds.max_avg_latency,
@@ -72,7 +74,11 @@ def main() -> int:
         print(f"  Avg latency: {result.avg_latency * 1000:.3f} ms")
         print(f"  P95 latency: {result.p95_latency * 1000:.3f} ms")
         print(f"  Duration: {result.duration:.3f} s for {result.total_events} events")
-        print(f"  Batch flushes: {result.write_batches}")
+        print(
+            "  Persistence: "
+            f"{result.persistence_batches} batches, total {result.persistence_duration * 1000:.3f} ms, "
+            f"avg {result.avg_persistence_latency * 1000:.3f} ms"
+        )
         print(f"  Status: {'PASS' if result.passed else 'FAIL'}")
 
     return 0 if result.passed else 1
