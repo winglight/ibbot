@@ -38,9 +38,12 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
     ib_client = _require_ib_client()
 
     try:
+        trade = None
+        metrics: Dict[str, Any] | None = None
+
         # 直接调用下单方法，避免嵌套的事件循环调用
         if order.order_type.upper() == "MARKET":
-            trade = await ib_client.place_market_order(
+            trade, metrics = await ib_client.place_market_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 action=order.action,
@@ -50,7 +53,7 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
         elif order.order_type.upper() == "LIMIT":
             if not order.price:
                 raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = await ib_client.place_limit_order(
+            trade, metrics = await ib_client.place_limit_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 price=order.price,
@@ -60,7 +63,17 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
             )
         else:
             raise HTTPException(status_code=400, detail="Invalid order type")
-        
+
+        if metrics:
+            logger.debug(
+                "IBKR bridge timings for API order",
+                order_type=order.order_type.upper(),
+                symbol=order.symbol,
+                action=order.action,
+                queue_wait=f"{metrics['queue_wait']:.6f}",
+                execution_time=f"{metrics['execution_time']:.6f}",
+            )
+
         if trade:
             # 使用 OrderManager 记录订单
             try:
@@ -132,6 +145,15 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
             }
         else:
             raise HTTPException(status_code=400, detail="Failed to place order")
+    except asyncio.TimeoutError:
+        logger.error(
+            "Order placement timed out via IBKR bridge",
+            symbol=order.symbol,
+            quantity=order.quantity,
+            action=order.action,
+            order_type=order.order_type,
+        )
+        raise HTTPException(status_code=504, detail="Order placement timed out")
     except Exception as e:
         logger.error(f"Order placement error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -146,13 +168,10 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
 
     try:
         try:
-            success, message = await asyncio.wait_for(
-                ib_client.cancel_order(order_id),
-                timeout=35.0,
-            )
+            success, message = await ib_client.cancel_order(order_id)
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
-            return {"success": False, "error": "Order cancellation timed out"}
+            raise HTTPException(status_code=504, detail="Order cancellation timed out")
 
         if success:
             # 更新 OrderManager 本地状态
@@ -196,13 +215,10 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
             raise HTTPException(status_code=400, detail="order_id is required")
 
         try:
-            success, message = await asyncio.wait_for(
-                ib_client.cancel_order(int(order_id)),
-                timeout=35.0,
-            )
+            success, message = await ib_client.cancel_order(int(order_id))
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
-            return {"success": False, "error": "Order cancellation timed out"}
+            raise HTTPException(status_code=504, detail="Order cancellation timed out")
         
         if success:
             # 更新 OrderManager 本地状态
@@ -270,14 +286,31 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
         quantity = abs(int(position_qty))
         
         # 执行平仓市价单
-        trade = await ib_client.place_market_order(
+        try:
+            trade, metrics = await ib_client.place_market_order(
+                symbol=symbol,
+                quantity=quantity,
+                action=action,
+                exchange=target_position.get('exchange', 'SMART'),
+                sec_type=target_position.get('secType', 'STK')
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Close position order timed out via IBKR bridge",
+                symbol=symbol,
+                quantity=quantity,
+                action=action,
+            )
+            raise HTTPException(status_code=504, detail="Close position order timed out")
+
+        logger.debug(
+            "IBKR bridge timings for close position order",
             symbol=symbol,
-            quantity=quantity,
             action=action,
-            exchange=target_position.get('exchange', 'SMART'),
-            sec_type=target_position.get('secType', 'STK')
+            queue_wait=f"{metrics['queue_wait']:.6f}",
+            execution_time=f"{metrics['execution_time']:.6f}",
         )
-        
+
         if trade:
             # 记录订单
             try:
@@ -657,14 +690,31 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
             logger.warning(f"反向下单前停用风险规则失败: {e}")
         
         # 执行反向市价单
-        trade = await ib_client.place_market_order(
+        try:
+            trade, metrics = await ib_client.place_market_order(
+                symbol=symbol,
+                quantity=quantity,
+                action=action,
+                exchange=target_position.get('exchange', 'SMART'),
+                sec_type=target_position.get('secType', 'STK')
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Reverse position order timed out via IBKR bridge",
+                symbol=symbol,
+                quantity=quantity,
+                action=action,
+            )
+            raise HTTPException(status_code=504, detail="Reverse position order timed out")
+
+        logger.debug(
+            "IBKR bridge timings for reverse position order",
             symbol=symbol,
-            quantity=quantity,
             action=action,
-            exchange=target_position.get('exchange', 'SMART'),
-            sec_type=target_position.get('secType', 'STK')
+            queue_wait=f"{metrics['queue_wait']:.6f}",
+            execution_time=f"{metrics['execution_time']:.6f}",
         )
-        
+
         if trade:
             # 记录订单
             try:
@@ -723,13 +773,10 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
 
     try:
         try:
-            cancelled_count = await asyncio.wait_for(
-                ib_client.cancel_all_orders(),
-                timeout=40.0,
-            )
+            cancelled_count = await ib_client.cancel_all_orders()
         except asyncio.TimeoutError:
             logger.error("Cancel all orders timed out")
-            raise HTTPException(status_code=408, detail="Cancel all orders timed out")
+            raise HTTPException(status_code=504, detail="Cancel all orders timed out")
 
         await websocket_manager.broadcast({  # 替换 manager
             "type": "all_orders_cancelled",

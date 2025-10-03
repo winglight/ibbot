@@ -1259,12 +1259,20 @@ class RiskManager:
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
-                    trade = await client.place_market_order(
+                    trade, metrics = await client.place_market_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
                         action=action
                     )
-                    
+
+                    risk_logger.debug(
+                        "Bridge timings for take-profit market order",
+                        symbol=symbol,
+                        action=action,
+                        queue_wait=f"{metrics['queue_wait']:.6f}",
+                        execution_time=f"{metrics['execution_time']:.6f}",
+                    )
+
                     if trade:
                         self.pending_orders[symbol]["take_profit"] = True
                         order_placed = True
@@ -1334,6 +1342,14 @@ class RiskManager:
                         await self._persist_risk_rule(db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Take profit rule disabled due to order failure for {symbol}")
+                except asyncio.TimeoutError as timeout_err:
+                    risk_logger.error(
+                        "Take profit market order timed out via IBKR bridge",
+                        symbol=symbol,
+                        quantity=abs(position_qty),
+                        error=str(timeout_err),
+                    )
+                    return
                 except Exception as e:
                     risk_logger.error(f"Failed to place take profit market order for {symbol}: {e}")
                     # 下单异常时禁用规则
@@ -1417,12 +1433,20 @@ class RiskManager:
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
-                    trade = await client.place_market_order(
+                    trade, metrics = await client.place_market_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
                         action=action
                     )
-                    
+
+                    risk_logger.debug(
+                        "Bridge timings for stop-loss market order",
+                        symbol=symbol,
+                        action=action,
+                        queue_wait=f"{metrics['queue_wait']:.6f}",
+                        execution_time=f"{metrics['execution_time']:.6f}",
+                    )
+
                     if trade:
                         self.pending_orders[symbol]["stop_loss"] = True
                         
@@ -1531,6 +1555,14 @@ class RiskManager:
                         await self._persist_risk_rule(db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Stop loss rule disabled due to order failure for {symbol}")
+                except asyncio.TimeoutError as timeout_err:
+                    risk_logger.error(
+                        "Stop loss market order timed out via IBKR bridge",
+                        symbol=symbol,
+                        quantity=abs(position_qty),
+                        error=str(timeout_err),
+                    )
+                    return
                 except Exception as e:
                     risk_logger.error(f"Failed to place stop loss market order for {symbol}: {e}")
                     # 下单异常时禁用规则
@@ -1761,12 +1793,27 @@ class RiskManager:
                 asyncio.set_event_loop(loop)
             
             try:
-                trade = await client.place_market_order(
+                trade, metrics = await client.place_market_order(
                     symbol=order_request.symbol,
                     quantity=order_request.quantity,
                     action=action
                 )
+                risk_logger.debug(
+                    "Bridge timings for queued market order",
+                    symbol=order_request.symbol,
+                    action=action,
+                    queue_wait=f"{metrics['queue_wait']:.6f}",
+                    execution_time=f"{metrics['execution_time']:.6f}",
+                )
                 risk_logger.info(f"下单操作完成，trade结果: {trade is not None}")
+            except asyncio.TimeoutError as timeout_err:
+                risk_logger.error(
+                    "Queued market order placement timed out via IBKR bridge",
+                    symbol=order_request.symbol,
+                    quantity=order_request.quantity,
+                    error=str(timeout_err),
+                )
+                return
             except Exception as executor_error:
                 risk_logger.error(f"Executor执行下单失败 for {order_request.symbol}: {executor_error}")
                 risk_logger.error(f"错误类型: {type(executor_error).__name__}")
