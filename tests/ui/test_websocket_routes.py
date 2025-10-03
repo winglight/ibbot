@@ -91,6 +91,7 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
     class StubOrdersClient:
         def __init__(self) -> None:
             self.default_start_date = "2024-05-10T00:00:00+00:00"
+            self.default_start_date_timezone = "UTC"
 
         async def list_orders(
             self,
@@ -106,8 +107,10 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
             }
             if start_date:
                 payload["start_date"] = start_date
+                payload["start_date_timezone"] = self.default_start_date_timezone
             elif self.default_start_date:
                 payload["start_date"] = self.default_start_date
+                payload["start_date_timezone"] = self.default_start_date_timezone
             return payload
 
     orders_client = StubOrdersClient()
@@ -219,6 +222,7 @@ def _receive_until_type(
 
 def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     app, account_client = websocket_app
+    orders_client = websocket_module._ORDERS_CLIENT
 
     async def fake_stats(_: str) -> dict[str, Any]:
         return {"stale": True}
@@ -244,6 +248,11 @@ def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any]
             assert messages[1]["account_info"]["equity"] == 1000
             assert messages[2]["orders"][0]["order_id"] == "1"
             assert messages[2]["orders"][0]["notes"] == "Review setup"
+            assert messages[2]["meta"]["start_date"] == orders_client.default_start_date
+            assert (
+                messages[2]["meta"].get("start_date_timezone")
+                == orders_client.default_start_date_timezone
+            )
             assert messages[3]["positions"][0]["symbol"] == "ES"
 
             ws.send_json({"type": "request_orders_snapshot", "limit": 5, "force": True})
@@ -252,6 +261,11 @@ def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any]
             assert orders_payload["success"] is True
             assert account_client.orders_calls[-1][:2] == (5, 0)
             assert orders_payload["orders"][0]["notes"] == "Review setup"
+            assert orders_payload["meta"]["start_date"] == orders_client.default_start_date
+            assert (
+                orders_payload["meta"].get("start_date_timezone")
+                == orders_client.default_start_date_timezone
+            )
 
             ws.send_json({"type": "request_risk_rules", "force": True})
             risk_payload = _receive_until_type(ws, "risk_rules")

@@ -310,6 +310,9 @@ async def _fetch_orders(
                 start_meta = meta.get("start_date")
                 if start_meta:
                     metadata["start_date"] = start_meta
+                start_meta_tz = meta.get("start_date_timezone")
+                if start_meta_tz:
+                    metadata["start_date_timezone"] = start_meta_tz
         try:
             if raw_total is not None:
                 total_count = int(raw_total)
@@ -319,6 +322,9 @@ async def _fetch_orders(
         payload_start = payload.get("start_date")
         if payload_start:
             metadata["start_date"] = payload_start
+        payload_start_tz = payload.get("start_date_timezone")
+        if payload_start_tz:
+            metadata["start_date_timezone"] = payload_start_tz
         for key in ("limit", "offset", "page", "returned"):
             value = payload.get(key)
             if value is None:
@@ -688,13 +694,15 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
 
 def _orders_payload(
     orders: List[Any], *, limit: Optional[int] = None, start_date: Optional[str] = None,
-    page: Optional[int] = None, total: Optional[int] = None
+    start_date_timezone: Optional[str] = None, page: Optional[int] = None,
+    total: Optional[int] = None
 ) -> Dict[str, Any]:
     returned = len(orders)
     meta: Dict[str, Any] = {
         "limit": limit,
         "page_size": limit,
         "start_date": start_date,
+        "start_date_timezone": start_date_timezone,
         "generated_at": to_local_iso(now_local()),
         "source": "websocket",
         "returned": returned,
@@ -1081,6 +1089,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 orders,
                 limit=initial_limit,
                 start_date=metadata.get("start_date"),
+                start_date_timezone=metadata.get("start_date_timezone"),
                 page=1,
                 total=total,
             )
@@ -1398,6 +1407,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     raw_trimmed = ""
                 start_date_meta_value = start_date_iso or (raw_trimmed or None)
+                if start_dt is not None and start_dt.tzinfo is not None:
+                    start_date_tz_meta_value = getattr(start_dt.tzinfo, "key", None) or start_dt.tzinfo.tzname(start_dt)
+                else:
+                    start_date_tz_meta_value = None
                 cache_key_date = start_date_meta_value or ""
                 key = f"orders_snapshot:{limit}:{cache_key_date}:{page}"
                 force = bool(message.get("force"))
@@ -1432,6 +1445,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "limit": limit,
                                 "page": page,
                                 "start_date": start_date_meta_value,
+                                "start_date_timezone": start_date_tz_meta_value,
                             },
                         )
                         payload = unavailable_orders
@@ -1443,6 +1457,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "limit": limit,
                                 "page": page,
                                 "start_date": start_date_meta_value,
+                                "start_date_timezone": start_date_tz_meta_value,
                             },
                         )
                     else:
@@ -1454,10 +1469,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         if effective_start_date is None:
                             effective_start_date = start_date_meta_value
+                        effective_start_timezone = (
+                            metadata.get("start_date_timezone")
+                            if isinstance(metadata, Mapping)
+                            else None
+                        )
+                        if effective_start_timezone is None:
+                            effective_start_timezone = start_date_tz_meta_value
                         payload = _orders_payload(
                             orders,
                             limit=limit,
                             start_date=effective_start_date,
+                            start_date_timezone=effective_start_timezone,
                             page=page,
                             total=total,
                         )
@@ -1467,7 +1490,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.warning(f"Failed to stream orders snapshot: {exc}")
                     error_payload = _service_unavailable_payload(
                         "orders_snapshot",
-                        meta={"limit": limit, "page": page, "start_date": start_date_raw},
+                        meta={
+                            "limit": limit,
+                            "page": page,
+                            "start_date": start_date_raw,
+                            "start_date_timezone": start_date_tz_meta_value,
+                        },
                     )
                     error_payload["details"] = str(exc)
                     last_responses[key] = error_payload
