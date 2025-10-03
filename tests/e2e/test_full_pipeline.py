@@ -592,9 +592,12 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
         poll_timeout=0.05,
     )
 
+    async def _risk_repository_factory() -> Any:
+        return snapshot_repo
+
     risk_runtime = RiskRuntime(
         redis_factory=redis_factory,
-        risk_snapshot_repository=snapshot_repo,
+        risk_snapshot_repository_factory=_risk_repository_factory,
         logger_name="tests.risk-service",
         service_name="tests.risk-service",
         poll_interval=0.05,

@@ -13,6 +13,7 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 
 from services.risk import RiskRuntime
+from services.risk.runtime import RiskSnapshotRepositoryFactory
 from services.risk.engine import RiskRule
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
@@ -126,7 +127,7 @@ async def _health_loop(app: FastAPI, interval: float) -> None:
 async def _lifespan(
     app: FastAPI,
     *,
-    runtime_factory: Callable[[Any, Any | None], RiskRuntime],
+    runtime_factory: Callable[[Any, RiskSnapshotRepositoryFactory | None], RiskRuntime],
     initial_config: Mapping[str, Any] | None = None,
     health_interval: float = DEFAULT_HEALTH_INTERVAL,
     redis_factory: Callable[[], Any] | None = None,
@@ -145,23 +146,19 @@ async def _lifespan(
         provider = ConfigProvider(redis_client=redis, hash_prefix="hash:config")
         await provider.start()
 
-    snapshot_repository = None
-    snapshot_session = None
+    snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None
     try:
         from src.ibbot.db import get_session_factory, risk_snapshot_repository
     except ModuleNotFoundError:
         pass
     else:
-        try:
-            session_factory = get_session_factory()
-            snapshot_session = session_factory()
-            snapshot_repository = risk_snapshot_repository(snapshot_session)
-        except Exception:
-            logger.warning("Failed to initialise risk snapshot repository", exc_info=True)
-            snapshot_session = None
-            snapshot_repository = None
+        session_factory = get_session_factory()
 
-    session_cleanup = snapshot_session
+        async def _snapshot_repository_factory() -> Any:
+            session = session_factory()
+            return risk_snapshot_repository(session)
+
+        snapshot_repository_factory = _snapshot_repository_factory
 
     try:
         config_payload = dict(initial_config or {})
@@ -172,9 +169,12 @@ async def _lifespan(
                 logger.warning("Failed to load initial risk config: %s", exc)
                 config_payload = {}
 
-        runtime = runtime_factory(redis, snapshot_repository)
-        if runtime.risk_snapshot_repository is None and snapshot_repository is not None:
-            runtime.risk_snapshot_repository = snapshot_repository
+        runtime = runtime_factory(redis, snapshot_repository_factory)
+        if (
+            runtime.risk_snapshot_repository_factory is None
+            and snapshot_repository_factory is not None
+        ):
+            runtime.risk_snapshot_repository_factory = snapshot_repository_factory
 
         stored_config = await runtime.load_risk_config()
         if not stored_config and config_payload:
@@ -225,9 +225,6 @@ async def _lifespan(
         if runtime is not None:
             with contextlib.suppress(Exception):
                 await runtime.stop()
-        if session_cleanup is not None:
-            with contextlib.suppress(Exception):
-                await session_cleanup.close()
         if provider is not None:
             with contextlib.suppress(Exception):
                 await provider.close()
@@ -248,12 +245,12 @@ def create_app(
         title="Risk Service",
         lifespan=lambda app: _lifespan(
             app,
-            runtime_factory=lambda redis, repository: runtime
+            runtime_factory=lambda redis, repository_factory: runtime
             or RiskRuntime(
                 redis_factory=lambda: redis,
                 logger_name=SERVICE_NAME,
                 service_name=SERVICE_NAME,
-                risk_snapshot_repository=repository,
+                risk_snapshot_repository_factory=repository_factory,
             ),
             initial_config=initial_config,
             health_interval=health_interval,
