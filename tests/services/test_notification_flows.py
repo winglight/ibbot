@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from fastapi.testclient import TestClient
 
@@ -44,6 +45,26 @@ class FlakyChannel(RecordingChannel):
             self._remaining_failures -= 1
             raise RuntimeError(f"channel {self.name} failed")
         await super().__call__(event, message)
+
+
+class DummyRedis:
+    def __init__(self) -> None:
+        self.entries: list[str] = []
+
+    async def lpush(self, _key: str, value: str) -> int:
+        self.entries.insert(0, value)
+        return len(self.entries)
+
+    async def ltrim(self, _key: str, _start: int, _stop: int) -> int:
+        return len(self.entries)
+
+
+class RecordingWriter:
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    async def record_event(self, payload: Mapping[str, Any]) -> None:
+        self.events.append(dict(payload))
 
 
 def test_build_channels_respects_config() -> None:
@@ -117,6 +138,55 @@ def test_notification_service_retry_flow(caplog) -> None:
         and getattr(record, "notification_channel", "") == "email"
     ]
     assert retry_success, "expected retry success log entry"
+
+
+def test_notification_history_writer_payload() -> None:
+    redis = DummyRedis()
+    writer = RecordingWriter()
+
+    async def writer_factory() -> RecordingWriter:
+        return writer
+
+    service = NotificationService(
+        stream_reader=FakeStreamReader([]),
+        channels=[],
+        poll_interval=0,
+        redis_client=redis,
+        history_writer_factory=writer_factory,
+    )
+
+    event = NotificationEvent(
+        stream="stream:alerts",
+        message_id="1-1",
+        payload={
+            "command_id": "cmd-1",
+            "user": "alice",
+            "role": "operator",
+            "category": "alerts",
+        },
+    )
+    message = service._format_event(event)
+
+    run(
+        service._record_history(
+            event=event,
+            channel="telegram",
+            status="success",
+            message=message,
+            retries=0,
+        )
+    )
+
+    assert writer.events, "expected audit writer to capture entry"
+    recorded = writer.events[0]
+    assert recorded["action"] == "notification:telegram"
+    assert recorded["result"] == "success"
+    assert recorded["user"] == "alice"
+    assert recorded["role"] == "operator"
+    assert recorded["path"] == event.stream
+    assert recorded["detail"] == message
+    assert recorded["extra"]["command_id"] == "cmd-1"
+    assert recorded["extra"]["status"] == "success"
 
 
 def test_health_endpoint_uses_service_state() -> None:
