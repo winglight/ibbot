@@ -374,14 +374,17 @@ async def _load_daily_summary_cache() -> Tuple[list[Dict[str, Any]], Optional[Di
     elif net_liq_payload is not None:
         metadata["stale"] = True
         metadata["stale_reason"] = "net-liq-invalid"
+        metadata["from_cache"] = False
 
     if totals is None:
         metadata["stale"] = True
         metadata["stale_reason"] = "daily-summary-unavailable"
+        metadata["from_cache"] = False
 
     if not rows and not net_liq:
         metadata["stale"] = True
         metadata.setdefault("stale_reason", "daily-summary-missing")
+        metadata["from_cache"] = False
 
     return rows, net_liq, metadata
 
@@ -1064,6 +1067,7 @@ async def get_account_orders(
     fast: str | None = Query(None),
     limit: int = Query(DEFAULT_ORDER_LIMIT, ge=1, le=500),
     page: int = Query(1, ge=1),
+    offset: int | None = Query(None, ge=0),
 ) -> Dict[str, Any]:
     refresh = _parse_bool(force_refresh, default=False)
     fast_flag = _parse_bool(fast, default=True)
@@ -1079,7 +1083,16 @@ async def get_account_orders(
             except Exception as exc:
                 logger.warning("Orders force refresh failed: %s", exc)
 
-    offset = (page - 1) * limit
+    if offset is not None:
+        offset_value = offset
+        if limit > 0:
+            computed_page = (offset_value // limit) + 1
+            if computed_page > 0:
+                page = computed_page
+    else:
+        offset_value = (page - 1) * limit
+
+    offset = offset_value
 
     orders_payload, metadata = await _load_orders_snapshot_payload()
     metadata = dict(metadata)
@@ -1186,6 +1199,7 @@ async def get_account_orders(
 
     if orders_snapshot is None:
         fallback_metadata = dict(metadata)
+        fallback_metadata["from_cache"] = False
         fallback_metadata.setdefault("stale", True)
         fallback_metadata.setdefault("from_cache", False)
         fallback_metadata.setdefault("stale_reason", fallback_metadata.get("stale_reason") or "orders-snapshot-missing")
