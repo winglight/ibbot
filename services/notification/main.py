@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import uuid
+import inspect
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -134,16 +135,20 @@ async def _default_service_factory() -> tuple[NotificationService, CleanupCallba
         else DEFAULT_HISTORY_LIMIT
     )
 
-    history_repository_factory: Callable[[], Awaitable[Any]] | None = None
+    history_writer_factory: Callable[[], Awaitable[Any]] | None = None
     try:
-        from src.db import audit_log_writer
+        from src.utils.audit import create_audit_log_writer
     except ModuleNotFoundError:
         pass
     else:
-        def _history_repo_factory() -> Any:
-            return audit_log_writer()
 
-        history_repository_factory = _history_repo_factory
+        async def _history_writer_factory() -> Any:
+            writer = create_audit_log_writer()
+            if inspect.isawaitable(writer):
+                return await writer
+            return writer
+
+        history_writer_factory = _history_writer_factory
 
     service = NotificationService(
         stream_reader=reader,
@@ -158,7 +163,7 @@ async def _default_service_factory() -> tuple[NotificationService, CleanupCallba
         command_batch_size=command_batch_size,
         history_key=history_key,
         history_max_entries=history_max_entries,
-        history_repository_factory=history_repository_factory,
+        history_writer_factory=history_writer_factory,
     )
 
     async def _cleanup() -> None:

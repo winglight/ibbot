@@ -59,7 +59,7 @@ class RetryItem:
     last_error: str | None = None
 
 
-class NotificationHistoryRepositoryProtocol(Protocol):
+class NotificationHistoryWriterProtocol(Protocol):
     async def record_event(self, payload: Mapping[str, Any]) -> None:
         ...
 
@@ -108,11 +108,11 @@ class NotificationService:
         command_batch_size: int = 10,
         history_key: str = "list:notification:history",
         history_max_entries: int = 500,
-        history_repository_factory: (
+        history_writer_factory: (
             Callable[
                 [],
-                Awaitable[NotificationHistoryRepositoryProtocol]
-                | NotificationHistoryRepositoryProtocol,
+                Awaitable[NotificationHistoryWriterProtocol]
+                | NotificationHistoryWriterProtocol,
             ]
             | None
         ) = None,
@@ -133,10 +133,10 @@ class NotificationService:
         self._command_batch_size = max(1, int(command_batch_size))
         self._history_key = history_key
         self._history_max_entries = max(0, int(history_max_entries))
-        self._history_repository_factory = history_repository_factory
-        self._history_repository: NotificationHistoryRepositoryProtocol | None = None
-        self._history_repository_close: Callable[[], Awaitable[None]] | None = None
-        self._history_repository_created = False
+        self._history_writer_factory = history_writer_factory
+        self._history_writer: NotificationHistoryWriterProtocol | None = None
+        self._history_writer_close: Callable[[], Awaitable[None]] | None = None
+        self._history_writer_created = False
 
     # ------------------------------------------------------------------
     # public API
@@ -149,7 +149,7 @@ class NotificationService:
     async def aclose(self) -> None:
         """Release any database resources owned by the service."""
 
-        await self._shutdown_history_repository()
+        await self._shutdown_history_writer()
 
     async def run_forever(self) -> None:
         """Continuously poll Redis streams and process events."""
@@ -164,7 +164,7 @@ class NotificationService:
                 if processed == 0 and self._poll_interval > 0:
                     await asyncio.sleep(self._poll_interval)
         finally:
-            await self._shutdown_history_repository()
+            await self._shutdown_history_writer()
             self._logger.info("Notification service stopped")
 
     async def poll_once(self, *, include_commands: bool = True) -> int:
@@ -531,11 +531,11 @@ class NotificationService:
             extra["notification_error"] = error
         self._logger.log(level, "Notification %s", status, extra=extra)
 
-    def _resolve_repository_close(
-        self, repository: NotificationHistoryRepositoryProtocol
+    def _resolve_history_writer_close(
+        self, writer: NotificationHistoryWriterProtocol
     ) -> Callable[[], Awaitable[None]] | None:
         for attr in ("aclose", "close"):
-            closer = getattr(repository, attr, None)
+            closer = getattr(writer, attr, None)
             if callable(closer):
 
                 async def _close(
@@ -545,46 +545,36 @@ class NotificationService:
 
                 return _close
 
-        session = getattr(repository, "_session", None)
-        close_method = getattr(session, "close", None) if session is not None else None
-        if callable(close_method):
-
-            async def _close_session(
-                close_method: Callable[[], Awaitable[Any] | Any] = close_method,
-            ) -> None:
-                await _maybe_await(close_method())
-
-            return _close_session
         return None
 
-    async def _ensure_history_repository(
+    async def _ensure_history_writer(
         self,
-    ) -> NotificationHistoryRepositoryProtocol | None:
-        repository = self._history_repository
-        if repository is not None:
-            return repository
-        factory = self._history_repository_factory
+    ) -> NotificationHistoryWriterProtocol | None:
+        writer = self._history_writer
+        if writer is not None:
+            return writer
+        factory = self._history_writer_factory
         if factory is None:
             return None
         try:
-            repository = await _maybe_await(factory())
+            writer = await _maybe_await(factory())
         except Exception:
             self._logger.debug(
                 "Failed to initialise notification history repository", exc_info=True
             )
-            self._history_repository_created = False
-            self._history_repository_close = None
-            self._history_repository = None
+            self._history_writer_created = False
+            self._history_writer_close = None
+            self._history_writer = None
             return None
 
-        self._history_repository = repository
-        self._history_repository_created = True
-        self._history_repository_close = self._resolve_repository_close(repository)
-        return repository
+        self._history_writer = writer
+        self._history_writer_created = True
+        self._history_writer_close = self._resolve_history_writer_close(writer)
+        return writer
 
-    async def _shutdown_history_repository(self) -> None:
-        closer = self._history_repository_close
-        self._history_repository_close = None
+    async def _shutdown_history_writer(self) -> None:
+        closer = self._history_writer_close
+        self._history_writer_close = None
         if closer is not None:
             try:
                 await _maybe_await(closer())
@@ -592,9 +582,9 @@ class NotificationService:
                 self._logger.debug(
                     "Failed to close notification history repository", exc_info=True
                 )
-        if self._history_repository_created:
-            self._history_repository = None
-            self._history_repository_created = False
+        if self._history_writer_created:
+            self._history_writer = None
+            self._history_writer_created = False
 
     async def _record_history(
         self,
@@ -639,14 +629,52 @@ class NotificationService:
         except Exception:  # pragma: no cover - storage errors shouldn't crash processing
             self._logger.debug("Failed to record notification history", exc_info=True)
 
-        repository = await self._ensure_history_repository()
-        if repository is not None:
+        writer = await self._ensure_history_writer()
+        if writer is not None:
             try:
-                await repository.record_event(dict(entry))
+                await writer.record_event(
+                    self._build_history_audit_payload(
+                        event=event,
+                        channel=channel,
+                        status=status,
+                        message=message,
+                        entry=entry,
+                    )
+                )
             except Exception:
                 self._logger.debug(
                     "Failed to persist notification history repository entry", exc_info=True
                 )
+
+    def _build_history_audit_payload(
+        self,
+        *,
+        event: NotificationEvent,
+        channel: str,
+        status: str,
+        message: str,
+        entry: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload_data = event.payload if isinstance(event.payload, Mapping) else {}
+        command_id = str(payload_data.get("command_id") or event.message_id or "")
+        user = payload_data.get("user") or payload_data.get("username") or "system"
+        role = payload_data.get("role") or payload_data.get("user_role") or "notification"
+        category = payload_data.get("category") or payload_data.get("event_type") or "dispatch"
+
+        extra_payload = dict(entry)
+        extra_payload.setdefault("command_id", command_id)
+
+        audit_entry: dict[str, Any] = {
+            "action": f"notification:{channel}",
+            "result": status,
+            "user": str(user),
+            "role": str(role),
+            "method": str(category),
+            "path": event.stream,
+            "detail": message,
+            "extra": extra_payload,
+        }
+        return audit_entry
 
     async def _publish_health_metrics(self) -> None:
         if self._redis is None:
