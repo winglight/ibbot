@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 try:  # pragma: no cover - fallback used when ib_insync is unavailable
-    from ib_insync import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
+    from ib_insync import Contract, ExecutionFilter, Future, IB, LimitOrder, MarketOrder, Order, Stock
 except ImportError:  # pragma: no cover - exercised only in minimal environments
-    from test.ib_insync_stub import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
+    from test.ib_insync_stub import Contract, ExecutionFilter, Future, IB, LimitOrder, MarketOrder, Order, Stock
 from loguru import logger
 from zoneinfo import ZoneInfo
 
@@ -756,92 +756,123 @@ class IBKRClient:
         ibkr_logger.info("Gateway restart command completed successfully")
         return True
     
-    def _place_order_in_thread(
+    async def _place_order_via_bridge(
         self,
-        ib,
         symbol: str,
         quantity: int,
         action: str,
         exchange: str,
         sec_type: str,
         order_type: str,
-        price: float = None,
-    ):
-        """在连接管理器的事件循环中执行下单操作，避免事件循环冲突。
-        使用连接管理器的 run_async_in_connection_thread 方法确保正确执行。
+        price: Optional[float] = None,
+    ) -> tuple[Optional[Any], float, float, bool]:
+        """Place an order on the connection loop and capture bridge timings.
+
+        Returns a tuple of ``(trade, queue_wait, execution_time, simulated)``.
+        Raises :class:`asyncio.TimeoutError` when the task times out either while
+        waiting for the bridge queue or while executing on the connection loop.
         """
-        import threading
-        current_thread = threading.current_thread()
-        ibkr_logger.info(f"_place_order_in_thread called for {symbol} in thread: {current_thread.name}")
 
-        try:
-            if is_trading_disabled():
-                trade = self._simulate_trade(
-                    order_type=order_type,
-                    symbol=symbol,
-                    quantity=quantity,
-                    action=action,
-                    exchange=exchange,
-                    sec_type=sec_type,
-                    price=price,
-                )
-                return trade
+        log_context = dict(
+            symbol=symbol,
+            quantity=quantity,
+            action=action,
+            order_type=order_type,
+            exchange=exchange,
+            sec_type=sec_type,
+        )
 
-            # 检查连接状态
-            if not self.connection_manager.is_connected():
-                ibkr_logger.error("IBKR connection is not active")
-                return None
+        if is_trading_disabled():
+            trade = self._simulate_trade(
+                order_type=order_type,
+                symbol=symbol,
+                quantity=quantity,
+                action=action,
+                exchange=exchange,
+                sec_type=sec_type,
+                price=price,
+            )
+            ibkr_logger.info(
+                "Trading disabled; returning simulated trade",
+                **log_context,
+            )
+            return trade, 0.0, 0.0, True
 
-            # 获取IB实例
-            ib_instance = self.connection_manager.get_ib_instance()
-            if not ib_instance:
-                ibkr_logger.error("No active IB instance for placing order")
-                return None
+        if not self.connection_manager.is_connected():
+            raise RuntimeError("IBKR connection is not active")
 
-            # 构建异步下单流程
-            async def execute_order_async():
-                try:
-                    # 根据证券类型获取正确的合约
-                    if sec_type == 'FUT' or symbol.upper() in INDEX_FUTURE_SYMBOLS:
-                        contract = self.get_future_contract(symbol, exchange)
-                    else:
-                        contract = self.get_stock_contract(symbol, exchange)
+        ib_instance = self.connection_manager.get_ib_instance()
+        if not ib_instance:
+            raise RuntimeError("No active IB instance for placing order")
 
-                    # 使用异步方式确认合约，避免在运行中事件循环上使用同步阻塞方法
-                    qualified_contracts = await ib_instance.qualifyContractsAsync(contract)
-                    if not qualified_contracts:
-                        ibkr_logger.error(f"Failed to qualify contract for {symbol}")
-                        return None
+        async def execute_order_async():
+            if sec_type == "FUT" or symbol.upper() in INDEX_FUTURE_SYMBOLS:
+                contract = self.get_future_contract(symbol, exchange)
+            else:
+                contract = self.get_stock_contract(symbol, exchange)
 
-                    qualified_contract = qualified_contracts[0]
+            qualified_contracts = await ib_instance.qualifyContractsAsync(contract)
+            if not qualified_contracts:
+                raise RuntimeError(f"Failed to qualify contract for {symbol}")
 
-                    # 创建订单
-                    if order_type == 'MARKET':
-                        order = MarketOrder(action, quantity)
-                    else:  # LIMIT
-                        order = LimitOrder(action, quantity, price)
+            qualified_contract = qualified_contracts[0]
 
-                    # 提交订单（placeOrder 为同步非阻塞方法，安全在事件循环线程调用）
-                    trade = ib_instance.placeOrder(qualified_contract, order)
-                    ibkr_logger.info(
-                        f"{order_type} order placed: {action} {quantity} {symbol} ({sec_type}) on {qualified_contract.exchange}, "
-                        f"conId={getattr(qualified_contract, 'conId', 'N/A')}"
-                    )
-                    return trade
-                except Exception as e:
-                    ibkr_logger.error(f"Failed to place order in async execution: {e}")
-                    return None
+            if order_type == "MARKET":
+                order = MarketOrder(action, quantity)
+            else:
+                order = LimitOrder(action, quantity, price)
 
-            # 使用连接管理器的方法在正确的事件循环中执行
-            try:
-                return self.connection_manager.run_async_in_connection_thread(execute_order_async(), timeout=45)
-            except Exception as e:
-                ibkr_logger.error(f"Failed to place {order_type.lower()} order via connection manager: {e}")
-                return None
+            trade_local = ib_instance.placeOrder(qualified_contract, order)
+            ibkr_logger.info(
+                "Order dispatched to IBKR",
+                conId=getattr(qualified_contract, "conId", "N/A"),
+                exchange=qualified_contract.exchange,
+                **log_context,
+            )
+            return trade_local
 
-        except Exception as e:
-            ibkr_logger.error(f"Failed to place {order_type.lower()} order in thread: {e}")
-            return None
+        bridge_result = await self.connection_manager.schedule_async(
+            execute_order_async(),
+            queue_timeout=10.0,
+            execution_timeout=45.0,
+            warn_queue_threshold=2.0,
+            warn_execution_threshold=30.0,
+        )
+
+        queue_wait = bridge_result.queue_wait
+        execution_time = bridge_result.execution_time
+
+        if bridge_result.timed_out:
+            message = (
+                f"Order placement timed out (queue_wait={queue_wait:.6f}s, "
+                f"execution_time={execution_time:.6f}s)"
+            )
+            ibkr_logger.error(
+                message,
+                **log_context,
+            )
+            raise asyncio.TimeoutError(message)
+
+        if bridge_result.error:
+            ibkr_logger.error(
+                "Order placement via bridge failed",
+                error=str(bridge_result.error),
+                queue_wait=f"{queue_wait:.6f}",
+                execution_time=f"{execution_time:.6f}",
+                **log_context,
+            )
+            raise bridge_result.error
+
+        trade = bridge_result.result
+        if trade is None:
+            ibkr_logger.warning(
+                "Order placement via bridge returned no trade",
+                queue_wait=f"{queue_wait:.6f}",
+                execution_time=f"{execution_time:.6f}",
+                **log_context,
+            )
+
+        return trade, queue_wait, execution_time, False
 
     def _simulate_trade(
         self,
@@ -1455,100 +1486,177 @@ class IBKRClient:
             if loop.is_running():
                 loop.create_task(_cleanup())
 
-    async def place_market_order(self, symbol: str, quantity: int,
-                           action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:
+    async def place_market_order(
+        self,
+        symbol: str,
+        quantity: int,
+        action: str = "BUY",
+        exchange: str = "SMART",
+        sec_type: str = "STK",
+    ) -> Optional[Order]:
         """下市价单"""
-        # 下单前备份订单信息
-        # self._backup_order(symbol, quantity, action, 'MARKET', sec_type=sec_type, exchange=exchange)
-        
+
         try:
-            trade = self._place_order_in_thread(
-                None,  # will use self.ib
-                symbol, quantity, action, exchange, sec_type, 'MARKET'
+            trade, queue_wait, execution_time, simulated = await self._place_order_via_bridge(
+                symbol,
+                quantity,
+                action,
+                exchange,
+                sec_type,
+                "MARKET",
             )
-            
+
+            ibkr_logger.info(
+                "Market order bridge timings",
+                symbol=symbol,
+                action=action,
+                quantity=quantity,
+                exchange=exchange,
+                sec_type=sec_type,
+                queue_wait=f"{queue_wait:.6f}",
+                execution_time=f"{execution_time:.6f}",
+                simulated=simulated,
+            )
+
             if trade:
-                # 记录reqId到订单ID的映射，用于错误处理
                 req_id = trade.order.orderId
                 order_id = str(req_id)
                 self.req_id_to_order_id[req_id] = order_id
                 ibkr_logger.debug(f"Mapped reqId {req_id} to order_id {order_id}")
-                
-                # 更新订单状态
-                self._update_order_status(symbol, action, quantity, 'Submitted')
-            
+                self._update_order_status(symbol, action, quantity, "Submitted")
+
             return trade
+        except asyncio.TimeoutError:
+            raise
         except Exception as e:
             ibkr_logger.error(f"Failed to place market order: {e}")
             return None
 
-    def place_limit_order(self, symbol: str, quantity: int, price: float,
-                              action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:
+    async def place_limit_order(
+        self,
+        symbol: str,
+        quantity: int,
+        price: float,
+        action: str = "BUY",
+        exchange: str = "SMART",
+        sec_type: str = "STK",
+    ) -> Optional[Order]:
         """下限价单"""
-        # 下单前备份订单信息
-        # self._backup_order(symbol, quantity, action, 'LIMIT', price, sec_type=sec_type, exchange=exchange)
-        
+
         try:
-            trade = self._place_order_in_thread(
-                None,  # will use self.ib
-                symbol, quantity, action, exchange, sec_type, 'LIMIT', price
+            trade, queue_wait, execution_time, simulated = await self._place_order_via_bridge(
+                symbol,
+                quantity,
+                action,
+                exchange,
+                sec_type,
+                "LIMIT",
+                price,
             )
-            
+
+            ibkr_logger.info(
+                "Limit order bridge timings",
+                symbol=symbol,
+                action=action,
+                quantity=quantity,
+                exchange=exchange,
+                sec_type=sec_type,
+                price=price,
+                queue_wait=f"{queue_wait:.6f}",
+                execution_time=f"{execution_time:.6f}",
+                simulated=simulated,
+            )
+
             if trade:
-                # 记录reqId到订单ID的映射，用于错误处理
                 req_id = trade.order.orderId
                 order_id = str(req_id)
                 self.req_id_to_order_id[req_id] = order_id
                 ibkr_logger.debug(f"Mapped reqId {req_id} to order_id {order_id}")
-                
-                # 更新订单状态
-                self._update_order_status(symbol, action, quantity, 'Submitted')
-            
+                self._update_order_status(symbol, action, quantity, "Submitted")
+
             return trade
+        except asyncio.TimeoutError:
+            raise
         except Exception as e:
             ibkr_logger.error(f"Failed to place limit order: {e}")
             return None
 
-    def refresh_orders(self) -> bool:
+    async def refresh_orders(self) -> bool:
         """刷新IBKR订单数据，使用异步API避免事件循环冲突"""
+
         ib = self.ib
         if not ib or not ib.isConnected():
             ibkr_logger.error("IBKR connection lost for order refresh")
             return False
 
-        try:
-            async def _refresh():
-                try:
-                    await ib.reqOpenOrdersAsync()
-                    await ib.reqAllOpenOrdersAsync()
-                    await asyncio.sleep(0.2)
-                    ibkr_logger.debug("Requested order refresh from IBKR (async)")
-                    return True
-                except Exception as e:
-                    ibkr_logger.warning(f"Failed to refresh orders: {e}")
-                    return False
+        async def _refresh() -> bool:
+            await ib.reqOpenOrdersAsync()
+            await ib.reqAllOpenOrdersAsync()
+            await asyncio.sleep(0.2)
+            ibkr_logger.debug("Requested order refresh from IBKR (async)")
+            return True
 
-            result = self.connection_manager.run_async_in_connection_thread(_refresh(), timeout=1.5)
-            if result is not None:
-                return bool(result)
-            else:
-                # 如果异步方法失败，回退到同步方法
-                ibkr_logger.warning("Async order refresh failed, falling back to sync method")
-                try:
-                    ib.reqOpenOrders()
-                    ib.reqAllOpenOrders()
-                    import time
-                    time.sleep(0.2)
-                    ibkr_logger.debug("Requested order refresh from IBKR (sync fallback)")
-                    return True
-                except Exception as e:
-                    ibkr_logger.error(f"Sync order refresh also failed: {e}")
-                    return False
+        bridge_result = await self.connection_manager.schedule_async(
+            _refresh(),
+            queue_timeout=1.0,
+            execution_timeout=1.5,
+            warn_queue_threshold=0.5,
+            warn_execution_threshold=1.0,
+        )
+
+        queue_wait = bridge_result.queue_wait
+        execution_time = bridge_result.execution_time
+
+        if bridge_result.timed_out:
+            message = (
+                f"Order refresh timed out (queue_wait={queue_wait:.6f}s, "
+                f"execution_time={execution_time:.6f}s)"
+            )
+            ibkr_logger.error(message)
+            raise asyncio.TimeoutError(message)
+
+        if bridge_result.error:
+            ibkr_logger.warning(
+                "Async order refresh failed, attempting sync fallback",
+                error=str(bridge_result.error),
+                queue_wait=f"{queue_wait:.6f}",
+                execution_time=f"{execution_time:.6f}",
+            )
+            return await asyncio.to_thread(self._refresh_orders_sync_fallback)
+
+        ibkr_logger.debug(
+            "Order refresh timings",
+            queue_wait=f"{queue_wait:.6f}",
+            execution_time=f"{execution_time:.6f}",
+        )
+
+        success = bool(bridge_result.result)
+        if not success:
+            ibkr_logger.warning(
+                "Async order refresh returned False, attempting sync fallback",
+                queue_wait=f"{queue_wait:.6f}",
+                execution_time=f"{execution_time:.6f}",
+            )
+            return await asyncio.to_thread(self._refresh_orders_sync_fallback)
+
+        return success
+
+    def _refresh_orders_sync_fallback(self) -> bool:
+        try:
+            ib = self.ib
+            if not ib or not ib.isConnected():
+                ibkr_logger.error("IBKR connection lost for order refresh (fallback)")
+                return False
+            ib.reqOpenOrders()
+            ib.reqAllOpenOrders()
+            time.sleep(0.2)
+            ibkr_logger.debug("Requested order refresh from IBKR (sync fallback)")
+            return True
         except Exception as e:
-            ibkr_logger.error(f"Order refresh failed: {e}")
+            ibkr_logger.error(f"Sync order refresh also failed: {e}")
             return False
 
-    def cancel_order(self, order_id: Any) -> tuple[bool, str]:
+    async def cancel_order(self, order_id: Any) -> tuple[bool, str]:
         """取消指定订单"""
         # 规范化 order_id，内部与 IBKR 比较使用 int，外部广播/日志统一使用字符串
         order_id_str = str(order_id)
@@ -1565,19 +1673,17 @@ class IBKRClient:
             ibkr_logger.error(f"Invalid order_id for cancellation: {order_id}")
             return False, "Invalid order_id"
         try:
-            # 确保连接
             if not self.is_connected():
                 ibkr_logger.error(f"Cannot cancel order {order_id}: IBKR is not connected")
                 return False, "Not connected"
 
-            # 刷新订单数据，使用异步API避免事件循环冲突
             try:
-                self.refresh_orders()
+                await self.refresh_orders()
+            except asyncio.TimeoutError:
+                raise
             except Exception as refresh_error:
                 ibkr_logger.warning(f"Failed to refresh orders before cancel: {refresh_error}")
-                # 继续执行取消操作，不因刷新失败而中断
 
-            # 在连接线程事件循环中执行取消逻辑，避免跨线程事件循环错误
             async def _cancel_op():
                 try:
                     ib_local = self.ib
@@ -1588,50 +1694,48 @@ class IBKRClient:
                     trades = ib_local.trades()
                     target_trade = None
                     for trade in trades:
-                        if trade.order.orderId == order_id:
+                        if trade.order.orderId == order_id_int:
                             target_trade = trade
                             break
 
                     if not target_trade:
-                        # 快速重查一次，避免因列表延迟导致误判
                         try:
                             await ib_local.reqOpenOrdersAsync()
                             await ib_local.reqAllOpenOrdersAsync()
                             await asyncio.sleep(0.2)
                             trades = ib_local.trades()
                             for trade in trades:
-                                if trade.order.orderId == order_id:
+                                if trade.order.orderId == order_id_int:
                                     target_trade = trade
                                     break
                         except Exception as requery_err:
                             ibkr_logger.debug(f"Quick requery before cancel failed: {requery_err}")
 
                     if not target_trade:
-                        ibkr_logger.info(f"Order {order_id} not found in active trades")
-                        return False, f"Order {order_id} not found or already completed"
+                        ibkr_logger.info(f"Order {order_id_str} not found in active trades")
+                        return False, f"Order {order_id_str} not found or already completed"
 
                     current_status = target_trade.orderStatus.status
-                    ibkr_logger.info(f"Order {order_id} current status: {current_status}")
+                    ibkr_logger.info(f"Order {order_id_str} current status: {current_status}")
 
-                    # 检查订单状态是否可以取消
-                    if current_status in ['Filled', 'Cancelled', 'Inactive']:
-                        ibkr_logger.warning(f"Order {order_id} cannot be cancelled, status: {current_status}")
+                    if current_status in ["Filled", "Cancelled", "Inactive"]:
+                        ibkr_logger.warning(f"Order {order_id_str} cannot be cancelled, status: {current_status}")
                         return False, f"Order cannot be cancelled, current status: {current_status}"
 
-                    # 如果已经是PendingCancel状态，短暂确认后直接返回；否则发送取消请求
-                    if current_status == 'PendingCancel':
+                    if current_status == "PendingCancel":
                         await asyncio.sleep(0.5)
-                        ibkr_logger.info(f"Order {order_id} already in PendingCancel, acknowledging cancellation initiation")
+                        ibkr_logger.info(
+                            f"Order {order_id_str} already in PendingCancel, acknowledging cancellation initiation"
+                        )
                         return True, "Order cancellation initiated (PendingCancel)"
-                    else:
-                        ibkr_logger.info(f"Sending cancel request for order {order_id}")
-                        try:
-                            ib_local.cancelOrder(target_trade.order)
-                        except Exception as send_err:
-                            ibkr_logger.error(f"Error sending cancel request for order {order_id}: {send_err}")
-                            return False, f"Error sending cancel request: {send_err}"
 
-                    # 等待取消确认，使用更短超时与轮询间隔，并对 PendingCancel 早返回
+                    ibkr_logger.info(f"Sending cancel request for order {order_id_str}")
+                    try:
+                        ib_local.cancelOrder(target_trade.order)
+                    except Exception as send_err:
+                        ibkr_logger.error(f"Error sending cancel request for order {order_id_str}: {send_err}")
+                        return False, f"Error sending cancel request: {send_err}"
+
                     max_wait_time = 10.0
                     check_interval = 0.25
                     start_time = asyncio.get_event_loop().time()
@@ -1646,210 +1750,405 @@ class IBKRClient:
                         updated_trades = ib_local.trades()
                         found = False
                         for updated_trade in updated_trades:
-                            if updated_trade.order.orderId == order_id:
+                            if updated_trade.order.orderId == order_id_int:
                                 found = True
                                 new_status = updated_trade.orderStatus.status
-                                if new_status in ['Cancelled', 'Inactive']:
-                                    ibkr_logger.info(f"Order {order_id} successfully cancelled, final status: {new_status}")
+                                if new_status in ["Cancelled", "Inactive"]:
+                                    ibkr_logger.info(
+                                        f"Order {order_id_str} successfully cancelled, final status: {new_status}"
+                                    )
                                     return True, f"Order cancelled successfully, status: {new_status}"
-                                elif new_status == 'PendingCancel':
+                                elif new_status == "PendingCancel":
                                     if pending_first_seen_elapsed is None:
                                         pending_first_seen_elapsed = elapsed
-                                        ibkr_logger.info(f"Order {order_id} pending cancellation...")
+                                        ibkr_logger.info(f"Order {order_id_str} pending cancellation...")
                                     elif elapsed - pending_first_seen_elapsed >= 1.0:
-                                        ibkr_logger.info(f"Order {order_id} cancellation acknowledged (PendingCancel)")
+                                        ibkr_logger.info(
+                                            f"Order {order_id_str} cancellation acknowledged (PendingCancel)"
+                                        )
                                         return True, "Order cancellation initiated (PendingCancel)"
                                 else:
                                     if new_status != current_status:
-                                        ibkr_logger.info(f"Order {order_id} status changed from {current_status} to {new_status}")
+                                        ibkr_logger.info(
+                                            f"Order {order_id_str} status changed from {current_status} to {new_status}"
+                                        )
                                         current_status = new_status
                                 break
                         if not found:
-                            # 订单不在trades中了，在Paper Trading中通常意味着已取消
-                            ibkr_logger.debug(f"Order {order_id} not found in current trades, rechecking...")
+                            ibkr_logger.debug(f"Order {order_id_str} not found in current trades, rechecking...")
 
-                    # 超时后最终检查
                     final_trades = ib_local.trades()
                     for final_trade in final_trades:
-                        if final_trade.order.orderId == order_id:
+                        if final_trade.order.orderId == order_id_int:
                             final_status = final_trade.orderStatus.status
-                            if final_status in ['Cancelled', 'Inactive']:
-                                ibkr_logger.info(f"Order {order_id} finally cancelled, status: {final_status}")
+                            if final_status in ["Cancelled", "Inactive"]:
+                                ibkr_logger.info(
+                                    f"Order {order_id_str} finally cancelled, status: {final_status}"
+                                )
                                 return True, f"Order cancelled successfully, status: {final_status}"
-                            elif final_status == 'PendingCancel':
-                                ibkr_logger.warning(f"Order {order_id} still in PendingCancel after {max_wait_time}s - may be normal in Paper Trading")
-                                return True, f"Order cancellation initiated (Paper Trading may take longer)"
+                            elif final_status == "PendingCancel":
+                                ibkr_logger.warning(
+                                    f"Order {order_id_str} still in PendingCancel after {max_wait_time}s - may be normal in Paper Trading"
+                                )
+                                return True, "Order cancellation initiated (Paper Trading may take longer)"
                             else:
-                                ibkr_logger.warning(f"Order {order_id} cancellation timeout, final status: {final_status}")
+                                ibkr_logger.warning(
+                                    f"Order {order_id_str} cancellation timeout, final status: {final_status}"
+                                )
                                 return False, f"Cancellation timeout, order status: {final_status}"
 
-                    # 订单不在列表中，在Paper Trading中这通常意味着已取消
-                    ibkr_logger.info(f"Order {order_id} no longer in trades list after timeout - likely cancelled in Paper Trading")
+                    ibkr_logger.info(
+                        f"Order {order_id_str} no longer in trades list after timeout - likely cancelled in Paper Trading"
+                    )
                     return True, "Order likely cancelled (no longer in active trades)"
                 except Exception as inner_e:
-                    ibkr_logger.error(f"Error during cancellation operation for order {order_id}: {inner_e}")
+                    ibkr_logger.error(f"Error during cancellation operation for order {order_id_str}: {inner_e}")
                     return False, f"Error during cancellation: {inner_e}"
 
-            result = self.connection_manager.run_async_in_connection_thread(_cancel_op(), timeout=16)
-            if result is not None:
-                return result
-            else:
-                ibkr_logger.warning("Failed to execute cancel operation in connection thread")
-                return False, "Failed to dispatch cancel operation"
+            bridge_result = await self.connection_manager.schedule_async(
+                _cancel_op(),
+                queue_timeout=2.0,
+                execution_timeout=16.0,
+                warn_queue_threshold=1.0,
+                warn_execution_threshold=12.0,
+            )
 
+            queue_wait = bridge_result.queue_wait
+            execution_time = bridge_result.execution_time
+
+            if bridge_result.timed_out:
+                message = (
+                    f"Cancel order timed out (queue_wait={queue_wait:.6f}s, execution_time={execution_time:.6f}s)"
+                )
+                ibkr_logger.error(message, order_id=order_id_str)
+                raise asyncio.TimeoutError(message)
+
+            if bridge_result.error:
+                ibkr_logger.error(
+                    "Cancel order via bridge failed",
+                    order_id=order_id_str,
+                    error=str(bridge_result.error),
+                    queue_wait=f"{queue_wait:.6f}",
+                    execution_time=f"{execution_time:.6f}",
+                )
+                raise bridge_result.error
+
+            if bridge_result.result is None:
+                ibkr_logger.warning(
+                    "Cancel order via bridge returned no result",
+                    order_id=order_id_str,
+                    queue_wait=f"{queue_wait:.6f}",
+                    execution_time=f"{execution_time:.6f}",
+                )
+                return False, "Cancellation failed"
+
+            ibkr_logger.info(
+                "Cancel order bridge timings",
+                order_id=order_id_str,
+                queue_wait=f"{queue_wait:.6f}",
+                execution_time=f"{execution_time:.6f}",
+            )
+
+            return bridge_result.result
+
+        except asyncio.TimeoutError:
+            raise
         except Exception as e:
             ibkr_logger.error(f"Failed to cancel order {order_id}: {e}")
             return False, f"Error: {str(e)}"
     
-    def cancel_all_orders(self) -> int:
+    async def cancel_all_orders(self) -> int:
         """取消所有订单"""
-        def _cancel_orders_operation():
-            """在连接线程中执行取消订单操作，避免事件循环警告"""
+
+        async def _cancel_orders_operation_async() -> int:
             try:
-                # 获取IB实例
                 ib = self.ib
                 if not ib or not ib.isConnected():
-                    ibkr_logger.error(f"IBKR connection lost for cancel all orders")
+                    ibkr_logger.error("IBKR connection lost for cancel all orders")
                     return 0
 
-                # 优先使用openTrades()获取活跃订单，降级到trades()
                 trades = ib.openTrades() or ib.trades()
                 cancellable_orders = []
-                
-                # 过滤出可取消的订单，包括更多状态以确保捕获所有活跃订单
                 cancellable_statuses = [
-                    'Submitted', 'PreSubmitted', 'PendingSubmit', 'PendingCancel',
-                    'ApiPending', 'ApiCancelled'
+                    "Submitted",
+                    "PreSubmitted",
+                    "PendingSubmit",
+                    "PendingCancel",
+                    "ApiPending",
+                    "ApiCancelled",
                 ]
-                
-                # 取消所有当前可取消的订单（不再按 clientId 过滤）
+
                 for trade in trades:
                     order_status = trade.orderStatus.status
                     order_id = trade.order.orderId
-                    
-                    # 记录所有活跃订单的状态以便调试
                     ibkr_logger.debug(f"Order {order_id} status: {order_status}")
-                    
-                    # 检查订单是否可取消
+
                     if order_status in cancellable_statuses:
                         cancellable_orders.append(trade)
-                        ibkr_logger.info(f"Order {order_id} marked for cancellation (status: {order_status})")
-                    elif order_status not in ['Filled', 'Cancelled', 'Inactive']:
-                        # 处理未知状态，保守地尝试取消
-                        ibkr_logger.warning(f"Order {order_id} has unknown status '{order_status}', attempting to cancel")
+                        ibkr_logger.info(
+                            f"Order {order_id} marked for cancellation (status: {order_status})"
+                        )
+                    elif order_status not in ["Filled", "Cancelled", "Inactive"]:
+                        ibkr_logger.warning(
+                            f"Order {order_id} has unknown status '{order_status}', attempting to cancel"
+                        )
                         cancellable_orders.append(trade)
-                
+
                 if not cancellable_orders:
                     ibkr_logger.info("No cancellable orders found")
                     return 0
-                
+
                 ibkr_logger.info(f"Found {len(cancellable_orders)} orders to cancel")
-                
-                # 发送取消请求
+
                 for trade in cancellable_orders:
                     try:
                         order_id = trade.order.orderId
                         ib.cancelOrder(trade.order)
                         ibkr_logger.info(f"Sent cancel request for order {order_id}")
                     except Exception as e:
-                        ibkr_logger.error(f"Failed to send cancel request for order {trade.order.orderId}: {e}")
-                
-                # 等待取消确认
-                max_wait_time = 20
-                start_time = time.time()
+                        ibkr_logger.error(
+                            f"Failed to send cancel request for order {trade.order.orderId}: {e}"
+                        )
+
+                max_wait_time = 20.0
+                start_time = time.perf_counter()
                 check_interval = 0.5
                 cancelled_count = 0
-                
-                while time.time() - start_time < max_wait_time:
-                    time.sleep(check_interval)
-                    
-                    # 重新获取订单状态
+
+                while time.perf_counter() - start_time < max_wait_time:
+                    await asyncio.sleep(check_interval)
+
                     updated_trades = ib.trades()
                     current_cancelled = 0
-                    
+
                     for original_trade in cancellable_orders:
                         order_id = original_trade.order.orderId
                         found = False
-                        
+
                         for updated_trade in updated_trades:
                             if updated_trade.order.orderId == order_id:
                                 found = True
                                 status = updated_trade.orderStatus.status
-                                if status in ['Cancelled', 'Inactive']:
+                                if status in ["Cancelled", "Inactive"]:
                                     current_cancelled += 1
                                 break
-                        
-                        # 订单不在列表中，在Paper Trading中通常意味着已取消
+
                         if not found:
                             current_cancelled += 1
-                    
-                    # 如果所有订单都已取消，提前退出
+
                     if current_cancelled >= len(cancellable_orders):
                         cancelled_count = current_cancelled
                         break
-                    
-                    # 更新已取消数量
+
                     if current_cancelled > cancelled_count:
                         cancelled_count = current_cancelled
-                        ibkr_logger.info(f"Progress: {cancelled_count}/{len(cancellable_orders)} orders cancelled")
-                
-                # 最终检查
+                        ibkr_logger.info(
+                            f"Progress: {cancelled_count}/{len(cancellable_orders)} orders cancelled"
+                        )
+
                 if cancelled_count < len(cancellable_orders):
                     final_trades = ib.trades()
                     final_cancelled = 0
-                    
+
                     for original_trade in cancellable_orders:
                         order_id = original_trade.order.orderId
                         found = False
-                        
+
                         for final_trade in final_trades:
                             if final_trade.order.orderId == order_id:
                                 found = True
                                 status = final_trade.orderStatus.status
-                                if status in ['Cancelled', 'Inactive', 'PendingCancel']:
+                                if status in ["Cancelled", "Inactive", "PendingCancel"]:
                                     final_cancelled += 1
                                 break
-                        
+
                         if not found:
                             final_cancelled += 1
-                    
+
                     cancelled_count = final_cancelled
-                
-                ibkr_logger.info(f"Successfully cancelled {cancelled_count}/{len(cancellable_orders)} orders")
+
+                ibkr_logger.info(
+                    f"Successfully cancelled {cancelled_count}/{len(cancellable_orders)} orders"
+                )
                 return cancelled_count
-                
             except Exception as e:
                 ibkr_logger.error(f"Error in cancel orders operation: {e}")
                 return 0
-        
+
         try:
-            # 确保连接
             if not self.is_connected():
                 ibkr_logger.error("Cannot cancel orders: IBKR is not connected")
                 return 0
 
-            # 刷新订单，使用异步API避免事件循环冲突
             try:
-                self.refresh_orders()
+                await self.refresh_orders()
+            except asyncio.TimeoutError:
+                raise
             except Exception as refresh_error:
-                ibkr_logger.warning(f"Failed to refresh orders before cancel all: {refresh_error}")
-                # 继续执行取消操作，不因刷新失败而中断
+                ibkr_logger.warning(
+                    f"Failed to refresh orders before cancel all: {refresh_error}"
+                )
 
-            # 尝试使用连接管理器在正确的线程中执行操作
-            result = self.connection_manager.run_in_connection_thread(
-                _cancel_orders_operation,
-                timeout=15.0,
+            bridge_result = await self.connection_manager.schedule_async(
+                _cancel_orders_operation_async(),
+                queue_timeout=2.0,
+                execution_timeout=30.0,
+                warn_queue_threshold=1.0,
+                warn_execution_threshold=25.0,
             )
-            
-            if result is not None:
-                return result
-            else:
-                # 回退到直接执行
-                ibkr_logger.warning("Failed to use connection thread, falling back to direct execution")
-                return _cancel_orders_operation()
-                
+
+            queue_wait = bridge_result.queue_wait
+            execution_time = bridge_result.execution_time
+
+            if bridge_result.timed_out:
+                message = (
+                    f"Cancel all orders timed out (queue_wait={queue_wait:.6f}s, execution_time={execution_time:.6f}s)"
+                )
+                ibkr_logger.error(message)
+                raise asyncio.TimeoutError(message)
+
+            if bridge_result.error:
+                ibkr_logger.error(
+                    "Cancel all orders via bridge failed",
+                    error=str(bridge_result.error),
+                    queue_wait=f"{queue_wait:.6f}",
+                    execution_time=f"{execution_time:.6f}",
+                )
+                return await asyncio.to_thread(self._cancel_orders_operation_sync)
+
+            if bridge_result.result is None:
+                ibkr_logger.warning(
+                    "Cancel all orders via bridge returned no result",
+                    queue_wait=f"{queue_wait:.6f}",
+                    execution_time=f"{execution_time:.6f}",
+                )
+                return await asyncio.to_thread(self._cancel_orders_operation_sync)
+
+            ibkr_logger.info(
+                "Cancel all orders bridge timings",
+                queue_wait=f"{queue_wait:.6f}",
+                execution_time=f"{execution_time:.6f}",
+            )
+            return int(bridge_result.result)
+
+        except asyncio.TimeoutError:
+            raise
         except Exception as e:
             ibkr_logger.error(f"Failed to cancel all orders: {e}")
+            return 0
+
+    def _cancel_orders_operation_sync(self) -> int:
+        try:
+            ib = self.ib
+            if not ib or not ib.isConnected():
+                ibkr_logger.error("IBKR connection lost for cancel all orders (sync fallback)")
+                return 0
+
+            trades = ib.openTrades() or ib.trades()
+            cancellable_orders = []
+            cancellable_statuses = [
+                "Submitted",
+                "PreSubmitted",
+                "PendingSubmit",
+                "PendingCancel",
+                "ApiPending",
+                "ApiCancelled",
+            ]
+
+            for trade in trades:
+                order_status = trade.orderStatus.status
+                order_id = trade.order.orderId
+                ibkr_logger.debug(f"Order {order_id} status: {order_status}")
+                if order_status in cancellable_statuses:
+                    cancellable_orders.append(trade)
+                    ibkr_logger.info(
+                        f"Order {order_id} marked for cancellation (status: {order_status})"
+                    )
+                elif order_status not in ["Filled", "Cancelled", "Inactive"]:
+                    ibkr_logger.warning(
+                        f"Order {order_id} has unknown status '{order_status}', attempting to cancel"
+                    )
+                    cancellable_orders.append(trade)
+
+            if not cancellable_orders:
+                ibkr_logger.info("No cancellable orders found")
+                return 0
+
+            ibkr_logger.info(f"Found {len(cancellable_orders)} orders to cancel")
+
+            for trade in cancellable_orders:
+                try:
+                    order_id = trade.order.orderId
+                    ib.cancelOrder(trade.order)
+                    ibkr_logger.info(f"Sent cancel request for order {order_id}")
+                except Exception as e:
+                    ibkr_logger.error(
+                        f"Failed to send cancel request for order {trade.order.orderId}: {e}"
+                    )
+
+            max_wait_time = 20
+            start_time = time.time()
+            check_interval = 0.5
+            cancelled_count = 0
+
+            while time.time() - start_time < max_wait_time:
+                time.sleep(check_interval)
+
+                updated_trades = ib.trades()
+                current_cancelled = 0
+
+                for original_trade in cancellable_orders:
+                    order_id = original_trade.order.orderId
+                    found = False
+
+                    for updated_trade in updated_trades:
+                        if updated_trade.order.orderId == order_id:
+                            found = True
+                            status = updated_trade.orderStatus.status
+                            if status in ["Cancelled", "Inactive"]:
+                                current_cancelled += 1
+                            break
+
+                    if not found:
+                        current_cancelled += 1
+
+                if current_cancelled >= len(cancellable_orders):
+                    cancelled_count = current_cancelled
+                    break
+
+                if current_cancelled > cancelled_count:
+                    cancelled_count = current_cancelled
+                    ibkr_logger.info(
+                        f"Progress: {cancelled_count}/{len(cancellable_orders)} orders cancelled"
+                    )
+
+            if cancelled_count < len(cancellable_orders):
+                final_trades = ib.trades()
+                final_cancelled = 0
+
+                for original_trade in cancellable_orders:
+                    order_id = original_trade.order.orderId
+                    found = False
+
+                    for final_trade in final_trades:
+                        if final_trade.order.orderId == order_id:
+                            found = True
+                            status = final_trade.orderStatus.status
+                            if status in ["Cancelled", "Inactive", "PendingCancel"]:
+                                final_cancelled += 1
+                            break
+
+                    if not found:
+                        final_cancelled += 1
+
+                cancelled_count = final_cancelled
+
+            ibkr_logger.info(
+                f"Successfully cancelled {cancelled_count}/{len(cancellable_orders)} orders"
+            )
+            return cancelled_count
+        except Exception as e:
+            ibkr_logger.error(f"Error in cancel orders operation: {e}")
             return 0
     
     def get_orders(self, risk_manager=None, strategy_manager=None, order_manager=None) -> List[Dict]:
@@ -1878,7 +2177,17 @@ class IBKRClient:
                 trades = ib.openTrades()
             else:
                 # 刷新订单数据并更新刷新时间
-                self.refresh_orders()
+                try:
+                    asyncio.run(self.refresh_orders())
+                except asyncio.TimeoutError as timeout_exc:
+                    ibkr_logger.error(f"Order refresh timed out while fetching orders: {timeout_exc}")
+                    return []
+                except Exception as refresh_error:
+                    ibkr_logger.warning(
+                        f"Failed to refresh orders before fetch: {refresh_error}; attempting sync fallback"
+                    )
+                    if not self._refresh_orders_sync_fallback():
+                        return []
                 self._last_order_refresh_time = current_time
                 # 读取最新的开放订单列表
                 trades = ib.openTrades()
@@ -2676,25 +2985,25 @@ class IBKRClient:
             async def _backfill_op():
                 try:
                     ib_local = self.ib
-                    # Compute start time for the execution filter (local time, format YYYYMMDD-HH:MM:SS)
                     start_dt = now_local() - timedelta(days=max(1, int(days)))
-                    # IB API expects a hyphen between date and time, e.g. 20250131-13:45:00
                     start_str = start_dt.strftime('%Y%m%d-%H:%M:%S')
 
-                    # Request executions; this will also trigger commissionReport events
                     filt = ExecutionFilter(time=start_str)
-                    connection_logger.info(f"Requesting executions since {start_str} for backfilling commissions/PnL")
+                    connection_logger.info(
+                        f"Requesting executions since {start_str} for backfilling commissions/PnL"
+                    )
                     try:
                         await ib_local.reqExecutionsAsync(filt)
                     except Exception as e:
-                        connection_logger.warning(f"reqExecutionsAsync failed: {e}; trying sync fallback")
+                        connection_logger.warning(
+                            f"reqExecutionsAsync failed: {e}; trying sync fallback"
+                        )
                         try:
                             ib_local.reqExecutions(filt)
                         except Exception as e2:
                             connection_logger.error(f"Sync reqExecutions failed: {e2}")
                             return 0
 
-                    # Allow some time for commission reports to arrive and pair with executions
                     await asyncio.sleep(1.5)
 
                     fills = ib_local.fills()
@@ -2705,7 +3014,6 @@ class IBKRClient:
                     update_count = 0
                     for fill in fills:
                         try:
-                            # Prefer commissionReport attached to fill
                             cr = getattr(fill, 'commissionReport', None)
                             exec_obj = getattr(fill, 'execution', None)
                             if cr and exec_obj and hasattr(exec_obj, 'orderId'):
@@ -2715,7 +3023,6 @@ class IBKRClient:
                                 connection_logger.debug(
                                     f"Backfill commission report for order {order_id}: commission={commission}, pnl={pnl}"
                                 )
-                                # Use the same updater which syncs DB and in-memory order
                                 await self._update_order_commission_pnl(order_id, commission, pnl)
                                 update_count += 1
                         except Exception as inner_e:
@@ -2727,11 +3034,45 @@ class IBKRClient:
                     connection_logger.error(f"Backfill operation failed: {e}")
                     return 0
 
-            result = self.run_async_in_connection_thread(_backfill_op())
+            bridge_result = await self.connection_manager.schedule_async(
+                _backfill_op(),
+                queue_timeout=2.0,
+                execution_timeout=30.0,
+                warn_queue_threshold=1.0,
+                warn_execution_threshold=25.0,
+            )
+
+            queue_wait = bridge_result.queue_wait
+            execution_time = bridge_result.execution_time
+
+            if bridge_result.timed_out:
+                message = (
+                    f"Backfill commissions timed out (queue_wait={queue_wait:.6f}s, execution_time={execution_time:.6f}s)"
+                )
+                connection_logger.error(message)
+                raise asyncio.TimeoutError(message)
+
+            if bridge_result.error:
+                connection_logger.error(
+                    "Backfill commissions via bridge failed",
+                    error=str(bridge_result.error),
+                    queue_wait=f"{queue_wait:.6f}",
+                    execution_time=f"{execution_time:.6f}",
+                )
+                raise bridge_result.error
+
+            connection_logger.info(
+                "Backfill commissions bridge timings",
+                queue_wait=f"{queue_wait:.6f}",
+                execution_time=f"{execution_time:.6f}",
+            )
+
             try:
-                return int(result or 0)
+                return int(bridge_result.result or 0)
             except Exception:
                 return 0
+        except asyncio.TimeoutError:
+            raise
         except Exception as e:
             connection_logger.error(f"Backfill commissions wrapper error: {e}")
             return 0
@@ -2789,7 +3130,8 @@ if __name__ == "__main__":
             
             print("\n# Test limit order:")
             print("# trade = client.place_limit_order('AAPL', 1, 150.0, 'BUY')")
-            trade = client.place_limit_order('MNQ', 1, 23360, 'BUY')
+            import asyncio as _asyncio_debug
+            trade = _asyncio_debug.run(client.place_limit_order('MNQ', 1, 23360, 'BUY'))
             print("# if trade:")
             print("#     print(f'Limit order placed: {trade.order.orderId}')")
             print("# else:")

@@ -50,7 +50,7 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
         elif order.order_type.upper() == "LIMIT":
             if not order.price:
                 raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = ib_client.place_limit_order(
+            trade = await ib_client.place_limit_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 price=order.price,
@@ -145,15 +145,10 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
     ib_client = _require_ib_client()
 
     try:
-        # Run in executor to avoid blocking event loop with timeout
-        loop = asyncio.get_event_loop()
         try:
             success, message = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: ib_client.cancel_order(order_id)
-                ),
-                timeout=35.0  # 35-second timeout for order cancellation
+                ib_client.cancel_order(order_id),
+                timeout=35.0,  # 35-second timeout for order cancellation
             )
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
@@ -200,15 +195,12 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
         if not order_id:
             raise HTTPException(status_code=400, detail="order_id is required")
 
-        # Run in executor to avoid blocking event loop
-        loop = asyncio.get_event_loop()
+        order_id_int = int(order_id)
+
         try:
             success, message = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: ib_client.cancel_order(int(order_id))
-                ),
-                timeout=35.0  # 35-second timeout for order cancellation
+                ib_client.cancel_order(order_id_int),
+                timeout=35.0,  # 35-second timeout for order cancellation
             )
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
@@ -732,9 +724,15 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
     ib_client = _require_ib_client()
 
     try:
-        # 直接调用取消所有订单方法，避免嵌套的事件循环调用
-        cancelled_count = ib_client.cancel_all_orders()
-        
+        try:
+            cancelled_count = await asyncio.wait_for(
+                ib_client.cancel_all_orders(),
+                timeout=45.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Cancel all orders request timed out")
+            raise HTTPException(status_code=408, detail="Cancel all orders timed out")
+
         await websocket_manager.broadcast({  # 替换 manager
             "type": "all_orders_cancelled",
             "count": cancelled_count

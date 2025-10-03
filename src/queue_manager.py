@@ -1030,13 +1030,15 @@ class QueueManager:
                 )
             )
         elif order_type == "LIMIT":
-            return core.ibkr_client.place_limit_order(
-                symbol=symbol,
-                quantity=quantity,
-                price=price,
-                action=action,
-                exchange=exchange,
-                sec_type=sec_type,
+            return asyncio.run(
+                core.ibkr_client.place_limit_order(
+                    symbol=symbol,
+                    quantity=quantity,
+                    price=price,
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type,
+                )
             )
 
         raise ValueError(f"Unsupported order type: {order_type}")
