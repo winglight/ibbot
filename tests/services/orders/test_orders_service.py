@@ -79,7 +79,7 @@ def test_order_submission_persists_snapshot_and_normalises_request() -> None:
                         "order_type": "LIMIT",
                         "limit_price": 4450.5,
                         "source": "web",
-                        "notes": "Entry at support",
+                        "metadata": {"notes": "Entry at support"},
                     },
                 )
                 list_response = await client.get("/orders")
@@ -508,7 +508,7 @@ def test_order_submission_writes_influx_point(monkeypatch: pytest.MonkeyPatch) -
                 order_type="LIMIT",
                 limit_price=4450.5,
                 exchange="CME",
-                notes="Hedge entry",
+                metadata={"notes": "Hedge entry"},
             )
             await runtime.submit_order(submission)
             assert writer.points

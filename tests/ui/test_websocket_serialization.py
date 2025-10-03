@@ -63,6 +63,22 @@ def test_serialise_order_falls_back_to_legacy_fields() -> None:
     assert payload["notes"] == "Legacy fallback"
 
 
+def test_serialise_order_reads_metadata_notes() -> None:
+    order = {
+        "order_id": "meta",
+        "symbol": "ES",
+        "action": "BUY",
+        "order_type": "MKT",
+        "quantity": 1,
+        "status": "Submitted",
+        "metadata": {"notes": "Metadata supplied"},
+    }
+
+    payload = websocket_module._serialise_order(order)
+
+    assert payload["notes"] == "Metadata supplied"
+
+
 def test_orders_payload_includes_start_date_metadata() -> None:
     payload = websocket_module._orders_payload(
         [{"order_id": "1"}],
