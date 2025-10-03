@@ -1,10 +1,13 @@
-"""Compatibility shim that exposes the DB-API repositories from :mod:`src.db`."""
+"""Deprecated compatibility stub for :mod:`src.ibbot.db`."""
 
 from __future__ import annotations
 
-from src.db import *  # noqa: F401,F403 - re-export public API
-from src.db import __all__ as _public
+import warnings
 
-__all__ = list(_public)
+warnings.warn(
+    "src.ibbot.db has been removed. Import from src.db instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
-del _public
+raise ImportError("src.ibbot.db is no longer available; use 'src.db' or 'src.db.config'.")

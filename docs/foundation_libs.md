@@ -28,7 +28,7 @@
 ## 关键接口
 
 - **Redis**：`src/ibbot/redis/__init__.py` 暴露 `get_redis_client`、`redis_set`、`read_stream` 等协程方法，所有连接参数均源自上述配置。
-- **MariaDB**：`src/db/mariadb.py` 暴露 `connect`、`run_sql_query` 等工具函数，`src/ibbot/db` 则提供基于 SQLAlchemy 的会话工厂与仓储封装。
+- **MariaDB**：`src/db/mariadb.py` 暴露 `connect`、`run_sql_query` 等工具函数，`src.db` 模块统一提供仓储工厂与写入器创建方法。
 - **Logging**：`src/ibbot/logging/__init__.py` 的 `get_logger`、`get_log_file` 与 `read_log_segment` 用于统一日志格式与读取。
 
 ## 诊断脚本

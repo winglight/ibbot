@@ -56,7 +56,7 @@ SQLite 文件（历史的 `data/trading_bot.db` 已移除）。这意味着：
 
 - 设置 `IBBOT_DB_URL`（或兼容的 `DATA_LAYER_DB_URL`）为 `mysql+asyncmy://` 形式以启用 MariaDB 持久化。
 - 运行 `scripts/sql/20240522_init_mariadb.sql` 可以初始化所需的 `orders`、`market_prices`、`service_metrics`、`risk_*` 与 `market_events` 表。
-- 应用代码可通过 `src.db` 暴露的仓储工厂（例如 `order_repository()`、`service_metric_writer()`）执行插入/更新操作。
+- 所有仓储工厂统一由 `src.db` 模块暴露，例如 `from src.db import order_repository`；旧的 `src.ibbot.db` 包已废弃并在导入时抛出迁移提示（详见 [docs/db_api_migration.md](docs/db_api_migration.md)）。
 - 生产环境建议使用 Alembic 管理迁移：在项目根目录执行 `alembic upgrade head` 会根据 `IBBOT_DB_URL` 中的数据库应用最新结构。
 
 ## 📁 基础目录结构

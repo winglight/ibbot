@@ -116,7 +116,7 @@
 - `services/queue_monitor` 写入的 Redis 快照 `hash:service:queue-monitor`（确认队列长度/滞留时间指标）。
 - `services/queue_monitor` 同步的健康哈希 `hash:service:health:queue`（供 `/api/services/status` 及外部仪表板读取聚合指标）。
 - 主服务 `/api/monitoring/metrics/write-rate` 接口返回的 `service_metrics` 写入速率，用于验证 `services/ib_feed`、`services/market_data` 等服务上报是否正常。
-- 需要持久化到 MariaDB 的指标（订单、行情价格、服务运行指标、风控快照等）现统一通过 `src/ibbot/db` 暴露的仓储工厂创建，旧版文档提到的 `write_fn`/`write` 回调已经废弃。
+- 需要持久化到 MariaDB 的指标（订单、行情价格、服务运行指标、风控快照等）现统一通过 `src.db` 模块暴露的仓储工厂创建，旧版文档提到的 `write_fn`/`write` 回调已经废弃。
 
 若 MariaDB 使用全新凭据，请确保 `.env.local` 中的 `IBBOT_DB_URL`、`IBBOT_DB_USER`、`IBBOT_DB_PASSWORD` 与初始化参数一致。
 

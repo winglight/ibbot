@@ -1,17 +1,4 @@
-"""Database configuration helpers for the ibbot data access layer.
-
-This module resolves the async SQLAlchemy URL used by the services.  The
-connection string is expected to use the ``mysql+asyncmy`` dialect and is read
-from ``IBBOT_DB_URL``.  For backward compatibility with the historical data
-layer the resolver falls back to ``DATA_LAYER_DB_URL`` when the primary
-variable is not set.
-
-Example
--------
->>> from src.ibbot.db.config import get_database_url
->>> get_database_url()
-"mysql+asyncmy://user:pass@host:3306/ibbot"
-"""
+"""Database configuration helpers for :mod:`src.db`."""
 
 from __future__ import annotations
 
@@ -34,18 +21,7 @@ class DatabaseConfigError(RuntimeError):
 
 
 def _coerce_url(value: str) -> URL:
-    """Parse ``value`` into a SQLAlchemy :class:`~sqlalchemy.engine.URL`.
-
-    Parameters
-    ----------
-    value:
-        Raw database URL string.
-
-    Raises
-    ------
-    DatabaseConfigError
-        If the URL cannot be parsed or uses an unsupported driver.
-    """
+    """Parse *value* into a SQLAlchemy :class:`~sqlalchemy.engine.URL`."""
 
     try:
         url = make_url(value)
@@ -61,24 +37,7 @@ def _coerce_url(value: str) -> URL:
 
 
 def resolve_database_url(env: Mapping[str, str] | None = None) -> str:
-    """Return the configured database URL.
-
-    Parameters
-    ----------
-    env:
-        Optional mapping used for environment lookups.  When omitted the
-        function reads from :data:`os.environ`.
-
-    Returns
-    -------
-    str
-        Normalised SQLAlchemy URL string.
-
-    Raises
-    ------
-    DatabaseConfigError
-        If neither environment variable is defined or the URL is invalid.
-    """
+    """Return the configured database URL."""
 
     source = env or os.environ
     raw_url = source.get(PRIMARY_ENV_VAR) or source.get(FALLBACK_ENV_VAR)

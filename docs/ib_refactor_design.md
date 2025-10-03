@@ -19,7 +19,7 @@
 - **基础能力库 (foundation-libs)**：
   - `ibbot.config`: 环境变量加载与配置中心。
   - `ibbot.redis`: Redis 连接池、队列、Pub/Sub、Stream 封装。
-  - `ibbot.db`: MariaDB 写入/查询适配，统一持久化入口。
+  - `src.db`: MariaDB 写入/查询适配，统一持久化入口。
   - `ibbot.logging`: 统一日志封装，默认写入 `data/logs/<module>.log` 并支持标准输出。
 - **IB 指令执行服务 (ib-command-service)**：独占 IB Gateway/TWS 连接，串行处理 Redis 队列中的下单/撤单/查询指令，并回写结果。
 - **IB 数据采集服务 (ib-feed-service)**：使用独立 IB 客户端订阅实时行情与 DOM，写入 Redis Pub/Sub/缓存，同时负责 MariaDB 持久化。
@@ -196,7 +196,7 @@
   - 文档：更新部署说明。
 
 ### 阶段 1：基础能力库
-1. 实现 `ibbot.config`、`ibbot.redis`、`ibbot.db`、`ibbot.logging`。
+1. 实现 `ibbot.config`、`ibbot.redis`、`src.db`、`ibbot.logging`。
 2. 提供示例脚本 `scripts/diagnose_foundation.py` 验证连通性。
 3. 单元测试：
    - Redis 队列入队/出队、Pub/Sub 自动重连 (`tests/foundation/test_redis.py`)。

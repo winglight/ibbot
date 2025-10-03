@@ -21,15 +21,15 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from ibbot.config import ConfigProvider  # noqa: E402
-from ibbot.db.config import DatabaseConfigError, resolve_database_url  # noqa: E402
-from ibbot.db.schemas import metadata  # noqa: E402
 from ibbot.logging import get_log_file, get_logger  # noqa: E402
+from src.db.config import DatabaseConfigError, resolve_database_url  # noqa: E402
+from src.db.schema import REQUIRED_TABLES  # noqa: E402
 from sqlalchemy import inspect, text  # noqa: E402
 from sqlalchemy.engine.url import make_url  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
 
 
-REQUIRED_DB_TABLES: frozenset[str] = frozenset(table.name for table in metadata.sorted_tables)
+REQUIRED_DB_TABLES: frozenset[str] = frozenset(REQUIRED_TABLES)
 
 
 @dataclass(slots=True)
