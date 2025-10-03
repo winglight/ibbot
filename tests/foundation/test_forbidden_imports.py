@@ -20,17 +20,18 @@ def _python_files() -> list[Path]:
 FORBIDDEN_RULES = {
     "core.connection_manager": {
         "pattern": re.compile(r"(?m)^\s*(?:from\s+core\s+import\s+connection_manager|import\s+core\.connection_manager)"),
-        "allowed": set(),
+        "allowed": frozenset(),
     },
     "sqlite3": {
         "pattern": re.compile(r"(?m)^\s*import\s+sqlite3"),
-        "allowed": set(),
+        "allowed": frozenset(),
     },
     "get_db_manager": {
         "pattern": re.compile(
             r"(?m)^\s*(?:from\s+[^\s]+\s+import\s+.*\bget_db_manager\b|import\s+[^\n]*\bget_db_manager\b)"
         ),
-        "allowed": set(),
+        "allowed": frozenset(),
+        "message": "Legacy get_db_manager imports are forbidden; use service clients or Redis caches",
     },
 }
 
@@ -43,12 +44,13 @@ def test_forbidden_imports() -> None:
         for rule_name, rule in FORBIDDEN_RULES.items():
             pattern = rule["pattern"]
             allowed = rule["allowed"]
+            message = rule.get("message", rule_name)
             for match in pattern.finditer(text):
                 if rel_path in allowed:
                     continue
                 line = text.count("\n", 0, match.start()) + 1
                 snippet = match.group(0).strip()
-                violations.append(f"{rel_path}:{line}: {rule_name} -> {snippet}")
+                violations.append(f"{rel_path}:{line}: {message} -> {snippet}")
 
         if rel_path == "main.py" or rel_path.startswith("src/routes/"):
             for module in (
