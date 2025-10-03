@@ -64,13 +64,16 @@
 > `connection_control` 仍可手动触发，但默认计划已不再包含。
 
 `services/notification/main.py` 是通知管道的常驻进程，负责将 Redis 队列中的事件转发至 Telegram/邮件等渠道。
-Docker Compose 会通过 `uvicorn services.notification.main:app --port 8055` 启动该模块；
-若在裸机环境运行，请使用 `python -m uvicorn services.notification.main:app --host 0.0.0.0 --port 8055`
-或调用 `scripts/run_service.py notification` 让监督脚本代为启动。
-无论采用哪种方式，都需要确保该脚本与主服务同机运行，并在主程序环境变量中配置
-`NOTIFICATION_SERVICE_URL`（Docker 模式默认指向 `http://notification:8055`）。
-如果在本地单机调试时仅启动主程序与通知脚本，可在 `.env.local` 中设置
-`NOTIFICATION_SERVICE_URL=http://127.0.0.1:8055` 与 `NOTIFICATION_SERVICE_TIMEOUT`，以便跳过容器网络解析。
+
+- **Docker Compose**：`docker/docker-compose.yml`、`docker/local.compose.yml` 与 `docker/docker-compose.prod.yml`
+  均通过 `uvicorn services.notification.main:app --host 0.0.0.0 --port 8055` 启动该服务，并将
+  `NOTIFICATION_SERVICE_URL` 设置为 `http://notification:8055`。确认容器与 Redis 位于同一网络即可。
+- **裸机/监督脚本**：若未使用容器，可运行 `python -m uvicorn services.notification.main:app --host 0.0.0.0 --port 8055`
+  或调用 `scripts/run_service.py notification` 由监督脚本拉起进程。
+- **配置终端点**：`NOTIFICATION_SERVICE_URL`/`NOTIFICATION_SERVICE_TIMEOUT` 位于 `.env` 与 `.env.example` 中，
+  本地单机调试可改为 `http://127.0.0.1:8055`，以便跳过容器 DNS 解析；Docker 环境保持默认值即可。
+
+确保该脚本与主服务同机运行并可通过上述地址访问后，通知测试接口（`/api/notifications/test`）即可验证通信链路。
 
 关闭所有容器：
 

@@ -32,6 +32,7 @@
 - **orders**：订单指令服务，默认映射 `8050`，负责下单/撤单操作。
 - **ibbot / optimizer**：主服务与策略优化器，端口分别为 `8000/8001`。
 - **risk**：风险控制 REST 服务，默认映射 `8030`。
+- **notification**：通知调度服务，默认映射 `8055`，负责监听 Redis 队列并触发消息推送。
 - **strategy**：策略管理 REST 服务，默认映射 `8045`。
 - **optimizer-ui**：静态部署的优化器前端，默认映射 `4173`。
 - **cloudflared**：可选的 Cloudflare Tunnel，仅在 `CF_TUNNEL_TOKEN` 存在时自动加入启动序列。
