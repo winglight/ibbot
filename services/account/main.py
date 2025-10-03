@@ -808,9 +808,10 @@ async def _publish_refresh_health(
 async def _refresh_account_info(
     *,
     force_refresh: bool,
+    snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    snapshot = await read_account_info_snapshot()
-    needs_refresh = _snapshot_requires_refresh(snapshot, force_refresh=force_refresh)
+    current_snapshot = snapshot if snapshot is not None else await read_account_info_snapshot()
+    needs_refresh = _snapshot_requires_refresh(current_snapshot, force_refresh=force_refresh)
 
     if needs_refresh:
         service = _state.snapshot_service
@@ -836,8 +837,8 @@ async def _refresh_account_info(
             error=None if success else error,
         )
 
-        snapshot = info_snapshot
-        metadata = _snapshot_metadata(snapshot) if snapshot else {}
+        current_snapshot = info_snapshot
+        metadata = _snapshot_metadata(current_snapshot) if current_snapshot else {}
         if success:
             logger.info(
                 "Account info refresh succeeded (source=%s, updated_at=%s, stale=%s)",
@@ -853,16 +854,17 @@ async def _refresh_account_info(
                 metadata.get("snapshot_updated_at"),
             )
 
-    return await _ensure_snapshot(snapshot, kind="Account info")
+    return await _ensure_snapshot(current_snapshot, kind="Account info")
 
 
 async def _refresh_positions(
     *,
     force_refresh: bool,
     fast: bool,
+    snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    snapshot = await read_positions_snapshot()
-    needs_refresh = _snapshot_requires_refresh(snapshot, force_refresh=force_refresh)
+    current_snapshot = snapshot if snapshot is not None else await read_positions_snapshot()
+    needs_refresh = _snapshot_requires_refresh(current_snapshot, force_refresh=force_refresh)
 
     if needs_refresh:
         service = _state.snapshot_service
@@ -888,8 +890,8 @@ async def _refresh_positions(
             error=None if success else error,
         )
 
-        snapshot = positions_snapshot
-        metadata = _snapshot_metadata(snapshot) if snapshot else {}
+        current_snapshot = positions_snapshot
+        metadata = _snapshot_metadata(current_snapshot) if current_snapshot else {}
         if success:
             logger.info(
                 "Positions refresh succeeded (source=%s, updated_at=%s, stale=%s)",
@@ -905,7 +907,7 @@ async def _refresh_positions(
                 metadata.get("snapshot_updated_at"),
             )
 
-    return await _ensure_snapshot(snapshot, kind="Positions")
+    return await _ensure_snapshot(current_snapshot, kind="Positions")
 
 
 async def _load_orders_fast(
@@ -1028,23 +1030,31 @@ async def _ensure_snapshot(snapshot: Optional[Dict[str, Any]], *, kind: str) -> 
 
 @app.get("/account/info")
 async def get_account_info(
-    force_refresh: str | None = Query(None),
-    fast: str | None = Query(None),
+    force_refresh: bool | str | None = Query(False),
+    fast: bool | str | None = Query(False),
 ) -> Dict[str, Any]:
     refresh = _parse_bool(force_refresh, default=False)
     _ = _parse_bool(fast, default=False)  # parsed for parity with other endpoints
-    snapshot = await _refresh_account_info(force_refresh=refresh)
+
+    snapshot = await read_account_info_snapshot()
+    snapshot = await _refresh_account_info(force_refresh=refresh, snapshot=snapshot)
     return _snapshot_response(snapshot, data_key="account_info")
 
 
 @app.get("/account/positions")
 async def get_account_positions(
-    force_refresh: str | None = Query(None),
-    fast: str | None = Query(None),
+    force_refresh: bool | str | None = Query(False),
+    fast: bool | str | None = Query(False),
 ) -> Dict[str, Any]:
     refresh = _parse_bool(force_refresh, default=False)
     fast_flag = _parse_bool(fast, default=False)
-    snapshot = await _refresh_positions(force_refresh=refresh, fast=fast_flag)
+
+    snapshot = await read_positions_snapshot()
+    snapshot = await _refresh_positions(
+        force_refresh=refresh,
+        fast=fast_flag,
+        snapshot=snapshot,
+    )
     return _snapshot_response(snapshot, data_key="positions")
 
 
