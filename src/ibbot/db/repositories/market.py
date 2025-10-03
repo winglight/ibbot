@@ -68,9 +68,10 @@ class MariaDbMarketPriceRepository:
         ask_size: float | None = None,
         source: str | None = None,
         observed_at: datetime | str | int | float | None = None,
+        recorded_at: datetime | str | int | float | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> None:
-        timestamp = _parse_datetime(observed_at) or _utc_now()
+        timestamp = _parse_datetime(observed_at) or _parse_datetime(recorded_at) or _utc_now()
         payload = {
             "symbol": symbol,
             "bid": bid,
