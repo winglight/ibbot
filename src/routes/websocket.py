@@ -119,14 +119,11 @@ class ConnectionContext(NamedTuple):
     error_code: Optional[str]
 
 
-_METADATA_KEYS = (
-    "source",
-    "snapshot_updated_at",
-    "updated_at",
-    "stale",
-    "stale_reason",
-    "stale_at",
-    "from_cache",
+_METADATA_KEYS = tuple(
+    dict.fromkeys(
+        list(AccountServiceClient._METADATA_KEYS)
+        + ["fast", "force_refresh", "requested_fast", "requested_force_refresh"]
+    )
 )
 
 
@@ -1026,6 +1023,24 @@ async def websocket_endpoint(websocket: WebSocket):
                     response_payload["stale_reason"] = combined_meta["stale_reason"]
                 if combined_meta.get("stale_at"):
                     response_payload["stale_at"] = combined_meta["stale_at"]
+                if combined_meta:
+                    response_payload["metadata"] = dict(combined_meta)
+                for key in (
+                    "fast",
+                    "force_refresh",
+                    "requested_fast",
+                    "requested_force_refresh",
+                ):
+                    if key in combined_meta and key not in response_payload:
+                        response_payload[key] = combined_meta[key]
+                for key in (
+                    "fast",
+                    "force_refresh",
+                    "requested_fast",
+                    "requested_force_refresh",
+                ):
+                    if key in combined_meta and key not in response_payload:
+                        response_payload[key] = combined_meta[key]
 
                 await websocket.send_text(json.dumps(response_payload))
 
@@ -1062,6 +1077,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 if combined_meta.get("stale_at"):
                     fallback_payload["stale_at"] = combined_meta["stale_at"]
                 fallback_payload["source"] = combined_meta.get("source") or "redis"
+                if combined_meta:
+                    fallback_payload["metadata"] = dict(combined_meta)
+                for key in (
+                    "fast",
+                    "force_refresh",
+                    "requested_fast",
+                    "requested_force_refresh",
+                ):
+                    if key in combined_meta and key not in fallback_payload:
+                        fallback_payload[key] = combined_meta[key]
                 await websocket.send_text(json.dumps(fallback_payload))
     except Exception as e:
         logger.debug(f"Failed to send initial account_update: {e}")
@@ -1116,9 +1141,11 @@ async def websocket_endpoint(websocket: WebSocket):
         stale_positions = AccountServiceClient.is_metadata_stale(
             positions_snapshot_metadata
         )
+        requested_fast = True
+        requested_force_refresh = stale_positions
         positions_result = await _fetch_positions(
-            force_refresh=stale_positions,
-            fast=True,
+            force_refresh=requested_force_refresh,
+            fast=requested_fast,
         )
         unavailable_positions = (
             _extract_service_unavailable_payload(positions_result, "position_update")
@@ -1154,6 +1181,8 @@ async def websocket_endpoint(websocket: WebSocket):
             payload.setdefault(
                 "stale", AccountServiceClient.is_metadata_stale(combined_meta)
             )
+            payload.setdefault("fast", bool(requested_fast))
+            payload.setdefault("force_refresh", bool(requested_force_refresh))
             await websocket.send_text(json.dumps(payload))
         else:
             combined_meta = dict(positions_snapshot_metadata)
@@ -1207,6 +1236,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     "stale": stale_flag,
                     "from_cache": bool(combined_meta.get("from_cache")),
                 }
+                response_payload.setdefault("fast", bool(requested_fast))
+                response_payload.setdefault(
+                    "force_refresh", bool(requested_force_refresh)
+                )
                 if combined_meta.get("snapshot_updated_at"):
                     response_payload["snapshot_updated_at"] = combined_meta[
                         "snapshot_updated_at"
@@ -1215,6 +1248,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     response_payload["stale_reason"] = combined_meta["stale_reason"]
                 if combined_meta.get("stale_at"):
                     response_payload["stale_at"] = combined_meta["stale_at"]
+                if combined_meta:
+                    response_payload["metadata"] = dict(combined_meta)
 
                 await websocket.send_text(json.dumps(response_payload))
 
@@ -1249,6 +1284,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     fallback_payload["stale_reason"] = combined_meta["stale_reason"]
                 if combined_meta.get("stale_at"):
                     fallback_payload["stale_at"] = combined_meta["stale_at"]
+                if combined_meta:
+                    fallback_payload["metadata"] = dict(combined_meta)
+                for key in (
+                    "fast",
+                    "force_refresh",
+                    "requested_fast",
+                    "requested_force_refresh",
+                ):
+                    if key in combined_meta and key not in fallback_payload:
+                        fallback_payload[key] = combined_meta[key]
                 await websocket.send_text(json.dumps(fallback_payload))
     except Exception as e:
         logger.debug(f"Failed to send initial positions snapshot: {e}")
@@ -1707,11 +1752,45 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                     if unavailable_positions is not None:
                         payload = dict(unavailable_positions)
-                        payload.setdefault("positions", [])
+                        if "positions" not in payload or not isinstance(
+                            payload.get("positions"), list
+                        ):
+                            if isinstance(positions_snapshot_data, list):
+                                payload["positions"] = [
+                                    dict(item) if isinstance(item, Mapping) else item
+                                    for item in positions_snapshot_data
+                                ]
+                            else:
+                                payload["positions"] = []
                         payload.setdefault("source", "service")
-                        payload["fast"] = fast
+                        payload["fast"] = bool(fast)
+                        payload["force_refresh"] = bool(effective_force)
                         payload["connected"] = bool(connected_flag)
                         payload["fresh"] = bool(redis_fresh)
+                        combined_meta = _merge_metadata(payload, snapshot_metadata)
+                        if combined_meta.get("source") and not payload.get("source"):
+                            payload["source"] = combined_meta["source"]
+                        if (
+                            "from_cache" not in payload
+                            and combined_meta.get("from_cache") is not None
+                        ):
+                            payload["from_cache"] = bool(combined_meta.get("from_cache"))
+                        if (
+                            combined_meta.get("snapshot_updated_at")
+                            and "snapshot_updated_at" not in payload
+                        ):
+                            payload["snapshot_updated_at"] = combined_meta[
+                                "snapshot_updated_at"
+                            ]
+                        if combined_meta.get("stale_reason") and "stale_reason" not in payload:
+                            payload["stale_reason"] = combined_meta["stale_reason"]
+                        if combined_meta.get("stale_at") and "stale_at" not in payload:
+                            payload["stale_at"] = combined_meta["stale_at"]
+                        payload.setdefault(
+                            "stale", AccountServiceClient.is_metadata_stale(combined_meta)
+                        )
+                        if combined_meta:
+                            payload["metadata"] = dict(combined_meta)
                         last_responses[key] = payload
                         await websocket.send_text(json.dumps(payload))
                         continue
@@ -1745,6 +1824,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             or source_value
                             or "service",
                             fast=fast,
+                            force_refresh=bool(effective_force),
                             connected=bool(connected_flag),
                             fresh=bool(redis_fresh),
                         )
@@ -1756,6 +1836,27 @@ async def websocket_endpoint(websocket: WebSocket):
                             "details",
                             "Positions data unavailable from service or cache",
                         )
+                        if (
+                            combined_meta.get("snapshot_updated_at")
+                            and "snapshot_updated_at" not in unavailable_payload
+                        ):
+                            unavailable_payload["snapshot_updated_at"] = combined_meta[
+                                "snapshot_updated_at"
+                            ]
+                        if (
+                            combined_meta.get("stale_reason")
+                            and "stale_reason" not in unavailable_payload
+                        ):
+                            unavailable_payload["stale_reason"] = combined_meta[
+                                "stale_reason"
+                            ]
+                        if (
+                            combined_meta.get("stale_at")
+                            and "stale_at" not in unavailable_payload
+                        ):
+                            unavailable_payload["stale_at"] = combined_meta["stale_at"]
+                        if combined_meta:
+                            unavailable_payload["metadata"] = dict(combined_meta)
                         last_responses[key] = unavailable_payload
                         await websocket.send_text(json.dumps(unavailable_payload))
                         continue

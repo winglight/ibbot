@@ -110,6 +110,15 @@ def _snapshot_response(
         "stale": stale_value,
     }
 
+    if metadata_map:
+        response["metadata"] = dict(metadata_map)
+    else:
+        response["metadata"] = {}
+
+    for key in ("fast", "force_refresh", "requested_fast", "requested_force_refresh"):
+        if key in metadata_map and key not in response:
+            response[key] = metadata_map[key]
+
     if stale_reason:
         response["stale_reason"] = stale_reason
     stale_at = metadata_map.get("stale_at")
