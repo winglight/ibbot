@@ -132,11 +132,11 @@ test.describe('monitoring validation', () => {
     });
 
     await page.waitForFunction(() => {
-      return window.app?.monitoringDashboard?.influxChart?.data?.datasets?.length > 0;
+      return window.app?.monitoringDashboard?.dbChart?.data?.datasets?.length > 0;
     });
 
     const chartDatasets = await page.evaluate(() => {
-      const chart = window.app?.monitoringDashboard?.influxChart;
+      const chart = window.app?.monitoringDashboard?.dbChart;
       if (!chart) {
         return [];
       }
@@ -174,7 +174,7 @@ test.describe('monitoring validation', () => {
       contentType: 'application/json',
     });
 
-    const summaryText = await page.locator('#influxSummaryText').textContent();
+    const summaryText = await page.locator('#dbSummaryText').textContent();
     expect(summaryText).toBeTruthy();
     const averageMatch = summaryText!.match(/平均\s+([0-9.]+)\/m/);
     expect(averageMatch).not.toBeNull();

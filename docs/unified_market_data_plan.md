@@ -38,7 +38,7 @@ IBKR (DOM/Tick/Historical)
         ▼
 +----------------------+         +--------------------------+
 | Cache Layer          |         | Persistence Layer        |
-|  (Redis snapshots)   |         | (InfluxDB time-series)   |
+|  (Redis snapshots)   |         | (MariaDB event store)    |
 +----------------------+         +--------------------------+
         │
         ▼
@@ -56,13 +56,13 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 - **SubscriptionRegistry**: 记录活跃订阅，处理同 symbol/interval 的复用、引用计数、自动重试与断线恢复。
 - **IntervalTransformer**: 接收 tick/DOM，生成不同 interval 的 K 线或聚合指标，输出至缓存+持久化。
 - **Cache Layer (Redis)**: 存储热点快照与短期窗口（如最近 N 根 K 线），提供快速 `snapshot` 服务，并支撑策略预热。
-- **Persistence Layer (InfluxDB)**: 长期存储时序数据，支持历史查询、回放与回测；可选写入告警审计。
+- **Persistence Layer (MariaDB)**: 长期存储标准化市场事件，支持历史查询、回放与回测；可选写入告警审计。
 - **EventBus**: 统一发布订阅总线，支持 topic 通配、消费者隔离，默认基于 asyncio/队列实现，留出替换为 Redis Streams/NATS 的扩展点。
 - **Compatibility Facade**: 供 `DOMService`、`StrategyManager`、`IBKRClient` 等现有模块调用，内部根据配置决定走旧逻辑或新数据层。
 
 ## Data Flow & Switching Strategy
-1. **订阅流程**：消费者调用 `DataSourceManager.subscribe`，输入标准化参数（symbol、channel、interval、options）。管理层委派到对应适配器，接收数据后写入 Redis 快照 → 发布 EventBus → 异步写入 InfluxDB。
-2. **历史查询**：先查 Redis 缓存（短期窗口），miss 时查询 InfluxDB，若 Influx 缺口则触发 `IBHistoricalLoader` 异步补数并回写缓存。
+1. **订阅流程**：消费者调用 `DataSourceManager.subscribe`，输入标准化参数（symbol、channel、interval、options）。管理层委派到对应适配器，接收数据后写入 Redis 快照 → 发布 EventBus → 异步写入 MariaDB。
+2. **历史查询**：先查 Redis 缓存（短期窗口），miss 时查询 MariaDB，若数据库缺口则触发 `IBHistoricalLoader` 异步补数并回写缓存。
 3. **切换机制**：配置项 `DATA_LAYER_MODE` (`legacy`/`unified`/`dual`) 控制逻辑。
    - `legacy`: 完全沿用 `IBKRClient` 现有实现。
    - `unified`: 路由到新数据层。
@@ -104,11 +104,10 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
   - Key: `MarketSnapshot:{symbol}` → 最新 tick/行情；TTL 5s，定期刷新。
   - Key: `DOMSnapshot:{symbol}` → 最新 DOM/指标；TTL 2s。
   - Key: `Candles:{symbol}:{interval}` → 最近 N 根（默认 300 条）JSON 列表。
-- **InfluxDB**
-  - Measurement: `dom_depth`, tags=`symbol`,`exchange`,`source`; fields：价格深度、盘口量。
-  - Measurement: `dom_metrics`, tags=`symbol`,`metric`, fields=`value`,`signal_long`,`signal_short`。
-  - Measurement: `tick_quotes`, tags=`symbol`,`exchange`,`source`; fields=`last`,`bid`,`ask`,`volume`。
-  - Measurement: `candles_{interval}`（或统一 measurement + interval tag）。
+- **MariaDB**
+  - Table: `market_events` → 记录 `event_type/topic/symbol/payload/meta`，用于回放与历史查询。
+  - Table: `market_prices` → 保留最近一次盘口快照与观测时间。
+  - Table: `service_metrics` → 统计各服务上报的吞吐/延迟等指标。
 
 ### 实际部署配置
 
@@ -117,17 +116,13 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 - `DATA_LAYER_REDIS_URL`：Redis 连接串（例如 `redis://:REDIS_PASSWORD@redis:6379/0`）。未设置时回退为进程内缓存。
 - `DATA_LAYER_REDIS_PREFIX`（可选）：键名前缀，默认 `market-data`。
 - `DATA_LAYER_REDIS_SNAPSHOT_TTL`（可选）：快照 TTL 秒数，未设置则常驻。
-- `DATA_LAYER_INFLUX_URL`：InfluxDB 访问地址（例如 `http://influxdb:8086`）。
-- `DATA_LAYER_INFLUX_BUCKET`：写入 bucket 名称。
-- `DATA_LAYER_INFLUX_ORG`：组织名称。
-- `DATA_LAYER_INFLUX_TOKEN`（可选）：访问 token，如未配置则使用匿名方式。
-- `DATA_LAYER_INFLUX_MEASUREMENT`（可选）：事件 measurement，默认 `market_events`。
-- `DATA_LAYER_INFLUX_TIMEOUT_MS`（可选）：InfluxDB 客户端超时时间（毫秒），未设置则使用默认值。
+- `DATA_LAYER_DB_URL`：MariaDB 访问地址（例如 `mysql+pymysql://user:pass@mariadb:3306/ibbot?charset=utf8mb4`）。
+- `IBBOT_DB_USER` / `IBBOT_DB_PASSWORD` / `IBBOT_DB_NAME`：容器初始化与手动连接所需的凭据，与 `DATA_LAYER_DB_URL` 保持一致。
 
 配置步骤：
-1. 在 `.env` 或部署环境中设置上述变量，Redis/Influx 任意一项缺失即保持内存/Noop 模式。
-2. 确保容器或主机已部署对应服务，可参考 `docker/local.compose.yml` 中 `redis` 与 `influxdb` 的端口映射。
-3. 重启应用后，日志会输出 `Using Redis cache backend...` 或 `Using InfluxDB persistence backend...`，确认接入成功。
+1. 在 `.env` 或部署环境中设置上述变量，Redis/MariaDB 任意一项缺失即保持内存/Noop 模式。
+2. 确保容器或主机已部署对应服务，可参考 `docker/local.compose.yml` 中 `redis` 与 `mariadb` 的端口映射。
+3. 重启应用后，日志会输出 `Using Redis cache backend...` 或 `Using MariaDB persistence backend...`，确认接入成功。
 
 ## Compatibility Layer
 - `IBKRClient.get_real_time_data/get_historical_data` 调整为根据 mode 调用：
@@ -142,7 +137,7 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 ### Phase 0 – Preparation & Baseline
 - 定义数据契约与 envelope（本文件所述），创建 JSON Schema。
 - 为现有 DOM 流、行情查询建立单元与集成基线测试，确保可回归。
-- 搭建 InfluxDB / Redis 本地 docker compose 配置（可复用现有服务，建议直接复用 `docker/local.compose.yml` 中的定义）。
+- 搭建 MariaDB / Redis 本地 docker compose 配置（可复用现有服务，建议直接复用 `docker/local.compose.yml` 中的定义）。
 
 ### Phase 1 – Core Infrastructure
 - 实现 `EventBus`（in-process variant）及测试用假实现。
@@ -152,7 +147,7 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 ### Phase 2 – Unified Market Data Layer
 - 实现 `IBQuoteSource`、`IBHistoricalLoader` 适配器，处理 tick、补数、异常恢复。
 - 增加 `IntervalTransformer`，支持 1s/5s/1m/5m 可配置聚合；写入 Redis 缓存。
-- 建立 Redis 快照与 InfluxDB 写入流水线，实现幂等与批量写机制。
+- 建立 Redis 快照与 MariaDB 写入流水线，实现幂等与批量写机制。
 - 扩展 `DataSourceManager.snapshot/history`，在统一模式下供 `IBKRClient` 调用。
 
 ### Phase 3 – Consumer Integration & Toggle
@@ -163,8 +158,8 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 
 ### Phase 4 – Event Ecosystem & Observability
 - 将告警、策略事件接入 EventBus（发布/订阅），替换零散监听。
-- 构建监控：订阅延迟、缓存命中率、Influx 写入失败率、重试次数。
-- 编写回放工具（从 Influx/Redis 读取并重放到 EventBus）以支持调试。
+- 构建监控：订阅延迟、缓存命中率、MariaDB 写入失败率、重试次数。
+- 编写回放工具（从 MariaDB/Redis 读取并重放到 EventBus）以支持调试。
 
 ### Phase 5 – Cleanup & Migration
 - 在生产环境逐步启用 unified 模式，监控指标，确认稳定后淘汰 legacy path。
@@ -173,7 +168,7 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 
 ## Testing Strategy
 - 单元测试覆盖：EventBus（并发、退订）、SubscriptionRegistry（引用计数、断线恢复）、IntervalTransformer（聚合准确性）。
-- 集成测试：基于 `ib_insync` stub 模拟 tick/DOM 流，验证 Redis 快照、Influx 写入、订阅去重。
+- 集成测试：基于 `ib_insync` stub 模拟 tick/DOM 流，验证 Redis 快照、MariaDB 写入、订阅去重。
 - 回归测试：沿用现有 DOM pipeline tests，新增 `dual` 模式比较脚本。
 - 性能测试：模拟高频 tick（>500 msg/s）与多 topic 订阅，评估延迟与资源占用。
 
@@ -185,13 +180,13 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 ## Data Exchange Roadmap for Future ESB
 - 事件 envelope 与 topic 命名与 ESB 对齐，未来仅需替换 EventBus 实现为 Redis Streams/NATS/Kafka。
 - Schema 注册与版本管理预留接口，后续可接入 Schema Registry。
-- 通过配置选择持久化后端（InfluxDB/pandas Parquet），满足不同环境部署需求。
+- 通过配置选择持久化后端（MariaDB/pandas Parquet），满足不同环境部署需求。
 
 ## Open Questions
-- InfluxDB 集群部署与权限管理是否有既有规范？
+- MariaDB 集群部署与权限管理是否有既有规范？
 - Redis 的高可用方案是否需要与现有缓存共享？
 - 是否有第三方行情源需要并行接入（如 CQG、Polygon）？
 
 ## Update Log
 - 2024-07-30: 初始方案与分阶段计划。
-- 2024-07-31: 新增 Redis/Influx 可选后端及配置说明。
+- 2024-07-31: 新增 Redis/MariaDB 可选后端及配置说明。

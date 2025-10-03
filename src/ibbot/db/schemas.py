@@ -150,7 +150,7 @@ class RiskRuleSnapshot(Base):
 
 
 class MarketEvent(Base):
-    """Generic market event payloads originally persisted to InfluxDB."""
+    """Generic market event payloads stored in MariaDB."""
 
     __tablename__ = "market_events"
     __table_args__ = (

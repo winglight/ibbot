@@ -1,7 +1,7 @@
 # Docker 部署与使用指南
 
 本目录提供容器化部署 IBBot 所需的基础镜像与历史 Compose 示例。自本次更新后，**`docker/local.compose.yml`、`docker/prod.compose.yml` 与 `scripts/deploy.sh`**
-成为推荐入口，用于在本地或生产环境按依赖顺序拉起 Redis、InfluxDB、服务端以及前端 UI。
+成为推荐入口，用于在本地或生产环境按依赖顺序拉起 Redis、MariaDB、服务端以及前端 UI。
 
 ## 1. 前置条件
 
@@ -12,7 +12,7 @@
 ## 2. 开发/测试环境（推荐）
 
 ```bash
-# 以本地依赖顺序启动 Redis → InfluxDB → 服务 → UI
+# 以本地依赖顺序启动 Redis → MariaDB → 服务 → UI
 ./scripts/deploy.sh up --env local
 
 # 查看容器状态或再次运行诊断
@@ -26,7 +26,7 @@
 `docker/local.compose.yml` 包含以下组件：
 
 - **redis**：缓存与配置中心，默认对宿主机开放 `6379` 端口。
-- **influxdb**：行情写入与指标存储，默认开放 `8086`。
+- **mariadb**：行情写入与指标存储，默认开放 `3306`。
 - **ib-gateway**：集成 noVNC 的 IB Gateway，`http://localhost:5800/` 可进行登录与授权。
 - **account**：账户 API 服务，默认映射 `8020`，必须在主进程之前启动。
 - **orders**：订单指令服务，默认映射 `8050`，负责下单/撤单操作。
@@ -40,7 +40,7 @@
 `scripts/deploy.sh` 在启动完成后会自动执行：
 
 1. `docker compose ps` 输出各服务状态；
-2. `python scripts/diagnose_foundation.py` 检查 Redis、InfluxDB 与日志写入。
+2. `python scripts/diagnose_foundation.py` 检查 Redis、MariaDB 与日志写入。
 
 常用挂载目录位于根目录 `data/` 下，可直接在宿主机查看日志与持久化文件。
 

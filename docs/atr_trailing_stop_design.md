@@ -146,5 +146,5 @@
 ## 8. 后续扩展
 - 支持动态调整 ATR lookback，根据波动率状态切换窗口。
 - 引入 `trading_hours` 过滤，避免在休市时 ATR 被静态价格稀释。
-- 将 ATR、止损轨迹写入 Prometheus/InfluxDB 以便图表化监控。
+- 将 ATR、止损轨迹写入 Prometheus/MariaDB 以便图表化监控。
 

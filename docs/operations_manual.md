@@ -24,7 +24,7 @@
   ```bash
   ./scripts/deploy.sh up --env local
   ```
-  `deploy.sh` 会按 Redis → InfluxDB → IB Gateway → 主服务 → Optimizer → UI → Cloudflare Tunnel（如配置）依次启动，并在 180 秒内轮询健康状态。
+  `deploy.sh` 会按 Redis → MariaDB → IB Gateway → 主服务 → Optimizer → UI → Cloudflare Tunnel（如配置）依次启动，并在 180 秒内轮询健康状态。
 - **查看状态**：
   ```bash
   ./scripts/deploy.sh status
@@ -43,7 +43,7 @@
 | 阶段 | 核对项 |
 | --- | --- |
 | 阶段 1 | `python scripts/diagnose_foundation.py` 返回全绿；`data/logs/` 写入权限正常。 |
-| 阶段 2 | Redis 中存在服务配置键（`hash:config:<service>`）；`services/<name>/main.py` 日志无异常；Influx `service_metrics` 出现对应服务写入。 |
+| 阶段 2 | Redis 中存在服务配置键（`hash:config:<service>`）；`services/<name>/main.py` 日志无异常；MariaDB `service_metrics` 出现对应服务写入。 |
 | 阶段 3 | 访问主站 `/rapidoc`、`/api/monitoring/metrics/write-rate` 成功；前端监控卡片可展示队列和写入速率指标。 |
 | 阶段 4 | `pytest tests`、`pytest tests/e2e`、`pytest tests/perf`、`pytest tests/failover` 全部通过；`./scripts/deploy.sh up --env production` 能在目标环境跑通。 |
 
@@ -53,7 +53,7 @@
 
 | 指标 | 来源 | 说明 |
 | --- | --- | --- |
-| `service_metrics` measurement | 所有服务通过 `src/ibbot/influx.build_service_metric_point` 写入 | 统一包含 `service`、`metric`、`value` 字段，监控吞吐、延迟、队列深度等。 |
+| `service_metrics` 表 | 所有服务通过 `src.db.mariadb.run_sql_query` 或 SQLAlchemy 会话写入 | 统一包含 `service`、`metric`、`value` 字段，监控吞吐、延迟、队列深度等。 |
 | `hash:service:queue-monitor` | Queue Monitor 服务 (`services/queue_monitor/main.py`) | 保存最近一次队列/Stream 指标快照，可用 `redis-cli HGETALL` 查看。 |
 | `stream:market-service` | Market Data 服务 | 累积行情快照，Risk/策略消费并统计延迟。 |
 | `stream:ib:results` | IB Command/风险服务 | 存储指令执行结果、风控触发记录。 |
@@ -69,9 +69,10 @@
   ```bash
   redis-cli HGETALL hash:service:queue-monitor
   ```
-- **行情写入快照**（`market_price`/`market_dom` measurement，替换 `<bucket>` 为实际名称）：
+- **行情写入快照**（MariaDB `market_events` 表）：
   ```bash
-  docker exec -it influxdb influx query 'from(bucket: "<bucket>") |> range(start: -5m) |> filter(fn: (r) => r._measurement == "market_price") |> limit(n:5)'
+  docker exec -it mariadb mariadb -u"${IBBOT_DB_USER:-ibbot}" -p"${IBBOT_DB_PASSWORD:-ibbot-password}" "${IBBOT_DB_NAME:-ibbot}" \
+    -e "SELECT event_type, symbol, ingested_at FROM market_events ORDER BY ingested_at DESC LIMIT 5;"
   ```
 - **策略事件流积压**：
   ```bash
@@ -91,17 +92,17 @@
 
 - **现象**：`deploy.sh` 阶段性失败或诊断脚本报错。
 - **定位**：
-  1. 运行 `python scripts/diagnose_foundation.py` 查看 Redis/Influx 连接详情。
+  1. 运行 `python scripts/diagnose_foundation.py` 查看 Redis/MariaDB 连接详情。
   2. 若仅 Redis 异常，检查端口占用（`ss -ltnp | grep 6379`）与防火墙。
-  3. 若 Influx Token 错误，校对 `.env.local` 的 `INFLUX_TOKEN/ORG/BUCKET` 与容器初始化日志。
-- **恢复**：修正配置后 `./scripts/deploy.sh restart redis influxdb ibbot`。
+  3. 若 MariaDB 凭据错误，校对 `.env.local` 的 `IBBOT_DB_URL/USER/PASSWORD` 与容器初始化日志。
+- **恢复**：修正配置后 `./scripts/deploy.sh restart redis mariadb ibbot`。
 
 ### 3.2 行情无更新
 
 - **现象**：前端行情卡片不刷新、策略无触发。
 - **定位**：
   1. 检查 `redis-cli PUBSUB CHANNELS "pubsub:ib:price*"` 是否存在频道；若无，确认 `services/ib_feed` 是否运行且订阅列表正确。
-  2. 使用上文的 Influx 查询命令确认 `market_price`/`market_dom` measurement 在最近 5 分钟内有写入。
+  2. 使用上文的 MariaDB 查询命令确认 `market_events` 在最近 5 分钟内有写入。
   3. 查看 `services/ib_feed` 日志（`docker logs` 或 `tail -f data/logs/ib-feed.log`）。
 - **恢复**：更新配置（Redis `hash:config:ib-feed` 中的订阅列表），重启 `ib-feed` 与 `market-data`。
 

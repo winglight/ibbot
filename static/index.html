@@ -2112,18 +2112,18 @@
             </div>
         </div>
         <div class="col-lg-6 mb-3">
-            <div class="card" id="influxWriteRateCard">
+            <div class="card" id="dbWriteRateCard">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <h5 class="mb-0"><i class="fas fa-wave-square me-2"></i>指标写入速率</h5>
                     <div class="d-flex align-items-center gap-2">
-                        <select class="form-select form-select-sm" id="influxWindowSelect">
+                        <select class="form-select form-select-sm" id="dbWindowSelect">
                             <option value="30m">30 分钟</option>
                             <option value="1h" selected>1 小时</option>
                             <option value="6h">6 小时</option>
                             <option value="12h">12 小时</option>
                             <option value="24h">24 小时</option>
                         </select>
-                        <button class="btn btn-sm btn-outline-light" id="refreshInfluxMetricsBtn" title="Refresh">
+                        <button class="btn btn-sm btn-outline-light" id="refreshDbMetricsBtn" title="Refresh">
                             <i class="fas fa-sync-alt"></i>
                         </button>
                     </div>
@@ -2131,10 +2131,10 @@
                 <div class="card-body">
                     <div class="row g-2 align-items-center mb-2 small">
                         <div class="col-auto">
-                            <label for="influxServiceSelect" class="col-form-label">服务</label>
+                            <label for="dbServiceSelect" class="col-form-label">服务</label>
                         </div>
                         <div class="col-auto">
-                            <select class="form-select form-select-sm" id="influxServiceSelect">
+                            <select class="form-select form-select-sm" id="dbServiceSelect">
                                 <option value="">全部</option>
                                 <option value="queue-monitor">queue-monitor</option>
                                 <option value="market-data">market-data</option>
@@ -2142,16 +2142,16 @@
                             </select>
                         </div>
                         <div class="col-auto">
-                            <label for="influxMetricSelect" class="col-form-label">Metric</label>
+                            <label for="dbMetricInput" class="col-form-label">Metric</label>
                         </div>
                         <div class="col-auto">
-                            <input type="text" class="form-control form-control-sm" id="influxMetricSelect" placeholder="可选关键词">
+                            <input type="text" class="form-control form-control-sm" id="dbMetricInput" placeholder="可选关键词">
                         </div>
                     </div>
                     <div class="ratio ratio-16x9">
-                        <canvas id="influxWriteRateChart"></canvas>
+                        <canvas id="dbWriteRateChart"></canvas>
                     </div>
-                    <div class="small text-muted mt-2" id="influxSummaryText">-</div>
+                    <div class="small text-muted mt-2" id="dbSummaryText">-</div>
                 </div>
             </div>
         </div>
