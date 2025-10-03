@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from services.strategy import StrategyTaskConsumer, sync_strategy_metadata
 from src.ibbot import update_service_health
@@ -88,7 +88,8 @@ class StrategyUpsertRequest(BaseModel):
     description: str | None = None
     enabled: bool = True
 
-    @validator("name")
+    @field_validator("name")
+    @classmethod
     def _validate_name(cls, value: str) -> str:  # noqa: D401 - short validation helper
         value = value.strip()
         if not value:
@@ -277,12 +278,15 @@ class StrategyRuntime:
 
     async def list_strategies(self) -> list[StrategyDocument]:
         async with self._lock:
-            return [doc.copy() for doc in sorted(self._strategies.values(), key=lambda d: d.name)]
+            return [
+                doc.model_copy()
+                for doc in sorted(self._strategies.values(), key=lambda d: d.name)
+            ]
 
     async def get_strategy(self, name: str) -> StrategyDocument | None:
         async with self._lock:
             document = self._strategies.get(name)
-            return document.copy() if document is not None else None
+            return document.model_copy() if document is not None else None
 
     async def get_internal_info_payload(self, name: str) -> tuple[dict[str, Any], bool]:
         document = await self.get_strategy(name)
@@ -326,7 +330,9 @@ class StrategyRuntime:
             if stored is not None:
                 new_params = dict(stored.params)
                 new_params[str(parameter)] = applied
-                updated = stored.copy(update={"params": new_params, "updated_at": _utc_now().isoformat()})
+                updated = stored.model_copy(
+                    update={"params": new_params, "updated_at": _utc_now().isoformat()}
+                )
                 self._strategies[name] = updated
                 await self._persist_document(updated)
         await self.get_internal_info_payload(name)
@@ -405,7 +411,9 @@ class StrategyRuntime:
             document = self._strategies.get(name)
             if document is None:
                 raise StrategyNotRegistered(name)
-            updated = document.copy(update={"name": new_name, "updated_at": _utc_now().isoformat()})
+            updated = document.model_copy(
+                update={"name": new_name, "updated_at": _utc_now().isoformat()}
+            )
             self._strategies.pop(name, None)
             self._strategies[new_name] = updated
             await self._persist_document(updated)
@@ -502,7 +510,9 @@ class StrategyRuntime:
             document = self._strategies.get(name)
             if document is None:
                 raise StrategyNotRegistered(name)
-            updated = document.copy(update={"enabled": bool(enabled), "updated_at": _utc_now().isoformat()})
+            updated = document.model_copy(
+                update={"enabled": bool(enabled), "updated_at": _utc_now().isoformat()}
+            )
             self._strategies[name] = updated
             await self._persist_document(updated)
         self._health_signal.set()
@@ -513,7 +523,7 @@ class StrategyRuntime:
             document = self._strategies.get(name)
             if document is None:
                 raise StrategyNotRegistered(name)
-            updated = document.copy(
+            updated = document.model_copy(
                 update={
                     "params": {},
                     "metadata": {},
@@ -738,7 +748,7 @@ class StrategyRuntime:
 
     async def _persist_document(self, document: StrategyDocument) -> None:
         metadata_key = self._metadata_key(document.name)
-        await self._redis.set(metadata_key, json.dumps(document.dict()))
+        await self._redis.set(metadata_key, json.dumps(document.model_dump()))
 
     async def _persist_index(self) -> None:
         payload = [doc.name for doc in sorted(self._strategies.values(), key=lambda d: d.name)]
@@ -1148,7 +1158,7 @@ class StrategyRuntime:
                 if not payload:
                     continue
                 try:
-                    document = StrategyDocument.parse_obj(payload)
+                    document = StrategyDocument.model_validate(payload)
                 except ValidationError:
                     continue
                 self._strategies[name] = document
@@ -1342,7 +1352,7 @@ def create_app(
     ) -> dict[str, Any]:
         redis_client = await _get_redis(request)
         settings = await load_strategy_settings(redis_client)
-        updates = payload.dict(exclude_none=True)
+        updates = payload.model_dump(exclude_none=True)
         if "api_payload_template" in updates and not isinstance(updates["api_payload_template"], dict):
             updates.pop("api_payload_template")
         settings.update(updates)
@@ -1457,7 +1467,7 @@ def create_app(
         except StrategyNotRegistered as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         model = StrategyRiskSettings(**settings)
-        return {"success": True, "settings": model.dict()}
+        return {"success": True, "settings": model.model_dump()}
 
     @app.put("/strategies/{name}/risk-settings")
     async def update_strategy_risk_settings(
@@ -1469,14 +1479,17 @@ def create_app(
             current = await runtime.load_risk_settings(name)
         except StrategyNotRegistered as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-        updates = payload.dict(exclude_unset=True)
+        updates = payload.model_dump(exclude_unset=True)
         current.update(updates)
         model = StrategyRiskSettings(**current)
         try:
-            stored = await runtime.persist_risk_settings(name, model.dict())
+            stored = await runtime.persist_risk_settings(name, model.model_dump())
         except StrategyNotRegistered as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-        return {"success": True, "settings": StrategyRiskSettings(**stored).dict()}
+        return {
+            "success": True,
+            "settings": StrategyRiskSettings(**stored).model_dump(),
+        }
 
     @app.get("/strategies/{name}/status")
     async def get_strategy_status(
