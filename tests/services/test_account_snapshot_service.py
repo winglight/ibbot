@@ -30,9 +30,32 @@ class FakeRedis:
         return None
 
 
+class RecordingSnapshotRepository:
+    def __init__(self) -> None:
+        self.account_snapshots: List[Dict[str, Any]] = []
+        self.account_sources: List[str] = []
+        self.position_snapshots: List[Dict[str, Any]] = []
+        self.position_sources: List[str] = []
+        self.stale_reasons: List[str] = []
+
+    async def write_account_info_snapshot(self, data: Dict[str, Any], source: str) -> bool:
+        self.account_snapshots.append(dict(data))
+        self.account_sources.append(source)
+        return True
+
+    async def write_positions_snapshot(self, data: Dict[str, Any], source: str) -> bool:
+        self.position_snapshots.append(dict(data))
+        self.position_sources.append(source)
+        return True
+
+    async def mark_all_snapshots_stale(self, reason: str) -> None:
+        self.stale_reasons.append(reason)
+
+
 async def test_refresh_account_info_success(monkeypatch: pytest.MonkeyPatch) -> None:
     service = AccountSnapshotService()
     fake_redis = FakeRedis()
+    repository = RecordingSnapshotRepository()
 
     async def fake_get_client() -> FakeRedis:
         return fake_redis
@@ -45,23 +68,20 @@ async def test_refresh_account_info_success(monkeypatch: pytest.MonkeyPatch) -> 
             "result": {"balance": 123.45, "timestamp": datetime.now().isoformat()},
         }
 
-    captured: Dict[str, Any] = {}
-
-    async def fake_write_snapshot(data: Dict[str, Any], source: str) -> bool:
-        captured["data"] = data
-        captured["source"] = source
-        return True
-
     monkeypatch.setattr("src.account_snapshot_service.get_redis_client", fake_get_client)
     monkeypatch.setattr("src.account_snapshot_service.request_ib_command", fake_request)
     monkeypatch.setattr(
-        "src.account_snapshot_service.write_account_info_snapshot", fake_write_snapshot
+        "src.account_snapshot_service.write_account_info_snapshot",
+        repository.write_account_info_snapshot,
     )
 
     result = await service.refresh_account_info(reason="unit-test")
 
-    assert result == captured["data"]
-    assert captured["source"] == IB_COMMAND_SOURCE
+    assert repository.account_snapshots, "Expected account snapshot to be persisted"
+    stored_snapshot = repository.account_snapshots[-1]
+    assert pytest.approx(stored_snapshot.get("balance", 0.0)) == 123.45
+    assert repository.account_sources[-1] == IB_COMMAND_SOURCE
+    assert result == stored_snapshot
     assert fake_redis.calls, "Expected health update call"
     key, mapping = fake_redis.calls[-1]
     assert key == "hash:service:health:account-snapshot"
@@ -77,7 +97,7 @@ async def test_refresh_account_info_timeout_marks_stale(
 ) -> None:
     service = AccountSnapshotService()
     fake_redis = FakeRedis()
-    stale_calls: List[str] = []
+    repository = RecordingSnapshotRepository()
 
     async def fake_get_client() -> FakeRedis:
         return fake_redis
@@ -85,25 +105,22 @@ async def test_refresh_account_info_timeout_marks_stale(
     async def fake_request(method: str, **_: Any) -> Dict[str, Any]:
         raise IBCommandTimeout("timeout", command_id="cmd-timeout", payload={"method": method})
 
-    async def fake_mark_stale(reason: str) -> None:
-        stale_calls.append(reason)
-
-    async def fake_write_snapshot(*_: Any, **__: Any) -> bool:
-        raise AssertionError("write_account_info_snapshot should not be called")
-
     monkeypatch.setattr("src.account_snapshot_service.get_redis_client", fake_get_client)
     monkeypatch.setattr("src.account_snapshot_service.request_ib_command", fake_request)
     monkeypatch.setattr(
-        "src.account_snapshot_service.mark_all_snapshots_stale", fake_mark_stale
+        "src.account_snapshot_service.mark_all_snapshots_stale",
+        repository.mark_all_snapshots_stale,
     )
     monkeypatch.setattr(
-        "src.account_snapshot_service.write_account_info_snapshot", fake_write_snapshot
+        "src.account_snapshot_service.write_account_info_snapshot",
+        repository.write_account_info_snapshot,
     )
 
     result = await service.refresh_account_info(reason="unit-test")
 
     assert result is None
-    assert stale_calls == ["ib-command-timeout"]
+    assert repository.account_snapshots == []
+    assert repository.stale_reasons == ["ib-command-timeout"]
     assert fake_redis.calls, "Expected health update call"
     _, mapping = fake_redis.calls[-1]
     assert mapping["healthy"] == "false"
@@ -118,7 +135,7 @@ async def test_refresh_positions_execution_error(
 ) -> None:
     service = AccountSnapshotService()
     fake_redis = FakeRedis()
-    stale_calls: List[str] = []
+    repository = RecordingSnapshotRepository()
 
     async def fake_get_client() -> FakeRedis:
         return fake_redis
@@ -130,25 +147,22 @@ async def test_refresh_positions_execution_error(
             payload={"error": "boom", "method": method},
         )
 
-    async def fake_mark_stale(reason: str) -> None:
-        stale_calls.append(reason)
-
-    async def fake_write_positions(*_: Any, **__: Any) -> bool:
-        raise AssertionError("write_positions_snapshot should not be called")
-
     monkeypatch.setattr("src.account_snapshot_service.get_redis_client", fake_get_client)
     monkeypatch.setattr("src.account_snapshot_service.request_ib_command", fake_request)
     monkeypatch.setattr(
-        "src.account_snapshot_service.mark_all_snapshots_stale", fake_mark_stale
+        "src.account_snapshot_service.mark_all_snapshots_stale",
+        repository.mark_all_snapshots_stale,
     )
     monkeypatch.setattr(
-        "src.account_snapshot_service.write_positions_snapshot", fake_write_positions
+        "src.account_snapshot_service.write_positions_snapshot",
+        repository.write_positions_snapshot,
     )
 
     result = await service.refresh_positions(reason="unit-test", fast=True)
 
     assert result is None
-    assert not stale_calls, "Execution errors should not mark snapshots stale"
+    assert repository.position_snapshots == []
+    assert repository.stale_reasons == []
     assert fake_redis.calls, "Expected health update call"
     _, mapping = fake_redis.calls[-1]
     assert mapping["healthy"] == "false"
