@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnostics for Redis, InfluxDB and logging dependencies."""
+"""Diagnostics for Redis, database and logging dependencies."""
 
 from __future__ import annotations
 
@@ -137,7 +137,10 @@ def _diagnose_influx_sync(config: Mapping[str, str], *, dry_run: bool) -> Diagno
         return DiagnosticResult(
             name="InfluxDB",
             success=False,
-            message="influxdb-client is not installed. Install influxdb-client to enable Influx diagnostics.",
+            message=(
+                "SQLAlchemy with the asyncio extra (and asyncmy) is required for MariaDB diagnostics. "
+                "Install SQLAlchemy[asyncio] and asyncmy to enable database checks."
+            ),
         )
 
     influx_module = importlib.import_module("influxdb_client")
@@ -295,7 +298,9 @@ async def run(args: argparse.Namespace) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Diagnose foundational dependencies (Redis, Influx, logging)")
+    parser = argparse.ArgumentParser(
+        description="Diagnose foundational dependencies (Redis, database, logging)"
+    )
     parser.add_argument(
         "--module",
         default="foundation",
