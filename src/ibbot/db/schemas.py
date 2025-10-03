@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    BigInteger,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 __all__ = [
@@ -157,6 +167,22 @@ class MarketEvent(Base):
         Index("ix_market_events_event_type", "event_type"),
         Index("ix_market_events_topic", "topic"),
         Index("ix_market_events_symbol", "symbol"),
+        Index("ix_market_events_recorded_at", "recorded_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(128))
+    topic: Mapped[str] = mapped_column(String(256))
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    ts_ns: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
     )
 
 
