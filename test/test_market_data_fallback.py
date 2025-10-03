@@ -96,4 +96,4 @@ def test_chart_data_returns_404_when_service_empty(client, admin_headers, fake_m
     )
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "No chart data found"
+    assert response.json()["detail"] == "No chart data available"
