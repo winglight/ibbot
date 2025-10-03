@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import logging
+from typing import Awaitable, Callable
 
 from fastapi.testclient import TestClient
 
@@ -45,19 +46,6 @@ class FlakyChannel(RecordingChannel):
         await super().__call__(event, message)
 
 
-class InMemoryWriter:
-    def __init__(self) -> None:
-        self.points: list[dict[str, str]] = []
-
-    async def __call__(self, points: list) -> int:
-        for point in points:
-            if isinstance(point, dict):
-                self.points.append(point["fields"])
-            else:
-                self.points.append(point.fields)
-        return len(points)
-
-
 def test_build_channels_respects_config() -> None:
     config = {"telegram_enabled": "true", "email_enabled": "0", "websocket_enabled": "YES"}
     channels = build_channels(config, "ibbot.services.notification.test")
@@ -65,34 +53,41 @@ def test_build_channels_respects_config() -> None:
     assert names == {"telegram", "websocket"}
 
 
-def test_notification_service_dispatch_success() -> None:
+def test_notification_service_dispatch_success(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="ibbot.services.notification")
+
     event = StreamMessage(stream="stream:ib:results", message_id="1-1", data={"type": "order", "status": "filled"})
     channel = RecordingChannel("telegram")
-    writer = InMemoryWriter()
     service = NotificationService(
         stream_reader=FakeStreamReader([[event]]),
         channels=[NotificationChannel(name="telegram", sender=channel)],
         poll_interval=0,
-        write=writer,
     )
 
     processed = run(service.poll_once())
     assert processed == 1
     assert channel.sent[0][0].stream == "stream:ib:results"
     assert channel.sent[0][0].payload["status"] == "filled"
-    assert any(point["status"] == "success" for point in writer.points)
+
+    success_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "notification_status", "") == "success"
+        and getattr(record, "notification_channel", "") == "telegram"
+    ]
+    assert success_records, "expected success log entry"
     assert service.health_status["healthy"] is True
 
 
-def test_notification_service_retry_flow() -> None:
+def test_notification_service_retry_flow(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="ibbot.services.notification")
+
     event = StreamMessage(stream="stream:risk:events", message_id="2-1", data={"type": "alert", "level": "high"})
     flaky = FlakyChannel("email", failures=1)
-    writer = InMemoryWriter()
     service = NotificationService(
         stream_reader=FakeStreamReader([[event], []]),
         channels=[NotificationChannel(name="email", sender=flaky)],
         poll_interval=0,
-        write=writer,
         max_retries=3,
     )
 
@@ -101,10 +96,27 @@ def test_notification_service_retry_flow() -> None:
     assert service.get_retry_count("stream:risk:events", "2-1", "email") == 1
     assert service.health_status["healthy"] is False
 
+    failure_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "notification_status", "") == "failed"
+        and getattr(record, "notification_channel", "") == "email"
+    ]
+    assert failure_records, "expected failure log entry"
+
+    caplog.clear()
     processed = run(service.poll_once())
     assert processed == 1
     assert service.get_retry_count("stream:risk:events", "2-1", "email") == 0
     assert service.health_status["healthy"] is True
+
+    retry_success = [
+        record
+        for record in caplog.records
+        if getattr(record, "notification_status", "") == "success"
+        and getattr(record, "notification_channel", "") == "email"
+    ]
+    assert retry_success, "expected retry success log entry"
 
 
 def test_health_endpoint_uses_service_state() -> None:

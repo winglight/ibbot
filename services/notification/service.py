@@ -11,8 +11,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping, Sequence
-
-from src.ibbot.influx import InfluxPoint, write_points
 from src.ibbot import update_service_health
 from src.ibbot.redis import StreamMessage
 
@@ -87,7 +85,6 @@ class NotificationService:
         channels: Sequence[NotificationChannel],
         poll_interval: float = 1.0,
         max_retries: int = 3,
-        write: Callable[[Iterable[InfluxPoint | Mapping[str, Any]]], Awaitable[int] | int] = write_points,
         service_name: str = "notification",
         logger_instance: logging.Logger | None = None,
         redis_client: Any | None = None,
@@ -101,7 +98,6 @@ class NotificationService:
         self._channels = OrderedDict((channel.name, channel) for channel in channels)
         self._poll_interval = max(poll_interval, 0.0)
         self._max_retries = max(0, int(max_retries))
-        self._write = write
         self._service_name = service_name
         self._logger = logger_instance or logger
         self._offsets: MutableMapping[str, str] = {}
@@ -151,12 +147,14 @@ class NotificationService:
         except Exception as exc:  # pragma: no cover - network errors hard to simulate deterministically
             self._logger.warning("Failed to read notification streams", exc_info=True)
             self._last_error = str(exc)
-            await self._write_log_point(
+            self._log_event(
+                level=logging.ERROR,
                 stream="internal",
                 channel="reader",
                 status="error",
                 message=f"Failed to read streams: {exc}",
                 retries=0,
+                error=str(exc),
             )
             return processed
 
@@ -334,12 +332,14 @@ class NotificationService:
                 item.attempts += 1
                 item.last_error = str(exc)
                 self._last_error = str(exc)
-                await self._write_log_point(
+                self._log_event(
+                    level=logging.WARNING,
                     stream=item.event.stream,
                     channel=channel_name,
                     status="failed",
                     message=f"Retry failed: {exc}",
                     retries=item.attempts,
+                    error=str(exc),
                 )
                 await self._record_history(
                     event=item.event,
@@ -357,7 +357,8 @@ class NotificationService:
                     self._pending_retries.pop(key, None)
                 continue
 
-            await self._write_log_point(
+            self._log_event(
+                level=logging.INFO,
                 stream=item.event.stream,
                 channel=channel_name,
                 status="success",
@@ -409,12 +410,14 @@ class NotificationService:
                 attempts = self._schedule_retry(event, channel.name, message, str(exc))
                 if results is not None:
                     results[channel.name] = {"status": "retrying", "error": str(exc), "retries": attempts}
-                await self._write_log_point(
+                self._log_event(
+                    level=logging.WARNING,
                     stream=event.stream,
                     channel=channel.name,
                     status="failed",
-                    message=f"{message} | error={exc}",
+                    message=message,
                     retries=attempts,
+                    error=str(exc),
                 )
                 await self._record_history(
                     event=event,
@@ -427,7 +430,8 @@ class NotificationService:
                 self._last_error = str(exc)
                 continue
 
-            await self._write_log_point(
+            self._log_event(
+                level=logging.INFO,
                 stream=event.stream,
                 channel=channel.name,
                 status="success",
@@ -471,36 +475,28 @@ class NotificationService:
     def _safe_repr(value: Any) -> str:
         return repr(value)
 
-    async def _write_log_point(
+    def _log_event(
         self,
         *,
+        level: int,
         stream: str,
         channel: str,
         status: str,
         message: str,
         retries: int,
+        error: str | None = None,
     ) -> None:
-        point = InfluxPoint(
-            "logs",
-            fields={
-                "message": message,
-                "status": status,
-                "retries": retries,
-            },
-            tags={
-                "service": self._service_name,
-                "stream": stream,
-                "channel": channel,
-                "status": status,
-            },
-            timestamp=datetime.now(timezone.utc),
-        )
-        try:
-            result = self._write([point])
-            if inspect.isawaitable(result):
-                await result
-        except Exception:  # pragma: no cover - logging only, depends on influx availability
-            self._logger.debug("Failed to write notification log point", exc_info=True)
+        extra = {
+            "notification_service": self._service_name,
+            "notification_stream": stream,
+            "notification_channel": channel,
+            "notification_status": status,
+            "notification_retries": retries,
+            "notification_message": message,
+        }
+        if error:
+            extra["notification_error"] = error
+        self._logger.log(level, "Notification %s", status, extra=extra)
 
     async def _record_history(
         self,

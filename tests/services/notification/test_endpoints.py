@@ -132,7 +132,6 @@ def _build_app(
         redis_client=redis,
         command_queue="queue:test:notification",
         command_status_prefix="hash:test:notification",
-        write=lambda _: 0,
     )
 
     async def factory() -> tuple[IdleNotificationService, Any]:
