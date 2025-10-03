@@ -20,3 +20,6 @@ PyJWT
 python-jose[cryptography]
 pandas-market-calendars
 influxdb-client
+SQLAlchemy>=2
+asyncmy
+alembic
