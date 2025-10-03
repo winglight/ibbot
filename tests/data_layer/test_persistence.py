@@ -130,7 +130,8 @@ def test_mariadb_backend_persists_event_without_running_loop(sqlite_session_fact
     assert event.payload["price"] == 123.45
     assert event.meta["channel"] == "market.tick"
     expected_time = datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=timezone.utc)
-    assert event.event_time == expected_time
+    assert event.recorded_at == expected_time
+    assert event.ts_ns == ts_ns
 
 
 @pytest.mark.skipif(not SQLALCHEMY_AVAILABLE, reason="SQLAlchemy is not installed")
@@ -159,4 +160,5 @@ def test_mariadb_backend_schedules_when_loop_running(sqlite_session_factory):
     assert event.topic == "market.candle.1m"
     assert event.payload["close"] == 456.78
     expected_time = datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=timezone.utc)
-    assert event.event_time == expected_time
+    assert event.recorded_at == expected_time
+    assert event.ts_ns == ts_ns
