@@ -7,6 +7,7 @@ from src.telegram_notifier import TelegramNotifier
 from src.risk_manager import RiskManager
 from src.strategy_manager import StrategyManager
 from src.database import get_db_manager
+from src.async_executor import get_async_executor
 from src.queue_manager import queue_manager
 from src.order_manager import get_order_manager
 from src.websocket_manager import websocket_manager
@@ -27,7 +28,8 @@ from src.cache import init_redis
 
 # Initialize shared instances
 telegram_notifier = TelegramNotifier()
-db_manager = get_db_manager()
+async_executor = get_async_executor()
+db_manager = get_db_manager(async_executor=async_executor)
 notification_manager = NotificationManager(
     telegram_notifier=telegram_notifier,
     websocket_manager=websocket_manager,
@@ -38,8 +40,8 @@ dom_config = dom_dependencies.dom_config
 dom_processor = get_dom_processor()
 depth_subscriber = dom_dependencies.depth_subscriber
 
-risk_manager = RiskManager(notification_manager=notification_manager)
-strategy_manager = StrategyManager()
+risk_manager = RiskManager(notification_manager=notification_manager, async_executor=async_executor)
+strategy_manager = StrategyManager(async_executor=async_executor)
 strategy_risk_manager = StrategyRiskManager(
     db_manager=db_manager,
     notification_manager=notification_manager,
