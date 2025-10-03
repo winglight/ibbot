@@ -16,7 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from services.notification import NotificationChannel, NotificationService, RedisStreamReader
 from src.ibbot.config import ConfigProvider
-from src.ibbot.influx import write_points
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
 from src.notification_history import (
@@ -140,7 +139,6 @@ async def _default_service_factory() -> tuple[NotificationService, CleanupCallba
         channels=channels,
         poll_interval=poll_interval,
         max_retries=max_retries,
-        write=write_points,
         service_name=SERVICE_NAME,
         logger_instance=logger,
         redis_client=redis,
