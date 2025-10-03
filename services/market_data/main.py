@@ -10,7 +10,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Dict, Mapping, Sequence
 
 from contextlib import asynccontextmanager
 
@@ -21,10 +21,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import PubSubListener, get_redis_client
+from src.services.factories import (
+    ServiceMetricsWriterProtocol,
+    create_service_metrics_writer,
+)
 from src.utils import NY_TZ, now_local, to_local_iso
-
-if TYPE_CHECKING:  # pragma: no cover - typing helpers
-    from src.db import ServiceMetricRepository
 
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
 DOM_CHANNEL_TEMPLATE = "pubsub:ib:dom:{symbol}"
@@ -258,6 +259,14 @@ class WebSocketManager:
                 await self.disconnect(websocket)
 
 
+MetricsRepositoryFactory = Callable[
+    [],
+    Awaitable[ServiceMetricsWriterProtocol | None]
+    | ServiceMetricsWriterProtocol
+    | None,
+]
+
+
 @dataclass(slots=True)
 class MarketDataRuntime:
     """Aggregate market snapshots and expose them over HTTP/WebSocket."""
@@ -272,9 +281,7 @@ class MarketDataRuntime:
     health_service_name: str = "market-data"
     health_key: str | None = None
     stream_maxlen: int = 5000
-    metrics_repository_factory: (
-        Callable[[], Awaitable["ServiceMetricRepository"] | "ServiceMetricRepository"] | None
-    ) = None
+    metrics_repository_factory: MetricsRepositoryFactory | None = None
 
     _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _redis: Any = field(default=None, init=False, repr=False)
@@ -289,7 +296,7 @@ class MarketDataRuntime:
     _metrics_latency_max: Dict[str, float] = field(default_factory=lambda: defaultdict(float), init=False, repr=False)
     _last_metrics_at: datetime = field(default_factory=_now, init=False, repr=False)
     _logger: Any = field(default=None, init=False, repr=False)
-    _metrics_repository: "ServiceMetricRepository" | None = field(
+    _metrics_repository: ServiceMetricsWriterProtocol | None = field(
         default=None, init=False, repr=False
     )
     _metrics_repository_close: Callable[[], Awaitable[None]] | None = field(
@@ -590,15 +597,7 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
     runtime = runtime or MarketDataRuntime()
 
     if runtime.metrics_repository_factory is None:
-        try:
-            from src.db import service_metric_writer
-        except ModuleNotFoundError:  # pragma: no cover - optional dependency missing
-            pass
-        else:
-            def _build_metrics_repository() -> "ServiceMetricRepository":
-                return service_metric_writer()
-
-            runtime.metrics_repository_factory = _build_metrics_repository
+        runtime.metrics_repository_factory = create_service_metrics_writer
 
     cache_prefix = os.getenv(CACHE_PREFIX_ENV, DEFAULT_CACHE_PREFIX).strip() or DEFAULT_CACHE_PREFIX
     cache_prefix = cache_prefix.rstrip(":")

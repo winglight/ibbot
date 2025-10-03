@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
 
 from contextlib import asynccontextmanager
 
@@ -24,9 +24,10 @@ from src.ibbot.redis import (
     get_stream_metrics,
     get_redis_client,
 )
-
-if TYPE_CHECKING:  # pragma: no cover - import for typing only
-    from src.db import ServiceMetricRepository
+from src.services.factories import (
+    ServiceMetricsWriterProtocol,
+    create_service_metrics_writer,
+)
 
 
 Logger = logging.Logger
@@ -152,6 +153,14 @@ QUEUE_MONITOR_SERVICE_NAME = os.getenv(
 )
 
 
+MetricsRepositoryFactory = Callable[
+    [],
+    Awaitable[ServiceMetricsWriterProtocol | None]
+    | ServiceMetricsWriterProtocol
+    | None,
+]
+
+
 @dataclass(slots=True)
 class QueueMonitorRuntime:
     """Monitor Redis queue metrics and expose them for dashboards."""
@@ -167,9 +176,7 @@ class QueueMonitorRuntime:
     service_name: str = QUEUE_MONITOR_SERVICE_NAME
     health_hash_key: str = QUEUE_MONITOR_HEALTH_HASH_KEY
     logger_name: str = "ibbot.services.queue_monitor"
-    metrics_repository_factory: (
-        Callable[[], Awaitable["ServiceMetricRepository"] | "ServiceMetricRepository"] | None
-    ) = None
+    metrics_repository_factory: MetricsRepositoryFactory | None = None
 
     _queue_targets: tuple[QueueTarget, ...] = field(init=False, repr=False)
     _stream_targets: tuple[StreamTarget, ...] = field(init=False, repr=False)
@@ -184,7 +191,7 @@ class QueueMonitorRuntime:
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _ws_manager: WebSocketManager = field(default_factory=WebSocketManager, init=False, repr=False)
     _logger: Logger | None = field(default=None, init=False, repr=False)
-    _metrics_repository: "ServiceMetricRepository" | None = field(
+    _metrics_repository: ServiceMetricsWriterProtocol | None = field(
         default=None, init=False, repr=False
     )
     _metrics_repository_close: Callable[[], Awaitable[None]] | None = field(
@@ -541,15 +548,7 @@ def create_app(*, runtime: QueueMonitorRuntime | None = None) -> FastAPI:
     runtime = runtime or QueueMonitorRuntime()
 
     if runtime.metrics_repository_factory is None:
-        try:
-            from src.db import service_metric_writer
-        except ModuleNotFoundError:  # pragma: no cover - optional dependency missing
-            pass
-        else:
-            def _build_metrics_repository() -> "ServiceMetricRepository":
-                return service_metric_writer()
-
-            runtime.metrics_repository_factory = _build_metrics_repository
+        runtime.metrics_repository_factory = create_service_metrics_writer
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
