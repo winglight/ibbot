@@ -115,16 +115,14 @@ class IBQuoteFeed(QuoteFeed):
                 existing.callbacks.append(callback)
 
                 async def _cancel_existing() -> None:
-                    self._remove_callback(symbol_key, callback)
+                    await self._remove_callback(symbol_key, callback)
 
                 return _cancel_existing
 
         await asyncio.to_thread(self._ensure_connection_ready)
 
         try:
-            subscription = await asyncio.to_thread(
-                self._start_subscription, symbol_key, callback, options or {}
-            )
+            subscription = await self._start_subscription(symbol_key, callback, options or {})
         except RuntimeError as exc:
             raise self._data_source_error_cls(str(exc)) from exc
 
@@ -137,12 +135,12 @@ class IBQuoteFeed(QuoteFeed):
             current = self._subscriptions.get(symbol_key)
             if current:
                 current.callbacks.append(callback)
-                await asyncio.to_thread(self._stop_subscription, subscription)
+                await self._stop_subscription(subscription)
             else:
                 self._subscriptions[symbol_key] = subscription
 
         async def _cancel() -> None:
-            self._remove_callback(symbol_key, callback)
+            await self._remove_callback(symbol_key, callback)
 
         return _cancel
 
@@ -154,7 +152,7 @@ class IBQuoteFeed(QuoteFeed):
         if not self._connection_manager.is_connected():
             raise self._data_source_error_cls("IBKR connection is not active")
 
-    def _start_subscription(
+    async def _start_subscription(
         self,
         symbol: str,
         callback: Callback,
@@ -170,7 +168,7 @@ class IBQuoteFeed(QuoteFeed):
             ticker = ib.reqMktData(contract, "", False, False)
             return ticker, contract
 
-        result = cm.run_in_connection_thread(
+        result = await cm.run_in_connection_thread(
             _subscribe,
             timeout=15.0,
         )
@@ -192,14 +190,14 @@ class IBQuoteFeed(QuoteFeed):
             ticker.updateEvent += _on_update
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.error("Failed to attach update handler for {}: {}", symbol, exc)
-            connection_manager.run_in_connection_thread(
-                lambda: connection_manager.get_ib_instance().cancelMktData(contract)
+            await cm.run_in_connection_thread(
+                lambda: cm.get_ib_instance().cancelMktData(contract)
             )
             return None
 
         return _Subscription(callbacks=[callback], ticker=ticker, contract=contract, handler=_on_update)
 
-    def _stop_subscription(self, subscription: _Subscription) -> None:
+    async def _stop_subscription(self, subscription: _Subscription) -> None:
         ticker = subscription.ticker
         contract = subscription.contract
 
@@ -220,12 +218,12 @@ class IBQuoteFeed(QuoteFeed):
                 except Exception:
                     pass
 
-        cm.run_in_connection_thread(
+        await cm.run_in_connection_thread(
             _cancel,
             timeout=5.0,
         )
 
-    def _remove_callback(self, symbol: str, callback: Callback) -> None:
+    async def _remove_callback(self, symbol: str, callback: Callback) -> None:
         subscription: Optional[_Subscription]
         with self._lock:
             subscription = self._subscriptions.get(symbol)
@@ -239,7 +237,7 @@ class IBQuoteFeed(QuoteFeed):
                 return
             self._subscriptions.pop(symbol, None)
 
-        self._stop_subscription(subscription)
+        await self._stop_subscription(subscription)
 
     def _notify_callbacks(self, symbol: str, payload: Dict[str, float]) -> None:
         callbacks: List[Callback]

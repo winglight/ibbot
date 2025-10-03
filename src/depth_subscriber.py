@@ -153,7 +153,7 @@ class DepthSubscriber:
                         )
 
             try:
-                self.connection_manager.run_in_connection_thread(
+                self.connection_manager.run_in_connection_thread_blocking(
                     _cancel_previous,
                     timeout=_CANCEL_TIMEOUT_SEC,
                 )
@@ -195,7 +195,7 @@ class DepthSubscriber:
             _depth_logger.warning(f"Ticker initial state - domBids: {getattr(ticker, 'domBids', 'None')}, domAsks: {getattr(ticker, 'domAsks', 'None')}")
             return ticker, contract
 
-        result = self.connection_manager.run_in_connection_thread(
+        result = self.connection_manager.run_in_connection_thread_blocking(
             _subscribe,
             timeout=_SUBSCRIBE_TIMEOUT_SEC,
         )
@@ -269,7 +269,7 @@ class DepthSubscriber:
                 except Exception as e:
                     _depth_logger.error(f"cancelMktDepth error for {symbol}: {e}")
 
-        self.connection_manager.run_in_connection_thread(
+        self.connection_manager.run_in_connection_thread_blocking(
             _cancel,
             timeout=_CANCEL_TIMEOUT_SEC,
         )

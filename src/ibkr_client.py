@@ -834,7 +834,10 @@ class IBKRClient:
 
             # 使用连接管理器的方法在正确的事件循环中执行
             try:
-                return self.connection_manager.run_async_in_connection_thread(execute_order_async(), timeout=45)
+                return self.connection_manager.run_async_in_connection_thread_blocking(
+                    execute_order_async(),
+                    timeout=45,
+                )
             except Exception as e:
                 ibkr_logger.error(f"Failed to place {order_type.lower()} order via connection manager: {e}")
                 return None
@@ -1205,8 +1208,7 @@ class IBKRClient:
                     ibkr_logger.error(f"Error requesting market data for {symbol} in connection thread: {e}")
                     return None
             
-            ticker = await asyncio.to_thread(
-                self.connection_manager.run_in_connection_thread,
+            ticker = await self.connection_manager.run_in_connection_thread(
                 _req_ticker,
                 timeout=10.0,
             )
@@ -1301,8 +1303,7 @@ class IBKRClient:
                     ib.cancelMktData(contract)
                 except Exception as e:
                     ibkr_logger.warning(f"Failed to cancel market data for {symbol}: {e}")
-            await asyncio.to_thread(
-                self.connection_manager.run_in_connection_thread,
+            await self.connection_manager.run_in_connection_thread(
                 _cancel_mkt_data,
                 timeout=5.0,
             )
@@ -1528,7 +1529,10 @@ class IBKRClient:
                     ibkr_logger.warning(f"Failed to refresh orders: {e}")
                     return False
 
-            result = self.connection_manager.run_async_in_connection_thread(_refresh(), timeout=1.5)
+            result = self.connection_manager.run_async_in_connection_thread_blocking(
+                _refresh(),
+                timeout=1.5,
+            )
             if result is not None:
                 return bool(result)
             else:
@@ -1690,7 +1694,10 @@ class IBKRClient:
                     ibkr_logger.error(f"Error during cancellation operation for order {order_id}: {inner_e}")
                     return False, f"Error during cancellation: {inner_e}"
 
-            result = self.connection_manager.run_async_in_connection_thread(_cancel_op(), timeout=16)
+            result = self.connection_manager.run_async_in_connection_thread_blocking(
+                _cancel_op(),
+                timeout=16,
+            )
             if result is not None:
                 return result
             else:
@@ -1836,7 +1843,7 @@ class IBKRClient:
                 # 继续执行取消操作，不因刷新失败而中断
 
             # 尝试使用连接管理器在正确的线程中执行操作
-            result = self.connection_manager.run_in_connection_thread(
+            result = self.connection_manager.run_in_connection_thread_blocking(
                 _cancel_orders_operation,
                 timeout=15.0,
             )
@@ -2727,7 +2734,9 @@ class IBKRClient:
                     connection_logger.error(f"Backfill operation failed: {e}")
                     return 0
 
-            result = self.run_async_in_connection_thread(_backfill_op())
+            result = await self.connection_manager.run_async_in_connection_thread(
+                _backfill_op(),
+            )
             try:
                 return int(result or 0)
             except Exception:
