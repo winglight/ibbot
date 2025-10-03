@@ -1,22 +1,55 @@
 import asyncio
 import json
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
 from services.risk import RiskRuntime
 
 
-class RecordingWriter:
+class RecordingRepository:
     def __init__(self) -> None:
-        self.points: list[dict[str, object]] = []
+        self.config_snapshots: list[dict[str, Any]] = []
+        self.rule_snapshots: list[dict[str, Any]] = []
 
-    async def __call__(self, points):  # type: ignore[override]
-        batch = list(points)
-        self.points.extend(batch)
-        return len(batch)
+    async def save_config_snapshot(
+        self,
+        *,
+        service: str,
+        payload: Mapping[str, Any],
+        rules_count: int,
+        updated_at: str | None = None,
+        captured_at: str | datetime | None = None,
+    ) -> None:
+        self.config_snapshots.append(
+            {
+                "service": service,
+                "payload": dict(payload),
+                "rules_count": rules_count,
+                "updated_at": updated_at,
+                "captured_at": captured_at,
+            }
+        )
+
+    async def bulk_upsert_rule_snapshots(
+        self,
+        *,
+        service: str,
+        rules: Mapping[str, Mapping[str, Any]],
+        updated_at: str | None = None,
+        captured_at: str | datetime | None = None,
+    ) -> None:
+        self.rule_snapshots.append(
+            {
+                "service": service,
+                "rules": {symbol: dict(payload) for symbol, payload in rules.items()},
+                "updated_at": updated_at,
+                "captured_at": captured_at,
+            }
+        )
 
 
 class _InMemoryPipeline:
@@ -147,14 +180,14 @@ def test_risk_runtime_triggers_stop_loss(tmp_path: Path) -> None:
 async def _run_integration(tmp_path: Path, redis: Any) -> None:
     await redis.flushall()
 
-    writer = RecordingWriter()
+    repository = RecordingRepository()
 
     async def redis_factory():
         return redis
 
     runtime = RiskRuntime(
         redis_factory=redis_factory,
-        write_fn=writer,
+        risk_snapshot_repository=repository,
         logger_name="risk-service-test",
         service_name="risk-service-test",
         log_dir=tmp_path,
@@ -185,12 +218,16 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
     assert rules_snapshot.get("success") is True
     assert rules_snapshot.get("rules")
 
-    assert any(
-        point.get("measurement") == runtime.config_measurement for point in writer.points
-    )
-    assert any(
-        point.get("measurement") == runtime.rules_measurement for point in writer.points
-    )
+    assert repository.config_snapshots
+    latest_config = repository.config_snapshots[-1]
+    assert latest_config["service"] == runtime.service_name
+    assert latest_config["rules_count"] == 1
+    assert int(latest_config["payload"].get("rules_count", 0)) == 1
+    assert latest_config["payload"].get("updated_at")
+
+    assert repository.rule_snapshots
+    latest_rules = repository.rule_snapshots[-1]
+    assert "MNQ" in latest_rules["rules"]
 
     await runtime.start()
     try:
@@ -216,17 +253,10 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
             },
         )
 
-        async def _points_available():
-            return writer.points if writer.points else None
-
-        await _wait_for(_points_available)
-
         log_file = tmp_path / "risk-service-test.log"
         assert log_file.exists()
         log_content = log_file.read_text(encoding="utf-8")
         assert "Triggered stop_loss" in log_content
-
-        assert any(point["measurement"] == "logs" for point in writer.points)
     finally:
         await runtime.stop()
         await redis.flushall()

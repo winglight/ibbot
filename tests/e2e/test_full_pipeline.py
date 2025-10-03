@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import inspect
 import json
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -301,14 +302,46 @@ class DummyPubSubListener:
                 await result
 
 
-class RecordingWriter:
+class RecordingSnapshotRepository:
     def __init__(self) -> None:
-        self.points: list[dict[str, Any]] = []
+        self.config_snapshots: list[dict[str, Any]] = []
+        self.rule_snapshots: list[dict[str, Any]] = []
 
-    async def __call__(self, points: Any) -> int:
-        batch = list(points)
-        self.points.extend(batch)
-        return len(batch)
+    async def save_config_snapshot(
+        self,
+        *,
+        service: str,
+        payload: Mapping[str, Any],
+        rules_count: int,
+        updated_at: str | None = None,
+        captured_at: str | datetime | None = None,
+    ) -> None:
+        self.config_snapshots.append(
+            {
+                "service": service,
+                "payload": dict(payload),
+                "rules_count": rules_count,
+                "updated_at": updated_at,
+                "captured_at": captured_at,
+            }
+        )
+
+    async def bulk_upsert_rule_snapshots(
+        self,
+        *,
+        service: str,
+        rules: Mapping[str, Mapping[str, Any]],
+        updated_at: str | None = None,
+        captured_at: str | datetime | None = None,
+    ) -> None:
+        self.rule_snapshots.append(
+            {
+                "service": service,
+                "rules": {symbol: dict(payload) for symbol, payload in rules.items()},
+                "updated_at": updated_at,
+                "captured_at": captured_at,
+            }
+        )
 
 
 class RecordingMetricsRepository:
@@ -455,7 +488,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
     fake_ib = FakeIB()
     pubsub = DummyPubSubListener()
     metrics_repo = RecordingMetricsRepository()
-    writer = RecordingWriter()
+    snapshot_repo = RecordingSnapshotRepository()
 
     queue_key = "queue:ib:commands"
     result_stream = "stream:ib:results"
@@ -561,7 +594,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
 
     risk_runtime = RiskRuntime(
         redis_factory=redis_factory,
-        write_fn=writer,
+        risk_snapshot_repository=snapshot_repo,
         logger_name="tests.risk-service",
         service_name="tests.risk-service",
         poll_interval=0.05,

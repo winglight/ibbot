@@ -126,7 +126,7 @@ async def _health_loop(app: FastAPI, interval: float) -> None:
 async def _lifespan(
     app: FastAPI,
     *,
-    runtime_factory: Callable[[Any], RiskRuntime],
+    runtime_factory: Callable[[Any, Any | None], RiskRuntime],
     initial_config: Mapping[str, Any] | None = None,
     health_interval: float = DEFAULT_HEALTH_INTERVAL,
     redis_factory: Callable[[], Any] | None = None,
@@ -145,6 +145,24 @@ async def _lifespan(
         provider = ConfigProvider(redis_client=redis, hash_prefix="hash:config")
         await provider.start()
 
+    snapshot_repository = None
+    snapshot_session = None
+    try:
+        from src.ibbot.db import get_session_factory, risk_snapshot_repository
+    except ModuleNotFoundError:
+        pass
+    else:
+        try:
+            session_factory = get_session_factory()
+            snapshot_session = session_factory()
+            snapshot_repository = risk_snapshot_repository(snapshot_session)
+        except Exception:
+            logger.warning("Failed to initialise risk snapshot repository", exc_info=True)
+            snapshot_session = None
+            snapshot_repository = None
+
+    session_cleanup = snapshot_session
+
     try:
         config_payload = dict(initial_config or {})
         if not config_payload and provider is not None:
@@ -154,7 +172,9 @@ async def _lifespan(
                 logger.warning("Failed to load initial risk config: %s", exc)
                 config_payload = {}
 
-        runtime = runtime_factory(redis)
+        runtime = runtime_factory(redis, snapshot_repository)
+        if runtime.risk_snapshot_repository is None and snapshot_repository is not None:
+            runtime.risk_snapshot_repository = snapshot_repository
 
         stored_config = await runtime.load_risk_config()
         if not stored_config and config_payload:
@@ -205,6 +225,9 @@ async def _lifespan(
         if runtime is not None:
             with contextlib.suppress(Exception):
                 await runtime.stop()
+        if session_cleanup is not None:
+            with contextlib.suppress(Exception):
+                await session_cleanup.close()
         if provider is not None:
             with contextlib.suppress(Exception):
                 await provider.close()
@@ -225,11 +248,12 @@ def create_app(
         title="Risk Service",
         lifespan=lambda app: _lifespan(
             app,
-            runtime_factory=lambda redis: runtime
+            runtime_factory=lambda redis, repository: runtime
             or RiskRuntime(
                 redis_factory=lambda: redis,
                 logger_name=SERVICE_NAME,
                 service_name=SERVICE_NAME,
+                risk_snapshot_repository=repository,
             ),
             initial_config=initial_config,
             health_interval=health_interval,

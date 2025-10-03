@@ -24,7 +24,7 @@ async def test_rule_lifecycle_persists_and_records_history() -> None:
     async def factory() -> FakeRedis:
         return redis
 
-    runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
+    runtime = RiskRuntime(redis_factory=factory)
 
     await runtime.save_risk_config({"risk_per_trade_r": 0.01})
     await runtime.reload_from_storage()
@@ -78,7 +78,7 @@ async def test_load_risk_rules_promotes_cached_metadata() -> None:
     async def factory() -> FakeRedis:
         return redis
 
-    runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
+    runtime = RiskRuntime(redis_factory=factory)
 
     legacy_payload = {
         "symbol": "es",
@@ -121,7 +121,7 @@ async def test_config_saves_merge_and_removal() -> None:
     async def factory() -> FakeRedis:
         return redis
 
-    runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
+    runtime = RiskRuntime(redis_factory=factory)
 
     await runtime.save_risk_config({"risk_per_trade_r": 0.02, "account_equity": 200000})
     config_snapshot, _ = await runtime.reload_from_storage()
@@ -143,7 +143,7 @@ async def test_sizing_history_stream_filters_and_counts() -> None:
     async def factory() -> FakeRedis:
         return redis
 
-    runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
+    runtime = RiskRuntime(redis_factory=factory)
 
     now = datetime.now(timezone.utc).isoformat()
     await runtime.append_sizing_history({"symbol": "ES", "contracts": 3, "timestamp": now})

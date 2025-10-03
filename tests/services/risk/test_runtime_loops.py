@@ -22,7 +22,7 @@ async def _create_runtime(redis: FakeRedis) -> RiskRuntime:
     async def factory() -> FakeRedis:
         return redis
 
-    runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
+    runtime = RiskRuntime(redis_factory=factory)
     runtime._redis = redis  # type: ignore[assignment]
     runtime._logger = CapturingLogger()
     await runtime.update_config({"rules": []})
