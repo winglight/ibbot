@@ -1,24 +1,53 @@
 #!/usr/bin/env python3
 """
 IBKR连接诊断工具
-用于检查和诊断IBKR连接问题
+用于检查和诊断IBKR与MariaDB的连接问题。
 """
 
+from __future__ import annotations
+
+import asyncio
+import os
 import socket
 import sys
-import os
 from pathlib import Path
-from src.config import load_project_env
+from typing import Set
+
 from loguru import logger
-import asyncio
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from ibbot.db.config import DatabaseConfigError, resolve_database_url  # noqa: E402
+from ibbot.db.schemas import metadata  # noqa: E402
+from sqlalchemy import inspect, text  # noqa: E402
+from sqlalchemy.engine.url import make_url  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
+from src.config import load_project_env  # noqa: E402
 
 try:  # pragma: no cover - utility script, rarely exercised in tests
     from ib_insync import IB
 except ImportError:  # pragma: no cover - allow diagnostics in stub mode
     from test.ib_insync_stub import IB
 
-# 加载环境变量
 load_project_env()
+
+REQUIRED_DB_TABLES: Set[str] = {table.name for table in metadata.sorted_tables}
+
+
+def _redact_db_url(url: str) -> str:
+    parsed = make_url(url)
+    redacted = parsed
+    if parsed.password:
+        redacted = redacted.set(password="***")
+    return str(redacted)
+
+
+def _inspect_tables(sync_connection) -> set[str]:
+    inspector = inspect(sync_connection)
+    return set(inspector.get_table_names())
+
 
 def check_port_connectivity(host: str, port: int) -> bool:
     """检查端口连通性"""
@@ -28,59 +57,158 @@ def check_port_connectivity(host: str, port: int) -> bool:
         result = sock.connect_ex((host, port))
         sock.close()
         return result == 0
-    except Exception as e:
-        logger.error(f"端口连通性检查失败: {e}")
+    except Exception as exc:  # pragma: no cover - system specific
+        logger.error(f"端口连通性检查失败: {exc}")
         return False
+
 
 async def test_ibkr_connection(host: str, port: int, client_id: int) -> bool:
     """测试IBKR连接，自动尝试不同的客户端ID"""
     ib = IB()
-    
-    # 尝试多个客户端ID
+
     for attempt in range(6):
         try_client_id = client_id + attempt
         if try_client_id > 32:
-            try_client_id = try_client_id - 32
-        
+            try_client_id -= 32
+
         try:
             print(f"   尝试客户端ID: {try_client_id}")
             await ib.connectAsync(host=host, port=port, clientId=try_client_id, timeout=8)
             logger.info(f"IBKR连接测试成功，使用客户端ID: {try_client_id}")
             ib.disconnect()
             return True
-        except Exception as e:
-            error_msg = str(e)
+        except Exception as exc:
+            error_msg = str(exc)
             if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():
                 print(f"   客户端ID {try_client_id} 已被使用")
                 continue
-            elif attempt == 5:  # 最后一次尝试
-                logger.error(f"IBKR连接测试失败: {e}")
+            if attempt == 5:
+                logger.error(f"IBKR连接测试失败: {exc}")
                 return False
-            else:
-                print(f"   客户端ID {try_client_id} 连接失败: {error_msg}")
-    
+            print(f"   客户端ID {try_client_id} 连接失败: {error_msg}")
+
     return False
 
-def main():
-    """主诊断函数"""
+
+async def test_mariadb_connection() -> bool:
+    print("3. 检查MariaDB数据库...")
+    try:
+        db_url = resolve_database_url(os.environ)
+    except DatabaseConfigError as exc:
+        print(f"   ✗ 数据库配置错误: {exc}")
+        print("   解决方案:")
+        print("     - 设置 IBBOT_DB_URL 或 DATA_LAYER_DB_URL 环境变量")
+        print("     - 确保连接字符串使用 mysql+asyncmy 驱动")
+        return False
+
+    print(f"   数据库URL: {_redact_db_url(db_url)}")
+
+    try:
+        engine: AsyncEngine = create_async_engine(db_url, pool_pre_ping=True)
+    except Exception as exc:  # pragma: no cover - optional driver handling
+        print(f"   ✗ 无法创建数据库引擎: {exc}")
+        print("   解决方案:")
+        print("     - 安装依赖: pip install 'sqlalchemy[asyncio]' asyncmy")
+        return False
+
+    try:
+        async with engine.connect() as connection:
+            try:
+                result = await connection.execute(text("SELECT 1"))
+                value = result.scalar_one()
+                print(f"   ✓ 连接成功 (SELECT 1 -> {value})")
+            except Exception as exc:
+                print(f"   ✗ 数据库查询失败: {exc}")
+                print("   解决方案:")
+                print("     - 检查MariaDB服务是否正在运行")
+                print("     - 确认网络与安全组允许数据库端口访问")
+                print("     - 验证数据库用户权限")
+                return False
+
+            tables = await connection.run_sync(_inspect_tables)
+            missing = sorted(REQUIRED_DB_TABLES - tables)
+            if missing:
+                print("   ✗ 数据库缺少必要表:")
+                for table in missing:
+                    print(f"     - {table}")
+                print("   解决方案:")
+                print("     - 运行 scripts/sql/20240522_init_mariadb.sql 初始化表结构")
+                print("     - 或执行最新的数据库迁移脚本")
+                return False
+
+            print("   ✓ 所有必需表均已存在")
+    except Exception as exc:  # pragma: no cover - driver/environment specific
+        print(f"   ✗ 数据库连接异常: {exc}")
+        print("   解决方案:")
+        print("     - 检查数据库主机与端口配置")
+        print("     - 确认凭据是否正确")
+        print("     - 查看数据库日志获取更多信息")
+        return False
+    finally:
+        try:
+            await engine.dispose()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+
+    return True
+
+
+async def _run_async_checks(host: str, port: int, client_id: int) -> None:
+    print("2. 测试IBKR API连接...")
+    try:
+        ib_result = await test_ibkr_connection(host, port, client_id)
+    except Exception as exc:  # pragma: no cover - depends on external API
+        print(f"   ✗ 连接测试异常: {exc}")
+        ib_result = False
+
+    if ib_result:
+        print("   ✓ IBKR API连接成功")
+    else:
+        print("   ✗ IBKR API连接失败")
+        print("   可能原因:")
+        print("   - 客户端ID冲突")
+        print("   - API未在TWS/Gateway中启用")
+        print("   - 连接超时")
+        print()
+        print("解决方案:")
+        print("   1. 在TWS/Gateway中启用API连接:")
+        print("      - 打开 Configure > API > Settings")
+        print("      - 勾选 'Enable ActiveX and Socket Clients'")
+        print("      - 设置正确的端口号")
+        print("   2. 尝试不同的客户端ID (1-32)")
+        print("   3. 重启TWS/Gateway")
+
+    print()
+    db_result = await test_mariadb_connection()
+    print()
+
+    if ib_result and db_result:
+        print("诊断结果: IBKR 与 MariaDB 配置均正常")
+    elif ib_result:
+        print("诊断结果: IBKR 正常，但 MariaDB 存在问题")
+    elif db_result:
+        print("诊断结果: MariaDB 正常，但 IBKR 存在问题")
+    else:
+        print("诊断结果: IBKR 与 MariaDB 均需要进一步检查")
+
+
+def main() -> None:
     print("=" * 60)
     print("IBKR连接诊断工具")
     print("=" * 60)
-    
-    # 读取配置
-    host = os.getenv('IBKR_HOST', '127.0.0.1')
-    port = int(os.getenv('IBKR_PORT', '4002'))
-    client_id = int(os.getenv('IBKR_CLIENT_ID', '1'))
-    paper_trading = os.getenv('IBKR_PAPER_TRADING', 'True').lower() == 'true'
-    
-    print(f"当前配置:")
+
+    host = os.getenv("IBKR_HOST", "127.0.0.1")
+    port = int(os.getenv("IBKR_PORT", "4002"))
+    client_id = int(os.getenv("IBKR_CLIENT_ID", "1"))
+    paper_trading = os.getenv("IBKR_PAPER_TRADING", "True").lower() == "true"
+
+    print("当前配置:")
     print(f"  主机: {host}")
     print(f"  端口: {port}")
     print(f"  客户端ID: {client_id}")
     print(f"  模拟交易: {paper_trading}")
     print()
-    
-    # 检查1: 端口连通性
+
     print("1. 检查端口连通性...")
     if check_port_connectivity(host, port):
         print("   ✓ 端口连通性正常")
@@ -101,32 +229,9 @@ def main():
         print("   3. 在TWS/Gateway中启用API连接")
         print("   4. 检查防火墙设置")
         return
-    
-    # 检查2: IBKR API连接
-    print("2. 测试IBKR API连接...")
-    try:
-        result = asyncio.run(test_ibkr_connection(host, port, client_id))
-        if result:
-            print("   ✓ IBKR API连接成功")
-            print("\n诊断结果: 连接配置正常")
-        else:
-            print("   ✗ IBKR API连接失败")
-            print("   可能原因:")
-            print("   - 客户端ID冲突")
-            print("   - API未在TWS/Gateway中启用")
-            print("   - 连接超时")
-            print()
-            print("解决方案:")
-            print("   1. 在TWS/Gateway中启用API连接:")
-            print("      - 打开 Configure > API > Settings")
-            print("      - 勾选 'Enable ActiveX and Socket Clients'")
-            print("      - 设置正确的端口号")
-            print("   2. 尝试不同的客户端ID (1-32)")
-            print("   3. 重启TWS/Gateway")
-    except Exception as e:
-        print(f"   ✗ 连接测试异常: {e}")
-    
-    print()
+
+    asyncio.run(_run_async_checks(host, port, client_id))
+
     print("常见端口配置:")
     print("  TWS Live: 7497")
     print("  TWS Paper: 7497")
@@ -138,6 +243,7 @@ def main():
     print("  2. API设置是否正确配置")
     print("  3. 网络连接是否正常")
     print("  4. 防火墙是否允许连接")
+
 
 if __name__ == "__main__":
     main()

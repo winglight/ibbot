@@ -21,7 +21,15 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from ibbot.config import ConfigProvider  # noqa: E402
+from ibbot.db.config import DatabaseConfigError, resolve_database_url  # noqa: E402
+from ibbot.db.schemas import metadata  # noqa: E402
 from ibbot.logging import get_log_file, get_logger  # noqa: E402
+from sqlalchemy import inspect, text  # noqa: E402
+from sqlalchemy.engine.url import make_url  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
+
+
+REQUIRED_DB_TABLES: frozenset[str] = frozenset(table.name for table in metadata.sorted_tables)
 
 
 @dataclass(slots=True)
@@ -150,82 +158,117 @@ def _redact_db_url(url: str | None) -> str:
     return urlunparse(parsed._replace(netloc=netloc))
 
 
-def _diagnose_mariadb_sync(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
-    url = _first_non_empty(config, "IBBOT_DB_URL", "DATA_LAYER_DB_URL", "MARIADB_URL", "DATABASE_URL")
-    user = _first_non_empty(config, "IBBOT_DB_USER", "MARIADB_USER", "DB_USER")
-    database = _first_non_empty(config, "IBBOT_DB_NAME", "MARIADB_DATABASE", "DB_NAME")
+def _collect_table_names(sync_connection: Any) -> set[str]:
+    inspector = inspect(sync_connection)
+    return set(inspector.get_table_names())
 
+
+async def _diagnose_mariadb(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
     details: dict[str, Any] = {
-        "url": _redact_db_url(url),
-        "user": user or "<not configured>",
-        "database": database or "<not configured>",
+        "required_tables": sorted(REQUIRED_DB_TABLES),
     }
+
+    try:
+        resolved_url = resolve_database_url(config)
+    except DatabaseConfigError as exc:
+        return DiagnosticResult(
+            name="MariaDB",
+            success=False,
+            message=str(exc),
+            details=details,
+        )
+
+    details["url"] = _redact_db_url(resolved_url)
+
+    try:
+        parsed_url = make_url(resolved_url)
+        details["driver"] = parsed_url.drivername
+        details["database"] = parsed_url.database or "<default>"
+        if parsed_url.username:
+            details["user"] = parsed_url.username
+    except Exception:  # pragma: no cover - defensive parsing guard
+        details["driver"] = "<unknown>"
 
     if dry_run:
         return DiagnosticResult(
             name="MariaDB",
             success=True,
-            message="Dry-run: skipped database check.",
-            details=details,
-        )
-
-    if url is None:
-        return DiagnosticResult(
-            name="MariaDB",
-            success=False,
-            message="IBBOT_DB_URL is not configured.",
+            message="Dry-run: skipped database connectivity check.",
             details=details,
         )
 
     try:
-        from src.db import MariaDBConfigurationError, connect
-    except ImportError as exc:  # pragma: no cover - optional dependency resolution
+        engine: AsyncEngine = create_async_engine(resolved_url, pool_pre_ping=True)
+    except Exception as exc:  # pragma: no cover - driver discovery depends on environment
         return DiagnosticResult(
             name="MariaDB",
             success=False,
-            message=f"Failed to import database helpers: {exc}",
+            message=f"Failed to create async engine: {exc}",
             details=details,
         )
 
     try:
-        with connect() as connection:
-            cursor = connection.cursor()
+        async with engine.connect() as connection:
             try:
-                cursor.execute("SELECT 1")
-                row = cursor.fetchone()
-            finally:
-                cursor.close()
-            try:
-                version = getattr(connection, "get_server_info", lambda: None)()
-            except Exception:  # pragma: no cover - server_info availability varies
+                version = await connection.scalar(text("SELECT VERSION()"))
+            except Exception:  # pragma: no cover - depends on server permissions
                 version = None
-            select_value: Any | None = None
-            if isinstance(row, Mapping):
-                select_value = next(iter(row.values()), None)
-            elif row:
-                select_value = row[0]
             details["server_version"] = version or "<unknown>"
-            details["select_result"] = select_value
-    except MariaDBConfigurationError as exc:
-        return DiagnosticResult(name="MariaDB", success=False, message=str(exc), details=details)
+
+            try:
+                result = await connection.execute(text("SELECT 1"))
+                details["select_result"] = result.scalar_one()
+            except Exception as exc:
+                return DiagnosticResult(
+                    name="MariaDB",
+                    success=False,
+                    message=f"Connectivity probe failed: {exc}",
+                    details=details,
+                )
+
+            try:
+                available_tables = await connection.run_sync(_collect_table_names)
+            except Exception as exc:
+                return DiagnosticResult(
+                    name="MariaDB",
+                    success=False,
+                    message=f"Failed to introspect tables: {exc}",
+                    details=details,
+                )
+
+            missing_tables = sorted(REQUIRED_DB_TABLES - available_tables)
+            details["tables_present"] = sorted(available_tables)
+            details["missing_tables"] = missing_tables
+
+            if missing_tables:
+                return DiagnosticResult(
+                    name="MariaDB",
+                    success=False,
+                    message=(
+                        "Database is reachable but required tables are missing: "
+                        + ", ".join(missing_tables)
+                    ),
+                    details=details,
+                )
     except Exception as exc:  # pragma: no cover - network/database failures vary
         return DiagnosticResult(
             name="MariaDB",
             success=False,
-            message=f"Database query failed: {exc}",
+            message=f"Database check failed: {exc}",
             details=details,
         )
+    finally:
+        try:
+            await engine.dispose()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
 
     return DiagnosticResult(
         name="MariaDB",
         success=True,
-        message="Connectivity check succeeded.",
+        message="Connectivity and schema checks succeeded.",
         details=details,
     )
-
-
-async def _diagnose_mariadb(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
-    return await asyncio.to_thread(_diagnose_mariadb_sync, config, dry_run=dry_run)
 
 
 def _diagnose_logging(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
@@ -340,3 +383,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
