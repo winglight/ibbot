@@ -123,7 +123,30 @@ class AccountSnapshotService:
                     f"Failed to mark snapshots stale: {exc}"
                 )
 
-        asyncio.run_coroutine_threadsafe(_mark(), loop)
+        def _schedule_mark() -> None:
+            task = loop.create_task(_mark())
+
+            def _log_error(fut: asyncio.Future) -> None:
+                try:
+                    fut.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    snapshot_service_logger.warning(
+                        f"Failed to mark snapshots stale: {exc}"
+                    )
+
+            task.add_done_callback(_log_error)
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop.call_soon_threadsafe(_schedule_mark)
+        else:
+            if running_loop is loop:
+                _schedule_mark()
+            else:
+                loop.call_soon_threadsafe(_schedule_mark)
 
     def request_immediate_refresh(self, reason: str = "connection_restored") -> None:
         """Schedule an immediate refresh when the connection becomes available."""
@@ -132,10 +155,20 @@ class AccountSnapshotService:
         if not loop or not loop.is_running():
             return
 
-        asyncio.run_coroutine_threadsafe(
-            self.refresh_both(reason=reason, fast_positions=True),
-            loop,
-        )
+        coro = self.refresh_both(reason=reason, fast_positions=True)
+
+        def _schedule_refresh() -> None:
+            loop.create_task(coro)
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop.call_soon_threadsafe(_schedule_refresh)
+        else:
+            if running_loop is loop:
+                _schedule_refresh()
+            else:
+                loop.call_soon_threadsafe(_schedule_refresh)
 
     # ------------------------------------------------------------------
     # Refresh helpers

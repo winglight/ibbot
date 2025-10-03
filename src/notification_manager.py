@@ -240,9 +240,7 @@ class NotificationManager:
             loaded: Optional[Dict[str, Any]] = None
             if self.db_manager:
                 try:
-                    loaded = await asyncio.to_thread(
-                        self.db_manager.load_notification_config
-                    )
+                    loaded = await self.db_manager.load_notification_config_async()
                 except Exception as exc:
                     notification_logger.error(
                         f"Load notification settings failed: {exc}"
@@ -273,8 +271,7 @@ class NotificationManager:
             return
 
         try:
-            await asyncio.to_thread(
-                self.db_manager.save_notification_history,
+            await self.db_manager.save_notification_history_async(
                 channel=channel,
                 event_type=event_type,
                 message=message,
