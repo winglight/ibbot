@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import importlib
+import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -243,6 +244,8 @@ class StrategyRuntime:
         self._data_push_handler = data_push_handler
         self.pending_tasks: int = 0
         self.last_event_at: str | None = None
+        self._metadata_sync_lock = asyncio.Lock()
+        self._last_metadata_sync: float | None = None
 
     @property
     def queue_key(self) -> str:
@@ -253,7 +256,7 @@ class StrategyRuntime:
         return self._event_stream
 
     async def start(self) -> None:
-        await self._synchronise_metadata()
+        await self._synchronise_metadata(force=True)
         self.pending_tasks = await self._get_queue_length()
         self._stop.clear()
         if self._consumer is not None:
@@ -277,6 +280,7 @@ class StrategyRuntime:
         await self._publish_health(healthy=False)
 
     async def list_strategies(self) -> list[StrategyDocument]:
+        await self._synchronise_metadata(force=True)
         async with self._lock:
             return [
                 doc.model_copy()
@@ -544,6 +548,7 @@ class StrategyRuntime:
         return updated
 
     async def list_strategy_files(self) -> list[str]:
+        await self._synchronise_metadata(force=True)
         try:
             settings = await load_strategy_settings(self._redis)
         except Exception:  # pragma: no cover - defensive guard
@@ -1053,23 +1058,28 @@ class StrategyRuntime:
             except Exception:
                 self._logger.debug("Failed to rename risk settings via manager", exc_info=True)
 
-    async def _synchronise_metadata(self) -> None:
-        try:
-            settings = await load_strategy_settings(self._redis)
-        except Exception:  # pragma: no cover - defensive guard
-            settings = dict(DEFAULT_SETTINGS)
-        strategy_path = settings.get("strategy_path") or DEFAULT_SETTINGS.get("strategy_path")
-        try:
-            await sync_strategy_metadata(
-                self._redis,
-                {},
-                metadata_prefix=self._metadata_prefix,
-                strategy_path=strategy_path,
-                logger=self._logger,
-            )
-        except Exception:  # pragma: no cover - defensive guard
-            self._logger.warning("Failed to synchronise strategy metadata", exc_info=True)
-        await self._load_metadata()
+    async def _synchronise_metadata(self, *, force: bool = False) -> None:
+        async with self._metadata_sync_lock:
+            if not force and self._last_metadata_sync is not None:
+                return
+            try:
+                settings = await load_strategy_settings(self._redis)
+            except Exception:  # pragma: no cover - defensive guard
+                settings = dict(DEFAULT_SETTINGS)
+            strategy_path = settings.get("strategy_path") or DEFAULT_SETTINGS.get("strategy_path")
+            try:
+                await sync_strategy_metadata(
+                    self._redis,
+                    {},
+                    metadata_prefix=self._metadata_prefix,
+                    strategy_path=strategy_path,
+                    logger=self._logger,
+                )
+            except Exception:  # pragma: no cover - defensive guard
+                self._logger.warning("Failed to synchronise strategy metadata", exc_info=True)
+                return
+            await self._load_metadata()
+            self._last_metadata_sync = time.monotonic()
 
     @classmethod
     def _extract_metadata_files(cls, metadata: Mapping[str, Any]) -> set[str]:
