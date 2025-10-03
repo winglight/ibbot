@@ -627,14 +627,16 @@ class IBKRClient:
     async def _attempt_connection(self, attempt_number: int) -> bool:
         if self._needs_cleanup:
             try:
-                await run_in_cpu_executor(self.connection_manager.disconnect)
+                await self.connection_manager.disconnect_async(timeout=self.connection_manager._connect_wait_limit_sec)
+            except asyncio.TimeoutError as exc:
+                ibkr_logger.debug(f"Cleanup disconnect timed out: {exc}")
             except Exception as exc:
                 ibkr_logger.debug(f"Cleanup disconnect failed: {exc}")
             finally:
                 self._needs_cleanup = False
 
         try:
-            result = await run_in_cpu_executor(self.connection_manager.connect)
+            result = await self.connection_manager.connect_async()
         except Exception as exc:
             ibkr_logger.error(
                 "Reconnect attempt raised error",
