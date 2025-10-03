@@ -637,6 +637,7 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
 
     order_source_val = _first_value("source", "order_source")
     strategy_val = _first_value("strategy", "strategy_name")
+    notes_val = _first_value("notes", "note", "comment")
 
     return {
         "order_id": _order_value(order, "order_id"),
@@ -670,6 +671,7 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
         "trigger_type": trigger_type,
         "commission": commission_val,
         "pnl": _order_value(order, "pnl"),
+        "notes": notes_val,
     }
 
 

@@ -79,6 +79,7 @@ def test_order_submission_persists_snapshot_and_normalises_request() -> None:
                         "order_type": "LIMIT",
                         "limit_price": 4450.5,
                         "source": "web",
+                        "notes": "Entry at support",
                     },
                 )
                 list_response = await client.get("/orders")
@@ -95,6 +96,7 @@ def test_order_submission_persists_snapshot_and_normalises_request() -> None:
             assert snapshot["active_orders"][0]["command_id"] == command_id
             assert snapshot["active_orders"][0]["symbol"] == "ES"
             assert snapshot["active_orders"][0]["limit_price"] == 4450.5
+            assert snapshot["active_orders"][0]["notes"] == "Entry at support"
             assert snapshot["active_orders"][0]["events"][0]["type"] == "submission"
 
             history = await redis.lrange(runtime.history_key, 0, -1)
@@ -102,11 +104,13 @@ def test_order_submission_persists_snapshot_and_normalises_request() -> None:
             history_entry = json.loads(history[0])
             assert history_entry["event"] == "submitted"
             assert history_entry["command_id"] == command_id
+            assert history_entry["order"]["notes"] == "Entry at support"
 
             payload: dict[str, Any] = list_response.json()
             assert payload["total"] == 1
             assert payload["orders"][0]["symbol"] == "ES"
             assert payload["orders"][0]["limit_price"] == 4450.5
+            assert payload["orders"][0]["notes"] == "Entry at support"
             assert payload["limit"] == 50
             assert payload["offset"] == 0
             assert payload["page"] == 0
@@ -422,6 +426,7 @@ def test_order_submission_writes_influx_point(monkeypatch: pytest.MonkeyPatch) -
                 order_type="LIMIT",
                 limit_price=4450.5,
                 exchange="CME",
+                notes="Hedge entry",
             )
             await runtime.submit_order(submission)
             assert writer.points
@@ -436,6 +441,7 @@ def test_order_submission_writes_influx_point(monkeypatch: pytest.MonkeyPatch) -
             assert pytest.approx(fields["quantity"], rel=1e-6) == 2.0
             assert pytest.approx(fields["limit_price"], rel=1e-6) == 4450.5
             assert fields["order_type"] == "LIMIT"
+            assert fields["notes"] == "Hedge entry"
         finally:
             await runtime.stop()
 

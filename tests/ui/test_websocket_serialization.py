@@ -17,6 +17,7 @@ def test_serialise_order_prefers_canonical_fields() -> None:
         "source": "strategy",
         "strategy": "alpha",
         "submitted_at": "2024-05-01T10:00:00+08:00",
+        "notes": "Primary entry",
     }
 
     payload = websocket_module._serialise_order(order)
@@ -29,6 +30,7 @@ def test_serialise_order_prefers_canonical_fields() -> None:
     assert payload["order_source"] == "strategy"
     assert payload["strategy_name"] == "alpha"
     assert payload["submit_time"] == "2024-05-01T10:00:00+08:00"
+    assert payload["notes"] == "Primary entry"
 
 
 def test_serialise_order_falls_back_to_legacy_fields() -> None:
@@ -45,6 +47,7 @@ def test_serialise_order_falls_back_to_legacy_fields() -> None:
         "strategy_name": "legacy",
         "created_at": "2024-05-02T09:00:00",
         "commission": "1.0",
+        "note": "Legacy fallback",
     }
 
     payload = websocket_module._serialise_order(order)
@@ -57,6 +60,7 @@ def test_serialise_order_falls_back_to_legacy_fields() -> None:
     assert payload["strategy_name"] == "legacy"
     assert payload["commission"] == 1.0
     assert payload["submit_time"] == "2024-05-02T09:00:00+08:00"
+    assert payload["notes"] == "Legacy fallback"
 
 
 def test_orders_payload_includes_start_date_metadata() -> None:
