@@ -26,7 +26,7 @@ from src.websocket_manager import websocket_manager as global_websocket_manager
 from src.dom_service import get_dom_service
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
-from src.routes.monitoring import build_influx_write_rate_payload, get_queue_metrics
+from src.routes.monitoring import build_metric_series_payload, get_queue_metrics
 from src.service_status import build_service_status_payload
 from src.ib_command_health import (
     IB_COMMAND_HEALTH_KEY,
@@ -2067,14 +2067,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     payload["request_id"] = request_token
                 last_responses[key] = payload
                 await _send_or_disconnect(websocket, payload)
-            elif msg_type == "request_influx_write_rate":
+            elif msg_type == "request_metrics_write_rate":
                 window = (message.get("window") or "1h").strip() or "1h"
                 service_filter = message.get("service")
                 metric_filter = message.get("metric")
                 aggregate = (message.get("aggregate") or "sum").strip() or "sum"
                 request_token = message.get("request_id")
 
-                key = f"influx_write_rate:{window}:{service_filter or ''}:{metric_filter or ''}:{aggregate}"
+                key = f"metrics_write_rate:{window}:{service_filter or ''}:{metric_filter or ''}:{aggregate}"
                 force = bool(message.get("force"))
                 if not _allow_request(request_tracker, key, force=force):
                     cached = last_responses.get(key)
@@ -2088,7 +2088,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         await _send_or_disconnect(
                             websocket,
                             {
-                                "type": "influx_write_rate",
+                                "type": "metrics_write_rate",
                                 "success": False,
                                 "error": "Rate limited",
                                 "query": {
@@ -2102,7 +2102,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    data = build_influx_write_rate_payload(
+                    data = build_metric_series_payload(
                         window=window,
                         service=service_filter,
                         metric=metric_filter,
@@ -2112,7 +2112,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await _send_or_disconnect(
                         websocket,
                         {
-                            "type": "influx_write_rate",
+                            "type": "metrics_write_rate",
                             "success": False,
                             "error": getattr(exc, "detail", None) or str(exc),
                             "query": {
@@ -2125,11 +2125,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                     continue
                 except Exception as exc:
-                    logger.warning(f"Failed to load influx metrics: {exc}")
+                    logger.warning(f"Failed to load metrics write rate: {exc}")
                     await _send_or_disconnect(
                         websocket,
                         {
-                            "type": "influx_write_rate",
+                            "type": "metrics_write_rate",
                             "success": False,
                             "error": str(exc),
                             "query": {
@@ -2143,7 +2143,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 payload = {
-                    "type": "influx_write_rate",
+                    "type": "metrics_write_rate",
                     "success": True,
                     "source": "websocket",
                     **data,

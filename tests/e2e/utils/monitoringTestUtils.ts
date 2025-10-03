@@ -20,7 +20,7 @@ type QueueSnapshot = {
   }>;
 };
 
-type InfluxSeriesEntry = {
+type MetricsSeriesEntry = {
   time: string;
   value: number;
   service: string;
@@ -46,7 +46,7 @@ type LogsResponse = {
 
 type MonitoringStubConfig = {
   queueSnapshot?: QueueSnapshot;
-  influxSeries?: InfluxSeriesEntry[];
+  metricsSeries?: MetricsSeriesEntry[];
   baseLogs?: string[];
   tailLogs?: string[];
   logModules?: string[];
@@ -76,7 +76,7 @@ export const queueSnapshot: QueueSnapshot = {
   ],
 };
 
-export const influxSeries: InfluxSeriesEntry[] = [
+export const metricsSeries: MetricsSeriesEntry[] = [
   {
     time: new Date('2024-05-05T10:00:00Z').toISOString(),
     value: 4,
@@ -100,7 +100,7 @@ export const tailLogs: string[] = [
   '| 2024-05-05 10:00:10 | INFO | queue_manager | tail update delivered\n',
 ];
 
-const computeInfluxSummary = (series: InfluxSeriesEntry[]) => {
+const computeMetricsSummary = (series: MetricsSeriesEntry[]) => {
   const summary: Record<string, { points: number; sum: number; average: number }> = {};
   series.forEach((entry) => {
     const key = entry.metric || entry.service || 'unknown';
@@ -121,11 +121,11 @@ const computeInfluxSummary = (series: InfluxSeriesEntry[]) => {
 
 export async function stubMonitoringApis(page: Page, config: MonitoringStubConfig = {}) {
   const queueSnapshotData = config.queueSnapshot ?? queueSnapshot;
-  const influxSeriesData = config.influxSeries ?? influxSeries;
+  const metricsSeriesData = config.metricsSeries ?? metricsSeries;
   const baseLogsData = config.baseLogs ?? baseLogs;
   const tailLogsData = config.tailLogs ?? tailLogs;
   const modules = config.logModules ?? ['queue_manager'];
-  const influxSummary = computeInfluxSummary(influxSeriesData);
+  const metricsSummary = computeMetricsSummary(metricsSeriesData);
 
   let tailDelivered = false;
 
@@ -142,13 +142,13 @@ export async function stubMonitoringApis(page: Page, config: MonitoringStubConfi
       return;
     }
 
-    if (pathname === '/api/monitoring/influx/write-rate') {
+    if (pathname === '/api/monitoring/metrics/write-rate') {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          series: influxSeriesData,
-          summary: influxSummary,
+          series: metricsSeriesData,
+          summary: metricsSummary,
         }),
       });
       return;

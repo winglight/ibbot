@@ -26,7 +26,7 @@ try:  # redis is optional for some test environments
 except Exception:  # pragma: no cover - redis optional in CI
     Redis = Any  # type: ignore
 
-from src.ibbot.influx import query_data
+from src.db import MariaDBConfigurationError, run_sql_query
 from src.ibbot.redis import get_redis_client
 
 OPTIMIZER_APP_TITLE = "IBBot Optimizer"
@@ -130,7 +130,7 @@ class OptimizerService:
     """Encapsulates access to Redis and Influx for optimizer tasks."""
 
     redis_factory: Callable[[], Awaitable[Redis] | Redis] = get_redis_client
-    influx_query: Callable[[str], Awaitable[Iterable[Any]] | Iterable[Any]] = query_data
+    db_query: Callable[[str], Awaitable[Iterable[Any]] | Iterable[Any]] = run_sql_query
 
     async def _get_redis(self) -> Redis:
         instance = self.redis_factory()
@@ -138,12 +138,20 @@ class OptimizerService:
             return await instance  # type: ignore[return-value]
         return instance  # type: ignore[return-value]
 
-    async def _query_influx(self, query: str) -> list[Any]:
-        result = self.influx_query(query)
+    async def _query_database(self, query: str) -> list[Any]:
+        try:
+            result = self.db_query(query)
+        except MariaDBConfigurationError as exc:
+            raise OptimizerDataError(f"Database configuration error: {exc}") from exc
+        except Exception as exc:
+            raise OptimizerDataError(f"Failed to load training data: {exc}") from exc
+
         if inspect.isawaitable(result):
             result = await result  # type: ignore[assignment]
+
         if isinstance(result, Sequence):
             return list(result)
+
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: list(result))
 
@@ -172,7 +180,7 @@ class OptimizerService:
             {"type": "task_progress", "task_id": submission.task_id, "progress": "50"},
         )
 
-        training_data = await self._query_influx(submission.training_query)
+        training_data = await self._query_database(submission.training_query)
 
         parsed_params = _parse_mapping(param_space)
         parsed_history = _parse_mapping(history_metrics)

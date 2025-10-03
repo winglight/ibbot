@@ -56,7 +56,7 @@
 
             if (this.app && typeof this.app.registerWebSocketHandler === 'function') {
                 this.influxWsUnsubscribe = this.app.registerWebSocketHandler(
-                    'influx_write_rate',
+                    'metrics_write_rate',
                     (payload) => this.handleInfluxWriteRate(payload)
                 );
                 this.queueWsUnsubscribe = this.app.registerWebSocketHandler(
@@ -119,7 +119,7 @@
                 try {
                     this.influxWsUnsubscribe();
                 } catch (error) {
-                    console.warn('Failed to unsubscribe influx websocket handler', error);
+                    console.warn('Failed to unsubscribe metrics write rate websocket handler', error);
                 }
                 this.influxWsUnsubscribe = null;
             }
@@ -179,7 +179,7 @@
         }
 
         handleInfluxWriteRate(payload) {
-            if (!payload || payload.type !== 'influx_write_rate') {
+            if (!payload || payload.type !== 'metrics_write_rate') {
                 return false;
             }
 
@@ -596,7 +596,7 @@
             const windowValue = this.elements.influxWindow?.value || '1h';
             const serviceValue = this.elements.influxService?.value || '';
             const metricValue = this.elements.influxMetric?.value?.trim();
-            const useWebSocket = this.shouldUseWebSocket() && this.app?.ibkrManager?.requestInfluxWriteRate;
+            const useWebSocket = this.shouldUseWebSocket() && this.app?.ibkrManager?.requestMetricsWriteRate;
             if (useWebSocket) {
                 return new Promise((resolve, reject) => {
                     if (this.influxPending && this.influxPending.timer) {
@@ -616,7 +616,7 @@
                         }
                     }, manual ? 20000 : 25000);
 
-                    const result = this.app.ibkrManager.requestInfluxWriteRate({
+                    const result = this.app.ibkrManager.requestMetricsWriteRate({
                         window: windowValue,
                         service: serviceValue || undefined,
                         metric: metricValue || undefined,
@@ -645,7 +645,7 @@
                 params.set('window', windowValue);
                 if (serviceValue) params.set('service', serviceValue);
                 if (metricValue) params.set('metric', metricValue);
-                const data = await this.app.apiCall(`/monitoring/influx/write-rate?${params.toString()}`, {
+                const data = await this.app.apiCall(`/monitoring/metrics/write-rate?${params.toString()}`, {
                     useCache: false,
                     cacheTime: 0,
                     timeout: manual ? 15000 : 20000,
@@ -658,7 +658,7 @@
                 this.renderInfluxMetrics(data || {});
                 this.state.influx = REFRESH_STATE.idle;
             } catch (error) {
-                console.error('Failed to load Influx write metrics', error);
+                console.error('Failed to load metrics write rate', error);
                 this.handleInfluxError(error?.message || '无法加载写入速率', { scheduleNext: !immediate });
                 throw error;
             } finally {

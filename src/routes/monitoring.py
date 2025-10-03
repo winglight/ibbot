@@ -9,10 +9,17 @@ import json
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import asyncio
+import re
+from collections import defaultdict
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 
-from src.ibbot.influx import get_influx_config, query_data
+from src.db import (
+    MariaDBConfigurationError,
+    get_service_metrics_columns,
+    run_sql_query,
+)
 from src.ibbot.redis import (
     DEFAULT_COMMAND_QUEUE,
     DEFAULT_MARKET_STREAM,
@@ -400,71 +407,160 @@ async def get_queue_metrics(
     }
 
 
-def _format_flux_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+_WINDOW_PATTERN = re.compile(r"^(?P<value>\d+)(?P<unit>[smhd])$", re.IGNORECASE)
 
 
-def _prepare_flux_query(
-    *,
-    bucket: str,
-    measurement: str,
-    window: str,
-    service: str | None,
-    metric: str | None,
-    aggregate: str,
-) -> str:
-    statements = [
-        f'from(bucket: "{_format_flux_string(bucket)}")',
-        f"  |> range(start: -{window})",
-        f'  |> filter(fn: (r) => r._measurement == "{_format_flux_string(measurement)}")',
-        "  |> filter(fn: (r) => exists r._field and r._field == \"value\")",
-    ]
-    if service:
-        statements.append(f'  |> filter(fn: (r) => r.service == "{_format_flux_string(service)}")')
-    if metric:
-        statements.append(f'  |> filter(fn: (r) => r.metric == "{_format_flux_string(metric)}")')
-    statements.extend(
-        [
-            f"  |> aggregateWindow(every: 1m, fn: {aggregate}, createEmpty: false)",
-            "  |> keep(columns: [\"_time\", \"_value\", \"service\", \"metric\", \"queue_key\", \"stream_key\", \"group\"])",
-            "  |> sort(columns: [\"_time\"], desc: false)",
-        ]
-    )
-    return "\n".join(statements)
+def _parse_window(window: str) -> timedelta:
+    token = window.strip()
+    match = _WINDOW_PATTERN.match(token)
+    if not match:
+        raise HTTPException(status_code=400, detail="window must be a positive duration like 15m or 4h")
+    value = int(match.group("value"))
+    if value <= 0:
+        raise HTTPException(status_code=400, detail="window must be greater than zero")
+    unit = match.group("unit").lower()
+    if unit == "s":
+        return timedelta(seconds=value)
+    if unit == "m":
+        return timedelta(minutes=value)
+    if unit == "h":
+        return timedelta(hours=value)
+    if unit == "d":
+        return timedelta(days=value)
+    raise HTTPException(status_code=400, detail=f"Unsupported window unit: {unit}")
 
 
-def _normalise_flux_table(result: Any) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    if not result:
-        return records
-    tables = result if isinstance(result, Iterable) else [result]
-    for table in tables:
-        rows = getattr(table, "records", None)
-        if rows is None:
-            rows = table
-        for record in rows or []:
+def _normalise_aggregate(value: str) -> str:
+    token = (value or "").strip().lower() or "sum"
+    if token in {"sum", "total"}:
+        return "sum"
+    if token in {"avg", "mean", "average"}:
+        return "avg"
+    if token == "min":
+        return "min"
+    if token == "max":
+        return "max"
+    if token == "count":
+        return "count"
+    raise HTTPException(status_code=400, detail=f"Unsupported aggregate '{value}'")
+
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            normalised = raw.replace(" ", "T")
             try:
-                value = record.get_value() if hasattr(record, "get_value") else record.get("_value")
-                ts = record.get_time() if hasattr(record, "get_time") else record.get("_time")
-                values = getattr(record, "values", None)
-                if values is None and isinstance(record, Mapping):
-                    values = record
-                entry = {
-                    "time": ts.isoformat() if isinstance(ts, datetime) else str(ts),
-                    "value": float(value) if value is not None else None,
-                    "service": values.get("service") if values else None,
-                    "metric": values.get("metric") if values else None,
-                    "queue_key": values.get("queue_key") if values else None,
-                    "stream_key": values.get("stream_key") if values else None,
-                    "group": values.get("group") if values else None,
-                }
-            except Exception:  # pragma: no cover - defensive parsing
-                continue
-            records.append(entry)
-    return records
+                return datetime.fromisoformat(normalised)
+            except ValueError:
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+                    try:
+                        return datetime.strptime(raw, fmt)
+                    except ValueError:
+                        continue
+    return None
 
 
-def build_influx_write_rate_payload(
+def _aggregate_metric_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    aggregate: str,
+    has_service: bool,
+    has_metric: bool,
+    has_queue: bool,
+    has_stream: bool,
+    has_group: bool,
+) -> list[dict[str, Any]]:
+    buckets: dict[tuple[Any, ...], list[float]] = defaultdict(list)
+
+    for row in rows:
+        timestamp_value = row.get("bucket_time")
+        bucket_time = _coerce_datetime(timestamp_value)
+        if bucket_time is None:
+            continue
+        bucket_time = bucket_time.replace(second=0, microsecond=0)
+
+        raw_value = row.get("metric_value")
+        try:
+            numeric = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+
+        meta: dict[str, Any] = {}
+        if has_service:
+            meta["service"] = row.get("service")
+        if has_metric:
+            meta["metric"] = row.get("metric")
+        if has_queue:
+            meta["queue_key"] = row.get("queue_key")
+        if has_stream:
+            meta["stream_key"] = row.get("stream_key")
+        if has_group:
+            meta["group"] = row.get("group_name")
+
+        key = (
+            bucket_time,
+            meta.get("service"),
+            meta.get("metric"),
+            meta.get("queue_key"),
+            meta.get("stream_key"),
+            meta.get("group"),
+        )
+        buckets[key].append(numeric)
+
+    def _apply(values: list[float]) -> float | None:
+        if not values:
+            return None
+        if aggregate == "sum":
+            return float(sum(values))
+        if aggregate == "avg":
+            return float(sum(values) / len(values))
+        if aggregate == "min":
+            return float(min(values))
+        if aggregate == "max":
+            return float(max(values))
+        if aggregate == "count":
+            return float(len(values))
+        return None
+
+    entries: list[dict[str, Any]] = []
+    for key, values in buckets.items():
+        bucket_time, service, metric, queue_key, stream_key, group = key
+        aggregated = _apply(values)
+        if aggregated is None:
+            continue
+        entry = {"time": bucket_time.isoformat(), "value": aggregated}
+        if has_service:
+            entry["service"] = service
+        if has_metric:
+            entry["metric"] = metric
+        if has_queue:
+            entry["queue_key"] = queue_key
+        if has_stream:
+            entry["stream_key"] = stream_key
+        if has_group:
+            entry["group"] = group
+        entries.append(entry)
+
+    entries.sort(
+        key=lambda item: (
+            item.get("time", ""),
+            item.get("service") or "",
+            item.get("metric") or "",
+            item.get("queue_key") or "",
+            item.get("stream_key") or "",
+        )
+    )
+    return entries
+
+
+def build_metric_series_payload(
     *, window: str, service: str | None, metric: str | None, aggregate: str
 ) -> Mapping[str, Any]:
     """Return the write rate payload used by both HTTP and websocket handlers."""
@@ -476,31 +572,109 @@ def build_influx_write_rate_payload(
         "aggregate": aggregate,
     }
 
-    config = get_influx_config()
-    if not config.bucket:
+    try:
+        columns = get_service_metrics_columns()
+    except MariaDBConfigurationError as exc:
         return {
             "success": False,
-            "error": "InfluxDB bucket is not configured",
+            "error": str(exc),
             "series": [],
             "summary": {},
             "query": query_meta,
         }
 
-    flux = _prepare_flux_query(
-        bucket=config.bucket,
-        measurement="service_metrics",
-        window=window,
-        service=service,
-        metric=metric,
-        aggregate=aggregate,
+    def _resolve(*candidates: str) -> str | None:
+        for candidate in candidates:
+            if candidate in columns:
+                return candidate
+        return None
+
+    timestamp_col = _resolve("recorded_at", "timestamp", "created_at")
+    value_col = _resolve("value", "metric_value", "count")
+    service_col = _resolve("service", "service_name")
+    metric_col = _resolve("metric", "metric_name")
+    queue_col = _resolve("queue_key", "queue")
+    stream_col = _resolve("stream_key", "stream")
+    group_col = _resolve("group_name", "group")
+
+    if not timestamp_col or not value_col:
+        return {
+            "success": False,
+            "error": "service_metrics table is missing timestamp or value columns",
+            "series": [],
+            "summary": {},
+            "query": query_meta,
+        }
+
+    def _column(name: str) -> str:
+        return f"`{name}`"
+
+    select_parts = [
+        f"{_column(timestamp_col)} AS bucket_time",
+        f"{_column(value_col)} AS metric_value",
+    ]
+    if service_col:
+        select_parts.append(f"{_column(service_col)} AS service")
+    if metric_col:
+        select_parts.append(f"{_column(metric_col)} AS metric")
+    if queue_col:
+        select_parts.append(f"{_column(queue_col)} AS queue_key")
+    if stream_col:
+        select_parts.append(f"{_column(stream_col)} AS stream_key")
+    if group_col:
+        select_parts.append(f"{_column(group_col)} AS group_name")
+
+    where_clauses = [f"{_column(timestamp_col)} >= :start"]
+    params: dict[str, Any] = {
+        "start": datetime.utcnow() - _parse_window(window),
+    }
+
+    if service:
+        if not service_col:
+            raise HTTPException(status_code=400, detail="service filter is not supported")
+        where_clauses.append(f"{_column(service_col)} = :service")
+        params["service"] = service
+
+    if metric:
+        if not metric_col:
+            raise HTTPException(status_code=400, detail="metric filter is not supported")
+        where_clauses.append(f"{_column(metric_col)} = :metric")
+        params["metric"] = metric
+
+    sql = " ".join(
+        [
+            "SELECT",
+            ", ".join(select_parts),
+            "FROM service_metrics",
+            "WHERE",
+            " AND ".join(where_clauses),
+            f"ORDER BY {_column(timestamp_col)} ASC",
+        ]
     )
 
     try:
-        result = query_data(flux, org=config.org)
-    except Exception as exc:  # pragma: no cover - depends on client configuration
-        raise HTTPException(status_code=502, detail=f"Failed to query InfluxDB: {exc}") from exc
+        rows = run_sql_query(sql, params)
+    except MariaDBConfigurationError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "series": [],
+            "summary": {},
+            "query": query_meta,
+        }
+    except Exception as exc:  # pragma: no cover - depends on DB driver
+        raise HTTPException(status_code=502, detail=f"Failed to query MariaDB: {exc}") from exc
 
-    series = _normalise_flux_table(result)
+    series = _aggregate_metric_rows(
+        rows,
+        aggregate=_normalise_aggregate(aggregate),
+        has_service=service_col is not None,
+        has_metric=metric_col is not None,
+        has_queue=queue_col is not None,
+        has_stream=stream_col is not None,
+        has_group=group_col is not None,
+    )
+
     grouped: dict[str, dict[str, Any]] = defaultdict(lambda: {"points": 0, "sum": 0.0})
     for entry in series:
         key = entry.get("metric") or entry.get("queue_key") or entry.get("service") or "unknown"
@@ -522,22 +696,22 @@ def build_influx_write_rate_payload(
     }
 
 
-@router.get("/api/monitoring/influx/write-rate")
-async def get_influx_write_rate(
+@router.get("/api/monitoring/metrics/write-rate")
+async def get_metrics_write_rate(
     window: str = Query(default="1h"),
     service: str | None = Query(default=None),
     metric: str | None = Query(default=None),
     aggregate: str = Query(default="sum"),
 ) -> Mapping[str, Any]:
-    """Query InfluxDB for service metric write rates."""
+    """Query MariaDB for service metric write rates."""
 
-    return build_influx_write_rate_payload(
+    return build_metric_series_payload(
         window=window, service=service, metric=metric, aggregate=aggregate
     )
 
 
 __all__ = [
     "router",
-    "build_influx_write_rate_payload",
+    "build_metric_series_payload",
 ]
 

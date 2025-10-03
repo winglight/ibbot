@@ -641,14 +641,14 @@ def test_optimizer_flow(monkeypatch: pytest.MonkeyPatch) -> None:
 async def _run_optimizer_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     redis = InMemoryRedis()
 
-    async def fake_influx_query(_: str) -> list[dict[str, Any]]:
+    async def fake_db_query(_: str) -> list[dict[str, Any]]:
         return [
             {"timestamp": "2023-01-01T00:00:00Z", "value": 1.2},
             {"timestamp": "2023-01-01T00:01:00Z", "value": 0.8},
             {"timestamp": "2023-01-01T00:02:00Z", "value": 1.0},
         ]
 
-    service = OptimizerService(redis_factory=lambda: redis, influx_query=fake_influx_query)
+    service = OptimizerService(redis_factory=lambda: redis, db_query=fake_db_query)
 
     optimizer_module = importlib.import_module("services.optimizer.main")
     monkeypatch.setattr(optimizer_module, "load_project_env", lambda: None)
@@ -687,7 +687,7 @@ async def _run_optimizer_flow(monkeypatch: pytest.MonkeyPatch) -> None:
             json={
                 "task_id": "opt-task-1",
                 "strategy_id": strategy_id,
-                "training_query": "from(bucket:\"optimizer_signals\")",
+                "training_query": "SELECT value FROM optimizer_signals",
             },
         )
 

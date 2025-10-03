@@ -36,7 +36,7 @@
 ## 阶段切换注意事项
 
 1. **阶段 1 → 阶段 2**：部署前确保 Redis/Influx 已通过 `scripts/diagnose_foundation.py` 验证；各服务的 `SERVICE_NAME` 需在配置中心写入订阅标的、队列键等参数。
-2. **阶段 2 → 阶段 3**：主服务需加载新增路由（如 `/api/monitoring/influx/write-rate`）并开放给前端；记得同步更新 `static/index.html` 的监控组件。
+2. **阶段 2 → 阶段 3**：主服务需加载新增路由（如 `/api/monitoring/metrics/write-rate`）并开放给前端；记得同步更新 `static/index.html` 的监控组件。
 3. **阶段 3 → 阶段 4**：在 `docker/local.compose.yml` 中加入所有服务，执行 `./scripts/deploy.sh up --env local --build` 进行联调，再按照测试清单运行单元/集成/E2E/性能/故障注入。
 4. **回滚策略**：若新阶段出现异常，可通过 `./scripts/deploy.sh restart <service>` 单独重启；必要时在配置中心将新服务标记为禁用（例如从 Redis `hash:config:<service>` 删除订阅）。
 
