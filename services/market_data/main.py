@@ -296,6 +296,7 @@ class MarketDataRuntime:
         self._logger = get_logger(self.logger_name)
         self._loop = asyncio.get_running_loop()
         self._redis = await self.redis_factory()
+        await self._publish_health(status="starting", healthy=False)
         self._pubsub = self.pubsub_listener or PubSubListener(redis_factory=self.redis_factory)
         await self._register_channels()
         await self._pubsub.start()

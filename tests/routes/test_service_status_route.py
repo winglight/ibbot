@@ -155,3 +155,12 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     account_metrics = (account_entry.get("payload") or {}).get("metrics") or {}
     assert account_metrics.get("snapshot_updated_at") == captured_state.get("now")
     assert account_metrics.get("stale") is False
+
+    queue_entry = next(
+        (item for item in services if item.get("service") == "queue_monitor"),
+        None,
+    )
+    assert queue_entry is not None
+    assert queue_entry.get("default_health_key") == "hash:service:health:queue"
+    assert queue_entry.get("health_key") == "hash:service:health:queue"
+    assert queue_entry.get("status") == "running"

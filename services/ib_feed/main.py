@@ -80,6 +80,7 @@ class MarketDataFeedService:
         self._stop_health.clear()
         self._last_price_updates = self.price_updates
         self._last_dom_updates = self.dom_updates
+        await self._publish_health(status="starting", healthy=False)
         self._health_task = asyncio.create_task(self._health_loop(), name="ib-feed-health")
         await self._publish_health(status="running", healthy=True)
         if not self.subscriptions:

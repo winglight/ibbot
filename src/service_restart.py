@@ -240,11 +240,7 @@ DEFAULT_SERVICE_DEPENDENCIES: Mapping[str, Sequence[str]] = {
     "market_data_feed": (),
     "market_data": ("market_data_feed",),
     "risk": ("orders",),
-    # The notification dispatcher requires a healthy connection controller to
-    # refresh client subscriptions. Restarting the dispatcher therefore also
-    # restarts ``connection_control`` so operators can recover from Redis
-    # disconnects with a single action.
-    "notification": ("connection_control",),
+    "notification": (),
     "strategy": ("orders",),
     "ibbot": ("account", "orders"),
 }
