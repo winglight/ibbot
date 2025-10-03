@@ -215,6 +215,13 @@ def test_internal_info_endpoint_refreshes(redis_client: InMemoryRedis) -> None:
             cached_payload = cached_response.json()
             assert cached_payload["cached"] is True
             assert cached_payload["strategy"]["stale"] is True
+
+            sample_strategy.set_internal_info_failure(False)
+            refreshed_response = client.get("/strategies/inspector/internal-info")
+            assert refreshed_response.status_code == 200
+            refreshed_payload = refreshed_response.json()
+            assert refreshed_payload["cached"] is False
+            assert refreshed_payload["strategy"].get("stale") is not True
     finally:
         sample_strategy.set_internal_info_failure(False)
 

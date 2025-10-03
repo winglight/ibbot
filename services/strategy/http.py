@@ -296,7 +296,8 @@ class StrategyRuntime:
         document = await self.get_strategy(name)
         if document is None:
             raise StrategyNotRegistered(name)
-        cached, cached_flag = await self._load_cached_internal_info(name)
+        cached, _ = await self._load_cached_internal_info(name)
+        used_cached = False
         try:
             info = await self._generate_internal_info(document)
             stale = False
@@ -311,10 +312,11 @@ class StrategyRuntime:
                 "enabled": document.enabled,
             }
             stale = True
+            used_cached = True
         if stale:
             info = {**info, "stale": True}
         await self._persist_internal_info(name, info, stale=stale)
-        return info, stale or cached_flag
+        return info, used_cached
 
     async def update_internal_parameter_value(
         self,
