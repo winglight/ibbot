@@ -155,7 +155,9 @@ class NotificationService:
         """Continuously poll Redis streams and process events."""
 
         self._logger.info(
-            "Starting notification service", channels=list(self._channels), poll_interval=self._poll_interval
+            "Starting notification service (channels=%s, poll_interval=%s)",
+            list(self._channels),
+            self._poll_interval,
         )
         try:
             while not self._stop_requested:

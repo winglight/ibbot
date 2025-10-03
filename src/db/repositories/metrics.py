@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -110,6 +112,7 @@ class ServiceMetricRepository:
 
     def __init__(self, *, logger_name: str = "db.metrics") -> None:
         self._logger = get_logger(logger_name)
+        self._disabled_reason: str | None = None
 
     async def close(self) -> None:
         return None
@@ -118,6 +121,14 @@ class ServiceMetricRepository:
         self,
         metrics: Mapping[str, Any] | Iterable[Mapping[str, Any]],
     ) -> None:
+        if self._disabled_reason is not None:
+            if self._logger.isEnabledFor(logging.DEBUG):
+                self._logger.debug(
+                    "Skipping service metrics persistence; disabled: %s",
+                    self._disabled_reason,
+                )
+            return
+
         if isinstance(metrics, Mapping):
             rows: Sequence[dict[str, Any]] = (_as_row(metrics),)
         else:
@@ -130,7 +141,14 @@ class ServiceMetricRepository:
         except RepositoryValidationError:
             raise
         except MariaDBConfigurationError as exc:
-            raise ServiceMetricRepositoryError(str(exc)) from exc
+            reason = str(exc) or "MariaDB configuration error"
+            if self._disabled_reason is None:
+                self._disabled_reason = reason
+                self._logger.warning(
+                    "Disabling service metrics persistence: %s",
+                    reason,
+                )
+            return
         except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception("Failed to record service metrics", count=len(rows))
             raise ServiceMetricRepositoryError("Failed to record service metrics") from exc

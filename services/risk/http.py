@@ -131,6 +131,7 @@ async def _lifespan(
     app: FastAPI,
     *,
     runtime_factory: Callable[[Any, RiskSnapshotRepositoryFactory | None], RiskRuntime],
+    snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None,
     initial_config: Mapping[str, Any] | None = None,
     health_interval: float = DEFAULT_HEALTH_INTERVAL,
     redis_factory: Callable[[], Any] | None = None,
