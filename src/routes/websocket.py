@@ -638,6 +638,17 @@ def _serialise_order(order: Any) -> Dict[str, Any]:
     order_source_val = _first_value("source", "order_source")
     strategy_val = _first_value("strategy", "strategy_name")
     notes_val = _first_value("notes", "note", "comment")
+    if notes_val is None:
+        metadata_val = _order_value(order, "metadata")
+        if isinstance(metadata_val, Mapping):
+            for key in ("notes", "note", "comment"):
+                candidate = metadata_val.get(key)
+                if candidate is None:
+                    continue
+                if isinstance(candidate, str) and not candidate.strip():
+                    continue
+                notes_val = candidate
+                break
 
     return {
         "order_id": _order_value(order, "order_id"),

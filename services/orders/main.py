@@ -134,10 +134,10 @@ _REQUEST_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "order_type": ("order_type", "orderType", "type"),
     "limit_price": ("limit_price", "lmt_price", "limitPrice", "price"),
     "stop_price": ("stop_price", "aux_price", "stopPrice"),
-    "source": ("source",),
-    "strategy": ("strategy", "strategy_id"),
-    "time_in_force": ("time_in_force", "tif", "tif_code"),
-    "notes": ("notes", "note", "comment"),
+    "source": ("source", "metadata.source"),
+    "strategy": ("strategy", "strategy_id", "metadata.strategy"),
+    "time_in_force": ("time_in_force", "tif", "tif_code", "metadata.time_in_force"),
+    "notes": ("notes", "note", "comment", "metadata.notes"),
 }
 
 
@@ -177,13 +177,29 @@ def _coerce_mapping(value: Any) -> dict[str, Any] | None:
     return None
 
 
+def _resolve_alias_value(data: Mapping[str, Any], key: str) -> Any:
+    if not isinstance(data, Mapping):
+        return None
+    if "." not in key:
+        return data.get(key)
+    current: Any = data
+    for part in key.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        if part not in current:
+            return None
+        current = current[part]
+        if current is None:
+            return None
+    return current
+
+
 def _apply_field_aliases(record: dict[str, Any], data: Mapping[str, Any], *, aliases: Mapping[str, Iterable[str]]) -> None:
     for canonical, options in aliases.items():
         for key in options:
-            if key in data:
-                candidate = data[key]
-                if candidate is not None and candidate != "":
-                    record[canonical] = candidate
+            candidate = _resolve_alias_value(data, key)
+            if candidate is not None and candidate != "":
+                record[canonical] = candidate
                 break
 
 
@@ -257,6 +273,9 @@ def _normalise_order_record(record: Mapping[str, Any]) -> dict[str, Any]:
                 event_payload["payload"] = dict(event_payload["payload"])
             normalised_events.append(event_payload)
         payload["events"] = normalised_events
+    metadata_mapping = _coerce_mapping(payload.get("metadata"))
+    if metadata_mapping is not None:
+        payload["metadata"] = metadata_mapping
     return payload
 
 
@@ -276,11 +295,17 @@ def _normalise_cached_record(record: Mapping[str, Any]) -> dict[str, Any]:
     if response_mapping is not None:
         payload["response"] = response_mapping
 
+    metadata_mapping = _coerce_mapping(payload.get("metadata"))
+    if metadata_mapping is not None:
+        payload["metadata"] = metadata_mapping
+
     sources: list[Mapping[str, Any]] = [payload, request_mapping]
     if result_mapping is not None:
         sources.append(result_mapping)
     if response_mapping is not None:
         sources.append(response_mapping)
+    if metadata_mapping is not None:
+        sources.append(metadata_mapping)
 
     for source in sources:
         _apply_field_aliases(payload, source, aliases=_REQUEST_FIELD_ALIASES)
@@ -1013,8 +1038,11 @@ class OrdersRuntime:
         request = _coerce_mapping(record.get("request")) or {}
         response = _coerce_mapping(record.get("response")) or {}
         result = _coerce_mapping(record.get("result")) or {}
+        metadata = _coerce_mapping(record.get("metadata")) or {}
         sources: tuple[Mapping[str, Any], ...] = tuple(
-            source for source in (record, result, response, request) if isinstance(source, Mapping)
+            source
+            for source in (record, result, response, request, metadata)
+            if isinstance(source, Mapping)
         )
 
         def _lookup(*keys: str) -> Any:
