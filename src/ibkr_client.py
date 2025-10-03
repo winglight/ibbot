@@ -2691,6 +2691,7 @@ class IBKRClient:
                 error=str(exc),
             )
         else:
+            self._order_fill_cache.pop(oid, None)
             connection_logger.info(
                 "Updated order %s commission=%s, pnl=%s via orders service",
                 oid,

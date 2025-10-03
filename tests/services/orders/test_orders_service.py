@@ -213,6 +213,77 @@ def test_stream_updates_keep_filled_orders_in_history_and_detail() -> None:
     asyncio.run(_scenario())
 
 
+def test_patch_fill_metrics_updates_runtime_and_influx() -> None:
+    async def _scenario() -> None:
+        writer = RecordingWriter()
+        runtime, redis = await _create_runtime(write_fn=writer)
+        try:
+            app = create_app(runtime, enable_events=False)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                submit = await client.post(
+                    "/orders",
+                    json={
+                        "symbol": "GC",
+                        "quantity": 1,
+                        "action": "BUY",
+                        "order_type": "MARKET",
+                    },
+                )
+                order_id = submit.json()["command_id"]
+                patch = await client.patch(
+                    f"/orders/{order_id}/fills",
+                    json={
+                        "commission": 12.5,
+                        "realized_pnl": 45.0,
+                        "unrealized_pnl": 5.5,
+                        "filled_quantity": 1,
+                    },
+                )
+                detail = await client.get(f"/orders/{order_id}")
+
+            assert patch.status_code == 200
+            patch_payload = patch.json()
+            assert patch_payload["success"] is True
+            patched_order = patch_payload["order"]
+            assert patched_order["commission"] == pytest.approx(12.5)
+            assert patched_order["realized_pnl"] == pytest.approx(45.0)
+            assert patched_order["unrealized_pnl"] == pytest.approx(5.5)
+            assert patched_order["filled_quantity"] == pytest.approx(1.0)
+            assert any(evt["type"] == "fill_metrics_updated" for evt in patched_order["events"])
+
+            detail_payload = detail.json()
+            assert detail_payload["order"]["commission"] == pytest.approx(12.5)
+            assert detail_payload["order"]["unrealized_pnl"] == pytest.approx(5.5)
+            assert any(
+                evt["type"] == "fill_metrics_updated"
+                for evt in detail_payload["order"]["events"]
+            )
+
+            snapshot_raw = await redis.get(runtime.snapshot_key)
+            assert snapshot_raw is not None
+            snapshot = json.loads(snapshot_raw)
+            stored_order = snapshot["active_orders"][0]
+            assert stored_order["commission"] == pytest.approx(12.5)
+
+            history_entries = await redis.lrange(runtime.history_key, 0, -1)
+            assert any(
+                json.loads(entry)["event"] == "fill_metrics_updated"
+                for entry in history_entries
+            )
+
+            assert writer.points
+            point_fields = writer.points[-1]["fields"]
+            assert point_fields["commission"] == pytest.approx(12.5)
+            assert point_fields["realized_pnl"] == pytest.approx(45.0)
+            assert point_fields["filled_quantity"] == pytest.approx(1.0)
+            assert point_fields["unrealized_pnl"] == pytest.approx(5.5)
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_list_orders_pagination_with_history_and_active() -> None:
     async def _scenario() -> None:
         runtime, redis = await _create_runtime()
