@@ -84,7 +84,6 @@ class QueueManager:
         self._worker_loop_warning_threshold: float = 1.0
         self._task_processing_warning_threshold: float = 2.0
         self._io_warning_threshold: float = 0.5
-        self._offthread_warning_threshold: float = 1.5
 
         # 启动时加载持久化的任务（需要在性能阈值配置完成后调用）
         self._load_tasks()
@@ -474,6 +473,31 @@ class QueueManager:
             task.completed_at = now_local()
             queue_logger.info(f"Task {task.task_id} completed successfully")
 
+        except asyncio.TimeoutError as exc:
+            task.retry_count += 1
+            task.error_message = str(exc) or "Bridge timeout"
+            queue_logger.error(
+                "Task timed out via IBKR bridge",
+                task_id=task.task_id,
+                retry=task.retry_count,
+                max_retries=task.max_retries,
+            )
+
+            if task.retry_count < task.max_retries:
+                task.status = "pending"
+                task.started_at = None
+                self.pending_queue.append(task.task_id)
+                self._schedule_task_dispatch(task.task_id)
+                queue_logger.info(
+                    f"Task {task.task_id} requeued after timeout ({task.retry_count}/{task.max_retries})"
+                )
+            else:
+                task.status = "failed"
+                task.completed_at = now_local()
+                queue_logger.error(
+                    f"Task {task.task_id} failed permanently after bridge timeouts"
+                )
+
         except Exception as e:
             error_msg = str(e)
             task.error_message = error_msg
@@ -779,15 +803,9 @@ class QueueManager:
                 raise
 
         # 下单
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # 如果不在事件循环中，创建一个
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
         order_id = None
         order_type_for_record = "MKT" if order_type == "MARKET" else "LMT"
-        
+
         # 真实IBKR路径：使用 ibkr_client
         import core  # 延迟导入避免循环导入
         queue_logger.bind(
@@ -807,15 +825,45 @@ class QueueManager:
         if order_type == "LIMIT" and not payload.get('price'):
             raise Exception("Price required for limit order")
 
-        trade = await self._place_order_off_thread(
+        try:
+            if order_type == "MARKET":
+                trade, metrics = await core.ibkr_client.place_market_order(
+                    symbol=payload['symbol'],
+                    quantity=payload['qty'],
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type,
+                )
+            else:
+                trade, metrics = await core.ibkr_client.place_limit_order(
+                    symbol=payload['symbol'],
+                    quantity=payload['qty'],
+                    price=payload.get('price'),
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type,
+                )
+        except asyncio.TimeoutError:
+            queue_logger.warning(
+                "Strategy order placement timed out via IBKR bridge",
+                task_id=task.task_id,
+                symbol=payload['symbol'],
+                action=action,
+                order_type=order_type,
+                exchange=exchange,
+                sec_type=sec_type,
+                quantity=payload['qty'],
+            )
+            raise
+
+        queue_logger.bind(
+            task_id=task.task_id,
             symbol=payload['symbol'],
-            quantity=payload['qty'],
             action=action,
             order_type=order_type,
-            exchange=exchange,
-            sec_type=sec_type,
-            price=payload.get('price'),
-        )
+            queue_wait=f"{metrics['queue_wait']:.6f}",
+            execution_time=f"{metrics['execution_time']:.6f}",
+        ).debug("IBKR bridge timings for strategy order")
 
         if not trade:
             raise Exception("Failed to place strategy order")
@@ -945,103 +993,6 @@ class QueueManager:
             symbol=payload['symbol'],
             action=action,
         )
-
-    async def _place_order_off_thread(
-        self,
-        *,
-        symbol: str,
-        quantity: int,
-        action: str,
-        order_type: str,
-        exchange: str,
-        sec_type: str,
-        price: Optional[float],
-    ):
-        """在后台线程中执行下单流程，避免阻塞事件循环。"""
-
-        dispatch_start = time.monotonic()
-        queue_logger.bind(
-            symbol=symbol,
-            action=action,
-            order_type=order_type,
-            exchange=exchange,
-            sec_type=sec_type,
-            quantity=quantity,
-        ).debug("Dispatching order placement to background thread")
-        try:
-            result = await asyncio.to_thread(
-                self._place_order_blocking,
-                symbol,
-                quantity,
-                action,
-                order_type,
-                exchange,
-                sec_type,
-                price,
-            )
-            self._log_operation_duration(
-                event="place_order_off_thread",
-                start=dispatch_start,
-                threshold=self._offthread_warning_threshold,
-                message="Background order placement slower than expected",
-                symbol=symbol,
-                action=action,
-                order_type=order_type,
-                exchange=exchange,
-                sec_type=sec_type,
-                quantity=quantity,
-            )
-            return result
-        except Exception as exc:
-            queue_logger.error(
-                "Failed to place order off thread",
-                symbol=symbol,
-                action=action,
-                order_type=order_type,
-                exchange=exchange,
-                sec_type=sec_type,
-                quantity=quantity,
-                error=str(exc),
-            )
-            raise
-
-    def _place_order_blocking(
-        self,
-        symbol: str,
-        quantity: int,
-        action: str,
-        order_type: str,
-        exchange: str,
-        sec_type: str,
-        price: Optional[float],
-    ):
-        """在后台线程中调用 IBKR 客户端的下单接口。"""
-
-        import core  # 延迟导入避免循环导入
-
-        if order_type == "MARKET":
-            return asyncio.run(
-                core.ibkr_client.place_market_order(
-                    symbol=symbol,
-                    quantity=quantity,
-                    action=action,
-                    exchange=exchange,
-                    sec_type=sec_type,
-                )
-            )
-        elif order_type == "LIMIT":
-            return asyncio.run(
-                core.ibkr_client.place_limit_order(
-                    symbol=symbol,
-                    quantity=quantity,
-                    price=price,
-                    action=action,
-                    exchange=exchange,
-                    sec_type=sec_type,
-                )
-            )
-
-        raise ValueError(f"Unsupported order type: {order_type}")
 
     def _handle_persistence_future(self, future: Union[asyncio.Future, ConcurrentFuture]) -> None:
         """统一处理持久化任务的完成状态，记录可能的异常。"""

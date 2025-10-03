@@ -1486,8 +1486,8 @@ class IBKRClient:
         action: str = "BUY",
         exchange: str = "SMART",
         sec_type: str = "STK",
-    ) -> Optional[Order]:
-        """下市价单"""
+    ) -> tuple[Any, Dict[str, float]]:
+        """下市价单并返回桥接执行指标。"""
 
         try:
             trade, metrics = await self._place_order_via_bridge(
@@ -1513,7 +1513,7 @@ class IBKRClient:
                 )
                 self._update_order_status(symbol, action, quantity, "Submitted")
 
-            return trade
+            return trade, metrics
         except asyncio.TimeoutError:
             ibkr_logger.error(
                 "Market order placement timed out",
@@ -1523,10 +1523,18 @@ class IBKRClient:
                 exchange=exchange,
                 sec_type=sec_type,
             )
-            return None
+            raise
         except Exception as e:
-            ibkr_logger.error(f"Failed to place market order: {e}")
-            return None
+            ibkr_logger.error(
+                "Failed to place market order",
+                symbol=symbol,
+                quantity=quantity,
+                action=action,
+                exchange=exchange,
+                sec_type=sec_type,
+                error=str(e),
+            )
+            raise
 
     async def place_limit_order(
         self,
@@ -1536,8 +1544,8 @@ class IBKRClient:
         action: str = "BUY",
         exchange: str = "SMART",
         sec_type: str = "STK",
-    ) -> Optional[Order]:
-        """下限价单"""
+    ) -> tuple[Any, Dict[str, float]]:
+        """下限价单并返回桥接执行指标。"""
 
         try:
             trade, metrics = await self._place_order_via_bridge(
@@ -1563,7 +1571,7 @@ class IBKRClient:
                 )
                 self._update_order_status(symbol, action, quantity, "Submitted")
 
-            return trade
+            return trade, metrics
         except asyncio.TimeoutError:
             ibkr_logger.error(
                 "Limit order placement timed out",
@@ -1574,10 +1582,19 @@ class IBKRClient:
                 sec_type=sec_type,
                 price=price,
             )
-            return None
+            raise
         except Exception as e:
-            ibkr_logger.error(f"Failed to place limit order: {e}")
-            return None
+            ibkr_logger.error(
+                "Failed to place limit order",
+                symbol=symbol,
+                quantity=quantity,
+                action=action,
+                exchange=exchange,
+                sec_type=sec_type,
+                price=price,
+                error=str(e),
+            )
+            raise
 
     async def refresh_orders(self) -> bool:
         """刷新IBKR订单数据，使用异步API避免事件循环冲突"""
