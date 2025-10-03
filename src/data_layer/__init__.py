@@ -24,7 +24,11 @@ from .data_source_manager import (
     DataSubscriptionToken,
 )
 from .event_bus import EventBus, EventEnvelope, BusSubscriptionToken
-from .persistence import PersistenceBackend, NoopPersistenceBackend
+from .persistence import (
+    PersistenceBackend,
+    NoopPersistenceBackend,
+    ParquetPersistenceBackend,
+)
 
 __all__ = [
     "DataLayerMode",
@@ -45,6 +49,7 @@ __all__ = [
     "BusSubscriptionToken",
     "PersistenceBackend",
     "NoopPersistenceBackend",
+    "ParquetPersistenceBackend",
     "get_data_source_manager",
     "get_quote_feed",
 ]

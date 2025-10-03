@@ -149,3 +149,17 @@
 4. 更新 `docs/deployment.md`、`docs/service_delivery_overview.md`、`docs/tests.md` 后，与实现差异再次校对。
 
 完成上述步骤后即可提交审阅或进入下一阶段发布流程。
+
+## 5. 市场数据落地与保留策略
+
+- **目录结构**：实时 DOM 与 K 线数据统一写入 `data/market_data`。其中 DOM 快照位于
+  `data/market_data/dom/{SYMBOL}/YYYYMMDD.parquet`，K 线数据位于
+  `data/market_data/candles/{interval}/{SYMBOL}/YYYYMMDD.parquet`。文件按 UTC 日期划分，字段包含
+  `timestamp/timestamp_ns` 与原始 DOM 层级或 OHLCV 指标，便于下游按同一 Schema 消费。
+- **写入机制**：`services/ib_feed` 在 DOM 事件落地时直接调用 Parquet Writer，`data_layer`
+  在生成 K 线事件时同样追加写入；若缓存命中失败，会从对应 Parquet 文件回填历史，确保服务重启后仍可快速恢复。
+- **压缩与轮换**：提供 `scripts/market_data_rotate.py` 脚本，默认 7 天后将日度 Parquet 文件压缩为
+  `.parquet.gz`，30 天后删除归档。可通过 `--base-dir`、`--compress-after-days`、`--delete-after-days`
+  自定义策略，并支持 `--dry-run` 预览操作。部署时建议将该脚本加入定时任务，避免磁盘持续增长。
+- **存储路径**：通过 `MARKET_DATA_STORAGE_PATH`（或 `DATA_LAYER_PARQUET_PATH`）调整根目录，`MARKET_DATA_PARQUET_COMPRESSION`
+  控制写入压缩算法（默认 `snappy`）。确保目录具备写权限并纳入备份策略。

@@ -19,6 +19,7 @@ from src.ibbot.config import ConfigProvider
 from src.ibbot.influx import write_points
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
+from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
 
 SERVICE_NAME = "ib-feed"
 PRICE_MEASUREMENT = "market_price"
@@ -48,6 +49,7 @@ class MarketDataFeedService:
     redis: Any
     subscriptions: Sequence[str]
     write_fn: Callable[[Iterable[Mapping[str, Any]]], Awaitable[int] | int] = write_points
+    dom_writer: MarketDataParquetWriter | None = None
     logger_name: str = "ibbot.services.ib_feed"
     reconnect_delay: float = 1.0
     health_service_name: str = SERVICE_NAME
@@ -71,6 +73,12 @@ class MarketDataFeedService:
 
     def __post_init__(self) -> None:
         self._logger = get_logger(self.logger_name)
+        if self.dom_writer is None:
+            try:
+                self.dom_writer = get_market_data_writer()
+            except Exception:  # pragma: no cover - defensive guard
+                if self._logger:
+                    self._logger.warning("Falling back to no-op DOM writer", exc_info=True)
 
     async def start(self) -> None:
         """Start the service by connecting and subscribing to symbols."""
@@ -271,14 +279,24 @@ class MarketDataFeedService:
         self._dom_cache[symbol] = snapshot
         await self._publish_dom_snapshot(symbol, snapshot)
         payload = json.dumps(self._json_ready(snapshot), separators=(",", ":"))
-        await self._write_influx([
-            {
-                "measurement": DOM_MEASUREMENT,
-                "tags": {"symbol": symbol},
-                "fields": {"payload": payload},
-                "time": snapshot["timestamp"],
-            }
-        ])
+        writer = self.dom_writer
+        if writer is not None:
+            try:
+                writer.append_dom(symbol, snapshot)
+            except Exception:  # pragma: no cover - defensive guard
+                if self._logger:
+                    self._logger.warning("Failed to append DOM snapshot to Parquet", exc_info=True)
+        if self.write_fn is not write_points:
+            await self._write_influx(
+                [
+                    {
+                        "measurement": DOM_MEASUREMENT,
+                        "tags": {"symbol": symbol},
+                        "fields": {"payload": payload},
+                        "time": snapshot["timestamp"],
+                    }
+                ]
+            )
 
     async def _publish_price_snapshot(self, symbol: str, snapshot: Mapping[str, Any]) -> None:
         channel = PRICE_CHANNEL_TEMPLATE.format(symbol=symbol)

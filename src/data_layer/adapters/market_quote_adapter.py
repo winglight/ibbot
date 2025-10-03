@@ -106,7 +106,22 @@ class MarketQuoteAdapter(DataSourceAdapter):
             raise DataSourceError("Quote history requires symbol")
         if request.interval:
             channel = self._candle_channel(request.interval)
-            return self._cache.get_series(channel, symbol)
+            series = self._cache.get_series(channel, symbol)
+            if not series and hasattr(self._persistence, "load_candles"):
+                try:
+                    history = self._persistence.load_candles(  # type: ignore[attr-defined]
+                        symbol,
+                        request.interval,
+                        limit=self._candle_history,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.warning("Failed to load candle history for %s: %s", symbol, exc)
+                else:
+                    for entry in history:
+                        self._cache.append_series(channel, symbol, dict(entry), limit=self._candle_history)
+                    if history:
+                        series = history
+            return series
         return []
 
     def _dispatch_tick(self, symbol: str, payload: Dict[str, Any]) -> None:
