@@ -8,7 +8,7 @@ except ImportError:  # pragma: no cover - fallback for test environments
     from test.ib_insync_stub import IB, util, ExecutionFilter
 from loguru import logger
 
-from .utils import now_local
+from .utils import now_local, run_in_cpu_executor, run_in_db_executor
 from .restart_utils import restart_program
 
 # 为connection模块创建专用logger
@@ -625,7 +625,7 @@ class ConnectionManager:
                                     om = get_order_manager()
                                     fill_price = getattr(trade.orderStatus, 'avgFillPrice', None)
                                     executed_at = now_local() if status in ('Filled', 'PartiallyFilled') else None
-                                    updated = await asyncio.to_thread(
+                                    updated = await run_in_db_executor(
                                         om.update_order_status,
                                         order_id=order_id,
                                         status=status,
@@ -693,7 +693,7 @@ class ConnectionManager:
                                                           'risk' in lower_ref):
                                                         order_source = 'auto'
 
-                                            await asyncio.to_thread(
+                                            await run_in_db_executor(
                                                 om.add_order,
                                                 {
                                                     'order_id': order_id,
@@ -710,7 +710,7 @@ class ConnectionManager:
                                                 },
                                             )
 
-                                            await asyncio.to_thread(
+                                            await run_in_db_executor(
                                                 om.update_order_status,
                                                 order_id=order_id,
                                                 status=status,
@@ -955,7 +955,7 @@ class ConnectionManager:
         self._ensure_ready_event(loop)
 
         try:
-            status = await asyncio.to_thread(self._prepare_connection_start)
+            status = await run_in_cpu_executor(self._prepare_connection_start)
         except Exception as exc:
             connection_logger.error(f"Failed to initiate async IBKR connection: {exc}")
             return False

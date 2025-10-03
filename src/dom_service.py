@@ -6,7 +6,6 @@ import copy
 import threading
 import atexit
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Lock
 from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
@@ -45,6 +44,7 @@ from src.dom_parameter_tuner import (
 from src.dom_signal_tracker import SignalOutcomeTracker, resolve_outcome_config
 from src.dom_stats import DomStatsAggregator
 from src.dom_settings import get_automation_defaults
+from src.utils import get_async_executor, run_in_cpu_executor
 
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
 
@@ -311,7 +311,7 @@ class DOMService:
         end_time: Optional[Any] = None,
         max_points: Optional[int] = None,
     ) -> Dict[str, Any]:
-        return await asyncio.to_thread(
+        return await run_in_cpu_executor(
             self.get_stats,
             symbol,
             lookback_seconds=lookback_seconds,
@@ -324,18 +324,28 @@ class DOMService:
         listeners = list(self._listeners.get(event, []))
         if not listeners:
             return
+
+        def _log_async_error(fut: Any) -> None:
+            try:
+                fut.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.exception("DOM listener async callback failed: {}", exc)
+
         for callback in listeners:
             try:
                 result = callback(*args, **kwargs)
                 if inspect.isawaitable(result):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(result)  # type: ignore[arg-type]
                     except RuntimeError:
-                        try:
-                            asyncio.run(result)
-                        except RuntimeError:
-                            logger.exception("Failed to run async DOM listener callback")
+                        future = run_in_cpu_executor(asyncio.run, result)
+                        if hasattr(future, "add_done_callback"):
+                            future.add_done_callback(_log_async_error)
+                    else:
+                        task = loop.create_task(result)  # type: ignore[arg-type]
+                        task.add_done_callback(_log_async_error)
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.error(f"DOM listener error: {exc}")
 
@@ -744,9 +754,9 @@ class DOMService:
             return bool(asyncio.run_coroutine_threadsafe(coro, loop).result())
 
         if running_loop and running_loop.is_running():
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(asyncio.run, coro)
-                return bool(future.result())
+            executor = get_async_executor().cpu_executor
+            future = executor.submit(asyncio.run, coro)
+            return bool(future.result())
 
         return bool(asyncio.run(coro))
 
@@ -941,7 +951,7 @@ class DOMService:
                 "Unified DOM stream failed in dual mode; falling back to legacy",
                 symbol=symbol,
             )
-        return await asyncio.to_thread(
+        return await run_in_cpu_executor(
             self._start_stream_blocking, symbol, num_rows, force_restart=force_restart
         )
 
@@ -1044,7 +1054,7 @@ class DOMService:
             except RuntimeError:
                 pass
         target_symbol = removed_symbol or symbol
-        result = await asyncio.to_thread(
+        result = await run_in_cpu_executor(
             self._stop_stream_blocking,
             target_symbol,
             symbol_key,

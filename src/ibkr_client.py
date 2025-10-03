@@ -14,7 +14,13 @@ except ImportError:  # pragma: no cover - exercised only in minimal environments
 from loguru import logger
 from zoneinfo import ZoneInfo
 
-from src.utils import is_trading_disabled, now_local, to_local_time
+from src.utils import (
+    is_trading_disabled,
+    now_local,
+    run_in_cpu_executor,
+    run_in_db_executor,
+    to_local_time,
+)
 from src.data_layer import (
     DataSubscriptionRequest,
     DataSubscriptionToken,
@@ -710,7 +716,7 @@ class IBKRClient:
                     self._gateway_service_name,
                 ]
 
-        success = await asyncio.to_thread(self._run_restart_command, command, shell)
+        success = await run_in_cpu_executor(self._run_restart_command, command, shell)
 
         if not success and not self._gateway_restart_cmd:
             compose_file = self.connection_manager._project_root / "docker" / "docker-compose.yml"
@@ -718,7 +724,7 @@ class IBKRClient:
             if compose_file.exists():
                 fallback_cmd.extend(["-f", str(compose_file)])
             fallback_cmd.extend(["restart", self._gateway_service_name])
-            await asyncio.to_thread(self._run_restart_command, fallback_cmd, False)
+            await run_in_cpu_executor(self._run_restart_command, fallback_cmd, False)
 
         # Force a fresh session on next attempt
         self._needs_cleanup = True
@@ -1621,9 +1627,9 @@ class IBKRClient:
                 error=str(result.error),
             )
             try:
-                await asyncio.to_thread(ib.reqOpenOrders)
-                await asyncio.to_thread(ib.reqAllOpenOrders)
-                await asyncio.to_thread(time.sleep, 0.2)
+                await run_in_cpu_executor(ib.reqOpenOrders)
+                await run_in_cpu_executor(ib.reqAllOpenOrders)
+                await run_in_cpu_executor(time.sleep, 0.2)
                 ibkr_logger.debug("Requested order refresh from IBKR (sync fallback)")
                 return True
             except Exception as e:
@@ -2542,7 +2548,7 @@ class IBKRClient:
             def _portfolio_snapshot():
                 return ib.portfolio()
 
-            portfolio_items = await asyncio.to_thread(
+            portfolio_items = await run_in_cpu_executor(
                 self.connection_manager.run_in_connection_thread,
                 _portfolio_snapshot,
                 timeout=10.0,
@@ -2756,7 +2762,7 @@ class IBKRClient:
             if order_id:
                 # 更新订单状态为失败
                 order_manager = get_order_manager()
-                await asyncio.to_thread(
+                await run_in_db_executor(
                     order_manager.update_order_status,
                     order_id=order_id,
                     status=OrderStatus.REJECTED.value,
