@@ -70,6 +70,76 @@
             ];
         }
 
+        determineStrategyType(strategy) {
+            if (!strategy || typeof strategy !== 'object') {
+                return 'external';
+            }
+            const resolve = (value) => {
+                if (!value || typeof value !== 'string') {
+                    return '';
+                }
+                return value.trim().toLowerCase();
+            };
+            const directType = resolve(strategy.strategy_type);
+            if (directType === 'internal' || directType === 'external') {
+                return directType;
+            }
+            const metadata = (strategy.metadata && typeof strategy.metadata === 'object')
+                ? strategy.metadata
+                : {};
+            const metadataType = resolve(
+                metadata.strategy_type
+                || metadata.type
+                || metadata.category
+                || metadata.kind
+            );
+            if (metadataType === 'internal' || metadataType === 'external') {
+                return metadataType;
+            }
+            const source = resolve(metadata.source);
+            if (source && ['builtin', 'filesystem', 'internal', 'local'].includes(source)) {
+                return 'internal';
+            }
+            if (source && source.includes('external')) {
+                return 'external';
+            }
+            const FILE_METADATA_KEYS = ['file', 'file_path', 'filepath', 'path', 'script', 'scripts', 'files', 'paths'];
+            const hasFileReference = FILE_METADATA_KEYS.some((key) => {
+                const value = metadata[key];
+                if (Array.isArray(value)) {
+                    return value.some((item) => typeof item === 'string' && item.trim());
+                }
+                return typeof value === 'string' && value.trim();
+            });
+            if (hasFileReference) {
+                return 'internal';
+            }
+            if (typeof strategy.factory === 'string' && strategy.factory.trim()) {
+                return 'internal';
+            }
+            if (typeof metadata.factory === 'string' && metadata.factory.trim()) {
+                return 'internal';
+            }
+            if (strategy.api_endpoint || metadata.api_endpoint) {
+                return 'external';
+            }
+            return 'external';
+        }
+
+        normalizeStrategyDocument(strategy) {
+            if (!strategy || typeof strategy !== 'object') {
+                return strategy;
+            }
+            const type = this.determineStrategyType(strategy);
+            if (strategy.strategy_type === type && type) {
+                return strategy;
+            }
+            return {
+                ...strategy,
+                strategy_type: type,
+            };
+        }
+
         getStrategyExecutionsCacheKey(name, limit) {
             return `${name}::${limit}`;
         }
@@ -207,9 +277,10 @@
             }
 
             const strategies = Array.isArray(payload.strategies) ? payload.strategies : [];
-            this.strategies = strategies;
+            const normalized = strategies.map((item) => this.normalizeStrategyDocument(item));
+            this.strategies = normalized;
             this.strategiesLoaded = true;
-            this.displayStrategies(strategies);
+            this.displayStrategies(normalized);
             return true;
         }
 
@@ -1265,7 +1336,7 @@
             try {
                 const res = await this.app.apiCall(`/strategies/${encodeURIComponent(name)}`);
                 if (!res.success) throw new Error('Failed to load strategy');
-                const s = res.strategy;
+                const s = this.normalizeStrategyDocument(res.strategy);
                 const nameEl = document.getElementById('editStrategyName');
                 if (nameEl) nameEl.textContent = s.name;
                 const desc = document.getElementById('editStrategyDescriptionInput');
