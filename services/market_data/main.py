@@ -10,7 +10,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Mapping, Sequence
 
 from contextlib import asynccontextmanager
 
@@ -19,10 +19,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.ibbot import update_service_health
-from src.ibbot.influx import build_service_metric_point, write_points
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import PubSubListener, get_redis_client
 from src.utils import NY_TZ, now_local, to_local_iso
+
+if TYPE_CHECKING:  # pragma: no cover - typing helpers
+    from src.ibbot.db import ServiceMetricRepository
 
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
 DOM_CHANNEL_TEMPLATE = "pubsub:ib:dom:{symbol}"
@@ -227,12 +229,6 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return None
 
 
-async def _maybe_await(result: Awaitable[Any] | Any) -> Any:
-    if inspect.isawaitable(result):
-        return await result  # type: ignore[return-value]
-    return result
-
-
 class WebSocketManager:
     """Manage active WebSocket connections and broadcast updates."""
 
@@ -267,7 +263,6 @@ class MarketDataRuntime:
     """Aggregate market snapshots and expose them over HTTP/WebSocket."""
 
     redis_factory: Callable[[], Awaitable[Any]] = get_redis_client
-    write_fn: Callable[[Iterable[Any]], Awaitable[int] | int] = write_points
     pubsub_listener: PubSubListener | None = None
     subscriptions: Sequence[str] = ()
     logger_name: str = "ibbot.services.market_data"
@@ -277,6 +272,9 @@ class MarketDataRuntime:
     health_service_name: str = "market-data"
     health_key: str | None = None
     stream_maxlen: int = 5000
+    metrics_repository_factory: (
+        Callable[[], Awaitable["ServiceMetricRepository"] | "ServiceMetricRepository"] | None
+    ) = None
 
     _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _redis: Any = field(default=None, init=False, repr=False)
@@ -291,11 +289,24 @@ class MarketDataRuntime:
     _metrics_latency_max: Dict[str, float] = field(default_factory=lambda: defaultdict(float), init=False, repr=False)
     _last_metrics_at: datetime = field(default_factory=_now, init=False, repr=False)
     _logger: Any = field(default=None, init=False, repr=False)
+    _metrics_repository: "ServiceMetricRepository" | None = field(
+        default=None, init=False, repr=False
+    )
+    _metrics_repository_close: Callable[[], Awaitable[None]] | None = field(
+        default=None, init=False, repr=False
+    )
 
     async def start(self) -> None:
         self._logger = get_logger(self.logger_name)
         self._loop = asyncio.get_running_loop()
-        self._redis = await self.redis_factory()
+        try:
+            await self._initialize_metrics_repository()
+            self._redis = await self.redis_factory()
+        except Exception:
+            await self._close_metrics_repository()
+            self._redis = None
+            self._loop = None
+            raise
         await self._publish_health(status="starting", healthy=False)
         self._pubsub = self.pubsub_listener or PubSubListener(redis_factory=self.redis_factory)
         await self._register_channels()
@@ -318,6 +329,44 @@ class MarketDataRuntime:
         await self._publish_health(status="offline", healthy=False)
         self._redis = None
         self._loop = None
+        await self._close_metrics_repository()
+
+    async def _initialize_metrics_repository(self) -> None:
+        if self._metrics_repository is not None:
+            return
+        factory = self.metrics_repository_factory
+        if factory is None:
+            return
+        repository = factory()
+        if inspect.isawaitable(repository):
+            repository = await repository
+        self._metrics_repository = repository
+
+        close_callable = getattr(repository, "close", None)
+
+        if close_callable is not None and callable(close_callable):
+
+            async def _close_repo() -> None:
+                result = close_callable()
+                if inspect.isawaitable(result):
+                    await result
+
+            self._metrics_repository_close = _close_repo
+        else:
+            self._metrics_repository_close = None
+
+    async def _close_metrics_repository(self) -> None:
+        closer = self._metrics_repository_close
+        self._metrics_repository_close = None
+        repository = self._metrics_repository
+        self._metrics_repository = None
+        if closer is None:
+            return
+        try:
+            await closer()
+        except Exception:
+            if self._logger:
+                self._logger.warning("Failed to close service metrics repository", exc_info=True)
 
     async def _register_channels(self) -> None:
         if self._pubsub is None:
@@ -418,7 +467,8 @@ class MarketDataRuntime:
         if elapsed <= 0:
             elapsed = self.metrics_interval
         self._last_metrics_at = now
-        points = []
+        repository = self._metrics_repository
+        entries: list[dict[str, Any]] = []
         health_metrics: dict[str, Any] = {"interval": elapsed, "final": final}
         for metric, count in list(self._metrics_counts.items()):
             if count <= 0 and not final:
@@ -427,21 +477,24 @@ class MarketDataRuntime:
             max_latency = self._metrics_latency_max.get(metric, 0.0)
             avg_latency = latency_total / count if count else 0.0
             throughput = count / elapsed if elapsed > 0 else 0.0
-            points.append(
-                build_service_metric_point(
-                    service=self.service_name,
-                    metric=f"{metric}-throughput",
-                    value=throughput,
-                    extra_fields={"updates": count, "interval": elapsed},
-                )
+            entries.append(
+                {
+                    "service": self.service_name,
+                    "metric": f"{metric}-throughput",
+                    "value": throughput,
+                    "details": {"updates": int(count), "interval": float(elapsed)},
+                }
             )
-            points.append(
-                build_service_metric_point(
-                    service=self.service_name,
-                    metric=f"{metric}-latency",
-                    value=avg_latency,
-                    extra_fields={"max_latency": max_latency, "updates": count},
-                )
+            entries.append(
+                {
+                    "service": self.service_name,
+                    "metric": f"{metric}-latency",
+                    "value": avg_latency,
+                    "details": {
+                        "updates": int(count),
+                        "max_latency": max_latency,
+                    },
+                }
             )
             health_metrics[f"{metric}_updates"] = int(count)
             health_metrics[f"{metric}_throughput"] = throughput
@@ -450,11 +503,12 @@ class MarketDataRuntime:
             self._metrics_counts[metric] = 0.0
             self._metrics_latency[metric] = 0.0
             self._metrics_latency_max[metric] = 0.0
-        if points:
+        if entries and repository is not None:
             try:
-                await _maybe_await(self.write_fn(points))
+                await repository.record_metrics(entries)
             except Exception:
-                self._logger.warning("Failed to write service metrics", exc_info=True)
+                if self._logger:
+                    self._logger.warning("Failed to persist service metrics", exc_info=True)
         await self._publish_health(status="running", healthy=True, metrics=health_metrics)
 
     async def _publish_health(
@@ -523,6 +577,20 @@ class MarketDataRuntime:
 
 def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
     runtime = runtime or MarketDataRuntime()
+
+    if runtime.metrics_repository_factory is None:
+        try:
+            from src.ibbot.db import get_session_factory, service_metric_repository
+        except ModuleNotFoundError:  # pragma: no cover - optional dependency missing
+            pass
+        else:
+            session_factory = get_session_factory()
+
+            async def _build_metrics_repository() -> "ServiceMetricRepository":
+                session = session_factory()
+                return service_metric_repository(session)
+
+            runtime.metrics_repository_factory = _build_metrics_repository
 
     cache_prefix = os.getenv(CACHE_PREFIX_ENV, DEFAULT_CACHE_PREFIX).strip() or DEFAULT_CACHE_PREFIX
     cache_prefix = cache_prefix.rstrip(":")

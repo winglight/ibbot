@@ -100,6 +100,15 @@ class ServiceMetricRepository:
         self._session = session
         self._logger = get_logger(logger_name)
 
+    async def close(self) -> None:
+        """Close the underlying session if it is still open."""
+
+        try:
+            await self._session.close()
+        except Exception:  # pragma: no cover - defensive safeguard
+            self._logger.exception("Failed to close service metric session")
+            raise
+
     async def record_metrics(
         self,
         metrics: Mapping[str, Any] | Iterable[Mapping[str, Any]],
