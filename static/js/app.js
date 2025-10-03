@@ -2938,6 +2938,34 @@ class TradingApp {
         this.strategiesManager.displayStrategies(strategies);
     }
 
+    determineStrategyType(strategy) {
+        if (this.strategiesManager?.determineStrategyType) {
+            return this.strategiesManager.determineStrategyType(strategy);
+        }
+        if (!strategy || typeof strategy !== 'object') {
+            return 'external';
+        }
+        const raw = (strategy.strategy_type || '').toString().toLowerCase().trim();
+        if (raw === 'internal' || raw === 'external') {
+            return raw;
+        }
+        return 'external';
+    }
+
+    normalizeStrategyDocument(strategy) {
+        if (this.strategiesManager?.normalizeStrategyDocument) {
+            return this.strategiesManager.normalizeStrategyDocument(strategy);
+        }
+        if (!strategy || typeof strategy !== 'object') {
+            return strategy;
+        }
+        const type = this.determineStrategyType(strategy);
+        if (strategy.strategy_type === type) {
+            return strategy;
+        }
+        return { ...strategy, strategy_type: type };
+    }
+
     async toggleStrategy(name, enabled, options = {}) {
         if (!this.strategiesManager || typeof this.strategiesManager.toggleStrategy !== 'function') {
             return;

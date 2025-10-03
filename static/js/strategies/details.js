@@ -507,18 +507,20 @@
 
         async initializeStrategyDetailsContent(name) {
             const cached = this.app?.getStrategyFromCache?.(name);
-            if (cached) {
-                this.strategyDetailsState.basicInfo = cached;
-                this.updateStrategyDetailsHeader(cached);
-                this.configureStrategyDetailsTabs(cached);
-                this.app?.setupStrategyChartState?.(cached, name);
+            const normalizedCached = cached ? this.app?.normalizeStrategyDocument?.(cached) : null;
+            if (normalizedCached) {
+                this.strategyDetailsState.basicInfo = normalizedCached;
+                this.updateStrategyDetailsHeader(normalizedCached);
+                this.configureStrategyDetailsTabs(normalizedCached);
+                this.app?.setupStrategyChartState?.(normalizedCached, name);
             }
 
             const strategy = await this.fetchStrategyBasicInfo(name);
             if (this.strategyDetailsState.name !== name) {
                 return;
             }
-            const resolved = strategy || cached || null;
+            const normalizedStrategy = strategy ? this.app?.normalizeStrategyDocument?.(strategy) : null;
+            const resolved = normalizedStrategy || normalizedCached || null;
             this.strategyDetailsState.basicInfo = resolved;
             this.updateStrategyDetailsHeader(resolved);
             this.configureStrategyDetailsTabs(resolved);
@@ -529,7 +531,10 @@
             const typeEl = document.getElementById('detailsStrategyType');
             const trigEl = document.getElementById('detailsTriggerCount');
             const lastEl = document.getElementById('detailsLastTriggered');
-            if (typeEl) typeEl.textContent = strategy?.strategy_type || '-';
+            if (typeEl) {
+                const type = this.app?.determineStrategyType?.(strategy) || strategy?.strategy_type || '-';
+                typeEl.textContent = type || '-';
+            }
             if (trigEl) trigEl.textContent = strategy?.trigger_count ?? 0;
             if (lastEl) {
                 lastEl.textContent = strategy?.last_triggered
@@ -551,7 +556,9 @@
         }
 
         configureStrategyDetailsTabs(strategy) {
-            const isInternal = (strategy?.strategy_type || '').toLowerCase() === 'internal';
+            const resolvedType = this.app?.determineStrategyType?.(strategy) || strategy?.strategy_type || 'external';
+            const normalizedType = typeof resolvedType === 'string' ? resolvedType.toLowerCase() : 'external';
+            const isInternal = normalizedType === 'internal';
             const summaryWrap = document.getElementById('summary-tab-wrap');
             const riskWrap = document.getElementById('risk-settings-tab-wrap');
             const ordersWrap = document.getElementById('internal-orders-tab-wrap');
@@ -591,7 +598,10 @@
                 this.strategyDetailsState.defaultTabTarget = '#charts';
             }
 
-            this.strategyDetailsState.strategyType = isInternal ? 'internal' : (strategy?.strategy_type || 'external');
+            if (strategy && typeof strategy === 'object') {
+                strategy.strategy_type = normalizedType;
+            }
+            this.strategyDetailsState.strategyType = isInternal ? 'internal' : 'external';
         }
 
         activateStrategyDetailsDefaultTab() {
@@ -653,7 +663,11 @@
                     try {
                         const res = await this.app?.apiCall?.(`/strategies/${encodeURIComponent(name)}`);
                         if (res?.success) {
-                            return res.strategy || null;
+                            const strategy = res.strategy || null;
+                            if (!strategy) {
+                                return null;
+                            }
+                            return this.app?.normalizeStrategyDocument?.(strategy) || strategy;
                         }
                     } catch (err) {
                         console.error('Failed to load strategy info:', err);
