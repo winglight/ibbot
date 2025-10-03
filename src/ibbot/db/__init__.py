@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from .config import DatabaseConfigError, get_database_url, resolve_database_url
 from .session import get_async_engine, get_async_session, get_session_factory, session_scope
 from .schemas import (
+    AuditLog,
     Base,
     MarketEvent,
     MarketPrice,
@@ -38,11 +39,14 @@ from .repositories.market import MariaDbMarketPriceRepository
 from .repositories.metrics import ServiceMetricRepository
 from .repositories.order import MariaDbOrderRepository
 from .repositories.risk import RiskSnapshotRepository
+from .repositories.audit import AuditLogRepository
 
 if TYPE_CHECKING:  # pragma: no cover - import for type hints only
     from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
+    "AuditLog",
+    "AuditLogRepository",
     "Base",
     "DatabaseConfigError",
     "MarketEvent",
@@ -63,6 +67,7 @@ __all__ = [
     "metadata",
     "resolve_database_url",
     "session_scope",
+    "audit_log_repository",
     "market_event_repository",
     "market_price_repository",
     "order_repository",
@@ -105,3 +110,9 @@ def market_event_repository(session: "AsyncSession") -> MarketEventRepository:
     """Return a market event repository bound to *session*."""
 
     return MarketEventRepository(session)
+
+
+def audit_log_repository(session: "AsyncSession") -> AuditLogRepository:
+    """Return an audit log repository bound to *session*."""
+
+    return AuditLogRepository(session)

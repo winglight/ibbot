@@ -186,7 +186,7 @@ def test_websocket_handshake_with_mock_manager(monkeypatch: pytest.MonkeyPatch) 
         assert initial.get("error_code") is None
 
 
-class FakeInflux:
+class FakeTelemetrySink:
     def __init__(self) -> None:
         self.points: list[tuple[str, dict[str, Any]]] = []
 
@@ -200,7 +200,7 @@ class ObservedResultPublisher(ResultPublisher):
         redis: InMemoryRedis,
         *,
         websocket_manager: DummyWebSocketManager,
-        influx: FakeInflux,
+        metrics_sink: FakeTelemetrySink,
         stream_key: str,
         hash_prefix: str,
     ) -> None:
@@ -211,11 +211,11 @@ class ObservedResultPublisher(ResultPublisher):
             logger_name="tests.ib_command.results",
         )
         self._websocket_manager = websocket_manager
-        self._influx = influx
+        self._metrics_sink = metrics_sink
 
     async def publish(self, payload: ExecutionResult) -> None:  # type: ignore[override]
         await super().publish(payload)
-        await self._influx.write_point(
+        await self._metrics_sink.write_point(
             "order_results",
             {
                 "command_id": payload.command_id,
@@ -484,7 +484,7 @@ def test_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> None:
 async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     redis = InMemoryRedis()
     websocket_manager = DummyWebSocketManager()
-    influx = FakeInflux()
+    metrics_sink = FakeTelemetrySink()
     fake_ib = FakeIB()
     pubsub = DummyPubSubListener()
     metrics_repo = RecordingMetricsRepository()
@@ -614,7 +614,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
     publisher = ObservedResultPublisher(
         redis,
         websocket_manager=websocket_manager,
-        influx=influx,
+        metrics_sink=metrics_sink,
         stream_key=result_stream,
         hash_prefix=result_hash_prefix,
     )
@@ -684,6 +684,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
         await market_runtime.stop()
         assert metrics_repo.closed
         assert metrics_repo.records
+        assert metrics_sink.points
 
 
 def test_optimizer_flow(monkeypatch: pytest.MonkeyPatch) -> None:

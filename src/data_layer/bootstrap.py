@@ -14,13 +14,14 @@ from .cache import InMemoryCacheBackend, RedisCacheBackend
 from .data_source_manager import DataSourceManager
 from .config import get_candle_intervals
 from .persistence import (
-    InfluxPersistenceBackend,
+    DatabasePersistenceBackend,
     NoopPersistenceBackend,
     ParquetPersistenceBackend,
 )
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter
 from .quote_feed import QuoteFeed, resolve_default_quote_feed
 from src.ibbot.redis import DEFAULT_REDIS_URL
+from src.ibbot.db import DatabaseConfigError, get_database_url, get_session_factory
 
 __all__ = ["get_data_source_manager", "get_quote_feed"]
 
@@ -125,39 +126,19 @@ def _get_persistence_backend():
     except Exception as exc:
         logger.warning("Failed to initialise Parquet backend: {}", exc)
 
-    influx_url = os.getenv("DATA_LAYER_INFLUX_URL")
-    influx_bucket = os.getenv("DATA_LAYER_INFLUX_BUCKET")
-    influx_org = os.getenv("DATA_LAYER_INFLUX_ORG")
-    if influx_url and influx_bucket and influx_org:
-        token = os.getenv("DATA_LAYER_INFLUX_TOKEN")
-        measurement = os.getenv("DATA_LAYER_INFLUX_MEASUREMENT", "market_events")
-        timeout_raw = os.getenv("DATA_LAYER_INFLUX_TIMEOUT_MS")
-        timeout = None
-        if timeout_raw:
-            try:
-                timeout_candidate = int(timeout_raw.strip())
-            except ValueError:
-                logger.warning(
-                    "Invalid DATA_LAYER_INFLUX_TIMEOUT_MS value %r - falling back to default",
-                    timeout_raw,
-                )
-            else:
-                if timeout_candidate > 0:
-                    timeout = timeout_candidate
-
+    try:
+        session_factory = get_session_factory()
+        _persistence_backend = DatabasePersistenceBackend(session_factory=session_factory)
         try:
-            _persistence_backend = InfluxPersistenceBackend(
-                influx_url,
-                bucket=influx_bucket,
-                org=influx_org,
-                token=token,
-                measurement=measurement,
-                timeout=timeout,
-            )
-            logger.info("Using InfluxDB persistence backend at {}", influx_url)
-            return _persistence_backend
-        except Exception as exc:
-            logger.warning("Failed to initialise InfluxDB backend: {}", exc)
+            db_url = get_database_url()
+        except DatabaseConfigError:
+            db_url = "<unknown>"
+        logger.info("Using MariaDB persistence backend at {}", db_url)
+        return _persistence_backend
+    except DatabaseConfigError as exc:
+        logger.debug("Database persistence unavailable: {}", exc)
+    except Exception as exc:
+        logger.warning("Failed to initialise MariaDB persistence backend: {}", exc)
 
     _persistence_backend = NoopPersistenceBackend()
     logger.info("Using noop persistence backend")

@@ -19,9 +19,6 @@ from functools import lru_cache
 import os
 from typing import Mapping
 
-from sqlalchemy.engine import URL
-from sqlalchemy.engine.url import make_url
-
 __all__ = ["get_database_url", "resolve_database_url", "DatabaseConfigError"]
 
 SUPPORTED_DRIVER = "mysql+asyncmy"
@@ -33,7 +30,7 @@ class DatabaseConfigError(RuntimeError):
     """Raised when the database configuration is invalid or missing."""
 
 
-def _coerce_url(value: str) -> URL:
+def _coerce_url(value: str):
     """Parse ``value`` into a SQLAlchemy :class:`~sqlalchemy.engine.URL`.
 
     Parameters
@@ -46,6 +43,11 @@ def _coerce_url(value: str) -> URL:
     DatabaseConfigError
         If the URL cannot be parsed or uses an unsupported driver.
     """
+
+    try:
+        from sqlalchemy.engine.url import make_url
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+        raise DatabaseConfigError("SQLAlchemy is required to parse database URLs") from exc
 
     try:
         url = make_url(value)

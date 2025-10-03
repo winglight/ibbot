@@ -1,63 +1,125 @@
-from types import SimpleNamespace
-from typing import Optional
+import asyncio
+from dataclasses import dataclass
+
+import pytest
 
 from src.data_layer import persistence
+from src.data_layer.event_bus import EventEnvelope
 
 
-class _FakeBucketsAPI:
-    def __init__(self):
-        self.created = None
+@dataclass
+class _FakeSession:
+    closed: bool = False
 
-    def find_buckets(self):
-        return SimpleNamespace(buckets=[])
-
-    def create_bucket(self, *, bucket_name: str, org_id: str):
-        self.created = (bucket_name, org_id)
-        return SimpleNamespace(name=bucket_name)
+    async def close(self) -> None:
+        self.closed = True
 
 
-class _FakeOrganizationsAPI:
-    def __init__(self, expected_name: str, org_id: str):
-        self._expected_name = expected_name
-        self._org_id = org_id
+class _MarketEventRecorder:
+    def __init__(self, sink: list[dict]) -> None:
+        self._sink = sink
 
-    def find_organizations(self):
-        return SimpleNamespace(
-            orgs=[SimpleNamespace(name=self._expected_name, id=self._org_id)]
-        )
+    async def insert_event(self, payload: dict) -> None:
+        self._sink.append(payload)
 
 
-class _FakeWriteAPI:
-    def write(self, *args, **kwargs):  # pragma: no cover - helper stub
-        return None
+class _MetricRecorder:
+    def __init__(self, sink: list[dict]) -> None:
+        self._sink = sink
+
+    async def record_metrics(self, payload) -> None:
+        if isinstance(payload, dict):
+            self._sink.append(payload)
+        else:
+            self._sink.extend(list(payload))
 
 
-class _FakeClient:
-    def __init__(self, *, url: str, token: Optional[str], org: str):
-        self._bucket_api = _FakeBucketsAPI()
-        self._org_api = _FakeOrganizationsAPI(expected_name=org, org_id="org-id")
+def test_database_backend_persists_market_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[dict] = []
+    sessions: list[_FakeSession] = []
 
-    def write_api(self):
-        return _FakeWriteAPI()
+    def session_factory() -> _FakeSession:
+        session = _FakeSession()
+        sessions.append(session)
+        return session
 
-    def buckets_api(self):
-        return self._bucket_api
-
-    def organizations_api(self):
-        return self._org_api
-
-
-def test_influx_backend_creates_bucket_when_missing(monkeypatch, caplog):
-    monkeypatch.setattr(persistence, "InfluxDBClient", _FakeClient)
-
-    with caplog.at_level("INFO"):
-        backend = persistence.InfluxPersistenceBackend(
-            url="http://localhost", bucket="missing-bucket", org="test-org"
-        )
-
-    bucket_api = backend._client.buckets_api()
-    assert bucket_api.created == ("missing-bucket", "org-id")
-    assert any(
-        "Created InfluxDB bucket missing-bucket" in record.message
-        for record in caplog.records
+    monkeypatch.setattr(
+        persistence,
+        "market_event_repository",
+        lambda session: _MarketEventRecorder(events),
     )
+
+    backend = persistence.DatabasePersistenceBackend(session_factory=session_factory)
+    envelope = EventEnvelope(
+        event_type="market.tick",
+        topic="market.price",
+        symbol="SYM",
+        source="feed",
+        ts_ns=123,
+        payload={"bid": 1.23},
+        meta={"source": "test"},
+    )
+
+    backend.write_event(envelope)
+
+    assert events, "Expected market event to be recorded"
+    row = events[0]
+    assert row["event_type"] == "market.tick"
+    assert row["topic"] == "market.price"
+    assert row["payload"] == {"bid": 1.23}
+    assert sessions and sessions[0].closed is True
+
+
+def test_database_backend_persists_service_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics: list[dict] = []
+
+    def session_factory() -> _FakeSession:
+        return _FakeSession()
+
+    monkeypatch.setattr(
+        persistence,
+        "service_metric_repository",
+        lambda session: _MetricRecorder(metrics),
+    )
+
+    backend = persistence.DatabasePersistenceBackend(session_factory=session_factory)
+    envelope = EventEnvelope(
+        event_type="service.metric",
+        topic="metrics",
+        payload={"service": "queue", "metric": "depth", "value": 5},
+    )
+
+    backend.write_event(envelope)
+
+    assert metrics == [{"service": "queue", "metric": "depth", "value": 5}]
+
+
+def test_database_backend_handles_async_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics: list[dict] = []
+
+    def session_factory() -> _FakeSession:
+        return _FakeSession()
+
+    monkeypatch.setattr(
+        persistence,
+        "service_metric_repository",
+        lambda session: _MetricRecorder(metrics),
+    )
+
+    backend = persistence.DatabasePersistenceBackend(session_factory=session_factory)
+
+    async def scenario() -> None:
+        envelope = EventEnvelope(
+            event_type="service.metric",
+            topic="metrics",
+            payload=[{"service": "queue", "metric": "latency", "value": 1.2}],
+        )
+        backend.write_event(envelope)
+        # Give the scheduled task a chance to run.
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+    assert metrics == [
+        {"service": "queue", "metric": "latency", "value": 1.2},
+    ]

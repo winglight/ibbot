@@ -8,8 +8,9 @@ from typing import Any, Mapping
 
 from fastapi import Request
 from loguru import logger
+from sqlalchemy.exc import SQLAlchemyError
 
-from src.ibbot.influx import InfluxPoint, write_points
+from src.ibbot.db import DatabaseConfigError, audit_log_repository, session_scope
 
 
 def _coerce_fields(extra: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -38,10 +39,10 @@ async def log_audit_event(
     detail: str | None = None,
     extra: Mapping[str, Any] | None = None,
 ) -> None:
-    """Write an audit trail record to InfluxDB.
+    """Persist an audit trail record via the MariaDB repositories.
 
-    The function is intentionally tolerant: failures when writing to InfluxDB are
-    logged at debug level but never propagated to the caller so that security
+    The function is intentionally tolerant: failures when writing to the database
+    are logged at debug level but never propagated to the caller so that security
     checks do not disrupt the primary control flow.
     """
 
@@ -55,28 +56,24 @@ async def log_audit_event(
     timestamp = datetime.now(timezone.utc)
     result = "success" if success else "failure"
 
-    fields = {
-        "user": username,
+    extra_fields = _coerce_fields(extra)
+
+    entry = {
+        "username": username,
+        "role": role,
+        "action": action,
         "method": method,
         "path": path,
         "result": result,
-        "detail": detail or "",
+        "detail": detail,
+        "extra": extra_fields or None,
     }
-    fields.update(_coerce_fields(extra))
-
-    point = InfluxPoint(
-        "logs",
-        fields=fields,
-        tags={
-            "category": "audit",
-            "action": action,
-            "role": role,
-            "result": result,
-        },
-        timestamp=timestamp,
-    )
 
     try:
-        write_points([point])
-    except Exception as exc:  # pragma: no cover - safety net for production
-        logger.debug("Failed to write audit log: {}", exc)
+        async with session_scope() as session:
+            repository = audit_log_repository(session)
+            await repository.insert_entry(entry)
+    except (DatabaseConfigError, SQLAlchemyError) as exc:
+        logger.debug("Failed to persist audit log entry: {}", exc)
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        logger.debug("Unexpected error while writing audit log: {}", exc)

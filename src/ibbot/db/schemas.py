@@ -16,6 +16,7 @@ __all__ = [
     "RiskConfigSnapshot",
     "RiskRuleSnapshot",
     "MarketEvent",
+    "AuditLog",
 ]
 
 
@@ -167,5 +168,25 @@ class MarketEvent(Base):
     meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class AuditLog(Base):
+    """Application audit trail entries."""
+
+    __tablename__ = "audit_logs"
+    __table_args__ = (Index("ix_audit_logs_username", "username"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(128))
+    role: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(128))
+    method: Mapped[str] = mapped_column(String(16))
+    path: Mapped[str] = mapped_column(String(512))
+    result: Mapped[str] = mapped_column(String(32))
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )

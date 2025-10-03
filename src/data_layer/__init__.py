@@ -26,6 +26,7 @@ from .data_source_manager import (
 from .event_bus import EventBus, EventEnvelope, BusSubscriptionToken
 from .persistence import (
     PersistenceBackend,
+    DatabasePersistenceBackend,
     NoopPersistenceBackend,
     ParquetPersistenceBackend,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "EventEnvelope",
     "BusSubscriptionToken",
     "PersistenceBackend",
+    "DatabasePersistenceBackend",
     "NoopPersistenceBackend",
     "ParquetPersistenceBackend",
     "get_data_source_manager",

@@ -123,7 +123,7 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
     monkeypatch.setattr("src.routes.auth.ADMIN_PASSWORD", "change_me", raising=False)
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
-    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.get_database_url", lambda: "mysql+asyncmy://user:pass@db/test")
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
     monkeypatch.setattr("core.container.load_project_env", lambda: None)
 
@@ -165,7 +165,7 @@ async def test_startup_raises_when_sqlite_handles_detected(monkeypatch: pytest.M
     monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
     monkeypatch.setattr("src.routes.auth.ADMIN_PASSWORD", "change_me", raising=False)
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
-    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.get_database_url", lambda: "mysql+asyncmy://user:pass@db/test")
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
     monkeypatch.setattr("core.container.load_project_env", lambda: None)
 
@@ -201,7 +201,7 @@ async def test_app_routes_available_without_ib(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
     monkeypatch.setattr("src.routes.auth.ADMIN_PASSWORD", "change_me", raising=False)
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
-    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.get_database_url", lambda: "mysql+asyncmy://user:pass@db/test")
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
     monkeypatch.setattr("core.container.load_project_env", lambda: None)
 
@@ -253,7 +253,7 @@ async def test_connection_status_prefers_redis_when_fresh(
     monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
     monkeypatch.setattr("src.routes.auth.ADMIN_PASSWORD", "change_me", raising=False)
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
-    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.get_database_url", lambda: "mysql+asyncmy://user:pass@db/test")
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
     monkeypatch.setattr("core.container.load_project_env", lambda: None)
 
@@ -329,7 +329,7 @@ async def test_risk_routes_use_service_client(
     monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
     monkeypatch.setattr("src.routes.auth.ADMIN_PASSWORD", "change_me", raising=False)
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
-    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.get_database_url", lambda: "mysql+asyncmy://user:pass@db/test")
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
     monkeypatch.setattr("core.container.load_project_env", lambda: None)
 

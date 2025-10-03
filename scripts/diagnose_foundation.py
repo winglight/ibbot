@@ -21,6 +21,8 @@ if str(SRC_PATH) not in sys.path:
 
 from ibbot.config import ConfigProvider  # noqa: E402
 from ibbot.logging import get_log_file, get_logger  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
 
 @dataclass(slots=True)
@@ -128,86 +130,66 @@ async def _diagnose_redis(config: Mapping[str, str], *, dry_run: bool) -> Diagno
     )
 
 
-def _influx_available() -> bool:
-    return importlib.util.find_spec("influxdb_client") is not None
+def _database_available() -> bool:
+    return importlib.util.find_spec("sqlalchemy") is not None
 
 
-def _diagnose_influx_sync(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
-    if not _influx_available():
+async def _diagnose_database(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
+    if not _database_available():
         return DiagnosticResult(
-            name="InfluxDB",
+            name="MariaDB",
             success=False,
-            message="influxdb-client is not installed. Install influxdb-client to enable Influx diagnostics.",
+            message="SQLAlchemy is not installed. Install sqlalchemy to enable database diagnostics.",
         )
 
-    influx_module = importlib.import_module("influxdb_client")
-    influx_url = _first_non_empty(config, "INFLUX_URL", "IBBOT_INFLUX_URL", "DATA_LAYER_INFLUX_URL")
-    token = _first_non_empty(config, "INFLUX_TOKEN", "IBBOT_INFLUX_TOKEN", "DATA_LAYER_INFLUX_TOKEN")
-    org = _first_non_empty(config, "INFLUX_ORG", "IBBOT_INFLUX_ORG", "DATA_LAYER_INFLUX_ORG")
-    bucket = _first_non_empty(config, "INFLUX_BUCKET", "IBBOT_INFLUX_BUCKET", "DATA_LAYER_INFLUX_BUCKET")
-    timeout_ms = config.get("INFLUX_TIMEOUT_MS") or config.get("DATA_LAYER_INFLUX_TIMEOUT_MS")
-    timeout = float(timeout_ms) / 1000 if timeout_ms else None
-
-    details: dict[str, Any] = {
-        "url": influx_url or "<not configured>",
-        "org": org or "<not configured>",
-        "bucket": bucket or "<not configured>",
-    }
+    db_url = _first_non_empty(config, "IBBOT_DB_URL", "DATA_LAYER_DB_URL")
+    details: dict[str, Any] = {"url": db_url or "<not configured>"}
 
     if dry_run:
         return DiagnosticResult(
-            name="InfluxDB",
+            name="MariaDB",
             success=True,
-            message="Dry-run: skipped health check.",
+            message="Dry-run: skipped connection test.",
             details=details,
         )
 
-    if influx_url is None:
+    if not db_url:
         return DiagnosticResult(
-            name="InfluxDB",
+            name="MariaDB",
             success=False,
-            message="INFLUX_URL is not configured.",
+            message="Database URL is not configured (set IBBOT_DB_URL or DATA_LAYER_DB_URL).",
         )
 
-    client_kwargs: dict[str, Any] = {"url": influx_url, "token": token, "org": org}
-    if timeout is not None:
-        client_kwargs["timeout"] = timeout
-
     try:
-        client = influx_module.InfluxDBClient(**client_kwargs)
-    except Exception as exc:  # pragma: no cover - constructor failure depends on environment
+        engine = create_async_engine(db_url, pool_pre_ping=True)
+    except Exception as exc:  # pragma: no cover - depends on driver availability
         return DiagnosticResult(
-            name="InfluxDB",
+            name="MariaDB",
             success=False,
-            message=f"Failed to initialise client: {exc}",
+            message=f"Failed to create engine: {exc}",
             details=details,
         )
 
     try:
-        health = client.health()
-        status = getattr(health, "status", None)
-        if status and str(status).lower() == "pass":
-            message = "Health check returned PASS."
-            success = True
-        else:
-            message = f"Health check returned {status or 'unknown'}"
-            success = str(status).lower() == "pass" if status else False
-        details["status"] = status
-    except Exception as exc:  # pragma: no cover - network failures vary
-        client.close()
-        return DiagnosticResult(
-            name="InfluxDB",
-            success=False,
-            message=f"Health check failed: {exc}",
-            details=details,
-        )
+        async with engine.connect() as connection:
+            try:
+                await connection.execute(text("SELECT 1"))
+            except Exception as exc:  # pragma: no cover - network errors
+                return DiagnosticResult(
+                    name="MariaDB",
+                    success=False,
+                    message=f"Connectivity test failed: {exc}",
+                    details=details,
+                )
+    finally:
+        await engine.dispose()
 
-    client.close()
-    return DiagnosticResult(name="InfluxDB", success=success, message=message, details=details)
-
-
-async def _diagnose_influx(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
-    return await asyncio.to_thread(_diagnose_influx_sync, config, dry_run=dry_run)
+    return DiagnosticResult(
+        name="MariaDB",
+        success=True,
+        message="Connection test succeeded.",
+        details=details,
+    )
 
 
 def _diagnose_logging(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
@@ -272,7 +254,7 @@ async def run(args: argparse.Namespace) -> int:
 
     results: list[DiagnosticResult] = []
     results.append(await _diagnose_redis(config, dry_run=args.dry_run))
-    results.append(await _diagnose_influx(config, dry_run=args.dry_run))
+    results.append(await _diagnose_database(config, dry_run=args.dry_run))
     results.append(_diagnose_logging(config, dry_run=args.dry_run))
 
     print("=== Foundation Diagnostics ===")
@@ -295,7 +277,7 @@ async def run(args: argparse.Namespace) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Diagnose foundational dependencies (Redis, Influx, logging)")
+    parser = argparse.ArgumentParser(description="Diagnose foundational dependencies (Redis, MariaDB, logging)")
     parser.add_argument(
         "--module",
         default="foundation",

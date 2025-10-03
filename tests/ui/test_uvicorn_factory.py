@@ -24,7 +24,7 @@ async def test_uvicorn_factory_lifecycle(monkeypatch: pytest.MonkeyPatch) -> Non
         return fake_redis
 
     monkeypatch.setattr("core.container.init_redis", fake_init_redis)
-    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.get_database_url", lambda: "mysql+asyncmy://user:pass@db/test")
     monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
 
     await core.shutdown()

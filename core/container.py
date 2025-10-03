@@ -10,7 +10,7 @@ from loguru import logger
 from src.cache import init_redis
 from src.config import load_project_env
 from src.ibbot.config import ConfigProvider
-from src.ibbot.influx import InfluxConfig, configure_influx
+from src.ibbot.db import DatabaseConfigError, get_database_url
 from src.utils import now_local
 from src.websocket_manager import WebSocketManager, websocket_manager
 
@@ -20,7 +20,7 @@ class CoreContainer:
     """Shared state required by the UI application."""
 
     redis_client: Any | None
-    influx_config: InfluxConfig | None
+    database_url: str | None
     config_provider: ConfigProvider | None
     websocket_manager: WebSocketManager
 
@@ -76,11 +76,13 @@ async def initialise(*, force: bool = False) -> CoreContainer:
         logger.warning("Redis initialisation failed: {}", exc)
         redis_client = None
 
-    influx_config: InfluxConfig | None = None
+    database_url: str | None = None
     try:
-        influx_config = configure_influx()
-    except Exception as exc:  # pragma: no cover - optional dependency errors
-        logger.warning("Influx configuration failed: {}", exc)
+        database_url = get_database_url()
+    except DatabaseConfigError as exc:
+        logger.debug("Database URL not configured: {}", exc)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to resolve database URL: {}", exc)
 
     config_provider: ConfigProvider | None = None
     try:
@@ -93,7 +95,7 @@ async def initialise(*, force: bool = False) -> CoreContainer:
 
     container = CoreContainer(
         redis_client=redis_client,
-        influx_config=influx_config,
+        database_url=database_url,
         config_provider=config_provider,
         websocket_manager=websocket_manager,
     )

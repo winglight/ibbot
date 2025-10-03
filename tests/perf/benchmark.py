@@ -5,15 +5,7 @@ import math
 import statistics
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
-
-from src.ibbot import influx
-from src.ibbot.influx import (
-    InfluxPoint,
-    build_order_point,
-    build_quote_point,
-    build_service_metric_point,
-)
+from typing import Any, Iterable, Sequence
 
 
 @dataclass
@@ -26,6 +18,30 @@ class BenchmarkThresholds:
 
 
 @dataclass
+class WriteStatistics:
+    batches: int = 0
+    points: int = 0
+    last_error: str | None = None
+
+    def reset(self) -> None:
+        self.batches = 0
+        self.points = 0
+        self.last_error = None
+
+    def record_success(self, points: int) -> None:
+        self.batches += 1
+        self.points += points
+        self.last_error = None
+
+    def record_failure(self, error: Exception) -> None:
+        self.batches += 1
+        self.last_error = str(error)
+
+
+WRITE_STATS = WriteStatistics()
+
+
+@dataclass
 class BenchmarkResult:
     """Summary of a benchmark execution."""
 
@@ -35,7 +51,7 @@ class BenchmarkResult:
     duration: float
     total_points: int
     write_batches: int
-    service_metric_points: list[InfluxPoint] = field(default_factory=list)
+    service_metric_points: list[dict[str, Any]] = field(default_factory=list)
     thresholds: BenchmarkThresholds = field(default_factory=BenchmarkThresholds)
 
     @property
@@ -54,32 +70,21 @@ class _Event:
     sequence: int
 
 
-class _FakeInfluxWriteAPI:
-    def __init__(self, sink: "_FakeInfluxSink") -> None:
-        self._sink = sink
-
-    def write(self, *, bucket: str, org: str, record: Iterable[dict], write_precision: str) -> None:
-        self._sink.write(bucket=bucket, org=org, record=list(record), write_precision=write_precision)
-
-
-class _FakeInfluxClient:
-    def __init__(self, sink: "_FakeInfluxSink") -> None:
-        self._sink = sink
-
-    def write_api(self, *, write_options: object | None = None) -> _FakeInfluxWriteAPI:
-        return _FakeInfluxWriteAPI(self._sink)
-
-
-class _FakeInfluxSink:
+class _FakeSink:
     def __init__(self) -> None:
-        self.points: list[dict] = []
+        self.records: list[dict[str, Any]] = []
         self.write_calls = 0
-        self.buckets: list[str] = []
 
-    def write(self, *, bucket: str, org: str, record: list[dict], write_precision: str) -> None:
-        self.write_calls += 1
-        self.buckets.append(bucket)
-        self.points.extend(record)
+    def write(self, records: Iterable[dict[str, Any]]) -> None:
+        batch = list(records)
+        try:
+            self.records.extend(batch)
+        except Exception as exc:  # pragma: no cover - defensive
+            WRITE_STATS.record_failure(exc)
+            raise
+        else:
+            self.write_calls += 1
+            WRITE_STATS.record_success(len(batch))
 
 
 def _percentile(latencies: Sequence[float], percentile: float) -> float:
@@ -94,6 +99,35 @@ def _percentile(latencies: Sequence[float], percentile: float) -> float:
     return ordered[f] + (ordered[c] - ordered[f]) * (k - f)
 
 
+def _build_order_record(event: _Event, quantity: float, price: float) -> dict[str, Any]:
+    return {
+        "measurement": "orders",
+        "fields": {
+            "price": float(price),
+            "quantity": float(quantity),
+            "status": "filled" if event.sequence % 5 else "submitted",
+        },
+        "tags": {
+            "order_id": f"order-{event.sequence}",
+            "symbol": "SYM",
+            "side": "BUY" if event.sequence % 2 == 0 else "SELL",
+        },
+    }
+
+
+def _build_quote_record(event: _Event) -> dict[str, Any]:
+    return {
+        "measurement": "quotes",
+        "fields": {
+            "bid": 100.0 + (event.sequence % 50) * 0.01,
+            "ask": 100.1 + (event.sequence % 50) * 0.01,
+            "bid_size": 10 + (event.sequence % 5),
+            "ask_size": 10 + (event.sequence % 5),
+        },
+        "tags": {"symbol": "SYM"},
+    }
+
+
 async def _produce_events(queue: asyncio.Queue[_Event], *, total: int, consumer_count: int) -> None:
     for index in range(total):
         kind = "quote" if index % 3 else "order"
@@ -101,7 +135,6 @@ async def _produce_events(queue: asyncio.Queue[_Event], *, total: int, consumer_
         await queue.put(event)
         if index % 250 == 0:
             await asyncio.sleep(0)
-    # Signal completion to consumers
     for _ in range(consumer_count):
         await queue.put(_Event(kind="stop", enqueued_at=time.perf_counter(), sequence=-1))
 
@@ -109,13 +142,12 @@ async def _produce_events(queue: asyncio.Queue[_Event], *, total: int, consumer_
 async def _consume_events(
     queue: asyncio.Queue[_Event],
     *,
-    sink: _FakeInfluxSink,
+    sink: _FakeSink,
     batch_size: int,
     latencies: list[float],
     total_events: int,
 ) -> None:
-    client = _FakeInfluxClient(sink)
-    batch: list[InfluxPoint] = []
+    batch: list[dict[str, Any]] = []
     processed = 0
     while processed < total_events:
         event = await queue.get()
@@ -125,31 +157,46 @@ async def _consume_events(
         now = time.perf_counter()
         latencies.append(now - event.enqueued_at)
         if event.kind == "quote":
-            point = build_quote_point(
-                symbol="SYM", bid=100.0 + (event.sequence % 50) * 0.01,
-                ask=100.1 + (event.sequence % 50) * 0.01,
-                bid_size=10 + (event.sequence % 5),
-                ask_size=10 + (event.sequence % 5),
-                timestamp=None,
-            )
+            record = _build_quote_record(event)
         else:
             quantity = 10 + (event.sequence % 10)
-            point = build_order_point(
-                order_id=f"order-{event.sequence}",
-                symbol="SYM",
-                side="BUY" if event.sequence % 2 == 0 else "SELL",
-                quantity=quantity,
-                price=100.0 + (event.sequence % 50) * 0.02,
-                status="filled" if event.sequence % 5 else "submitted",
-            )
-        batch.append(point)
+            price = 100.0 + (event.sequence % 50) * 0.02
+            record = _build_order_record(event, quantity, price)
+        batch.append(record)
         processed += 1
         queue.task_done()
         if len(batch) >= batch_size:
-            influx.write_points(batch, bucket="benchmarks", org="bench", client=client, write_precision="ms")
+            sink.write(batch)
             batch.clear()
     if batch:
-        influx.write_points(batch, bucket="benchmarks", org="bench", client=client, write_precision="ms")
+        sink.write(batch)
+
+
+def _build_service_metrics(
+    *,
+    throughput: float,
+    avg_latency: float,
+    p95_latency: float,
+    duration: float,
+    event_count: int,
+    status: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "service": "perf-benchmark",
+            "metric": "throughput",
+            "value": throughput,
+            "status": status,
+            "details": {"duration": duration, "points": event_count},
+        },
+        {
+            "service": "perf-benchmark",
+            "metric": "latency",
+            "value": avg_latency,
+            "status": status,
+            "details": {"p95": p95_latency},
+        },
+    ]
 
 
 async def _run_async(
@@ -159,14 +206,11 @@ async def _run_async(
     batch_size: int,
     thresholds: BenchmarkThresholds,
 ) -> BenchmarkResult:
-    influx.reset_influx_state()
-    influx.configure_influx(org="bench", bucket="benchmarks")
-    influx.reset_write_statistics()
+    WRITE_STATS.reset()
 
     queue: asyncio.Queue[_Event] = asyncio.Queue(maxsize=batch_size * concurrency)
-
     latencies: list[float] = []
-    sink = _FakeInfluxSink()
+    sink = _FakeSink()
 
     start_time = time.perf_counter()
     producer_task = asyncio.create_task(
@@ -191,7 +235,6 @@ async def _run_async(
     throughput = event_count / duration if duration else float("inf")
     avg_latency = statistics.fmean(latencies) if latencies else 0.0
     p95_latency = _percentile(latencies, 0.95)
-    stats = influx.get_write_statistics()
 
     status = "pass" if (
         throughput >= thresholds.min_throughput
@@ -199,30 +242,22 @@ async def _run_async(
         and p95_latency <= thresholds.max_p95_latency
     ) else "fail"
 
-    service_metric_points = [
-        build_service_metric_point(
-            service="perf-benchmark",
-            metric="throughput",
-            value=throughput,
-            status=status,
-            extra_fields={"duration": duration, "points": event_count},
-        ),
-        build_service_metric_point(
-            service="perf-benchmark",
-            metric="latency",
-            value=avg_latency,
-            status=status,
-            extra_fields={"p95": p95_latency},
-        ),
-    ]
+    service_metric_points = _build_service_metrics(
+        throughput=throughput,
+        avg_latency=avg_latency,
+        p95_latency=p95_latency,
+        duration=duration,
+        event_count=event_count,
+        status=status,
+    )
 
     return BenchmarkResult(
         throughput=throughput,
         avg_latency=avg_latency,
         p95_latency=p95_latency,
         duration=duration,
-        total_points=len(sink.points),
-        write_batches=stats.batches,
+        total_points=len(sink.records),
+        write_batches=WRITE_STATS.batches,
         service_metric_points=service_metric_points,
         thresholds=thresholds,
     )
@@ -249,4 +284,4 @@ def run_benchmark(
     return result
 
 
-__all__ = ["run_benchmark", "BenchmarkResult", "BenchmarkThresholds"]
+__all__ = ["run_benchmark", "BenchmarkResult", "BenchmarkThresholds", "WriteStatistics"]

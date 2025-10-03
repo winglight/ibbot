@@ -1,22 +1,15 @@
-"""Fault injection tests ensuring dependency failures trigger recovery paths."""
-
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import pytest
 
-from src.ibbot.influx import (
-    InfluxPoint,
-    configure_influx,
-    get_write_statistics,
-    reset_write_statistics,
-    write_points,
-)
+from src.data_layer import persistence
+from src.data_layer.event_bus import EventEnvelope
 from src.ibbot.redis import PubSubListener
 from services.ib_feed.main import MarketDataFeedService
 
@@ -41,28 +34,48 @@ def _capture_logs(logger_name: str, level: int) -> Iterator[list[logging.LogReco
         logger.removeHandler(handler)
 
 
-class _FlakyInfluxClient:
-    """A minimal Influx client that simulates a transient outage."""
+@dataclass
+class _FakeSession:
+    closed: bool = False
 
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FlakyMarketRepository:
     def __init__(self) -> None:
-        self.calls = 0
         self.fail_next = True
+        self.events: list[dict] = []
 
-    def write_api(self, *, write_options: object | None = None) -> "_FlakyInfluxClient":
-        return self
-
-    def write(
-        self,
-        *,
-        bucket: str,
-        org: str,
-        record: Iterable[Mapping[str, object]],
-        write_precision: str,
-    ) -> None:
-        self.calls += 1
+    async def insert_event(self, payload: dict) -> None:
         if self.fail_next:
             self.fail_next = False
-            raise RuntimeError("simulated influx outage")
+            raise RuntimeError("simulated persistence outage")
+        self.events.append(payload)
+
+
+def test_database_persistence_failure_is_logged(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    sessions: list[_FakeSession] = []
+    repo = _FlakyMarketRepository()
+
+    def session_factory() -> _FakeSession:
+        session = _FakeSession()
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(persistence, "market_event_repository", lambda session: repo)
+
+    backend = persistence.DatabasePersistenceBackend(session_factory=session_factory)
+    envelope = EventEnvelope(event_type="market.tick", topic="market", payload={})
+
+    with caplog.at_level("WARNING"):
+        backend.write_event(envelope)
+
+    assert any("Failed to persist data layer event" in record.message for record in caplog.records)
+    assert sessions and sessions[0].closed is True
+
+    backend.write_event(envelope)
+    assert repo.events and repo.events[0]["event_type"] == "market.tick"
 
 
 class _FakePubSub:
@@ -151,29 +164,6 @@ async def _wait_for(predicate: callable, *, timeout: float = 1.0) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("condition not met within timeout")
-
-
-def test_influx_write_failure_updates_statistics() -> None:
-    configure_influx(url="http://localhost", token="token", org="org", bucket="bucket")
-    reset_write_statistics()
-    client = _FlakyInfluxClient()
-
-    with pytest.raises(RuntimeError, match="simulated influx outage"):
-        write_points([InfluxPoint("m", fields={"value": 1})], client=client)
-
-    stats = get_write_statistics()
-    assert stats.batches == 1
-    assert stats.points == 1
-    assert stats.last_error == "simulated influx outage"
-
-    result = write_points([InfluxPoint("m", fields={"value": 2})], client=client)
-    assert result == 1
-
-    stats = get_write_statistics()
-    assert stats.batches == 2
-    assert stats.points == 2
-    assert stats.last_error is None
-    assert client.calls == 2
 
 
 def test_redis_pubsub_listener_recovers_from_disconnect() -> None:

@@ -53,7 +53,7 @@
 
 | 指标 | 来源 | 说明 |
 | --- | --- | --- |
-| `service_metrics` measurement | 所有服务通过 `src/ibbot/influx.build_service_metric_point` 写入 | 统一包含 `service`、`metric`、`value` 字段，监控吞吐、延迟、队列深度等。 |
+| `service_metrics` measurement | 所有服务通过 `src/ibbot/db.build_service_metric_point` 写入 | 统一包含 `service`、`metric`、`value` 字段，监控吞吐、延迟、队列深度等。 |
 | `hash:service:queue-monitor` | Queue Monitor 服务 (`services/queue_monitor/main.py`) | 保存最近一次队列/Stream 指标快照，可用 `redis-cli HGETALL` 查看。 |
 | `stream:market-service` | Market Data 服务 | 累积行情快照，Risk/策略消费并统计延迟。 |
 | `stream:ib:results` | IB Command/风险服务 | 存储指令执行结果、风控触发记录。 |
