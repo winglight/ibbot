@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import threading
 from typing import AsyncIterator
 
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -27,12 +28,15 @@ _SESSION_FACTORY: async_sessionmaker[AsyncSession] | None = None
 
 
 def _create_engine() -> AsyncEngine:
-    return create_async_engine(
-        get_database_url(),
-        pool_pre_ping=True,
-        pool_recycle=1800,
-        connect_args={"charset": "utf8mb4"},
-    )
+    url = get_database_url()
+    driver = make_url(url).drivername
+    engine_kwargs: dict[str, object] = {"pool_pre_ping": True}
+    if driver.startswith("mysql"):
+        engine_kwargs["pool_recycle"] = 1800
+        engine_kwargs["connect_args"] = {"charset": "utf8mb4"}
+    elif driver == "sqlite+aiosqlite":
+        engine_kwargs["connect_args"] = {"timeout": 30}
+    return create_async_engine(url, **engine_kwargs)
 
 
 def get_async_engine() -> AsyncEngine:
