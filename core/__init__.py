@@ -1,5 +1,6 @@
 import asyncio
-import threading
+import atexit
+import os
 
 from src.connection_manager import connection_manager, ConnectionConfig
 from src.ibkr_client import IBKRClient
@@ -24,8 +25,33 @@ from src.dom_dependencies import DOMConfig, get_dom_processor
 import src.dom_dependencies as dom_dependencies
 from src.strategy_risk import StrategyRiskManager
 from src.cache import init_redis
+from src.utils import (
+    configure_async_executor,
+    run_in_cpu_executor,
+)
 
 # Initialize shared instances
+_cpu_default = min(32, os.cpu_count() or 4)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        logger.warning(f"Invalid integer for {name!s}: {value!r}; using default {default}")
+        return default
+    return parsed if parsed > 0 else default
+
+
+async_executor = configure_async_executor(
+    db_max_workers=_env_int("DB_EXECUTOR_WORKERS", 4),
+    cpu_max_workers=_env_int("CPU_EXECUTOR_WORKERS", _cpu_default),
+)
+atexit.register(async_executor.shutdown)
+
 telegram_notifier = TelegramNotifier()
 db_manager = get_db_manager()
 notification_manager = NotificationManager(
@@ -83,19 +109,10 @@ def _rebuild_strategy_cache_in_background() -> None:
 
 
 def _start_background_threads() -> None:
-    logger.info("Starting background initialisation threads (Redis, strategy cache)")
+    logger.info("Scheduling background initialisation tasks (Redis, strategy cache)")
 
-    threading.Thread(
-        target=_initialise_redis_in_background,
-        name="redis-init",
-        daemon=True,
-    ).start()
-
-    threading.Thread(
-        target=_rebuild_strategy_cache_in_background,
-        name="strategy-cache-rebuild",
-        daemon=True,
-    ).start()
+    run_in_cpu_executor(_initialise_redis_in_background)
+    run_in_cpu_executor(_rebuild_strategy_cache_in_background)
 
 try:
     strategy_manager.set_dependencies(
