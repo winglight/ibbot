@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from fastapi import Request
 from loguru import logger
 
-from src.ibbot.db import DatabaseConfigError, audit_log_repository, session_scope
+from src.db import AuditLogRepositoryError, MariaDBConfigurationError, audit_log_writer
 
 
 def _coerce_fields(extra: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -54,22 +54,21 @@ async def log_audit_event(
     result = "success" if success else "failure"
 
     try:
-        async with session_scope() as session:
-            repo = audit_log_repository(session)
-            await repo.record_event(
-                {
-                    "action": action,
-                    "result": result,
-                    "user": username,
-                    "role": role,
-                    "method": method,
-                    "path": path,
-                    "detail": detail or "",
-                    "extra": _coerce_fields(extra),
-                }
-            )
-    except DatabaseConfigError as exc:
-        logger.warning("Audit log database configuration error: {}", exc)
+        repo = audit_log_writer()
+        await repo.record_event(
+            {
+                "action": action,
+                "result": result,
+                "user": username,
+                "role": role,
+                "method": method,
+                "path": path,
+                "detail": detail or "",
+                "extra": _coerce_fields(extra),
+            }
+        )
+    except (MariaDBConfigurationError, AuditLogRepositoryError) as exc:
+        logger.warning("Audit log persistence error: {}", exc)
         logger.bind(
             action=action,
             result=result,

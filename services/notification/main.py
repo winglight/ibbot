@@ -136,15 +136,12 @@ async def _default_service_factory() -> tuple[NotificationService, CleanupCallba
 
     history_repository_factory: Callable[[], Awaitable[Any]] | None = None
     try:
-        from src.ibbot.db import audit_log_repository, get_session_factory
+        from src.db import audit_log_writer
     except ModuleNotFoundError:
         pass
     else:
-        session_factory = get_session_factory()
-
-        async def _history_repo_factory() -> Any:
-            session = session_factory()
-            return audit_log_repository(session)
+        def _history_repo_factory() -> Any:
+            return audit_log_writer()
 
         history_repository_factory = _history_repo_factory
 

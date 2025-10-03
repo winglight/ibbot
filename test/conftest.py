@@ -24,29 +24,16 @@ os.environ.setdefault("AUTO_CONNECT", "false")
 def configure_db_env(tmp_path_factory: pytest.TempPathFactory):
     """Ensure application tests have a database URL configured."""
 
-    from src.ibbot.db import config as db_config
-    from src.ibbot.db import session as db_session
-
     existing = os.getenv("IBBOT_DB_URL")
     if existing:
-        db_config.get_database_url.cache_clear()
-        db_session._ENGINE = None
-        db_session._SESSION_FACTORY = None
         yield existing
-        db_session._ENGINE = None
-        db_session._SESSION_FACTORY = None
         return
 
     db_file = tmp_path_factory.mktemp("functional-db") / "ibbot.db"
-    url = f"sqlite+aiosqlite:///{db_file}"
+    url = f"sqlite:///{db_file}"
     os.environ.setdefault("IBBOT_DB_URL", url)
     os.environ.setdefault("DATA_LAYER_DB_URL", url)
-    db_config.get_database_url.cache_clear()
-    db_session._ENGINE = None
-    db_session._SESSION_FACTORY = None
     yield url
-    db_session._ENGINE = None
-    db_session._SESSION_FACTORY = None
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Callable, Iterable, Mapping
+import inspect
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping
 
 from loguru import logger
 
 from .event_bus import EventEnvelope
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
 
-try:  # pragma: no cover - optional dependency
-    from sqlalchemy.ext.asyncio import AsyncSession
-except ImportError:  # pragma: no cover - optional dependency
-    AsyncSession = None  # type: ignore
-
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from src.ibbot.db.repositories.events import MarketEventRepository
-    from src.ibbot.db.repositories.metrics import ServiceMetricRepository
+    from src.db import MarketEventRepository, ServiceMetricRepository
 
 __all__ = [
     "PersistenceBackend",
@@ -47,41 +42,28 @@ class MariaDbPersistenceBackend(PersistenceBackend):
     def __init__(
         self,
         *,
-        repository: MarketEventRepository | None = None,
-        session_factory: Callable[[], "AsyncSession"] | None = None,
+        repository: "MarketEventRepository" | None = None,
+        repository_factory: (
+            Callable[[], Awaitable["MarketEventRepository"] | "MarketEventRepository"]
+            | None
+        ) = None,
         metric_repository: "ServiceMetricRepository" | None = None,
-        metric_session_factory: Callable[[], "AsyncSession"] | None = None,
+        metric_repository_factory: (
+            Callable[[], Awaitable["ServiceMetricRepository"] | "ServiceMetricRepository"]
+            | None
+        ) = None,
     ) -> None:
-        if repository is None and session_factory is None:
-            raise ValueError("repository or session_factory must be provided")
+        if repository is None and repository_factory is None:
+            raise ValueError("repository or repository_factory must be provided")
 
         self._repository = repository
-        self._session_factory = session_factory
+        self._repository_factory = repository_factory
         self._metric_repository = metric_repository
-        self._metric_session_factory = metric_session_factory or session_factory
+        self._metric_repository_factory = metric_repository_factory
 
     async def _persist(self, envelope: EventEnvelope) -> None:
-        if self._repository is not None:
-            await self._repository.insert_event(envelope)
-            return
-
-        if self._session_factory is None:  # pragma: no cover - defensive guard
-            raise RuntimeError("Session factory is not configured")
-
-        session = self._session_factory()
-        try:
-            from src.ibbot.db.repositories.events import MarketEventRepository
-
-            repository = MarketEventRepository(session)
-            await repository.insert_event(envelope)
-        finally:
-            try:
-                await session.close()
-            except Exception:  # pragma: no cover - defensive cleanup
-                logger.debug(
-                    "Failed to close MariaDB session during cleanup",
-                    exc_info=True,
-                )
+        repository = await self._get_event_repository()
+        await repository.insert_event(envelope)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task[None]) -> None:
@@ -104,28 +86,8 @@ class MariaDbPersistenceBackend(PersistenceBackend):
     async def _persist_metrics(
         self, metrics: Mapping[str, object] | Iterable[Mapping[str, object]]
     ) -> None:
-        repository = self._metric_repository
-        if repository is not None:
-            await repository.record_metrics(metrics)
-            return
-
-        if self._metric_session_factory is None:  # pragma: no cover - defensive guard
-            raise RuntimeError("Metric session factory is not configured")
-
-        session = self._metric_session_factory()
-        try:
-            from src.ibbot.db.repositories.metrics import ServiceMetricRepository
-
-            repository = ServiceMetricRepository(session)
-            await repository.record_metrics(metrics)
-        finally:
-            try:
-                await session.close()
-            except Exception:  # pragma: no cover - defensive cleanup
-                logger.debug(
-                    "Failed to close MariaDB session during metric persistence cleanup",
-                    exc_info=True,
-                )
+        repository = await self._get_metric_repository()
+        await repository.record_metrics(metrics)
 
     def record_service_metrics(
         self, metrics: Mapping[str, object] | Iterable[Mapping[str, object]]
@@ -139,6 +101,28 @@ class MariaDbPersistenceBackend(PersistenceBackend):
 
         task = loop.create_task(coro)
         task.add_done_callback(self._log_task_error)
+
+    async def _resolve_repository(
+        self,
+        repository: "MarketEventRepository | ServiceMetricRepository | None",
+        factory: Callable[[], Awaitable[Any] | Any] | None,
+    ) -> Any:
+        if repository is not None:
+            return repository
+        if factory is None:
+            raise RuntimeError("Repository factory is not configured")
+        instance = factory()
+        if inspect.isawaitable(instance):
+            instance = await instance
+        return instance
+
+    async def _get_event_repository(self) -> "MarketEventRepository":
+        return await self._resolve_repository(self._repository, self._repository_factory)
+
+    async def _get_metric_repository(self) -> "ServiceMetricRepository":
+        return await self._resolve_repository(
+            self._metric_repository, self._metric_repository_factory
+        )
 
 
 class ParquetPersistenceBackend(PersistenceBackend):

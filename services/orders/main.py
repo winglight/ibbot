@@ -1435,14 +1435,13 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
         if runtime is not None:
             return runtime
         try:
-            from src.ibbot.db import get_async_session, order_repository
+            from src.db import order_repository
         except ImportError as exc:  # pragma: no cover - optional dependency
             LOGGER.info("Orders repository unavailable: %s", exc)
             return OrdersRuntime()
 
-        async def _default_order_repository() -> OrderRepositoryProtocol:
-            session = get_async_session()
-            return order_repository(session)
+        def _default_order_repository() -> OrderRepositoryProtocol:
+            return order_repository()
 
         return OrdersRuntime(order_repository_factory=_default_order_repository)
 

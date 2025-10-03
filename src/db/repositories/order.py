@@ -1,20 +1,28 @@
-"""Repository for persisting order lifecycle events to MariaDB."""
+"""DB-API based repository for persisting order lifecycle events."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import func
-from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from src.db.async_support import run_in_thread
+from src.db.mariadb import MariaDBConfigurationError
 from src.ibbot.logging import get_logger
 
-from ..schemas import Order
+from .base import (
+    RepositoryError,
+    RepositoryValidationError,
+    execute_write,
+    is_sqlite,
+    json_dumps,
+    use_connection,
+)
 
-__all__ = ["MariaDbOrderRepository"]
+__all__ = ["OrderRepository", "OrderRepositoryError"]
+
+
+class OrderRepositoryError(RepositoryError):
+    """Raised when persisting order events fails."""
 
 
 def _utc_now() -> datetime:
@@ -38,9 +46,9 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _coerce_float(value: Any) -> float | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
         text = value.strip()
@@ -123,7 +131,7 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     )
     symbol_value = _first_nonempty(_lookup("symbol", "ticker"))
     if not order_identifier or not symbol_value:
-        raise ValueError("Order payload is missing identifying fields")
+        raise RepositoryValidationError("Order payload is missing identifying fields")
 
     side_value = _first_nonempty(_lookup("action", "side"))
     side = str(side_value).upper() if side_value is not None else "UNKNOWN"
@@ -232,54 +240,64 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return normalised
 
 
-def _dialect_name(session: AsyncSession) -> str:
-    try:
-        bind = session.get_bind()
-    except Exception:  # pragma: no cover - defensive guard
-        return ""
-    dialect = getattr(bind, "dialect", None)
-    return getattr(dialect, "name", "")
+class OrderRepository:
+    """Persist order updates using DB-API connections."""
 
-
-class MariaDbOrderRepository:
-    """Persist order updates using ``INSERT ... ON DUPLICATE KEY`` semantics."""
-
-    def __init__(self, session: AsyncSession, *, logger_name: str = "db.orders") -> None:
-        self._session = session
+    def __init__(self, *, logger_name: str = "db.orders") -> None:
         self._logger = get_logger(logger_name)
 
     async def upsert_order(self, payload: Mapping[str, Any]) -> None:
-        """Upsert a normalized order payload into the ``orders`` table."""
-
         normalised = _normalise_order_payload(payload)
-        dialect = _dialect_name(self._session)
-        if dialect == "sqlite":
-            stmt = sqlite_insert(Order).values(**normalised)
-            update_columns = {
-                column: getattr(stmt.excluded, column)
-                for column in normalised
-                if column not in {"id", "created_at"}
-            }
-            update_columns["updated_at"] = func.now()
-            executor = stmt.on_conflict_do_update(
-                index_elements=[Order.__table__.c.order_id],
-                set_=update_columns,
-            )
-        else:
-            stmt = mysql_insert(Order).values(**normalised)
-            update_columns = {
-                column: getattr(stmt.inserted, column)
-                for column in normalised
-                if column not in {"id", "created_at"}
-            }
-            update_columns["updated_at"] = func.now()
-            executor = stmt.on_duplicate_key_update(**update_columns)
+
         try:
-            await self._session.execute(executor)
-            await self._session.commit()
-        except Exception:
-            await self._session.rollback()
+            await run_in_thread(self._write_order, normalised)
+        except RepositoryValidationError:
+            raise
+        except MariaDBConfigurationError as exc:
+            raise OrderRepositoryError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception(
                 "Failed to upsert order", order_id=normalised.get("order_id")
             )
-            raise
+            raise OrderRepositoryError("Failed to upsert order") from exc
+
+    def _write_order(self, row: Mapping[str, Any]) -> None:
+        with use_connection() as connection:
+            prepared = dict(row)
+            if prepared.get("raw_payload") is not None:
+                prepared["raw_payload"] = json_dumps(prepared["raw_payload"])
+
+            columns = list(prepared.keys())
+            if not columns:
+                raise RepositoryValidationError("Normalised order payload is empty")
+
+            if is_sqlite(connection):
+                placeholders = ", ".join(f":{col}" for col in columns)
+                update_columns = ", ".join(
+                    f"{col}=excluded.{col}" for col in columns if col not in {"order_id"}
+                )
+                if update_columns:
+                    update_clause = (
+                        f"{update_columns}, updated_at=CURRENT_TIMESTAMP"
+                    )
+                else:
+                    update_clause = "updated_at=CURRENT_TIMESTAMP"
+                sql = (
+                    "INSERT INTO orders ({cols}) VALUES ({values}) "
+                    "ON CONFLICT(order_id) DO UPDATE SET {updates}"
+                ).format(cols=", ".join(columns), values=placeholders, updates=update_clause)
+                execute_write(connection, sql, prepared)
+            else:
+                placeholders = ", ".join(f"%({col})s" for col in columns)
+                update_columns = ", ".join(
+                    f"{col}=VALUES({col})" for col in columns if col not in {"order_id"}
+                )
+                if update_columns:
+                    update_clause = f"{update_columns}, updated_at=NOW()"
+                else:
+                    update_clause = "updated_at=NOW()"
+                sql = (
+                    "INSERT INTO orders ({cols}) VALUES ({values}) "
+                    "ON DUPLICATE KEY UPDATE {updates}"
+                ).format(cols=", ".join(columns), values=placeholders, updates=update_clause)
+                execute_write(connection, sql, prepared)

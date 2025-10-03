@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 __all__ = [
     "MariaDBConfigurationError",
     "connect",
+    "get_database_url",
     "get_service_metrics_columns",
     "run_sql_query",
     "set_engine",
@@ -107,6 +108,12 @@ def connect() -> Iterator[Any]:
                 connection.close()
             except Exception:  # pragma: no cover - defensive cleanup
                 pass
+
+
+def get_database_url() -> str:
+    """Return the configured database URL."""
+
+    return _get_database_url()
 
 
 def _extract_mapping(row: Any, index: int, key: str) -> Any:

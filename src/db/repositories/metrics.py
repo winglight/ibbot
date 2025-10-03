@@ -1,18 +1,28 @@
-"""Repository for writing service metric samples."""
+"""Repository for writing service metric samples using DB-API."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
-from sqlalchemy import insert
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from src.db.async_support import run_in_thread
+from src.db.mariadb import MariaDBConfigurationError
 from src.ibbot.logging import get_logger
 
-from ..schemas import ServiceMetric
+from .base import (
+    RepositoryError,
+    RepositoryValidationError,
+    executemany_write,
+    is_sqlite,
+    json_dumps,
+    use_connection,
+)
 
-__all__ = ["ServiceMetricRepository"]
+__all__ = ["ServiceMetricRepository", "ServiceMetricRepositoryError"]
+
+
+class ServiceMetricRepositoryError(RepositoryError):
+    """Raised when persisting service metrics fails."""
 
 
 def _utc_now() -> datetime:
@@ -70,15 +80,17 @@ def _as_row(entry: Mapping[str, Any]) -> dict[str, Any]:
     metric = str(entry["metric"]).strip()
     value = entry.get("value")
     if not service or not metric:
-        raise ValueError("Service metric entry must include non-empty service and metric")
+        raise RepositoryValidationError(
+            "Service metric entry must include non-empty service and metric"
+        )
     if value is None:
-        raise ValueError("Service metric entry missing value")
+        raise RepositoryValidationError("Service metric entry missing value")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         numeric_value = float(value)
     elif isinstance(value, str):
         numeric_value = float(value)
     else:
-        raise ValueError("Metric value must be numeric")
+        raise RepositoryValidationError("Metric value must be numeric")
 
     recorded_at = entry.get("recorded_at")
     row = {
@@ -94,20 +106,13 @@ def _as_row(entry: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class ServiceMetricRepository:
-    """Persist metrics in bulk or individually."""
+    """Persist metrics in bulk or individually using DB-API."""
 
-    def __init__(self, session: AsyncSession, *, logger_name: str = "db.metrics") -> None:
-        self._session = session
+    def __init__(self, *, logger_name: str = "db.metrics") -> None:
         self._logger = get_logger(logger_name)
 
     async def close(self) -> None:
-        """Close the underlying session if it is still open."""
-
-        try:
-            await self._session.close()
-        except Exception:  # pragma: no cover - defensive safeguard
-            self._logger.exception("Failed to close service metric session")
-            raise
+        return None
 
     async def record_metrics(
         self,
@@ -119,10 +124,36 @@ class ServiceMetricRepository:
             rows = tuple(_as_row(entry) for entry in metrics)
         if not rows:
             return
+
         try:
-            await self._session.execute(insert(ServiceMetric), rows)
-            await self._session.commit()
-        except Exception:
-            await self._session.rollback()
-            self._logger.exception("Failed to record service metrics")
+            await run_in_thread(self._write_metrics, rows)
+        except RepositoryValidationError:
             raise
+        except MariaDBConfigurationError as exc:
+            raise ServiceMetricRepositoryError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - log and wrap
+            self._logger.exception("Failed to record service metrics", count=len(rows))
+            raise ServiceMetricRepositoryError("Failed to record service metrics") from exc
+
+    def _write_metrics(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        with use_connection() as connection:
+            prepared_rows = []
+            for row in rows:
+                payload = dict(row)
+                if payload.get("details") is not None:
+                    payload["details"] = json_dumps(payload["details"])
+                prepared_rows.append(payload)
+
+            if not prepared_rows:
+                return
+
+            columns = list(prepared_rows[0].keys())
+            placeholders = (
+                ", ".join(f":{col}" for col in columns)
+                if is_sqlite(connection)
+                else ", ".join(f"%({col})s" for col in columns)
+            )
+            sql = "INSERT INTO service_metrics ({cols}) VALUES ({values})".format(
+                cols=", ".join(columns), values=placeholders
+            )
+            executemany_write(connection, sql, prepared_rows)

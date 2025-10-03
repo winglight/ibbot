@@ -1,18 +1,21 @@
-"""Repository for persisting audit trail events."""
+"""DB-API powered audit log repository."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import insert
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from src.db.async_support import run_in_thread
+from src.db.mariadb import MariaDBConfigurationError
 from src.ibbot.logging import get_logger
 
-from ..schemas import AuditLog
+from .base import RepositoryError, RepositoryValidationError, execute_write, is_sqlite, json_dumps, use_connection
 
-__all__ = ["AuditLogRepository"]
+__all__ = ["AuditLogRepository", "AuditLogRepositoryError"]
+
+
+class AuditLogRepositoryError(RepositoryError):
+    """Raised when persisting audit log entries fails."""
 
 
 def _utc_now() -> datetime:
@@ -46,16 +49,15 @@ def _normalise_payload(extra: Mapping[str, Any] | None) -> dict[str, Any] | None
 
 
 class AuditLogRepository:
-    """Persist audit entries into the MariaDB ``audit_logs`` table."""
+    """Persist audit entries into the ``audit_logs`` table."""
 
-    def __init__(self, session: AsyncSession, *, logger_name: str = "db.audit") -> None:
-        self._session = session
+    def __init__(self, *, logger_name: str = "db.audit") -> None:
         self._logger = get_logger(logger_name)
 
     async def record_event(self, payload: Mapping[str, Any]) -> None:
         action = _coerce_text(payload.get("action"))
         if not action:
-            raise ValueError("Audit log entry requires an action")
+            raise RepositoryValidationError("Audit log entry requires an action")
 
         row = {
             "action": action,
@@ -70,9 +72,28 @@ class AuditLogRepository:
         }
 
         try:
-            await self._session.execute(insert(AuditLog).values(**row))
-            await self._session.commit()
-        except Exception:
-            await self._session.rollback()
-            self._logger.exception("Failed to record audit log entry", action=action)
+            await run_in_thread(self._write_event, row)
+        except RepositoryValidationError:
             raise
+        except MariaDBConfigurationError as exc:
+            raise AuditLogRepositoryError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - log and wrap
+            self._logger.exception("Failed to record audit log entry", action=action)
+            raise AuditLogRepositoryError("Failed to record audit log entry") from exc
+
+    def _write_event(self, row: Mapping[str, Any]) -> None:
+        with use_connection() as connection:
+            payload = dict(row)
+            if payload.get("extra") is not None:
+                payload["extra"] = json_dumps(payload["extra"])
+
+            columns = list(payload.keys())
+            placeholders = (
+                ", ".join(f":{col}" for col in columns)
+                if is_sqlite(connection)
+                else ", ".join(f"%({col})s" for col in columns)
+            )
+            sql = "INSERT INTO audit_logs ({cols}) VALUES ({values})".format(
+                cols=", ".join(columns), values=placeholders
+            )
+            execute_write(connection, sql, payload)

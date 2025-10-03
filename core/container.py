@@ -10,14 +10,7 @@ from loguru import logger
 from src.cache import init_redis
 from src.config import load_project_env
 from src.ibbot.config import ConfigProvider
-try:  # pragma: no cover - optional dependency guard
-    from src.ibbot.db import DatabaseConfigError, get_database_url
-except ModuleNotFoundError:  # pragma: no cover - fallback when SQLAlchemy missing
-    class DatabaseConfigError(RuntimeError):
-        """Fallback error used when the database layer is unavailable."""
-
-    def get_database_url() -> str:
-        raise DatabaseConfigError("SQLAlchemy is not installed")
+from src.db import DatabaseConfigError, get_database_url
 from src.utils import now_local
 from src.websocket_manager import WebSocketManager, websocket_manager
 

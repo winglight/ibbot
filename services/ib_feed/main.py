@@ -21,7 +21,7 @@ from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_cl
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
-    from src.ibbot.db.repositories.market import MariaDbMarketPriceRepository
+    from src.db import MarketPriceRepository
 
 SERVICE_NAME = "ib-feed"
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
@@ -48,11 +48,11 @@ class MarketDataFeedService:
     ib_client: Any
     redis: Any
     subscriptions: Sequence[str]
-    price_repository: "MariaDbMarketPriceRepository | None" = None
+    price_repository: "MarketPriceRepository | None" = None
     price_repository_factory: (
         Callable[
             [],
-            Awaitable["MariaDbMarketPriceRepository"] | "MariaDbMarketPriceRepository",
+            Awaitable["MarketPriceRepository"] | "MarketPriceRepository",
         ]
         | None
     ) = None
@@ -495,7 +495,7 @@ async def run_service() -> None:
     redis_url = _resolve_redis_url("IB_FEED_REDIS_URL")
     redis = await get_redis_client(redis_url)
 
-    from src.ibbot.db import get_async_session, market_price_repository
+    from src.db import market_price_writer
 
     provider = ConfigProvider(redis_url=redis_url)
     await provider.start()
@@ -507,9 +507,8 @@ async def run_service() -> None:
     reconnect_delay = float(config.get("reconnect_delay", 1.0))
 
     ib_client = await _create_ib_client()
-    async def _price_repository_factory() -> Any:
-        session = get_async_session()
-        return market_price_repository(session)
+    def _price_repository_factory() -> Any:
+        return market_price_writer()
 
     service = MarketDataFeedService(
         ib_client,
