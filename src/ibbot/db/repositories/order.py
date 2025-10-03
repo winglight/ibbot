@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from sqlalchemy import func
 from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ibbot.logging import get_logger
@@ -231,6 +232,15 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return normalised
 
 
+def _dialect_name(session: AsyncSession) -> str:
+    try:
+        bind = session.get_bind()
+    except Exception:  # pragma: no cover - defensive guard
+        return ""
+    dialect = getattr(bind, "dialect", None)
+    return getattr(dialect, "name", "")
+
+
 class MariaDbOrderRepository:
     """Persist order updates using ``INSERT ... ON DUPLICATE KEY`` semantics."""
 
@@ -242,15 +252,30 @@ class MariaDbOrderRepository:
         """Upsert a normalized order payload into the ``orders`` table."""
 
         normalised = _normalise_order_payload(payload)
-        stmt = mysql_insert(Order).values(**normalised)
-        update_columns = {
-            column: getattr(stmt.inserted, column)
-            for column in normalised
-            if column not in {"id", "created_at"}
-        }
-        update_columns["updated_at"] = func.now()
+        dialect = _dialect_name(self._session)
+        if dialect == "sqlite":
+            stmt = sqlite_insert(Order).values(**normalised)
+            update_columns = {
+                column: getattr(stmt.excluded, column)
+                for column in normalised
+                if column not in {"id", "created_at"}
+            }
+            update_columns["updated_at"] = func.now()
+            executor = stmt.on_conflict_do_update(
+                index_elements=[Order.__table__.c.order_id],
+                set_=update_columns,
+            )
+        else:
+            stmt = mysql_insert(Order).values(**normalised)
+            update_columns = {
+                column: getattr(stmt.inserted, column)
+                for column in normalised
+                if column not in {"id", "created_at"}
+            }
+            update_columns["updated_at"] = func.now()
+            executor = stmt.on_duplicate_key_update(**update_columns)
         try:
-            await self._session.execute(stmt.on_duplicate_key_update(**update_columns))
+            await self._session.execute(executor)
             await self._session.commit()
         except Exception:
             await self._session.rollback()

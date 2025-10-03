@@ -19,6 +19,21 @@ jobs:
     name: Run tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.2
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: ibbot
+          MARIADB_USER: ibbot
+          MARIADB_PASSWORD: ibbot
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -u$MARIADB_USER -p$MARIADB_PASSWORD"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout repository
@@ -54,6 +69,8 @@ jobs:
           ADMIN_PASSWORD: 'change_me'
           JWT_SECRET: 'ci_secret_change_me'
           JWT_ALGORITHM: 'HS256'
+          IBBOT_DB_URL: 'mysql+asyncmy://ibbot:ibbot@127.0.0.1:3306/ibbot'
+          DATA_LAYER_DB_URL: 'mysql+asyncmy://ibbot:ibbot@127.0.0.1:3306/ibbot'
         run: |
           nohup python main.py > server.log 2>&1 &
           echo $! > app.pid
@@ -75,6 +92,8 @@ jobs:
       - name: Run tests
         env:
           API_BASE_URL: 'http://127.0.0.1:8000'
+          IBBOT_DB_URL: 'mysql+asyncmy://ibbot:ibbot@127.0.0.1:3306/ibbot'
+          DATA_LAYER_DB_URL: 'mysql+asyncmy://ibbot:ibbot@127.0.0.1:3306/ibbot'
         run: |
           pytest -v -k "not order_fix"
 

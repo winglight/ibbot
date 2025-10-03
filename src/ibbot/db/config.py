@@ -24,7 +24,7 @@ from sqlalchemy.engine.url import make_url
 
 __all__ = ["get_database_url", "resolve_database_url", "DatabaseConfigError"]
 
-SUPPORTED_DRIVER = "mysql+asyncmy"
+SUPPORTED_DRIVERS = {"mysql+asyncmy", "sqlite+aiosqlite"}
 PRIMARY_ENV_VAR = "IBBOT_DB_URL"
 FALLBACK_ENV_VAR = "DATA_LAYER_DB_URL"
 
@@ -52,9 +52,10 @@ def _coerce_url(value: str) -> URL:
     except Exception as exc:  # pragma: no cover - defensive
         raise DatabaseConfigError("Invalid database URL") from exc
 
-    if url.drivername != SUPPORTED_DRIVER:
+    if url.drivername not in SUPPORTED_DRIVERS:
+        supported = ", ".join(sorted(SUPPORTED_DRIVERS))
         raise DatabaseConfigError(
-            f"Unsupported database dialect '{url.drivername}'. Expected {SUPPORTED_DRIVER!r}."
+            f"Unsupported database dialect '{url.drivername}'. Expected one of {supported}."
         )
     return url
 
