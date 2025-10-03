@@ -311,6 +311,22 @@ class RecordingWriter:
         return len(batch)
 
 
+class RecordingMetricsRepository:
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+        self.closed = False
+
+    async def record_metrics(self, metrics: Any) -> None:
+        if isinstance(metrics, dict):
+            batch = [dict(metrics)]
+        else:
+            batch = [dict(entry) for entry in metrics]
+        self.records.extend(batch)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 async def _wait_for_result(
     redis: InMemoryRedis,
     hash_prefix: str,
@@ -438,6 +454,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
     influx = FakeInflux()
     fake_ib = FakeIB()
     pubsub = DummyPubSubListener()
+    metrics_repo = RecordingMetricsRepository()
     writer = RecordingWriter()
 
     queue_key = "queue:ib:commands"
@@ -452,13 +469,13 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
 
     market_runtime = MarketDataRuntime(
         redis_factory=redis_factory,
-        write_fn=writer,
         pubsub_listener=pubsub,
         subscriptions=("ES",),
         stream_key=market_stream,
         service_name="market-data-service-test",
         logger_name="tests.market_data.runtime",
         metrics_interval=0.1,
+        metrics_repository_factory=lambda: metrics_repo,
     )
 
     original_append_stream = MarketDataRuntime._append_stream
@@ -632,6 +649,8 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
         await asyncio.wait_for(strategy_task, timeout=2.0)
         await risk_runtime.stop()
         await market_runtime.stop()
+        assert metrics_repo.closed
+        assert metrics_repo.records
 
 
 def test_optimizer_flow(monkeypatch: pytest.MonkeyPatch) -> None:

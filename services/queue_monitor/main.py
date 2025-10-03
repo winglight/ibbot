@@ -10,14 +10,13 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
 
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from src.ibbot import update_service_health
-from src.ibbot.influx import build_service_metric_point, write_points
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
     DEFAULT_COMMAND_QUEUE,
@@ -32,12 +31,6 @@ Logger = logging.Logger
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-async def _maybe_await(result: Awaitable[Any] | Any) -> Any:
-    if inspect.isawaitable(result):
-        return await result  # type: ignore[return-value]
-    return result
 
 
 @dataclass(slots=True)
@@ -165,13 +158,15 @@ class QueueMonitorRuntime:
     )
     stream_targets: Sequence[StreamTarget | Mapping[str, Any] | Sequence[str]] = field(default_factory=tuple)
     redis_factory: Callable[[], Awaitable[Any]] = get_redis_client
-    write_fn: Callable[[Iterable[Any]], Awaitable[int] | int] = write_points
     metrics_interval: float = 5.0
     hash_key: str = QUEUE_MONITOR_METRICS_HASH_KEY
     pubsub_channel: str | None = QUEUE_MONITOR_PUBSUB_CHANNEL or None
     service_name: str = QUEUE_MONITOR_SERVICE_NAME
     health_hash_key: str = QUEUE_MONITOR_HEALTH_HASH_KEY
     logger_name: str = "ibbot.services.queue_monitor"
+    metrics_repository_factory: (
+        Callable[[], Awaitable["ServiceMetricRepository"] | "ServiceMetricRepository"] | None
+    ) = None
 
     _queue_targets: tuple[QueueTarget, ...] = field(init=False, repr=False)
     _stream_targets: tuple[StreamTarget, ...] = field(init=False, repr=False)
@@ -186,6 +181,12 @@ class QueueMonitorRuntime:
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _ws_manager: WebSocketManager = field(default_factory=WebSocketManager, init=False, repr=False)
     _logger: Logger | None = field(default=None, init=False, repr=False)
+    _metrics_repository: "ServiceMetricRepository" | None = field(
+        default=None, init=False, repr=False
+    )
+    _metrics_repository_close: Callable[[], Awaitable[None]] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._queue_targets = _normalise_queue_targets(self.queues)
@@ -197,7 +198,14 @@ class QueueMonitorRuntime:
             return
         self._logger = get_logger(self.logger_name)
         self._loop = asyncio.get_running_loop()
-        self._redis = await self.redis_factory()
+        try:
+            await self._initialize_metrics_repository()
+            self._redis = await self.redis_factory()
+        except Exception:
+            await self._close_metrics_repository()
+            self._loop = None
+            self._redis = None
+            raise
         self._stop_event.clear()
         try:
             await self.collect_once()
@@ -216,6 +224,7 @@ class QueueMonitorRuntime:
         self._task = None
         self._loop = None
         self._redis = None
+        await self._close_metrics_repository()
 
     def _empty_snapshot(self) -> Dict[str, Any]:
         return {"timestamp": _now().isoformat(), "queues": [], "streams": []}
@@ -254,6 +263,42 @@ class QueueMonitorRuntime:
         await self._ws_manager.broadcast({"type": "metrics", "data": snapshot})
         await self._publish_health(queue_metrics, stream_metrics)
         return snapshot
+
+    async def _initialize_metrics_repository(self) -> None:
+        if self._metrics_repository is not None:
+            return
+        factory = self.metrics_repository_factory
+        if factory is None:
+            return
+        repository = factory()
+        if inspect.isawaitable(repository):
+            repository = await repository
+        self._metrics_repository = repository
+
+        close_callable = getattr(repository, "close", None)
+
+        if close_callable is not None and callable(close_callable):
+
+            async def _close_repo() -> None:
+                result = close_callable()
+                if inspect.isawaitable(result):
+                    await result
+
+            self._metrics_repository_close = _close_repo
+        else:
+            self._metrics_repository_close = None
+
+    async def _close_metrics_repository(self) -> None:
+        closer = self._metrics_repository_close
+        self._metrics_repository_close = None
+        self._metrics_repository = None
+        if closer is None:
+            return
+        try:
+            await closer()
+        except Exception:
+            if self._logger:
+                self._logger.warning("Failed to close service metrics repository", exc_info=True)
 
     async def _publish_health(
         self,
@@ -374,75 +419,78 @@ class QueueMonitorRuntime:
         queue_metrics: Iterable[Mapping[str, Any]],
         stream_metrics: Iterable[Mapping[str, Any]],
     ) -> None:
-        points = []
+        repository = self._metrics_repository
+        if repository is None:
+            return
+        entries: list[dict[str, Any]] = []
         for entry in queue_metrics:
             slug = _slugify_metric(entry.get("name") or entry.get("queue_key", "queue"))
-            points.append(
-                build_service_metric_point(
-                    service=self.service_name,
-                    metric=f"{slug}-queue-length",
-                    value=float(entry.get("length", 0)),
-                    extra_fields={"queue_key": entry.get("queue_key")},
-                )
+            details = {
+                "queue_key": entry.get("queue_key"),
+                "name": entry.get("name"),
+            }
+            entries.append(
+                {
+                    "service": self.service_name,
+                    "metric": f"{slug}-queue-length",
+                    "value": float(entry.get("length", 0)),
+                    "details": details,
+                }
             )
-            points.append(
-                build_service_metric_point(
-                    service=self.service_name,
-                    metric=f"{slug}-consumption-rate",
-                    value=float(entry.get("consumption_rate", 0.0)),
-                    extra_fields={"queue_key": entry.get("queue_key")},
-                )
+            entries.append(
+                {
+                    "service": self.service_name,
+                    "metric": f"{slug}-consumption-rate",
+                    "value": float(entry.get("consumption_rate", 0.0)),
+                    "details": details,
+                }
             )
-            points.append(
-                build_service_metric_point(
-                    service=self.service_name,
-                    metric=f"{slug}-stale-seconds",
-                    value=float(entry.get("stale_seconds", 0.0)),
-                    extra_fields={"queue_key": entry.get("queue_key")},
-                )
+            entries.append(
+                {
+                    "service": self.service_name,
+                    "metric": f"{slug}-stale-seconds",
+                    "value": float(entry.get("stale_seconds", 0.0)),
+                    "details": details,
+                }
             )
         for entry in stream_metrics:
             slug = _slugify_metric(entry.get("name") or entry.get("stream_key", "stream"))
-            points.append(
-                build_service_metric_point(
-                    service=self.service_name,
-                    metric=f"{slug}-pending",
-                    value=float(entry.get("pending", 0)),
-                    extra_fields={
-                        "stream_key": entry.get("stream_key"),
-                        "group": entry.get("group"),
-                    },
-                )
+            details = {
+                "stream_key": entry.get("stream_key"),
+                "group": entry.get("group"),
+                "name": entry.get("name"),
+            }
+            entries.append(
+                {
+                    "service": self.service_name,
+                    "metric": f"{slug}-pending",
+                    "value": float(entry.get("pending", 0)),
+                    "details": details,
+                }
             )
-            points.append(
-                build_service_metric_point(
-                    service=self.service_name,
-                    metric=f"{slug}-consumption-rate",
-                    value=float(entry.get("consumption_rate", 0.0)),
-                    extra_fields={
-                        "stream_key": entry.get("stream_key"),
-                        "group": entry.get("group"),
-                    },
-                )
+            entries.append(
+                {
+                    "service": self.service_name,
+                    "metric": f"{slug}-consumption-rate",
+                    "value": float(entry.get("consumption_rate", 0.0)),
+                    "details": details,
+                }
             )
-            points.append(
-                build_service_metric_point(
-                    service=self.service_name,
-                    metric=f"{slug}-stale-seconds",
-                    value=float(entry.get("stale_seconds", 0.0)),
-                    extra_fields={
-                        "stream_key": entry.get("stream_key"),
-                        "group": entry.get("group"),
-                    },
-                )
+            entries.append(
+                {
+                    "service": self.service_name,
+                    "metric": f"{slug}-stale-seconds",
+                    "value": float(entry.get("stale_seconds", 0.0)),
+                    "details": details,
+                }
             )
-        if not points:
+        if not entries:
             return
         try:
-            await _maybe_await(self.write_fn(points))
+            await repository.record_metrics(entries)
         except Exception:
             if self._logger:
-                self._logger.warning("Failed to write service metrics", exc_info=True)
+                self._logger.warning("Failed to persist service metrics", exc_info=True)
 
     async def _publish_update(self, snapshot: Mapping[str, Any]) -> None:
         if not self.pubsub_channel or self._redis is None:
@@ -478,6 +526,20 @@ def _slugify_metric(name: Any) -> str:
 def create_app(*, runtime: QueueMonitorRuntime | None = None) -> FastAPI:
     runtime = runtime or QueueMonitorRuntime()
 
+    if runtime.metrics_repository_factory is None:
+        try:
+            from src.ibbot.db import get_session_factory, service_metric_repository
+        except ModuleNotFoundError:  # pragma: no cover - optional dependency missing
+            pass
+        else:
+            session_factory = get_session_factory()
+
+            async def _build_metrics_repository() -> "ServiceMetricRepository":
+                session = session_factory()
+                return service_metric_repository(session)
+
+            runtime.metrics_repository_factory = _build_metrics_repository
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await runtime.start()
@@ -504,3 +566,4 @@ def create_app(*, runtime: QueueMonitorRuntime | None = None) -> FastAPI:
             await runtime.disconnect_websocket(websocket)
 
     return app
+

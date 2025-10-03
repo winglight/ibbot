@@ -83,21 +83,22 @@ class FakeRedis:
         self.series[key] = payloads
 
 
-class RecordingWriter:
+class RecordingRepository:
     def __init__(self) -> None:
-        self.points: list[dict[str, Any]] = []
+        self.records: list[dict[str, Any]] = []
+        self.calls: list[list[dict[str, Any]]] = []
+        self.closed = False
 
-    def __call__(self, points: Iterable[Any]) -> int:
-        batch: list[dict[str, Any]] = []
-        for point in points:
-            if hasattr(point, "as_dict"):
-                batch.append(point.as_dict())
-            elif isinstance(point, Mapping):
-                batch.append(dict(point))
-            else:
-                raise TypeError(f"Unsupported point type: {type(point)!r}")
-        self.points.extend(batch)
-        return len(batch)
+    async def record_metrics(self, metrics: Mapping[str, Any] | Iterable[Mapping[str, Any]]) -> None:
+        if isinstance(metrics, Mapping):
+            batch = [dict(metrics)]
+        else:
+            batch = [dict(entry) for entry in metrics]
+        self.calls.append(batch)
+        self.records.extend(batch)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class FakePubSubListener:
@@ -121,17 +122,19 @@ class FakePubSubListener:
                 await result
 
 
-def _build_runtime(redis: FakeRedis, writer: RecordingWriter, *, symbols: list[str]) -> MarketDataRuntime:
+def _build_runtime(
+    redis: FakeRedis, repository: RecordingRepository, *, symbols: list[str]
+) -> MarketDataRuntime:
     async def factory() -> FakeRedis:
         return redis
 
     listener = FakePubSubListener()
     runtime = MarketDataRuntime(
         redis_factory=factory,
-        write_fn=writer,
         subscriptions=symbols,
         metrics_interval=0.05,
         pubsub_listener=listener,
+        metrics_repository_factory=lambda: repository,
     )
     return runtime
 
@@ -157,8 +160,8 @@ def _emit_dom(runtime: MarketDataRuntime, symbol: str, **fields: Any) -> None:
 
 def test_market_snapshot_available_via_rest() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["AAPL"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["AAPL"])
 
     with _start_client(runtime) as client:
         _emit_price(runtime, "AAPL", bid=199.5, ask=200.5, last=200.1, bid_size=10, ask_size=11)
@@ -178,8 +181,30 @@ def test_market_snapshot_available_via_rest() -> None:
         assert parsed["symbol"] == "AAPL"
 
         time.sleep(0.1)
-        metrics = [point for point in writer.points if point.get("measurement") == "service_metrics"]
-        assert metrics, "Expected service metrics to be written"
+        assert repository.records, "Expected service metrics to be recorded"
+        throughput = next(
+            (
+                entry
+                for entry in repository.records
+                if entry.get("metric", "").endswith("throughput")
+            ),
+            None,
+        )
+        assert throughput is not None
+        details = throughput.get("details") or {}
+        assert details.get("updates", 0) >= 1
+        assert "interval" in details
+        latency = next(
+            (
+                entry
+                for entry in repository.records
+                if entry.get("metric", "").endswith("latency")
+            ),
+            None,
+        )
+        assert latency is not None
+        latency_details = latency.get("details") or {}
+        assert "max_latency" in latency_details
 
         health = redis.hashes.get("hash:service:health:market-data") or {}
         assert health.get("status") == "running"
@@ -188,8 +213,8 @@ def test_market_snapshot_available_via_rest() -> None:
 
 def test_market_websocket_broadcasts_updates() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["ES"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["ES"])
 
     with _start_client(runtime) as client:
         with client.websocket_connect("/ws/market") as websocket:
@@ -204,6 +229,8 @@ def test_market_websocket_broadcasts_updates() -> None:
             snapshot = update["data"]
             assert snapshot["symbol"] == "ES"
             assert snapshot["dom"]["bids"][0]["price"] == 4300.25
+
+    assert repository.closed
 
 
 def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -396,7 +423,12 @@ def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) ->
     async def _redis_factory() -> Any:
         return async_client
 
-    runtime = MarketDataRuntime(redis_factory=_redis_factory, pubsub_listener=FakePubSubListener(), subscriptions=[])
+    runtime = MarketDataRuntime(
+        redis_factory=_redis_factory,
+        pubsub_listener=FakePubSubListener(),
+        subscriptions=[],
+        metrics_repository_factory=RecordingRepository,
+    )
 
     with _start_client(runtime) as client:
         for interval_key, bar_size in interval_bar_sizes.items():
@@ -419,8 +451,8 @@ def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_unknown_symbol_returns_404() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["CL"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["CL"])
 
     with _start_client(runtime) as client:
         response = client.get("/market/NQ")
@@ -430,8 +462,8 @@ def test_unknown_symbol_returns_404() -> None:
 
 def test_current_price_endpoint_returns_snapshot() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["MSFT"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["MSFT"])
 
     with _start_client(runtime) as client:
         _emit_price(runtime, "MSFT", last=330.55, bid=330.4, ask=330.7)
@@ -449,8 +481,8 @@ def test_current_price_endpoint_returns_snapshot() -> None:
 
 def test_current_price_endpoint_handles_missing_snapshot() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["MSFT"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["MSFT"])
 
     with _start_client(runtime) as client:
         response = client.get("/market/current_price", params={"symbol": "UNKNOWN"})
@@ -465,8 +497,8 @@ def test_current_price_endpoint_handles_missing_snapshot() -> None:
 
 def test_chart_data_returns_cached_series() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["ES"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["ES"])
 
     interval = "1m"
     symbol = "ES"
@@ -530,8 +562,8 @@ def test_chart_data_returns_cached_series() -> None:
 
 def test_chart_data_returns_404_when_series_missing() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["ES"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["ES"])
 
     with _start_client(runtime) as client:
         response = client.post(
@@ -549,8 +581,8 @@ def test_chart_data_returns_404_when_series_missing() -> None:
 
 def test_chart_data_returns_503_on_backend_error() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["ES"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["ES"])
     redis.fail_lrange = True
 
     with _start_client(runtime) as client:
@@ -569,8 +601,8 @@ def test_chart_data_returns_503_on_backend_error() -> None:
 
 def test_market_historical_returns_series_payload() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["ES"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["ES"])
 
     interval = "1m"
     symbol = "ES"
@@ -610,8 +642,8 @@ def test_market_historical_returns_series_payload() -> None:
 
 def test_market_historical_handles_missing_data() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
-    runtime = _build_runtime(redis, writer, symbols=["ES"])
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["ES"])
 
     with _start_client(runtime) as client:
         response = client.post(

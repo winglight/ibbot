@@ -46,21 +46,22 @@ class FakeRedis:
         return [state["details"]]
 
 
-class RecordingWriter:
+class RecordingRepository:
     def __init__(self) -> None:
-        self.points: list[dict[str, Any]] = []
+        self.records: list[dict[str, Any]] = []
+        self.calls: list[list[dict[str, Any]]] = []
+        self.closed = False
 
-    async def __call__(self, points: Iterable[Any]) -> int:
-        total = 0
-        for point in points:
-            if hasattr(point, "as_dict"):
-                self.points.append(point.as_dict())
-            elif isinstance(point, Mapping):
-                self.points.append(dict(point))
-            else:
-                raise TypeError(f"Unsupported metric point: {type(point)!r}")
-            total += 1
-        return total
+    async def record_metrics(self, metrics: Mapping[str, Any] | Iterable[Mapping[str, Any]]) -> None:
+        if isinstance(metrics, Mapping):
+            batch = [dict(metrics)]
+        else:
+            batch = [dict(entry) for entry in metrics]
+        self.calls.append(batch)
+        self.records.extend(batch)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 def test_queue_monitor_aggregates_metrics() -> None:
@@ -70,7 +71,7 @@ def test_queue_monitor_aggregates_metrics() -> None:
         "pending": 5,
         "details": ("id-1", "consumer-1", 1500, 1),
     }
-    writer = RecordingWriter()
+    repository = RecordingRepository()
 
     async def redis_factory() -> FakeRedis:
         return redis
@@ -79,9 +80,9 @@ def test_queue_monitor_aggregates_metrics() -> None:
         queues=[QueueTarget(name="commands", queue_key="queue:ib:commands")],
         stream_targets=[StreamTarget(name="jobs", stream_key="stream:jobs", group="group:jobs")],
         redis_factory=redis_factory,
-        write_fn=writer,
         metrics_interval=60.0,
         pubsub_channel=None,
+        metrics_repository_factory=lambda: repository,
     )
 
     async def run_monitor() -> tuple[dict[str, Any], dict[str, dict[str, str]], list[dict[str, Any]]]:
@@ -97,8 +98,8 @@ def test_queue_monitor_aggregates_metrics() -> None:
             await runtime.collect_once()
             snapshot = runtime.get_snapshot()
             hash_copy = {key: dict(value) for key, value in redis.hash_store.items()}
-            points = list(writer.points)
-            return snapshot, hash_copy, points
+            records = list(repository.records)
+            return snapshot, hash_copy, records
         finally:
             await runtime.stop()
 
@@ -128,15 +129,25 @@ def test_queue_monitor_aggregates_metrics() -> None:
     assert health_payload.get("total_stream_pending") == "3"
 
     assert recorded_points, "Expected service metrics to be recorded"
-    metric_names = {point.get("tags", {}).get("metric") for point in recorded_points}
+    metric_names = {entry.get("metric") for entry in recorded_points}
     assert "commands-queue-length" in metric_names
     assert "commands-consumption-rate" in metric_names
     assert "jobs-pending" in metric_names
+    queue_entries = [entry for entry in recorded_points if entry.get("metric") == "commands-queue-length"]
+    assert queue_entries
+    details = queue_entries[-1].get("details") or {}
+    assert details.get("queue_key") == "queue:ib:commands"
+    stream_entries = [entry for entry in recorded_points if entry.get("metric") == "jobs-pending"]
+    assert stream_entries
+    stream_details = stream_entries[-1].get("details") or {}
+    assert stream_details.get("stream_key") == "stream:jobs"
+    assert stream_details.get("group") == "group:jobs"
+    assert repository.closed
 
 
 def test_collect_once_writes_health_to_queue_hash() -> None:
     redis = FakeRedis()
-    writer = RecordingWriter()
+    repository = RecordingRepository()
 
     async def redis_factory() -> FakeRedis:
         return redis
@@ -145,9 +156,9 @@ def test_collect_once_writes_health_to_queue_hash() -> None:
         queues=[QueueTarget(name="commands", queue_key="queue:ib:commands")],
         stream_targets=[StreamTarget(name="jobs", stream_key="stream:jobs", group="group:jobs")],
         redis_factory=redis_factory,
-        write_fn=writer,
         metrics_interval=60.0,
         pubsub_channel=None,
+        metrics_repository_factory=lambda: repository,
     )
 
     async def run_collect_once() -> None:
