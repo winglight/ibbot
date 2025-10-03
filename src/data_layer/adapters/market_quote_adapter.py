@@ -51,7 +51,7 @@ class MarketQuoteAdapter(DataSourceAdapter):
         cache: CacheBackend,
         persistence: PersistenceBackend,
         *,
-        intervals: Iterable[str] = ("1s", "5s", "1m"),
+        intervals: Iterable[str] = ("1s", "5s", "1m", "5m", "15m", "30m", "1h", "1d"),
         candle_history: int = 300,
     ) -> None:
         super().__init__(event_bus)

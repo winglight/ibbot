@@ -39,7 +39,16 @@ class DataLayerMode(str, Enum):
 
 DEFAULT_DATA_LAYER_MODE = DataLayerMode.from_value(os.getenv("DATA_LAYER_MODE"))
 
-DEFAULT_CANDLE_INTERVALS: tuple[str, ...] = ("1s", "5s", "1m", "5m")
+DEFAULT_CANDLE_INTERVALS: tuple[str, ...] = (
+    "1s",
+    "5s",
+    "1m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "1d",
+)
 DEFAULT_CANDLE_HISTORY_LIMIT = 300
 
 

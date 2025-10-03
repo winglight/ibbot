@@ -344,7 +344,10 @@ def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("DATA_LAYER_REDIS_URL", raising=False)
     monkeypatch.delenv("IBBOT_REDIS_URL", raising=False)
     monkeypatch.setenv("DATA_LAYER_REDIS_PREFIX", "market-data")
-    monkeypatch.setenv("DATA_LAYER_CANDLE_INTERVALS", "1s,5m")
+    monkeypatch.setenv(
+        "DATA_LAYER_CANDLE_INTERVALS",
+        "1s,5s,1m,5m,15m,30m,1h,1d",
+    )
     monkeypatch.setenv("DATA_LAYER_CANDLE_HISTORY_LIMIT", "10")
 
     async def _produce_candles() -> None:
@@ -374,17 +377,21 @@ def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) ->
 
     asyncio.run(_produce_candles())
 
-    series_key = "market-data:series:market.candle.1s:AAPL"
-    stored_entries = sync_client.lrange(series_key, 0, -1)
-    assert stored_entries, "Expected candle series to be written to Redis"
-    latest_1s = json.loads(stored_entries[-1])
-    assert latest_1s["interval"] == "1s"
+    interval_bar_sizes = {
+        "1s": "1 sec",
+        "5m": "5 min",
+        "15m": "15 min",
+        "30m": "30 min",
+        "1h": "1 hour",
+        "1d": "1 day",
+    }
 
-    series_key_5m = "market-data:series:market.candle.5m:AAPL"
-    stored_entries_5m = sync_client.lrange(series_key_5m, 0, -1)
-    assert stored_entries_5m, "Expected 5m candle series to be written to Redis"
-    latest_5m = json.loads(stored_entries_5m[-1])
-    assert latest_5m["interval"] == "5m"
+    for interval_key in interval_bar_sizes:
+        series_key = f"market-data:series:market.candle.{interval_key}:AAPL"
+        stored_entries = sync_client.lrange(series_key, 0, -1)
+        assert stored_entries, f"Expected {interval_key} candle series to be written to Redis"
+        latest_entry = json.loads(stored_entries[-1])
+        assert latest_entry["interval"] == interval_key
 
     async def _redis_factory() -> Any:
         return async_client
@@ -392,35 +399,22 @@ def test_chart_data_endpoint_returns_candles(monkeypatch: pytest.MonkeyPatch) ->
     runtime = MarketDataRuntime(redis_factory=_redis_factory, pubsub_listener=FakePubSubListener(), subscriptions=[])
 
     with _start_client(runtime) as client:
-        response = client.post(
-            "/chart_data",
-            json={
-                "symbol": "AAPL",
-                "duration": "1 D",
-                "barSize": "1 sec",
-                "exchange": "SMART",
-            },
-        )
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["success"] is True
-        assert payload["symbol"] == "AAPL"
-        assert payload["data"], "Expected chart data to be returned"
-
-        response_5m = client.post(
-            "/chart_data",
-            json={
-                "symbol": "AAPL",
-                "duration": "1 D",
-                "barSize": "5 min",
-                "exchange": "SMART",
-            },
-        )
-        assert response_5m.status_code == 200
-        payload_5m = response_5m.json()
-        assert payload_5m["success"] is True
-        assert payload_5m["symbol"] == "AAPL"
-        assert payload_5m["data"], "Expected 5m chart data to be returned"
+        for interval_key, bar_size in interval_bar_sizes.items():
+            response = client.post(
+                "/chart_data",
+                json={
+                    "symbol": "AAPL",
+                    "duration": "1 D",
+                    "barSize": bar_size,
+                    "exchange": "SMART",
+                },
+            )
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["success"] is True
+            assert payload["symbol"] == "AAPL"
+            assert payload["data"], f"Expected {interval_key} chart data to be returned"
+            assert payload["bar_size"].lower() == bar_size.lower()
 
 
 def test_unknown_symbol_returns_404() -> None:
