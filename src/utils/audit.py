@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from fastapi import Request
 from loguru import logger
 
-from src.ibbot.influx import InfluxPoint, write_points
+from src.ibbot.db import DatabaseConfigError, audit_log_repository, session_scope
 
 
 def _coerce_fields(extra: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -38,11 +37,11 @@ async def log_audit_event(
     detail: str | None = None,
     extra: Mapping[str, Any] | None = None,
 ) -> None:
-    """Write an audit trail record to InfluxDB.
+    """Write an audit trail record to MariaDB via the SQLAlchemy layer.
 
-    The function is intentionally tolerant: failures when writing to InfluxDB are
-    logged at debug level but never propagated to the caller so that security
-    checks do not disrupt the primary control flow.
+    The function is intentionally tolerant: database write failures are logged
+    and a structured log entry is emitted instead so that security checks do
+    not disrupt the primary control flow.
     """
 
     username = getattr(request.state, "audit_username", None) or getattr(request.state, "username", None) or "anonymous"
@@ -52,31 +51,40 @@ async def log_audit_event(
     method = getattr(request.state, "audit_method", None) or request.method.upper()
     path = getattr(request.state, "audit_path", None) or request.url.path
 
-    timestamp = datetime.now(timezone.utc)
     result = "success" if success else "failure"
 
-    fields = {
-        "user": username,
-        "method": method,
-        "path": path,
-        "result": result,
-        "detail": detail or "",
-    }
-    fields.update(_coerce_fields(extra))
-
-    point = InfluxPoint(
-        "logs",
-        fields=fields,
-        tags={
-            "category": "audit",
-            "action": action,
-            "role": role,
-            "result": result,
-        },
-        timestamp=timestamp,
-    )
-
     try:
-        write_points([point])
+        async with session_scope() as session:
+            repo = audit_log_repository(session)
+            await repo.record_event(
+                {
+                    "action": action,
+                    "result": result,
+                    "user": username,
+                    "role": role,
+                    "method": method,
+                    "path": path,
+                    "detail": detail or "",
+                    "extra": _coerce_fields(extra),
+                }
+            )
+    except DatabaseConfigError as exc:
+        logger.warning("Audit log database configuration error: {}", exc)
+        logger.bind(
+            action=action,
+            result=result,
+            user=username,
+            role=role,
+            method=method,
+            path=path,
+        ).info("AUDIT (fallback): {}", detail or "")
     except Exception as exc:  # pragma: no cover - safety net for production
-        logger.debug("Failed to write audit log: {}", exc)
+        logger.debug("Failed to persist audit log: {}", exc)
+        logger.bind(
+            action=action,
+            result=result,
+            user=username,
+            role=role,
+            method=method,
+            path=path,
+        ).info("AUDIT (fallback): {}", detail or "")

@@ -16,6 +16,7 @@ __all__ = [
     "RiskConfigSnapshot",
     "RiskRuleSnapshot",
     "MarketEvent",
+    "AuditLog",
 ]
 
 
@@ -158,14 +159,22 @@ class MarketEvent(Base):
         Index("ix_market_events_symbol", "symbol"),
     )
 
+
+class AuditLog(Base):
+    """Audit trail for user actions within the platform."""
+
+    __tablename__ = "audit_logs"
+    __table_args__ = (Index("ix_audit_logs_created_at", "created_at"),)
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    event_type: Mapped[str] = mapped_column(String(128))
-    topic: Mapped[str] = mapped_column(String(256))
-    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    source: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    payload: Mapped[dict] = mapped_column(JSON)
-    meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    ingested_at: Mapped[datetime] = mapped_column(
+    action: Mapped[str] = mapped_column(String(128))
+    result: Mapped[str] = mapped_column(String(32))
+    user: Mapped[str] = mapped_column(String(128))
+    role: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    method: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from .config import DatabaseConfigError, get_database_url, resolve_database_url
 from .session import get_async_engine, get_async_session, get_session_factory, session_scope
 from .schemas import (
+    AuditLog,
     Base,
     MarketEvent,
     MarketPrice,
@@ -33,6 +34,7 @@ from .schemas import (
     ServiceMetric,
     metadata,
 )
+from .repositories.audit import AuditLogRepository
 from .repositories.events import MarketEventRepository
 from .repositories.market import MariaDbMarketPriceRepository
 from .repositories.metrics import ServiceMetricRepository
@@ -45,6 +47,8 @@ if TYPE_CHECKING:  # pragma: no cover - import for type hints only
 __all__ = [
     "Base",
     "DatabaseConfigError",
+    "AuditLog",
+    "AuditLogRepository",
     "MarketEvent",
     "MarketEventRepository",
     "MarketPrice",
@@ -64,6 +68,7 @@ __all__ = [
     "resolve_database_url",
     "session_scope",
     "market_event_repository",
+    "audit_log_repository",
     "market_price_repository",
     "order_repository",
     "risk_snapshot_repository",
@@ -105,3 +110,9 @@ def market_event_repository(session: "AsyncSession") -> MarketEventRepository:
     """Return a market event repository bound to *session*."""
 
     return MarketEventRepository(session)
+
+
+def audit_log_repository(session: "AsyncSession") -> AuditLogRepository:
+    """Return an audit log repository bound to *session*."""
+
+    return AuditLogRepository(session)

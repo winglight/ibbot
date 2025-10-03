@@ -127,7 +127,7 @@ def _compute_score(training_data: Iterable[Any]) -> float:
 
 @dataclass
 class OptimizerService:
-    """Encapsulates access to Redis and Influx for optimizer tasks."""
+    """Encapsulates access to Redis and MariaDB for optimizer tasks."""
 
     redis_factory: Callable[[], Awaitable[Redis] | Redis] = get_redis_client
     db_query: Callable[[str], Awaitable[Iterable[Any]] | Iterable[Any]] = run_sql_query
