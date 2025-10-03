@@ -13,6 +13,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Mapping, Sequence
 import os
+import shutil
+import subprocess
 
 __all__ = [
     "detect_open_sqlite_handles",
@@ -101,13 +103,14 @@ def get_startup_checks() -> list[dict[str, Any]]:
         return [dict(value) for value in _STARTUP_CHECKS.values()]
 
 
-def detect_open_sqlite_handles(fd_root: Path | None = None) -> list[str]:
-    """Inspect the current process for open SQLite-related file descriptors."""
+def _env_flag(name: str) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() not in {"", "0", "false", "no", "off", "disabled"}
 
-    root = fd_root or Path("/proc/self/fd")
-    if not root.exists():  # pragma: no cover - non-Linux environments
-        return []
 
+def _detect_open_sqlite_handles_via_proc(root: Path) -> list[str]:
     handles: list[str] = []
     for entry in root.iterdir():
         try:
@@ -124,5 +127,51 @@ def detect_open_sqlite_handles(fd_root: Path | None = None) -> list[str]:
         if "sqlite" in normalised.lower():
             handles.append(normalised)
 
-    return sorted(dict.fromkeys(handles))
+    return handles
+
+
+def _detect_open_sqlite_handles_via_lsof() -> list[str]:
+    """Use ``lsof`` to inspect open files for the current process."""
+
+    lsof_path = shutil.which("lsof")
+    if not lsof_path:
+        return []
+
+    try:
+        result = subprocess.run(  # noqa: S603 - lsof path resolved via shutil.which
+            [lsof_path, "-F", "n", "-p", str(os.getpid())],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:  # pragma: no cover - defensive guard for unexpected environments
+        return []
+
+    output = result.stdout or ""
+    handles: list[str] = []
+    for line in output.splitlines():
+        if not line or not line.startswith("n"):
+            continue
+        target = line[1:]
+        if "sqlite" in target.lower():
+            handles.append(target)
+
+    return handles
+
+
+def detect_open_sqlite_handles(fd_root: Path | None = None) -> list[str]:
+    """Inspect the current process for open SQLite-related file descriptors."""
+
+    root = fd_root or Path("/proc/self/fd")
+    handles: set[str] = set()
+
+    if root.exists():
+        handles.update(_detect_open_sqlite_handles_via_proc(root))
+    else:
+        handles.update(_detect_open_sqlite_handles_via_lsof())
+
+    if not handles and _env_flag("SQLITE_HANDLE_CHECK_USE_LSOF"):
+        handles.update(_detect_open_sqlite_handles_via_lsof())
+
+    return sorted(handles)
 

@@ -152,6 +152,42 @@ async def test_startup_initialises_core_utilities(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.anyio("asyncio")
+async def test_startup_raises_when_sqlite_handles_detected(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_redis = FakeRedis()
+
+    async def fake_init_redis(*args: Any, **kwargs: Any) -> FakeRedis:
+        return fake_redis
+
+    reset_startup_checks()
+    monkeypatch.setattr("main.detect_open_sqlite_handles", lambda: ["/tmp/leaky.sqlite"])
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "change_me")
+    monkeypatch.setattr("src.routes.auth.ADMIN_USERNAME", "admin", raising=False)
+    monkeypatch.setattr("src.routes.auth.ADMIN_PASSWORD", "change_me", raising=False)
+    monkeypatch.setattr("core.container.init_redis", fake_init_redis)
+    monkeypatch.setattr("core.container.configure_influx", lambda **_: None)
+    monkeypatch.setattr("core.container.ConfigProvider", DummyProvider)
+    monkeypatch.setattr("core.container.load_project_env", lambda: None)
+
+    await core.shutdown()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert "SQLite file handles detected" in str(excinfo.value)
+
+    check = get_sqlite_handle_check()
+    assert check is not None
+    assert check.get("healthy") is False
+    payload = check.get("payload") or {}
+    assert payload.get("handles") == ["/tmp/leaky.sqlite"]
+
+    await core.shutdown()
+    reset_startup_checks()
+
+
+@pytest.mark.anyio("asyncio")
 async def test_app_routes_available_without_ib(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_redis = FakeRedis()
 
