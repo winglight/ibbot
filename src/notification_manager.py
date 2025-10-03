@@ -1,6 +1,7 @@
 import asyncio
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from datetime import datetime, timedelta, time as dt_time, date as dt_date
+from typing import Optional, Dict, Any, List, Tuple
+from zoneinfo import ZoneInfo
 from loguru import logger
 
 from .utils import now_local
@@ -75,6 +76,17 @@ class NotificationManager:
         self._settings_expires: Optional[datetime] = None
         self._settings_lock: Optional[asyncio.Lock] = None
         self._settings_ttl_seconds: int = 45
+        self._background_tasks: Dict[str, asyncio.Task] = {}
+        self._background_lock: asyncio.Lock = asyncio.Lock()
+        self._background_stop: Optional[asyncio.Event] = None
+        self._history_prune_interval_seconds: int = 60 * 60 * 6  # Every 6 hours
+        self._history_prune_batch_size: int = 500
+        self._history_max_age_days: int = 30
+        try:
+            self._reminder_timezone: ZoneInfo = ZoneInfo("America/New_York")
+        except Exception:
+            self._reminder_timezone = ZoneInfo("UTC")
+        self._reminder_last_sent: Dict[str, dt_date] = {}
         notification_logger.info("NotificationManager initialized")
 
     # ------------------------------------------------------------------
@@ -156,6 +168,245 @@ class NotificationManager:
             self.websocket_manager = websocket_manager
         if db_manager:
             self.db_manager = db_manager
+
+    # ------------------------------------------------------------------
+    # Background task management
+
+    async def ensure_background_tasks(self) -> List[asyncio.Task]:
+        """Ensure long running background tasks are active."""
+
+        async with self._background_lock:
+            if self._background_stop is None:
+                self._background_stop = asyncio.Event()
+
+            tasks_created: List[asyncio.Task] = []
+
+            if "trading_reminder" not in self._background_tasks:
+                task = asyncio.create_task(
+                    self._trading_reminder_loop(self._background_stop),
+                    name="notification-trading-reminder",
+                )
+                self._background_tasks["trading_reminder"] = task
+                tasks_created.append(task)
+
+            if self.db_manager and "history_prune" not in self._background_tasks:
+                task = asyncio.create_task(
+                    self._history_prune_loop(self._background_stop),
+                    name="notification-history-prune",
+                )
+                self._background_tasks["history_prune"] = task
+                tasks_created.append(task)
+
+            return list(self._background_tasks.values())
+
+    async def shutdown_background_tasks(self) -> None:
+        """Signal and await all background tasks."""
+
+        async with self._background_lock:
+            tasks = list(self._background_tasks.values())
+            stop_event = self._background_stop
+            if stop_event is not None:
+                stop_event.set()
+            self._background_tasks.clear()
+            self._background_stop = None
+
+        for task in tasks:
+            task.cancel()
+
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive logging
+                notification_logger.warning(
+                    f"Background task shutdown warning: {exc}"
+                )
+
+    # ------------------------------------------------------------------
+    # Trading reminder helpers
+
+    def _parse_time(self, value: Optional[str]) -> Optional[dt_time]:
+        if not value:
+            return None
+        try:
+            hour_str, minute_str = value.split(":", 1)
+            hour = int(hour_str)
+            minute = int(minute_str)
+            if not (0 <= hour < 24 and 0 <= minute < 60):
+                raise ValueError("invalid range")
+            return dt_time(hour=hour, minute=minute, tzinfo=None)
+        except Exception:
+            notification_logger.warning(
+                f"Invalid trading reminder time configuration: {value!r}"
+            )
+            return None
+
+    def _now_in_reminder_tz(self) -> datetime:
+        tz = self._reminder_timezone
+        return datetime.now(tz)
+
+    def _next_trading_day(self, reference: datetime) -> datetime:
+        candidate = reference
+        while candidate.weekday() >= 5:  # 5=Saturday, 6=Sunday
+            candidate += timedelta(days=1)
+            candidate = candidate.replace(hour=reference.hour, minute=reference.minute, second=reference.second, microsecond=0)
+        return candidate
+
+    def _resolve_next_reminder(self, *,
+                                label: str,
+                                target_time: Optional[dt_time],
+                                reference: datetime) -> Optional[datetime]:
+        if target_time is None:
+            return None
+
+        base = reference.replace(
+            hour=target_time.hour,
+            minute=target_time.minute,
+            second=0,
+            microsecond=0,
+        )
+        if base <= reference:
+            base += timedelta(days=1)
+        base = self._next_trading_day(base)
+
+        last_sent = self._reminder_last_sent.get(label)
+        if last_sent and base.date() <= last_sent:
+            base = base.replace(hour=target_time.hour, minute=target_time.minute)
+            base += timedelta(days=1)
+            base = self._next_trading_day(base)
+
+        return base
+
+    async def _sleep_with_stop(self, stop_event: asyncio.Event, timeout: float) -> bool:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def _trading_reminder_loop(self, stop_event: asyncio.Event) -> None:
+        try:
+            while not stop_event.is_set():
+                try:
+                    settings = await self._load_settings_async()
+                except Exception as exc:
+                    notification_logger.warning(
+                        f"Failed to refresh notification settings: {exc}"
+                    )
+                    settings = {}
+
+                reminder_cfg = dict(settings.get("trading_reminder") or {})
+                if not reminder_cfg.get("enabled"):
+                    await self._sleep_with_stop(stop_event, 900.0)
+                    continue
+
+                start_time = self._parse_time(reminder_cfg.get("start_trading_time"))
+                end_time = self._parse_time(reminder_cfg.get("end_trading_time"))
+
+                now = self._now_in_reminder_tz()
+
+                schedule: List[Tuple[datetime, str]] = []
+                next_start = self._resolve_next_reminder(
+                    label="start",
+                    target_time=start_time,
+                    reference=now,
+                )
+                if next_start is not None:
+                    schedule.append((next_start, "start"))
+
+                next_end = self._resolve_next_reminder(
+                    label="end",
+                    target_time=end_time,
+                    reference=now,
+                )
+                if next_end is not None:
+                    schedule.append((next_end, "end"))
+
+                if not schedule:
+                    await self._sleep_with_stop(stop_event, 900.0)
+                    continue
+
+                schedule.sort(key=lambda item: item[0])
+                target_time, label = schedule[0]
+                wait_seconds = max(60.0, (target_time - now).total_seconds())
+
+                if await self._sleep_with_stop(stop_event, wait_seconds):
+                    break
+
+                await self._emit_trading_reminder(label, reminder_cfg, target_time)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            notification_logger.warning(
+                f"Trading reminder loop terminated unexpectedly: {exc}"
+            )
+
+    async def _emit_trading_reminder(self, label: str, cfg: Dict[str, Any], when: datetime) -> None:
+        last_sent = self._reminder_last_sent.get(label)
+        if last_sent == when.date():
+            return
+
+        channels: List[str] = []
+        if cfg.get("browser_notification_enabled", True):
+            channels.append("websocket")
+        if cfg.get("telegram_reminder_enabled", False):
+            channels.append("telegram")
+
+        if not channels:
+            self._reminder_last_sent[label] = when.date()
+            return
+
+        message = "🔔 开始交易提醒" if label == "start" else "🔔 结束交易提醒"
+
+        try:
+            await self.send_notification(
+                message=message,
+                event_type="trading_reminder",
+                channels=channels,
+                reminder_type=label,
+                scheduled_at=when.isoformat(),
+            )
+            self._reminder_last_sent[label] = when.date()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            notification_logger.warning(
+                f"Failed to send trading reminder ({label}): {exc}"
+            )
+
+    # ------------------------------------------------------------------
+    # History pruning helpers
+
+    async def _history_prune_loop(self, stop_event: asyncio.Event) -> None:
+        try:
+            while not stop_event.is_set():
+                if await self._sleep_with_stop(stop_event, self._history_prune_interval_seconds):
+                    break
+
+                if not self.db_manager:
+                    continue
+
+                try:
+                    removed = await asyncio.to_thread(
+                        self.db_manager.prune_notification_history,
+                        max_age_days=self._history_max_age_days,
+                        batch_size=self._history_prune_batch_size,
+                    )
+                    if removed:
+                        notification_logger.info(
+                            f"Pruned {removed} stale notification records"
+                        )
+                except Exception as exc:  # pragma: no cover - defensive
+                    notification_logger.warning(
+                        f"Notification history prune failed: {exc}"
+                    )
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            notification_logger.warning(
+                f"History prune loop terminated unexpectedly: {exc}"
+            )
 
     def _load_settings(self, raw_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """将数据库配置与默认值合并，确保返回结构完整。"""

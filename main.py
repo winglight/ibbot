@@ -83,6 +83,7 @@ from src.routes.queue import router as queue_router
 from src.routes.logs import router as logs_router
 from src.routes.websocket import router as websocket_router
 from src.routes.dom import router as dom_router
+from src.routes.services import router as services_router
 from src.data_layer import get_data_source_manager
 
 
@@ -176,12 +177,84 @@ class ModuleRegistry:
         self._root_logger = root_logger
         self._definitions: "OrderedDict[str, ModuleDefinition]" = OrderedDict()
         self._handles: List[ModuleHandle] = []
+        self._handles_by_name: Dict[str, ModuleHandle] = {}
+        self._enabled: List[str] = []
+        self._app: Optional[FastAPI] = None
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    FRIENDLY_NAMES: Dict[str, str] = {
+        "auto_connect": "IB Auto Connect",
+        "data_subscriptions": "Market Data Subscriptions",
+        "risk_manager": "Risk Manager",
+        "account_snapshot": "Account Snapshot Service",
+        "strategy_manager": "Strategy Manager",
+        "queue_worker": "Queue Worker",
+        "notification_manager": "Notification Service",
+    }
 
     def register(self, definition: ModuleDefinition) -> None:
         self._definitions[definition.name] = definition
 
     def available_modules(self) -> List[str]:
         return list(self._definitions.keys())
+
+    def _display_name(self, slug: str) -> str:
+        friendly = self.FRIENDLY_NAMES.get(slug)
+        if friendly:
+            return friendly
+        return slug.replace("_", " ").title()
+
+    def service_metadata(self) -> List[Dict[str, Any]]:
+        data: List[Dict[str, Any]] = []
+        for name, definition in self._definitions.items():
+            data.append(
+                {
+                    "slug": name,
+                    "name": self._display_name(name),
+                    "description": definition.description,
+                    "enabled": name in self._enabled,
+                }
+            )
+        return data
+
+    def health_snapshot(self) -> List[Dict[str, Any]]:
+        report: List[Dict[str, Any]] = []
+        for name, definition in self._definitions.items():
+            handle = self._handles_by_name.get(name)
+            tasks_info: List[Dict[str, Any]] = []
+            if handle:
+                for task in handle.tasks:
+                    try:
+                        task_name = task.get_name()
+                    except AttributeError:
+                        task_name = None
+                    task_state: Dict[str, Any] = {
+                        "name": task_name,
+                        "done": task.done(),
+                        "cancelled": task.cancelled(),
+                    }
+                    if task.done() and not task.cancelled():
+                        try:
+                            exc = task.exception()
+                        except asyncio.CancelledError:
+                            exc = None
+                        except Exception:
+                            exc = None
+                        if exc:
+                            task_state["error"] = str(exc)
+                    tasks_info.append(task_state)
+
+            report.append(
+                {
+                    "slug": name,
+                    "name": self._display_name(name),
+                    "description": definition.description,
+                    "enabled": name in self._enabled,
+                    "active": handle is not None,
+                    "tasks": tasks_info,
+                }
+            )
+        return report
 
     def resolve_enabled(self, raw: Optional[str]) -> List[str]:
         if raw is None or not raw.strip():
@@ -206,60 +279,103 @@ class ModuleRegistry:
                 deduped.setdefault(token, None)
         return list(deduped.keys())
 
-    async def start_modules(self, app: FastAPI, enabled: List[str]) -> None:
-        for name in enabled:
-            definition = self._definitions.get(name)
-            if definition is None:
-                continue
+    async def _drain_handle(self, handle: ModuleHandle) -> None:
+        for task in handle.tasks:
+            if not task.done():
+                task.cancel()
 
-            module_logger = self._root_logger.bind(module=name, request_id="-")
-            context = ModuleRuntimeContext(
-                app=app,
-                module_name=name,
-                logger=module_logger,
-                root_logger=self._root_logger,
-            )
+        for task in handle.tasks:
             try:
-                handle = await definition.start(context)
+                await task
+            except asyncio.CancelledError:
+                pass
             except Exception as exc:
-                module_logger.exception(f"Module {name} failed to start: {exc}")
-                handle = ModuleHandle(name=name)
+                self._root_logger.warning(
+                    f"Background task shutdown warning ({handle.name}): {exc}"
+                )
 
-            if handle.name != name:
-                handle.name = name
+        for finalizer in handle.finalizers:
+            try:
+                result = finalizer()
+                if inspect.isawaitable(result):
+                    await result
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self._root_logger.warning(
+                    f"Module shutdown warning ({handle.name}): {exc}"
+                )
+
+    async def start_module(self, name: str, app: Optional[FastAPI] = None) -> ModuleHandle:
+        definition = self._definitions.get(name)
+        if definition is None:
+            raise KeyError(name)
+
+        if app is None:
+            app = self._app
+        if app is None:
+            raise RuntimeError("Application context not initialised")
+
+        await self.stop_module(name)
+
+        module_logger = self._root_logger.bind(module=name, request_id="-")
+        context = ModuleRuntimeContext(
+            app=app,
+            module_name=name,
+            logger=module_logger,
+            root_logger=self._root_logger,
+        )
+        try:
+            handle = await definition.start(context)
+        except Exception as exc:
+            module_logger.exception(f"Module {name} failed to start: {exc}")
+            handle = ModuleHandle(name=name)
+
+        if handle.name != name:
+            handle.name = name
+
+        async with self._lock:
             self._handles.append(handle)
+            self._handles_by_name[name] = handle
+            if name not in self._enabled:
+                self._enabled.append(name)
+        return handle
+
+    async def stop_module(self, name: str) -> None:
+        async with self._lock:
+            handle = self._handles_by_name.pop(name, None)
+            if handle is None:
+                return
+            try:
+                self._handles.remove(handle)
+            except ValueError:
+                pass
+
+        await self._drain_handle(handle)
+
+    async def restart_module(self, name: str) -> ModuleHandle:
+        if name not in self._definitions:
+            raise KeyError(name)
+        return await self.start_module(name)
+
+    async def start_modules(self, app: FastAPI, enabled: List[str]) -> None:
+        self._app = app
+        self._enabled = list(enabled)
+        for name in enabled:
+            if name not in self._definitions:
+                continue
+            await self.start_module(name, app=app)
 
     async def shutdown_modules(self) -> None:
-        for handle in reversed(self._handles):
-            for task in handle.tasks:
-                if not task.done():
-                    task.cancel()
+        async with self._lock:
+            handles = list(self._handles)
+            self._handles.clear()
+            self._handles_by_name.clear()
+            self._enabled = []
+            self._app = None
 
-        for handle in reversed(self._handles):
-            for task in handle.tasks:
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as exc:
-                    self._root_logger.warning(
-                        f"Background task shutdown warning ({handle.name}): {exc}"
-                    )
-
-        for handle in reversed(self._handles):
-            for finalizer in handle.finalizers:
-                try:
-                    result = finalizer()
-                    if inspect.isawaitable(result):
-                        await result
-                except asyncio.CancelledError:
-                    pass
-                except Exception as exc:
-                    self._root_logger.warning(
-                        f"Module shutdown warning ({handle.name}): {exc}"
-                    )
-
-        self._handles.clear()
+        for handle in reversed(handles):
+            await self._drain_handle(handle)
 
 
 async def _module_auto_connect(context: ModuleRuntimeContext) -> ModuleHandle:
@@ -465,6 +581,55 @@ async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
     return handle
 
 
+async def _module_notification_manager(context: ModuleRuntimeContext) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+
+    manager = getattr(core, "notification_manager", None)
+    if manager is None:
+        context.logger.warning("Notification manager singleton unavailable")
+        return handle
+
+    try:
+        manager.set_dependencies(
+            telegram_notifier=getattr(core, "telegram_notifier", None),
+            websocket_manager=getattr(core, "websocket_manager", None),
+            db_manager=get_db_manager(),
+        )
+        context.logger.info("Notification manager dependencies refreshed")
+    except Exception as exc:
+        context.logger.warning(f"Notification manager dependency wiring warning: {exc}")
+
+    tasks: List[asyncio.Task[Any]] = []
+    ensure_tasks = getattr(manager, "ensure_background_tasks", None)
+    if callable(ensure_tasks):
+        try:
+            background_tasks = await ensure_tasks()
+            for task in background_tasks:
+                if isinstance(task, asyncio.Task):
+                    tasks.append(task)
+        except Exception as exc:
+            context.logger.warning(f"Notification manager background setup warning: {exc}")
+
+    if tasks:
+        handle.tasks.extend(tasks)
+        context.logger.info("Notification manager background tasks initialised")
+
+    async def _shutdown_notification_manager() -> None:
+        shutdown = getattr(manager, "shutdown_background_tasks", None)
+        if not callable(shutdown):
+            return
+        try:
+            result = shutdown()
+            if inspect.isawaitable(result):
+                await result
+            context.logger.info("Notification manager background tasks stopped")
+        except Exception as exc:
+            context.logger.warning(f"Notification manager shutdown warning: {exc}")
+
+    handle.finalizers.append(_shutdown_notification_manager)
+    return handle
+
+
 def _build_module_registry(main_logger) -> ModuleRegistry:
     registry = ModuleRegistry(main_logger)
     registry.register(
@@ -509,6 +674,13 @@ def _build_module_registry(main_logger) -> ModuleRegistry:
             description="Start the background queue worker for internal orders.",
         )
     )
+    registry.register(
+        ModuleDefinition(
+            name="notification_manager",
+            start=_module_notification_manager,
+            description="Manage notification dispatch background tasks.",
+        )
+    )
     return registry
 
 
@@ -519,6 +691,9 @@ async def lifespan(app: FastAPI):
 
     enabled_raw = os.getenv("ENABLED_MODULES", "ALL")
     enabled_modules = registry.resolve_enabled(enabled_raw)
+
+    app.state.module_registry = registry
+    app.state.enabled_modules = enabled_modules
 
     if enabled_modules:
         main_logger.info(
@@ -536,6 +711,10 @@ async def lifespan(app: FastAPI):
     finally:
         await registry.shutdown_modules()
         main_logger.info("Application shutdown complete.")
+        if hasattr(app.state, "module_registry"):
+            delattr(app.state, "module_registry")
+        if hasattr(app.state, "enabled_modules"):
+            delattr(app.state, "enabled_modules")
 
 
 # 重新创建带有lifespan的FastAPI应用
@@ -776,6 +955,7 @@ app.include_router(queue_router)
 app.include_router(logs_router)
 app.include_router(websocket_router)
 app.include_router(dom_router)
+app.include_router(services_router)
 
 # Utility helpers
 

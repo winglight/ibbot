@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Sequence, Union
 
 import pandas as pd
@@ -1224,6 +1224,41 @@ class DatabaseManager:
             deleted = cursor.rowcount or 0
 
         database_logger.info(f"Cleared {deleted} notification history records")
+        return deleted
+
+    def prune_notification_history(
+        self,
+        *,
+        max_age_days: int = 30,
+        batch_size: int = 500,
+    ) -> int:
+        """Delete stale notification history records in bounded batches."""
+
+        if max_age_days <= 0:
+            return 0
+
+        cutoff = now_local() - timedelta(days=max_age_days)
+        cutoff_iso = cutoff.isoformat()
+
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM notification_history
+                WHERE id IN (
+                    SELECT id FROM notification_history
+                    WHERE datetime(created_at) < datetime(?)
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                )
+                """,
+                (cutoff_iso, batch_size),
+            )
+            deleted = cursor.rowcount or 0
+
+        if deleted:
+            database_logger.debug(
+                f"Pruned {deleted} notification history records older than {cutoff_iso}"
+            )
         return deleted
 
     def update_notification_status(self, notification_id: int, status: str,
