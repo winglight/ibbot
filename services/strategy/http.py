@@ -1642,10 +1642,13 @@ def create_app(
 
     @app.delete("/strategy/{name}", status_code=status.HTTP_204_NO_CONTENT)
     @app.delete("/strategies/{name}", status_code=status.HTTP_204_NO_CONTENT)
-    async def delete_strategy(name: str, runtime: StrategyRuntime = Depends(_get_runtime)) -> None:
+    async def delete_strategy(
+        name: str, runtime: StrategyRuntime = Depends(_get_runtime)
+    ) -> Response:
         deleted = await runtime.delete_strategy(name)
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post("/strategy/{name}/toggle")
     @app.post("/strategies/{name}/toggle")
