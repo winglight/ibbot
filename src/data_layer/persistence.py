@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from loguru import logger
 
@@ -63,7 +63,7 @@ class MariaDbPersistenceBackend(PersistenceBackend):
 
     async def _persist(self, envelope: EventEnvelope) -> None:
         repository = await self._get_event_repository()
-        await repository.insert_event(envelope)
+        await self._invoke_repository(repository, ("insert_event", "write_event"), envelope)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task[None]) -> None:
@@ -87,7 +87,11 @@ class MariaDbPersistenceBackend(PersistenceBackend):
         self, metrics: Mapping[str, object] | Iterable[Mapping[str, object]]
     ) -> None:
         repository = await self._get_metric_repository()
-        await repository.record_metrics(metrics)
+        await self._invoke_repository(
+            repository,
+            ("record_metrics", "write_metrics", "record"),
+            metrics,
+        )
 
     def record_service_metrics(
         self, metrics: Mapping[str, object] | Iterable[Mapping[str, object]]
@@ -123,6 +127,31 @@ class MariaDbPersistenceBackend(PersistenceBackend):
         return await self._resolve_repository(
             self._metric_repository, self._metric_repository_factory
         )
+
+    async def _invoke_repository(
+        self, repository: Any, method_names: Sequence[str], *args: Any
+    ) -> None:
+        for name in method_names:
+            method = getattr(repository, name, None)
+            if method is not None:
+                break
+        else:  # pragma: no cover - defensive guard for misconfiguration
+            raise AttributeError(
+                f"Repository {repository!r} does not expose any of: {', '.join(method_names)}"
+            )
+
+        attr = getattr(type(repository), name, None)
+        if attr is not None and inspect.iscoroutinefunction(attr):
+            await method(*args)
+            return
+
+        if inspect.iscoroutinefunction(method):
+            await method(*args)
+            return
+
+        result = await asyncio.to_thread(method, *args)
+        if inspect.isawaitable(result):
+            await result
 
 
 class ParquetPersistenceBackend(PersistenceBackend):
