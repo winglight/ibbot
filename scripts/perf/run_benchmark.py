@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the ibbot performance benchmark")
     parser.add_argument("--events", type=int, default=5000, help="Number of synthetic events to process")
     parser.add_argument("--concurrency", type=int, default=4, help="Number of consumer tasks")
-    parser.add_argument("--batch-size", type=int, default=200, help="Number of points per Influx write")
+    parser.add_argument("--batch-size", type=int, default=200, help="Number of events per batch flush")
     parser.add_argument("--min-throughput", type=float, default=2000.0, help="Minimum acceptable throughput")
     parser.add_argument("--max-avg-latency", type=float, default=0.005, help="Maximum average latency in seconds")
     parser.add_argument("--max-p95-latency", type=float, default=0.02, help="Maximum p95 latency in seconds")
@@ -44,14 +44,23 @@ def main() -> int:
         "avg_latency": result.avg_latency,
         "p95_latency": result.p95_latency,
         "duration": result.duration,
-        "total_points": result.total_points,
+        "total_events": result.total_events,
         "write_batches": result.write_batches,
         "thresholds": {
             "min_throughput": thresholds.min_throughput,
             "max_avg_latency": thresholds.max_avg_latency,
             "max_p95_latency": thresholds.max_p95_latency,
         },
-        "service_metrics": [point.as_dict() for point in result.service_metric_points],
+        "service_metrics": [
+            {
+                "service": sample.service,
+                "metric": sample.metric,
+                "value": sample.value,
+                "status": sample.status,
+                "details": dict(sample.details),
+            }
+            for sample in result.service_metric_samples
+        ],
         "status": "pass" if result.passed else "fail",
     }
 
@@ -62,8 +71,8 @@ def main() -> int:
         print(f"  Throughput: {result.throughput:.2f} events/sec")
         print(f"  Avg latency: {result.avg_latency * 1000:.3f} ms")
         print(f"  P95 latency: {result.p95_latency * 1000:.3f} ms")
-        print(f"  Duration: {result.duration:.3f} s for {result.total_points} points")
-        print(f"  Influx write batches: {result.write_batches}")
+        print(f"  Duration: {result.duration:.3f} s for {result.total_events} events")
+        print(f"  Batch flushes: {result.write_batches}")
         print(f"  Status: {'PASS' if result.passed else 'FAIL'}")
 
     return 0 if result.passed else 1

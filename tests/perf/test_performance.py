@@ -16,11 +16,10 @@ def test_performance_benchmark_meets_thresholds() -> None:
         f"throughput={result.throughput:.2f}, avg_latency={result.avg_latency:.6f}, "
         f"p95_latency={result.p95_latency:.6f}"
     )
-    assert result.total_points == 4000
+    assert result.total_events == 4000
     assert result.write_batches > 0
 
-    metrics = {point.tags["metric"]: point for point in result.service_metric_points}
+    metrics = {sample.metric: sample for sample in result.service_metric_samples}
     assert set(metrics) == {"throughput", "latency"}
-    assert metrics["throughput"].measurement == "service_metrics"
-    assert metrics["latency"].fields["p95"] == result.p95_latency
-    assert metrics["throughput"].fields["value"] >= thresholds.min_throughput
+    assert metrics["latency"].details["p95"] == result.p95_latency
+    assert metrics["throughput"].value >= thresholds.min_throughput

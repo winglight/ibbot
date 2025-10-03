@@ -23,16 +23,16 @@ class DummyConfigProvider:
 
 def test_initialise_builds_container(monkeypatch: pytest.MonkeyPatch) -> None:
     dummy_redis = object()
-    influx_config = {"mock": True}
+    database_url = "mysql+asyncmy://user:pass@localhost/db"
 
     async def fake_init_redis():
         return dummy_redis
 
-    def fake_configure_influx():
-        return influx_config
+    def fake_get_database_url():
+        return database_url
 
     monkeypatch.setattr(core_container, "init_redis", fake_init_redis)
-    monkeypatch.setattr(core_container, "configure_influx", fake_configure_influx)
+    monkeypatch.setattr(core_container, "get_database_url", fake_get_database_url)
     monkeypatch.setattr(core_container, "ConfigProvider", DummyConfigProvider)
     monkeypatch.setattr(core_container, "load_project_env", lambda: None)
 
@@ -40,7 +40,7 @@ def test_initialise_builds_container(monkeypatch: pytest.MonkeyPatch) -> None:
         container = await core_container.initialise(force=True)
 
         assert container.redis_client is dummy_redis
-        assert container.influx_config == influx_config
+        assert container.database_url == database_url
         assert isinstance(container.config_provider, DummyConfigProvider)
         assert container.config_provider.started is True
         assert core_container.require_container() is container

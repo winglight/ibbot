@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -12,13 +12,6 @@ from typing import Any
 
 import pytest
 
-from src.ibbot.influx import (
-    InfluxPoint,
-    configure_influx,
-    get_write_statistics,
-    reset_write_statistics,
-    write_points,
-)
 from src.ibbot.redis import PubSubListener
 from services.ib_feed.main import MarketDataFeedService
 
@@ -41,36 +34,6 @@ def _capture_logs(logger_name: str, level: int) -> Iterator[list[logging.LogReco
         yield handler.records
     finally:
         logger.removeHandler(handler)
-
-
-class _RecordingInfluxClient:
-    """A minimal Influx client that records write payloads and simulates a transient outage."""
-
-    def __init__(self) -> None:
-        self.write_calls: list[dict[str, Any]] = []
-        self.fail_next = True
-
-    def write_api(self, *, write_options: object | None = None) -> "_RecordingInfluxClient":
-        return self
-
-    def write(
-        self,
-        *,
-        bucket: str,
-        org: str,
-        record: Iterable[Mapping[str, object]],
-        write_precision: str,
-    ) -> None:
-        payload = {
-            "bucket": bucket,
-            "org": org,
-            "write_precision": write_precision,
-            "record": [dict(entry) for entry in record],
-        }
-        self.write_calls.append(payload)
-        if self.fail_next:
-            self.fail_next = False
-            raise RuntimeError("simulated influx outage")
 
 
 class _FakePubSub:
@@ -159,41 +122,6 @@ async def _wait_for(predicate: callable, *, timeout: float = 1.0) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("condition not met within timeout")
-
-
-def test_influx_write_failure_updates_statistics() -> None:
-    configure_influx(url="http://localhost", token="token", org="org", bucket="bucket")
-    reset_write_statistics()
-    client = _RecordingInfluxClient()
-
-    with pytest.raises(RuntimeError, match="simulated influx outage"):
-        write_points([InfluxPoint("m", fields={"value": 1})], client=client)
-
-    stats = get_write_statistics()
-    assert stats.batches == 1
-    assert stats.points == 1
-    assert stats.last_error == "simulated influx outage"
-    assert client.write_calls
-    first_call = client.write_calls[0]
-    assert first_call["bucket"] == "bucket"
-    assert first_call["org"] == "org"
-    assert first_call["write_precision"] == "ns"
-    assert first_call["record"] == [
-        {"measurement": "m", "fields": {"value": 1}},
-    ]
-
-    result = write_points([InfluxPoint("m", fields={"value": 2})], client=client)
-    assert result == 1
-
-    stats = get_write_statistics()
-    assert stats.batches == 2
-    assert stats.points == 2
-    assert stats.last_error is None
-    assert len(client.write_calls) == 2
-    second_call = client.write_calls[-1]
-    assert second_call["record"] == [
-        {"measurement": "m", "fields": {"value": 2}},
-    ]
 
 
 def test_redis_pubsub_listener_recovers_from_disconnect() -> None:

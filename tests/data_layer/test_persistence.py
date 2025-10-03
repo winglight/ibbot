@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 import pytest
 
@@ -31,6 +31,19 @@ class _StubRepository:
         self.events.append(event)
 
 
+class _StubMetricRepository:
+    def __init__(self) -> None:
+        self.payloads: list[list[Mapping[str, Any]]] = []
+
+    async def record_metrics(
+        self, metrics: Mapping[str, Any] | Iterable[Mapping[str, Any]]
+    ) -> None:
+        if isinstance(metrics, Mapping):
+            self.payloads.append([dict(metrics)])
+        else:
+            self.payloads.append([dict(entry) for entry in metrics])
+
+
 def test_mariadb_backend_uses_repository_directly() -> None:
     repo = _StubRepository()
     backend = MariaDbPersistenceBackend(repository=repo)
@@ -48,6 +61,16 @@ def test_mariadb_backend_uses_repository_directly() -> None:
 
     assert repo.events and repo.events[0].topic == "market.tick"
     assert repo.events[0].payload["price"] == 1.2345
+
+
+def test_mariadb_backend_uses_metric_repository_directly() -> None:
+    repo = _StubRepository()
+    metric_repo = _StubMetricRepository()
+    backend = MariaDbPersistenceBackend(repository=repo, metric_repository=metric_repo)
+
+    backend.record_service_metrics({"service": "test", "metric": "throughput", "value": 1})
+
+    assert metric_repo.payloads == [[{"service": "test", "metric": "throughput", "value": 1}]]
 
 
 @pytest.fixture
