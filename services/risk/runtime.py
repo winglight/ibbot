@@ -1057,13 +1057,13 @@ class RiskRuntime:
         status = str(payload.get("status") or "").lower()
         self._engine.reset_trigger(event.symbol, event.trigger)
         message = f"Received result for {event.symbol}: {status or 'unknown'}"
-        await self._write_log_point(
-            level="INFO",
-            message=message,
-            symbol=event.symbol,
-            trigger=event.trigger,
-            status=status or "unknown",
-        )
+        logger = self._logger or get_logger(self.logger_name)
+        extra = {
+            "symbol": event.symbol,
+            "trigger": event.trigger,
+            "status": status or "unknown",
+        }
+        logger.info(message, extra=extra)
         return True
 
     async def _dispatch_event(self, event: RiskEvent) -> None:
@@ -1079,30 +1079,13 @@ class RiskRuntime:
             return
         self._pending_commands[command_id] = event
         message = f"Triggered {event.trigger} for {event.symbol} at {event.price:.4f}"
-        await self._write_log_point(
-            level="WARN",
-            message=message,
-            symbol=event.symbol,
-            trigger=event.trigger,
-            price=float(event.price),
-        )
-
-    async def _write_log_point(self, **fields: Any) -> None:
-        level_name = str(fields.pop("level", "INFO"))
-        message = str(fields.pop("message", ""))
-        if not message:
-            return
-        extra = {k: v for k, v in fields.items() if isinstance(v, (int, float, str))}
         logger = self._logger or get_logger(self.logger_name)
-        level_attr = level_name.lower()
-        if level_attr == "warn":
-            level_attr = "warning"
-        log_method = getattr(logger, level_attr, None)
-        log_kwargs = {"extra": extra} if extra else {}
-        if callable(log_method):
-            log_method(message, **log_kwargs)
-        else:
-            logger.info(message, **log_kwargs)
+        extra = {
+            "symbol": event.symbol,
+            "trigger": event.trigger,
+            "price": float(event.price),
+        }
+        logger.warning(message, extra=extra)
 
     def get_config_snapshot(self) -> dict[str, Any]:
         """Return the latest cached configuration snapshot."""
