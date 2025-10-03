@@ -27,6 +27,7 @@ from .event_bus import EventBus, EventEnvelope, BusSubscriptionToken
 from .persistence import (
     PersistenceBackend,
     NoopPersistenceBackend,
+    MariaDbPersistenceBackend,
     ParquetPersistenceBackend,
 )
 
@@ -49,6 +50,7 @@ __all__ = [
     "BusSubscriptionToken",
     "PersistenceBackend",
     "NoopPersistenceBackend",
+    "MariaDbPersistenceBackend",
     "ParquetPersistenceBackend",
     "get_data_source_manager",
     "get_quote_feed",
