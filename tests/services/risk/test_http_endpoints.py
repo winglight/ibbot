@@ -211,7 +211,12 @@ class StubRuntime:
             if not symbol_key or str(entry.get("symbol") or "").upper() == symbol_key
         ]
         items = items[-max(1, int(limit or 1)) :]
-        return {"success": True, "items": items, "count": len(items)}
+        return {
+            "success": True,
+            "items": items,
+            "history": items,
+            "count": len(items),
+        }
 
     async def fetch_sizing_history(
         self,
@@ -227,7 +232,12 @@ class StubRuntime:
             if not symbol_key or str(entry.get("symbol") or "").upper() == symbol_key
         ]
         items = items[-max(1, int(limit or 1)) :]
-        return {"success": True, "items": items, "count": len(items)}
+        return {
+            "success": True,
+            "items": items,
+            "history": items,
+            "count": len(items),
+        }
 
     async def start(self) -> None:
         self.start_calls += 1

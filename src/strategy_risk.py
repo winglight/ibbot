@@ -60,7 +60,11 @@ class StrategyRiskManager(RiskManager):
 
         payload = await self.fetch_rules_history(symbol=symbol, limit=limit)
         if isinstance(payload, Mapping):
-            history = payload.get("history") or payload.get("data")
+            history = (
+                payload.get("history")
+                or payload.get("items")
+                or payload.get("data")
+            )
             if isinstance(history, list):
                 return [dict(item) if isinstance(item, Mapping) else item for item in history]
         return []

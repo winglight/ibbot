@@ -354,7 +354,13 @@ class RiskRuntime:
             if len(results) >= limit_clamped:
                 break
         results.reverse()
-        return {"success": True, "items": results, "count": len(results)}
+        history = [dict(item) for item in results]
+        return {
+            "success": True,
+            "items": history,
+            "history": history,
+            "count": len(history),
+        }
 
     async def update_config(self, config: Mapping[str, Any]) -> None:
         snapshot: tuple[dict[str, Any], dict[str, Any], str] | None = None
@@ -1041,7 +1047,13 @@ class RiskRuntime:
             if len(results) >= limit_clamped:
                 break
         results.reverse()
-        return {"success": True, "items": results, "count": len(results)}
+        history = [dict(item) for item in results]
+        return {
+            "success": True,
+            "items": history,
+            "history": history,
+            "count": len(history),
+        }
 
     async def position_sizing(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Estimate a contract count for the provided payload."""
