@@ -218,6 +218,7 @@ class TradingApp {
         this.notificationsManager = typeof NotificationsManagerClass === 'function'
             ? new NotificationsManagerClass(this)
             : new NotificationsManager(this);
+        this.lastKnownOrderPrice = null;
         this.logsManagerInitialized = false;
         this.notificationsManagerInitialized = false;
         this.authenticatedModulesInitialized = false;
@@ -1316,6 +1317,8 @@ class TradingApp {
             document.getElementById('orderPrice').value = '';
             document.getElementById('orderPrice').disabled = true; // Market order by default
             document.getElementById('riskRuleSection').style.display = 'block'; // Always show SL/TP section
+
+            this.lastKnownOrderPrice = null;
             
             // Clear SL/TP inputs
             document.getElementById('stopLossPrice').value = '';
@@ -1945,8 +1948,13 @@ class TradingApp {
         const orderSymbol = document.getElementById('orderSymbol').value;
         const orderType = document.getElementById('orderType').value;
         const orderAction = document.getElementById('orderAction').value;
-        const orderPrice = parseFloat(document.getElementById('orderPrice').value);
+        const orderPriceInput = document.getElementById('orderPrice');
+        const orderPrice = parseFloat(orderPriceInput?.value);
         const riskRuleSection = document.getElementById('riskRuleSection');
+
+        if (Number.isFinite(orderPrice) && orderPrice > 0) {
+            this.lastKnownOrderPrice = orderPrice;
+        }
 
         // Clear SL/TP if no symbol
         if (!orderSymbol) {
@@ -1954,6 +1962,7 @@ class TradingApp {
             document.getElementById('takeProfitPrice').value = '';
             // Always keep SL/TP section visible
             if (riskRuleSection) riskRuleSection.style.display = 'block';
+            this.lastKnownOrderPrice = null;
             this.updateExpectedPnL();
             return;
         }
@@ -1968,6 +1977,7 @@ class TradingApp {
             // Always keep SL/TP section visible, hide only position suggestions
             if (riskRuleSection) riskRuleSection.style.display = 'block';
             document.getElementById('suggestedPositionSection').style.display = 'none';
+            this.lastKnownOrderPrice = Number.isFinite(orderPrice) ? orderPrice : this.lastKnownOrderPrice;
             this.updateExpectedPnL();
             return;
         }
@@ -1983,11 +1993,19 @@ class TradingApp {
             document.getElementById('takeProfitPrice').value = '';
             // Always keep SL/TP section visible even without valid price
             if (riskRuleSection) riskRuleSection.style.display = 'block';
+            this.lastKnownOrderPrice = Number.isFinite(orderPrice) ? orderPrice : this.lastKnownOrderPrice;
             this.updateExpectedPnL();
             return;
         }
 
         if (riskRuleSection) riskRuleSection.style.display = 'block';
+
+        if (Number.isFinite(tradingPrice)) {
+            this.lastKnownOrderPrice = tradingPrice;
+            if (orderPriceInput && (orderType === 'MARKET' || !Number.isFinite(orderPrice))) {
+                orderPriceInput.value = String(tradingPrice);
+            }
+        }
         
         // Get configuration from backend
         let stopLossRatio = 0.025; // Default 2.5%
@@ -2046,9 +2064,78 @@ class TradingApp {
         
         this.updateExpectedPnL();
     }
-    
+
     // Update expected PnL based on current inputs
-    // 旧版本的updateExpectedPnL已删除，使用新版本的方法
+    updateExpectedPnL() {
+        const expectedLossEl = document.getElementById('expectedLoss');
+        const expectedProfitEl = document.getElementById('expectedProfit');
+        if (!expectedLossEl || !expectedProfitEl) {
+            return;
+        }
+
+        const quantityEl = document.getElementById('orderQuantity');
+        const stopLossEl = document.getElementById('stopLossPrice');
+        const takeProfitEl = document.getElementById('takeProfitPrice');
+        const orderPriceEl = document.getElementById('orderPrice');
+        const orderActionEl = document.getElementById('orderAction');
+        const orderSymbolEl = document.getElementById('orderSymbol');
+        const orderTypeEl = document.getElementById('orderType');
+
+        const quantity = parseFloat(quantityEl?.value);
+        const stopLossPrice = parseFloat(stopLossEl?.value);
+        const takeProfitPrice = parseFloat(takeProfitEl?.value);
+        const orderAction = (orderActionEl?.value || 'BUY').toUpperCase();
+        const orderType = (orderTypeEl?.value || '').toUpperCase();
+        const symbol = orderSymbolEl?.value ? orderSymbolEl.value.toUpperCase().trim() : '';
+
+        let entryPrice = parseFloat(orderPriceEl?.value);
+        if (Number.isFinite(entryPrice) && entryPrice > 0) {
+            this.lastKnownOrderPrice = entryPrice;
+        } else if (Number.isFinite(this.lastKnownOrderPrice)) {
+            entryPrice = this.lastKnownOrderPrice;
+        }
+
+        if (!Number.isFinite(entryPrice) && orderType === 'MARKET' && symbol && this.dataManager?.priceCache instanceof Map) {
+            const cached = this.dataManager.priceCache.get(symbol);
+            if (cached && Number.isFinite(cached.price)) {
+                entryPrice = cached.price;
+            }
+        }
+
+        const orderSize = Number.isFinite(quantity) ? Math.abs(quantity) : 0;
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0 || orderSize <= 0) {
+            expectedLossEl.value = '';
+            expectedProfitEl.value = '';
+            return;
+        }
+
+        const direction = orderAction === 'SELL' ? -1 : 1;
+        const multiplier = this.getContractMultiplier(symbol || '');
+
+        const computePnL = (targetPrice) => {
+            if (!Number.isFinite(targetPrice)) {
+                return null;
+            }
+            const pnl = (targetPrice - entryPrice) * direction * orderSize * multiplier;
+            return Number.isFinite(pnl) ? pnl : null;
+        };
+
+        const formatPnL = (value) => {
+            if (value === null) {
+                return '';
+            }
+            const rounded = Math.round(Math.abs(value) * 100) / 100;
+            const formattedAbs = this.formatNumber(rounded);
+            const sign = value < 0 ? '-' : '';
+            return `${sign}$${formattedAbs}`;
+        };
+
+        const stopLossPnL = computePnL(stopLossPrice);
+        expectedLossEl.value = formatPnL(stopLossPnL);
+
+        const takeProfitPnL = computePnL(takeProfitPrice);
+        expectedProfitEl.value = formatPnL(takeProfitPnL);
+    }
 
     openRiskRuleModal(...args) {
         if (!this.riskRulesManager || typeof this.riskRulesManager.openRiskRuleModal !== 'function') {
