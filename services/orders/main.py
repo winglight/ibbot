@@ -1168,16 +1168,7 @@ class OrdersRuntime:
 
                 self._order_repository_close = _sync_close
             else:
-                session = getattr(repository, "_session", None)
-                close_method = getattr(session, "close", None) if session is not None else None
-                if callable(close_method):
-
-                    async def _close_session() -> None:
-                        await _maybe_await(close_method())
-
-                    self._order_repository_close = _close_session
-                else:
-                    self._order_repository_close = None
+                self._order_repository_close = None
 
         self._repository_last_error = ""
 
@@ -1441,7 +1432,43 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
             return OrdersRuntime()
 
         def _default_order_repository() -> OrderRepositoryProtocol:
-            return order_repository()
+            repository = order_repository()
+
+            upsert_callable = getattr(repository, "upsert_order", None)
+            if not callable(upsert_callable):
+                return repository
+
+            if inspect.iscoroutinefunction(upsert_callable):
+                return repository
+
+            try:
+                from src.db import run_in_thread as _run_in_thread
+            except ImportError:  # pragma: no cover - optional dependency
+                async def _run_in_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+                    return await asyncio.to_thread(func, *args, **kwargs)
+
+            class _AsyncOrderRepository(OrderRepositoryProtocol):
+                __slots__ = ("_repository", "_upsert", "_close")
+
+                def __init__(self, repo: Any) -> None:
+                    self._repository = repo
+                    self._upsert = getattr(repo, "upsert_order")
+                    self._close = getattr(repo, "close", None)
+
+                async def upsert_order(self, payload: Mapping[str, Any]) -> None:
+                    await _run_in_thread(self._upsert, payload)
+
+                async def aclose(self) -> None:
+                    if callable(self._close):
+                        await _run_in_thread(self._close)
+
+                async def close(self) -> None:  # pragma: no cover - compatibility shim
+                    await self.aclose()
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._repository, name)
+
+            return _AsyncOrderRepository(repository)
 
         return OrdersRuntime(order_repository_factory=_default_order_repository)
 
