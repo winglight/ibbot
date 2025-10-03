@@ -709,6 +709,40 @@ def test_strategy_files_endpoint_merges_sources(
         assert "gamma.py" in files
 
 
+def test_strategy_file_auto_discovery_during_runtime(
+    redis_client: InMemoryRedis, tmp_path: Path
+) -> None:
+    strategy_dir = tmp_path / "strategies"
+    strategy_dir.mkdir()
+
+    settings = {**DEFAULT_SETTINGS, "strategy_path": str(strategy_dir)}
+    asyncio.run(persist_strategy_settings(redis_client, settings))
+
+    client = _build_client(redis_client)
+
+    with client:
+        response = client.get("/strategy/files")
+        assert response.status_code == 200
+        initial_files = response.json()["files"]
+        assert "omega.py" not in initial_files
+
+        file_path = strategy_dir / "omega.py"
+        file_path.write_text("print('omega')\n", encoding="utf-8")
+
+        files_response = client.get("/strategy/files")
+        assert files_response.status_code == 200
+        files_payload = files_response.json()
+        assert "omega.py" in files_payload["files"]
+
+        strategies_response = client.get("/strategy")
+        assert strategies_response.status_code == 200
+        strategies = strategies_response.json()
+        assert any(entry["name"] == "omega" for entry in strategies)
+        omega_entry = next(entry for entry in strategies if entry["name"] == "omega")
+        assert omega_entry["metadata"].get("file") == "omega.py"
+        assert omega_entry["metadata"].get("source") == "filesystem"
+
+
 def test_strategy_executions_endpoint_returns_recent_fills(
     redis_client: InMemoryRedis,
     monkeypatch: pytest.MonkeyPatch,
