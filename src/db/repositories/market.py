@@ -1,18 +1,21 @@
-"""Repository helpers for ``market_prices`` records."""
+"""DB-API helpers for persisting market price samples."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import insert
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from src.db.async_support import run_in_thread
+from src.db.mariadb import MariaDBConfigurationError
 from src.ibbot.logging import get_logger
 
-from ..schemas import MarketPrice
+from .base import RepositoryError, execute_write, is_sqlite, json_dumps, use_connection
 
-__all__ = ["MariaDbMarketPriceRepository"]
+__all__ = ["MarketPriceRepository", "MarketPriceRepositoryError"]
+
+
+class MarketPriceRepositoryError(RepositoryError):
+    """Raised when persisting market prices fails."""
 
 
 def _utc_now() -> datetime:
@@ -51,11 +54,10 @@ def _normalise_extra(extra: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return payload or None
 
 
-class MariaDbMarketPriceRepository:
-    """Persist best-bid-offer samples to the ``market_prices`` table."""
+class MarketPriceRepository:
+    """Persist BBO snapshots to ``market_prices``."""
 
-    def __init__(self, session: AsyncSession, *, logger_name: str = "db.market") -> None:
-        self._session = session
+    def __init__(self, *, logger_name: str = "db.market") -> None:
         self._logger = get_logger(logger_name)
 
     async def insert_price(
@@ -83,9 +85,26 @@ class MariaDbMarketPriceRepository:
             "extra": _normalise_extra(extra),
         }
         try:
-            await self._session.execute(insert(MarketPrice).values(**payload))
-            await self._session.commit()
-        except Exception:
-            await self._session.rollback()
+            await run_in_thread(self._write_price, payload)
+        except MariaDBConfigurationError as exc:
+            raise MarketPriceRepositoryError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception("Failed to insert market price", symbol=symbol)
-            raise
+            raise MarketPriceRepositoryError("Failed to insert market price") from exc
+
+    def _write_price(self, row: Mapping[str, Any]) -> None:
+        with use_connection() as connection:
+            prepared = dict(row)
+            if prepared.get("extra") is not None:
+                prepared["extra"] = json_dumps(prepared["extra"])
+
+            columns = list(prepared.keys())
+            placeholders = (
+                ", ".join(f":{col}" for col in columns)
+                if is_sqlite(connection)
+                else ", ".join(f"%({col})s" for col in columns)
+            )
+            sql = "INSERT INTO market_prices ({cols}) VALUES ({values})".format(
+                cols=", ".join(columns), values=placeholders
+            )
+            execute_write(connection, sql, prepared)

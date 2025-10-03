@@ -1,4 +1,4 @@
-"""Repository for persisting market events."""
+"""Repository helpers for persisting market events via DB-API."""
 
 from __future__ import annotations
 
@@ -6,14 +6,17 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import insert
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from src.db.async_support import run_in_thread
+from src.db.mariadb import MariaDBConfigurationError
 from src.ibbot.logging import get_logger
 
-from ..schemas import MarketEvent
+from .base import RepositoryError, RepositoryValidationError, execute_write, is_sqlite, json_dumps, use_connection
 
-__all__ = ["MarketEventRepository"]
+__all__ = ["MarketEventRepository", "MarketEventRepositoryError"]
+
+
+class MarketEventRepositoryError(RepositoryError):
+    """Raised when persisting market events fails."""
 
 
 def _utc_now() -> datetime:
@@ -72,7 +75,7 @@ def _ensure_mapping(event: Any) -> Mapping[str, Any]:
         candidate = event._asdict()  # type: ignore[attr-defined]
         if isinstance(candidate, Mapping):
             return candidate
-    raise TypeError("Unsupported event payload")
+    raise RepositoryValidationError("Unsupported event payload")
 
 
 def _normalise_ts_ns(value: Any) -> int | None:
@@ -93,8 +96,7 @@ def _normalise_ts_ns(value: Any) -> int | None:
 class MarketEventRepository:
     """Persist market events emitted by the data layer."""
 
-    def __init__(self, session: AsyncSession, *, logger_name: str = "db.events") -> None:
-        self._session = session
+    def __init__(self, *, logger_name: str = "db.events") -> None:
         self._logger = get_logger(logger_name)
 
     async def insert_event(self, event: Mapping[str, Any] | Any) -> None:
@@ -119,13 +121,35 @@ class MarketEventRepository:
             "ingested_at": _utc_now(),
         }
         if not row["event_type"] or not row["topic"]:
-            raise ValueError("Event must provide event_type and topic")
+            raise RepositoryValidationError("Event must provide event_type and topic")
+
         try:
-            await self._session.execute(insert(MarketEvent).values(**row))
-            await self._session.commit()
-        except Exception:
-            await self._session.rollback()
+            await run_in_thread(self._write_event, row)
+        except RepositoryValidationError:
+            raise
+        except MariaDBConfigurationError as exc:
+            raise MarketEventRepositoryError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception(
                 "Failed to persist market event", event_type=row["event_type"], topic=row["topic"]
             )
-            raise
+            raise MarketEventRepositoryError("Failed to persist market event") from exc
+
+    def _write_event(self, row: Mapping[str, Any]) -> None:
+        with use_connection() as connection:
+            payload = dict(row)
+            if payload.get("payload") is not None:
+                payload["payload"] = json_dumps(payload["payload"])
+            if payload.get("meta") is not None:
+                payload["meta"] = json_dumps(payload["meta"])
+
+            columns = list(payload.keys())
+            placeholders = (
+                ", ".join(f":{col}" for col in columns)
+                if is_sqlite(connection)
+                else ", ".join(f"%({col})s" for col in columns)
+            )
+            sql = "INSERT INTO market_events ({cols}) VALUES ({values})".format(
+                cols=", ".join(columns), values=placeholders
+            )
+            execute_write(connection, sql, payload)

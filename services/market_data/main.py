@@ -24,7 +24,7 @@ from src.ibbot.redis import PubSubListener, get_redis_client
 from src.utils import NY_TZ, now_local, to_local_iso
 
 if TYPE_CHECKING:  # pragma: no cover - typing helpers
-    from src.ibbot.db import ServiceMetricRepository
+    from src.db import ServiceMetricRepository
 
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
 DOM_CHANNEL_TEMPLATE = "pubsub:ib:dom:{symbol}"
@@ -591,15 +591,12 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
 
     if runtime.metrics_repository_factory is None:
         try:
-            from src.ibbot.db import get_session_factory, service_metric_repository
+            from src.db import service_metric_writer
         except ModuleNotFoundError:  # pragma: no cover - optional dependency missing
             pass
         else:
-            session_factory = get_session_factory()
-
-            async def _build_metrics_repository() -> "ServiceMetricRepository":
-                session = session_factory()
-                return service_metric_repository(session)
+            def _build_metrics_repository() -> "ServiceMetricRepository":
+                return service_metric_writer()
 
             runtime.metrics_repository_factory = _build_metrics_repository
 

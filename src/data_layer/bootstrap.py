@@ -21,24 +21,12 @@ from .persistence import (
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter
 from .quote_feed import QuoteFeed, resolve_default_quote_feed
 from src.ibbot.redis import DEFAULT_REDIS_URL
-try:  # pragma: no cover - optional dependency
-    from src.ibbot.db.config import DatabaseConfigError, resolve_database_url
-    from src.ibbot.db.session import get_session_factory
-except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
-    if exc.name == "sqlalchemy":
-        DatabaseConfigError = RuntimeError  # type: ignore[assignment]
-        resolve_database_url = None  # type: ignore[assignment]
-        get_session_factory = None  # type: ignore[assignment]
-    else:  # pragma: no cover - unexpected import failure
-        raise
-
-try:  # pragma: no cover - optional dependency
-    from sqlalchemy.engine.url import make_url
-except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
-    if exc.name == "sqlalchemy":
-        make_url = None  # type: ignore[assignment]
-    else:  # pragma: no cover - unexpected import failure
-        raise
+from src.db import (
+    MariaDBConfigurationError,
+    connect as db_connect,
+    market_event_writer,
+    service_metric_writer,
+)
 
 __all__ = ["get_data_source_manager", "get_quote_feed"]
 
@@ -143,30 +131,20 @@ def _get_persistence_backend():
     except Exception as exc:
         logger.warning("Failed to initialise Parquet backend: {}", exc)
 
-    if resolve_database_url is not None and get_session_factory is not None:
-        try:
-            db_url = resolve_database_url()
-        except DatabaseConfigError as exc:
-            logger.info("MariaDB persistence disabled: {}", exc)
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logger.warning("Failed to resolve MariaDB configuration: {}", exc)
-        else:
-            try:
-                session_factory = get_session_factory()
-                if session_factory is None:  # pragma: no cover - defensive guard
-                    raise RuntimeError("No session factory available")
-                _persistence_backend = MariaDbPersistenceBackend(session_factory=session_factory)
-            except Exception as exc:
-                logger.warning("Failed to initialise MariaDB persistence backend: {}", exc)
-            else:
-                if make_url is not None:
-                    safe_url = make_url(db_url).render_as_string(hide_password=True)
-                else:
-                    safe_url = db_url
-                logger.info("Using MariaDB persistence backend at {}", safe_url)
-                return _persistence_backend
+    try:
+        with db_connect():
+            pass
+    except MariaDBConfigurationError as exc:
+        logger.info("MariaDB persistence disabled: {}", exc)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to initialise MariaDB persistence backend: {}", exc)
     else:
-        logger.debug("SQLAlchemy not available - skipping MariaDB persistence backend")
+        _persistence_backend = MariaDbPersistenceBackend(
+            repository_factory=market_event_writer,
+            metric_repository_factory=service_metric_writer,
+        )
+        logger.info("Using MariaDB persistence backend")
+        return _persistence_backend
 
     _persistence_backend = NoopPersistenceBackend()
     logger.info("Using noop persistence backend")

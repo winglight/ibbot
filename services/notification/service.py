@@ -18,7 +18,7 @@ logger = logging.getLogger("ibbot.services.notification")
 
 
 if TYPE_CHECKING:  # pragma: no cover - typing helpers
-    from src.ibbot.db import AuditLogRepository
+    from src.db import AuditLogRepository
 
 
 async def _maybe_await(result: Awaitable[Any] | Any) -> Any:

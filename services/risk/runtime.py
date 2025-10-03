@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover - redis might be unavailable in CI
     Redis = Any  # type: ignore[misc, assignment]
 
 if TYPE_CHECKING:  # pragma: no cover - typing helpers
-    from src.ibbot.db import RiskSnapshotRepository
+    from src.db import RiskSnapshotRepository
 
 
 def _utc_now() -> datetime:

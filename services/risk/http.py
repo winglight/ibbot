@@ -148,15 +148,12 @@ async def _lifespan(
 
     snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None
     try:
-        from src.ibbot.db import get_session_factory, risk_snapshot_repository
+        from src.db import risk_snapshot_repository
     except ModuleNotFoundError:
         pass
     else:
-        session_factory = get_session_factory()
-
-        async def _snapshot_repository_factory() -> Any:
-            session = session_factory()
-            return risk_snapshot_repository(session)
+        def _snapshot_repository_factory() -> Any:
+            return risk_snapshot_repository()
 
         snapshot_repository_factory = _snapshot_repository_factory
 
