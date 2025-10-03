@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from src.ibbot.redis import IBCommandError, IBCommandTimeout
 
 from services.account.main import (
+    ACCOUNT_SERVICE_NAME,
     DEFAULT_DAILY_SUMMARY_COMMAND,
     DEFAULT_ORDER_LIMIT,
     DEFAULT_ORDERS_SNAPSHOT_KEY,
@@ -318,6 +319,7 @@ def test_account_orders_snapshot_success_updates_metrics(
 
     assert capture_service_health
     metrics = capture_service_health[-1]["metrics"]
+    assert capture_service_health[-1]["service"] == ACCOUNT_SERVICE_NAME
     assert metrics.get("orders_last_refreshed_at") == orders_snapshot["updated_at"]
     assert metrics.get("orders_source") == "orders-service"
 
@@ -341,6 +343,8 @@ def test_account_orders_missing_sources_returns_503(
 
     assert capture_service_health
     metrics = capture_service_health[-1]["metrics"]
+    assert capture_service_health[-1]["service"] == ACCOUNT_SERVICE_NAME
+    assert metrics.get("orders_last_refreshed_at") == ""
     assert metrics.get("orders_last_error")
     assert "orders failed" in str(metrics.get("orders_last_error", "")).lower()
     assert metrics.get("orders_stale") is True
@@ -374,6 +378,7 @@ def test_account_daily_summary_cache_success_updates_metrics(
 
     assert capture_service_health
     metrics = capture_service_health[-1]["metrics"]
+    assert capture_service_health[-1]["service"] == ACCOUNT_SERVICE_NAME
     assert metrics.get("daily_summary_last_refreshed_at") == net_liq["timestamp"]
     assert metrics.get("daily_summary_source") == "account-service"
 
@@ -457,6 +462,49 @@ def test_account_info_stale_snapshot_refreshes_automatically(
     assert metrics.get("snapshot_updated_at") == refreshed["updated_at"]
 
 
+def test_account_info_stale_snapshot_force_refresh_updates_metadata_and_metrics(
+    capture_service_health: List[Dict[str, Any]],
+    test_client: TestClient,
+    fake_redis: Any,
+) -> None:
+    stale_snapshot = {
+        "data": {"equity": 42},
+        "updated_at": "2023-12-31T22:00:00+00:00",
+        "source": "pre-refresh",
+        "stale": True,
+    }
+    refreshed = {
+        "data": {"equity": 84},
+        "updated_at": "2024-01-01T04:00:00+00:00",
+        "source": "post-refresh",
+        "stale": False,
+    }
+    _write_snapshot(fake_redis, "account:info", stale_snapshot)
+
+    service = _state.snapshot_service
+    assert service is not None
+
+    async def _refresh(**_: Any) -> None:
+        await fake_redis.set("account:info", json.dumps(refreshed))
+
+    service.on_refresh_account_info = _refresh
+
+    response = test_client.get("/account/info", params={"force_refresh": "true"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["account_info"] == refreshed["data"]
+    assert payload["source"] == "post-refresh"
+    assert payload["snapshot_updated_at"] == refreshed["updated_at"]
+    assert payload["stale"] is False
+    assert service.refresh_account_info_calls
+    assert service.refresh_account_info_calls[-1]["reason"] == "api-force-refresh"
+
+    assert capture_service_health
+    metrics = capture_service_health[-1]["metrics"]
+    assert metrics.get("account_snapshot_updated_at") == refreshed["updated_at"]
+    assert metrics.get("snapshot_updated_at") == refreshed["updated_at"]
+
+
 def test_positions_force_refresh_respects_fast_flag(
     test_client: TestClient, fake_redis: Any
 ) -> None:
@@ -533,6 +581,54 @@ def test_positions_stale_snapshot_refreshes_metadata_and_metrics(
     assert payload["stale"] is False
     assert service.refresh_positions_calls
     assert service.refresh_positions_calls[-1]["reason"] == "api-stale"
+
+    assert capture_service_health
+    metrics = capture_service_health[-1]["metrics"]
+    assert metrics.get("positions_snapshot_updated_at") == refreshed["updated_at"]
+    assert metrics.get("snapshot_updated_at") == refreshed["updated_at"]
+
+
+def test_positions_stale_snapshot_force_refresh_updates_metadata_and_metrics(
+    capture_service_health: List[Dict[str, Any]],
+    test_client: TestClient,
+    fake_redis: Any,
+) -> None:
+    stale_snapshot = {
+        "data": [{"symbol": "AAPL", "position": 1}],
+        "updated_at": "2023-12-31T21:30:00+00:00",
+        "source": "pre-refresh",
+        "stale": True,
+    }
+    refreshed = {
+        "data": [{"symbol": "AAPL", "position": 3}],
+        "updated_at": "2024-01-01T04:30:00+00:00",
+        "source": "post-refresh",
+        "stale": False,
+    }
+    _write_snapshot(fake_redis, "account:positions", stale_snapshot)
+
+    service = _state.snapshot_service
+    assert service is not None
+
+    async def _refresh_positions(**_: Any) -> None:
+        await fake_redis.set("account:positions", json.dumps(refreshed))
+
+    service.on_refresh_positions = _refresh_positions
+
+    response = test_client.get(
+        "/account/positions",
+        params={"force_refresh": "true", "fast": "true"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["positions"] == refreshed["data"]
+    assert payload["source"] == "post-refresh"
+    assert payload["snapshot_updated_at"] == refreshed["updated_at"]
+    assert payload["stale"] is False
+    assert service.refresh_positions_calls
+    last_call = service.refresh_positions_calls[-1]
+    assert last_call["reason"] == "api-force-refresh"
+    assert last_call["fast"] is True
 
     assert capture_service_health
     metrics = capture_service_health[-1]["metrics"]
@@ -632,6 +728,8 @@ def test_daily_summary_missing_triggers_command_and_returns_503(
 
     assert capture_service_health
     metrics = capture_service_health[-1]["metrics"]
+    assert capture_service_health[-1]["service"] == ACCOUNT_SERVICE_NAME
+    assert metrics.get("daily_summary_last_refreshed_at") == ""
     assert metrics.get("daily_summary_last_error")
     assert "unavailable" in str(metrics.get("daily_summary_last_error", "")).lower()
     assert metrics.get("daily_summary_stale") is True
