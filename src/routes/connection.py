@@ -35,12 +35,8 @@ async def get_connection_config():
 @router.post("/api/connect")
 async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(get_current_user)):
     try:
-        loop = asyncio.get_event_loop()
         try:
-            await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: connection_manager.disconnect()),
-                timeout=15.0,
-            )
+            await connection_manager.disconnect_async(timeout=15.0)
         except asyncio.TimeoutError:
             logger.error("Disconnection operation timed out before reconnect")
             raise HTTPException(status_code=408, detail="Disconnect request timed out")
@@ -49,13 +45,7 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
         connection_manager.update_config(config)
 
         try:
-            success = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: connection_manager.connect()),
-                timeout=30.0,
-            )
-        except asyncio.TimeoutError:
-            logger.error("Connection operation timed out")
-            raise HTTPException(status_code=408, detail="Connection operation timed out")
+            success = await connection_manager.connect_async(timeout=30.0)
         except Exception as exc:
             logger.warning("Connection attempt failed", error=str(exc))
             detail = None
@@ -118,7 +108,14 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
 
             return {"success": True, "message": "Connected successfully"}
         else:
-            raise HTTPException(status_code=400, detail="Failed to connect to IBKR")
+            detail = None
+            try:
+                detail = connection_manager.get_last_connect_error()
+            except Exception:
+                detail = None
+            if not detail:
+                detail = "Failed to connect to IBKR"
+            raise HTTPException(status_code=400, detail=detail)
     except HTTPException:
         raise
     except Exception as e:
@@ -130,7 +127,11 @@ async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
     try:
         if risk_manager:
             risk_manager.stop()
-        connection_manager.disconnect()
+        try:
+            await connection_manager.disconnect_async(timeout=15.0)
+        except asyncio.TimeoutError:
+            logger.error("Disconnection operation timed out")
+            raise HTTPException(status_code=408, detail="Disconnect operation timed out")
 
         # 主动广播断开状态，供前端立即更新UI
         try:
