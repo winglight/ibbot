@@ -8,7 +8,7 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, MutableMapping, Protocol
 
 from services.risk.engine import RiskEngine, RiskEvent, RiskRule
 from src.ibbot import update_service_health
@@ -25,6 +25,9 @@ try:  # Optional dependency during testing environments.
     from redis.asyncio import Redis
 except Exception:  # pragma: no cover - redis might be unavailable in CI
     Redis = Any  # type: ignore[misc, assignment]
+
+if TYPE_CHECKING:  # pragma: no cover - typing helpers
+    from src.ibbot.db import RiskSnapshotRepository
 
 
 def _utc_now() -> datetime:
@@ -945,7 +948,12 @@ class RiskRuntime:
                 "Failed to initialise risk snapshot repository", exc_info=True
             )
             self._last_exception_message = str(exc)
-        self._redis = await self.redis_factory()
+        try:
+            self._redis = await self.redis_factory()
+        except Exception:
+            await self._shutdown_risk_snapshot_repository()
+            self._redis = None
+            raise
         await self._ensure_stream_groups()
         self._stop_event.clear()
         self._market_task = asyncio.create_task(self._market_loop(), name="risk-market-loop")

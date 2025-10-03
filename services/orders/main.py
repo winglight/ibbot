@@ -556,11 +556,19 @@ class OrdersRuntime:
         if self._stream_task is not None or self._redis is not None:
             return
 
-        if self.order_repository_factory is not None and self._order_repository is None:
-            await self._initialise_order_repository()
-        self._redis = await self.redis_factory()
-        await self._load_snapshot()
-        await self._publish_health()
+        try:
+            if (
+                self.order_repository_factory is not None
+                and self._order_repository is None
+            ):
+                await self._initialise_order_repository()
+            self._redis = await self.redis_factory()
+            await self._load_snapshot()
+            await self._publish_health()
+        except Exception:
+            await self._shutdown_order_repository()
+            self._redis = None
+            raise
 
         self._stop_event.clear()
 
@@ -1145,6 +1153,7 @@ class OrdersRuntime:
 
         close_candidate = getattr(repository, "aclose", None)
         if callable(close_candidate):
+
             async def _async_close() -> None:
                 await _maybe_await(close_candidate())
 
@@ -1152,12 +1161,22 @@ class OrdersRuntime:
         else:
             close_candidate = getattr(repository, "close", None)
             if callable(close_candidate):
+
                 async def _sync_close() -> None:
                     await _maybe_await(close_candidate())
 
                 self._order_repository_close = _sync_close
             else:
-                self._order_repository_close = None
+                session = getattr(repository, "_session", None)
+                close_method = getattr(session, "close", None) if session is not None else None
+                if callable(close_method):
+
+                    async def _close_session() -> None:
+                        await _maybe_await(close_method())
+
+                    self._order_repository_close = _close_session
+                else:
+                    self._order_repository_close = None
 
         self._repository_last_error = ""
 
@@ -1420,13 +1439,7 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
         else:
             async def _default_order_repository() -> OrderRepositoryProtocol:
                 session = get_async_session()
-                repository = order_repository(session)
-
-                async def _close() -> None:
-                    await session.close()
-
-                setattr(repository, "close", _close)
-                return repository
+                return order_repository(session)
 
             runtime_instance = OrdersRuntime(order_repository_factory=_default_order_repository)
     else:
