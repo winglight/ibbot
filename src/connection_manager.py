@@ -153,6 +153,14 @@ class ConnectionManager:
         # Weak reference back to IBKRClient (assigned during IBKRClient initialisation)
         self._ibkr_client_ref = None  # type: ignore[attr-defined]
         self._ibkr_connect_in_progress = False
+        # Async connection state tracking
+        self._connection_state_event_lock = threading.Lock()
+        self._connection_ready_event_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._connection_ready_event: Optional[asyncio.Event] = None
+        self._connection_state_waiters: Dict[int, "asyncio.Future[None]"] = {}
+        self._connection_state_waiter_seq: int = 0
+        self._connection_ready_flag: bool = False
+        self._connection_shutdown_flag: bool = True
 
     def _notify_ibkr_client_connected(self, *, external: bool) -> None:
         """Inform ``IBKRClient`` when a connection succeeds outside its control."""
@@ -179,7 +187,115 @@ class ConnectionManager:
                 "IBKR client notification after connect failed",
                 error=str(exc),
             )
-        
+
+    def _ensure_ready_event(self, loop: asyncio.AbstractEventLoop) -> asyncio.Event:
+        """Ensure an ``asyncio.Event`` exists for signalling connection state changes."""
+
+        with self._connection_state_event_lock:
+            stored_loop = self._connection_ready_event_loop
+            if stored_loop is not None:
+                try:
+                    if stored_loop.is_closed():
+                        stored_loop = None
+                except Exception:
+                    stored_loop = None
+
+            if (
+                stored_loop is loop
+                and self._connection_ready_event is not None
+            ):
+                return self._connection_ready_event
+
+            event = asyncio.Event()
+            if self._connection_ready_flag:
+                event.set()
+
+            if self._connection_state_waiters:
+                for future in self._connection_state_waiters.values():
+                    if not future.done():
+                        future.cancel()
+                self._connection_state_waiters.clear()
+
+            self._connection_ready_event_loop = loop
+            self._connection_ready_event = event
+            return event
+
+    def _register_state_waiter(
+        self, loop: asyncio.AbstractEventLoop
+    ) -> "asyncio.Future[None]":
+        """Register a one-shot future that resolves on the next connection state change."""
+
+        event = self._ensure_ready_event(loop)
+        future: "asyncio.Future[None]" = loop.create_future()
+
+        with self._connection_state_event_lock:
+            self._connection_state_waiter_seq += 1
+            waiter_id = self._connection_state_waiter_seq
+            self._connection_state_waiters[waiter_id] = future
+
+        def _cleanup(_future: "asyncio.Future[None]") -> None:
+            with self._connection_state_event_lock:
+                self._connection_state_waiters.pop(waiter_id, None)
+
+        future.add_done_callback(_cleanup)
+        return future
+
+    def _update_connection_state(
+        self,
+        *,
+        ready: Optional[bool] = None,
+        shutdown: Optional[bool] = None,
+    ) -> None:
+        """Update internal connection state flags and notify async waiters."""
+
+        waiters: list["asyncio.Future[None]"]
+        loop: Optional[asyncio.AbstractEventLoop]
+        event: Optional[asyncio.Event]
+
+        with self._connection_state_event_lock:
+            if ready is not None:
+                self._connection_ready_flag = bool(ready)
+                if ready:
+                    self._connection_shutdown_flag = False
+            if shutdown is not None:
+                self._connection_shutdown_flag = bool(shutdown)
+                if shutdown:
+                    self._connection_ready_flag = False
+
+            loop = self._connection_ready_event_loop
+            event = self._connection_ready_event
+            waiters = list(self._connection_state_waiters.values())
+            self._connection_state_waiters.clear()
+            ready_now = self._connection_ready_flag
+
+        if not loop:
+            return
+
+        def _dispatch() -> None:
+            if event:
+                if ready_now:
+                    event.set()
+                else:
+                    event.clear()
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(None)
+
+        try:
+            loop.call_soon_threadsafe(_dispatch)
+        except RuntimeError:
+            pass
+
+    def _complete_connect_attempt(self, success: bool) -> None:
+        """Finalize an asynchronous connection attempt and record the outcome."""
+
+        with self._connect_state_cond:
+            self._connect_in_progress = False
+            self._connect_attempt_started_at = None
+            self._connect_state_cond.notify_all()
+
+        self._record_connect_result(success)
+
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
         if self.connected:
@@ -282,6 +398,8 @@ class ConnectionManager:
     
     def _connect_in_thread(self) -> bool:
         """在独立线程中连接到IBKR服务器"""
+        self._update_connection_state(ready=False, shutdown=False)
+
         async def connect_worker():
             try:
                 # 获取当前事件循环
@@ -656,6 +774,8 @@ class ConnectionManager:
                 account_type = "Paper" if self.config.paper_trading else "Live"
                 connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
 
+                self._update_connection_state(ready=True, shutdown=False)
+
                 try:
                     import core
 
@@ -730,7 +850,9 @@ class ConnectionManager:
                     self.connected = False
                     self._connection_thread_alive = False
                     connection_logger.info("IBKR connection loop ended")
-            
+
+                    self._update_connection_state(ready=False, shutdown=True)
+
             except Exception as e:
                 connection_logger.error(f"Failed to connect to IBKR: {e}")
                 self.connected = False
@@ -739,6 +861,7 @@ class ConnectionManager:
                     self._last_connect_error = str(e)
                 except Exception:
                     self._last_connect_error = "Unknown connection error"
+                self._update_connection_state(ready=False, shutdown=True)
                      
                  
         
@@ -813,45 +936,69 @@ class ConnectionManager:
         
         # 重置最近错误
         self._last_connect_error = None
-        
+
         # 使用守护线程而不是线程池，确保线程能够持续运行
         self._connection_thread = threading.Thread(target=run_worker, daemon=True)
         self._connection_thread.start()
-        
-        # 等待连接建立或快速失败，增加更强的超时保护
-        max_wait = 15  # 增加等待时间，但添加更多检查点
-        wait_time = 0
-        check_interval = 0.1  # 更频繁的检查
-        
-        while wait_time < max_wait:
-            time.sleep(check_interval)
-            wait_time += check_interval
-            
-            # 若连接成功
-            if self.connected:
-                connection_logger.info("IBKR connection established successfully")
-                return True
-                
-            # 若出现错误则立即失败返回
-            if self._last_connect_error:
-                connection_logger.error(f"IBKR connection failed fast: {self._last_connect_error}")
-                # 确保清理连接线程
-                self._force_stop_connection_thread()
-                return False
-                
-            # 检查连接线程是否还活着
-            if not self._connection_thread or not self._connection_thread.is_alive():
-                connection_logger.error("Connection thread died unexpectedly")
-                self._last_connect_error = "Connection thread terminated unexpectedly"
-                return False
-        
-        # 超时处理
-        connection_logger.error(f"IBKR connection timeout after {max_wait} seconds")
-        self._last_connect_error = f"Connection timeout after {max_wait} seconds"
-        
-        # 强制停止连接线程，防止资源泄漏
-        self._force_stop_connection_thread()
-        return False
+
+        return True
+
+    async def connect_async(self, timeout: Optional[float] = None) -> bool:
+        """Asynchronously establish a connection to the IBKR server.
+
+        This method coordinates with the synchronous :meth:`connect` logic but
+        relies on an ``asyncio.Event`` to be notified when the connection thread
+        finishes initialising or encounters an error.
+        """
+
+        loop = asyncio.get_running_loop()
+        self._ensure_ready_event(loop)
+
+        try:
+            status = await asyncio.to_thread(self._prepare_connection_start)
+        except Exception as exc:
+            connection_logger.error(f"Failed to initiate async IBKR connection: {exc}")
+            return False
+
+        if status == "already_connected":
+            return True
+
+        if status == "failed":
+            self._record_connect_result(False)
+            self._update_connection_state(ready=False, shutdown=True)
+            return False
+
+        try:
+            success = await self._wait_for_connection_async(timeout=timeout)
+        except Exception as exc:
+            connection_logger.error(f"Async IBKR connection wait failed: {exc}")
+            success = False
+
+        self._complete_connect_attempt(success)
+        return success
+
+    async def disconnect_async(self, timeout: Optional[float] = None) -> None:
+        """Asynchronously disconnect from IBKR and await shutdown notification."""
+
+        loop = asyncio.get_running_loop()
+        self._ensure_ready_event(loop)
+
+        await asyncio.to_thread(self.disconnect)
+        await self._wait_for_state_async(
+            lambda: self._connection_shutdown_flag,
+            timeout=timeout,
+        )
+
+    async def ensure_connection(self, timeout: Optional[float] = None) -> bool:
+        """Ensure an active IBKR connection, awaiting if necessary."""
+
+        loop = asyncio.get_running_loop()
+        self._ensure_ready_event(loop)
+
+        if self._connection_ready_flag and self.ib and self.ib.isConnected():
+            return True
+
+        return await self.connect_async(timeout=timeout)
 
     def _record_connect_result(self, success: bool) -> None:
         if success:
@@ -970,39 +1117,48 @@ class ConnectionManager:
             connection_logger.warning(f"Pre-restart script stderr: {stderr[:500]}")
 
         if result.returncode != 0:
-            connection_logger.error(
-                f"Pre-restart script exited with code {result.returncode}"
-            )
+                connection_logger.error(
+                    f"Pre-restart script exited with code {result.returncode}"
+                )
 
-    def connect(self) -> bool:
-        """连接到IBKR服务器"""
-        # 检查当前连接是否使用相同配置
+    def _prepare_connection_start(self) -> str:
+        """Shared logic for initiating a connection attempt.
+
+        Returns one of ``"already_connected"``, ``"started"`` or ``"failed"`` to
+        indicate whether a new connection thread was launched and requires
+        awaiting. The method runs synchronously and may block briefly while
+        waiting for other connection attempts to finish.
+        """
+
         if self.connected and self.ib and self.ib.isConnected():
-            # 如果配置发生变化，需要重新连接
-            current_host = getattr(self.ib, 'host', None)
-            current_port = getattr(self.ib, 'port', None)
-            if (current_host == self.config.host and
-                current_port == self.config.port):
-                connection_logger.info("Already connected to IBKR with same configuration")
+            current_host = getattr(self.ib, "host", None)
+            current_port = getattr(self.ib, "port", None)
+            if current_host == self.config.host and current_port == self.config.port:
+                connection_logger.info(
+                    "Already connected to IBKR with same configuration"
+                )
                 self._record_connect_result(True)
-                return True
-            else:
-                connection_logger.info("Configuration changed, reconnecting...")
-                self.disconnect()
+                return "already_connected"
+            connection_logger.info("Configuration changed, reconnecting...")
+            self.disconnect()
 
         wait_logged = False
         force_abort_existing = False
+
         with self._connect_state_cond:
             while self._connect_in_progress:
                 if not wait_logged:
-                    connection_logger.info("Another IBKR connection attempt is in progress; waiting for completion")
+                    connection_logger.info(
+                        "Another IBKR connection attempt is in progress; waiting for completion"
+                    )
                     wait_logged = True
 
-                # 如果等待期间连接已经建立，则直接返回
                 if self.connected and self.ib and self.ib.isConnected():
-                    connection_logger.info("IBKR connection became available while waiting for existing attempt")
+                    connection_logger.info(
+                        "IBKR connection became available while waiting for existing attempt"
+                    )
                     self._record_connect_result(True)
-                    return True
+                    return "already_connected"
 
                 started_at = self._connect_attempt_started_at
                 if started_at is not None:
@@ -1019,16 +1175,13 @@ class ConnectionManager:
                         force_abort_existing = True
                         break
 
-                # 等待其他连接尝试完成
                 self._connect_state_cond.wait(timeout=1.0)
 
-            # 等待结束后再次检查连接状态，避免重复启动连接
             if self.connected and self.ib and self.ib.isConnected():
                 connection_logger.info("IBKR connection completed while waiting")
                 self._record_connect_result(True)
-                return True
+                return "already_connected"
 
-            # 标记当前正在尝试连接，阻止其他线程同时发起连接
             self._connect_in_progress = True
             self._connect_attempt_started_at = time.monotonic()
 
@@ -1036,16 +1189,157 @@ class ConnectionManager:
             self._force_stop_connection_thread()
 
         connection_logger.info("Connecting to IBKR...")
-        success = False
+
         try:
-            success = self._connect_in_thread()
-            return success
-        finally:
-            self._record_connect_result(success)
+            self._connect_in_thread()
+        except Exception as exc:
+            connection_logger.error(f"Failed to start IBKR connection thread: {exc}")
+            try:
+                self._last_connect_error = str(exc)
+            except Exception:
+                self._last_connect_error = "Unknown connection error"
+
             with self._connect_state_cond:
                 self._connect_in_progress = False
                 self._connect_attempt_started_at = None
                 self._connect_state_cond.notify_all()
+
+            return "failed"
+
+        return "started"
+
+    async def _wait_for_state_async(
+        self,
+        predicate: Callable[[], bool],
+        *,
+        timeout: Optional[float],
+    ) -> bool:
+        """Await ``predicate`` becoming ``True`` using connection state notifications."""
+
+        loop = asyncio.get_running_loop()
+        self._ensure_ready_event(loop)
+
+        deadline: Optional[float]
+        if timeout is None:
+            deadline = None
+        else:
+            try:
+                timeout_value = float(timeout)
+            except (TypeError, ValueError):
+                timeout_value = self._connect_wait_limit_sec
+            if timeout_value < 0:
+                timeout_value = 0.0
+            deadline = loop.time() + timeout_value
+
+        while True:
+            if predicate():
+                return True
+
+            if deadline is not None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return False
+            else:
+                remaining = None
+
+            waiter = self._register_state_waiter(loop)
+
+            try:
+                if remaining is None:
+                    await waiter
+                else:
+                    await asyncio.wait_for(waiter, max(0.0, remaining))
+            except asyncio.TimeoutError:
+                return False
+
+    async def _wait_for_connection_async(
+        self,
+        *,
+        timeout: Optional[float],
+    ) -> bool:
+        """Await the IBKR connection becoming ready within ``timeout`` seconds."""
+
+        loop = asyncio.get_running_loop()
+        self._ensure_ready_event(loop)
+
+        if timeout is None:
+            wait_limit = self._connect_wait_limit_sec
+        else:
+            try:
+                wait_limit = float(timeout)
+            except (TypeError, ValueError):
+                wait_limit = self._connect_wait_limit_sec
+        if wait_limit <= 0:
+            wait_limit = self._connect_wait_limit_sec
+
+        deadline = loop.time() + wait_limit
+
+        while True:
+            if self._connection_ready_flag and self.ib and self.ib.isConnected():
+                connection_logger.info("IBKR connection established successfully")
+                return True
+
+            last_error = self._last_connect_error
+            if last_error:
+                connection_logger.error(f"IBKR connection failed fast: {last_error}")
+                return False
+
+            thread = self._connection_thread
+            if not thread or not thread.is_alive():
+                connection_logger.error("Connection thread died unexpectedly")
+                self._last_connect_error = "Connection thread terminated unexpectedly"
+                return False
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                error_msg = f"Connection timeout after {wait_limit} seconds"
+                connection_logger.error(f"IBKR connection timeout after {wait_limit} seconds")
+                self._last_connect_error = error_msg
+                self._force_stop_connection_thread()
+                return False
+
+            waiter = self._register_state_waiter(loop)
+            try:
+                await asyncio.wait_for(waiter, max(0.0, remaining))
+            except asyncio.TimeoutError:
+                error_msg = f"Connection timeout after {wait_limit} seconds"
+                connection_logger.error(f"IBKR connection timeout after {wait_limit} seconds")
+                self._last_connect_error = error_msg
+                self._force_stop_connection_thread()
+                return False
+
+    def connect(self) -> bool:
+        """连接到IBKR服务器"""
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        else:
+            if running_loop.is_running():
+                raise RuntimeError(
+                    "connect() cannot be used while an event loop is running; "
+                    "use await connect_async() instead"
+                )
+
+        status = self._prepare_connection_start()
+        if status == "already_connected":
+            return True
+
+        if status == "failed":
+            self._record_connect_result(False)
+            self._update_connection_state(ready=False, shutdown=True)
+            return False
+
+        success = False
+        try:
+            wait_timeout = max(self._connect_wait_limit_sec, 15.0)
+            success = asyncio.run(self._wait_for_connection_async(timeout=wait_timeout))
+        except Exception as exc:
+            connection_logger.error(f"Synchronous IBKR connection wait failed: {exc}")
+            success = False
+
+        self._complete_connect_attempt(success)
+        return success
 
     def _force_stop_connection_thread(self) -> None:
         thread = self._connection_thread
@@ -1078,6 +1372,7 @@ class ConnectionManager:
         self.ib = None
         self._loop = None
         self._connection_thread = None
+        self._update_connection_state(ready=False, shutdown=True)
 
     def disconnect(self) -> None:
         """断开与IBKR服务器的连接，并停止事件循环"""
@@ -1127,6 +1422,8 @@ class ConnectionManager:
                 )
         except Exception as e:
             connection_logger.error(f"Disconnect error: {e}")
+        finally:
+            self._update_connection_state(ready=False, shutdown=True)
 
     def is_connected(self) -> bool:
         """检查连接状态"""
