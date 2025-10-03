@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-from sqlalchemy import insert
+from sqlalchemy import delete, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ibbot.logging import get_logger
@@ -128,4 +128,56 @@ class RiskSnapshotRepository:
         except Exception:
             await self._session.rollback()
             self._logger.exception("Failed to persist risk rule snapshots")
+            raise
+
+    async def bulk_upsert_rule_snapshots(
+        self,
+        *,
+        service: str,
+        rules: Mapping[str, Mapping[str, Any]],
+        updated_at: str | datetime | None = None,
+        captured_at: datetime | str | None = None,
+    ) -> None:
+        if not rules:
+            return
+
+        timestamp = _parse_datetime(captured_at) or _utc_now()
+        rows: list[dict[str, Any]] = []
+        symbols: list[str] = []
+
+        for symbol, payload in rules.items():
+            symbol_str = str(symbol)
+            if not symbol_str:
+                continue
+            entry_payload = dict(payload)
+            entry_payload.pop("symbol", None)
+            entry_updated = entry_payload.get("updated_at", updated_at)
+            entry_captured = entry_payload.get("captured_at")
+            rows.append(
+                {
+                    "service": service,
+                    "symbol": symbol_str,
+                    "payload": _normalise_payload(entry_payload),
+                    "updated_at_text": str(entry_updated) if entry_updated is not None else None,
+                    "captured_at": _parse_datetime(entry_captured) or timestamp,
+                }
+            )
+            symbols.append(symbol_str)
+
+        if not rows:
+            return
+
+        delete_stmt = delete(RiskRuleSnapshot).where(
+            RiskRuleSnapshot.service == service,
+            RiskRuleSnapshot.symbol.in_(symbols),
+        )
+        insert_stmt = insert(RiskRuleSnapshot).values(rows)
+
+        try:
+            await self._session.execute(delete_stmt)
+            await self._session.execute(insert_stmt)
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            self._logger.exception("Failed to upsert risk rule snapshots")
             raise

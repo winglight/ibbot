@@ -8,7 +8,7 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
+from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping, Protocol
 
 from services.risk.engine import RiskEngine, RiskEvent, RiskRule
 from src.ibbot import update_service_health
@@ -20,7 +20,6 @@ from src.ibbot.redis import (
     ResponseError,
     StreamMessage,
 )
-from src.ibbot.influx import write_points
 
 try:  # Optional dependency during testing environments.
     from redis.asyncio import Redis
@@ -38,12 +37,35 @@ async def _maybe_await(result: Awaitable[Any] | Any) -> Any:
     return result
 
 
+class RiskSnapshotRepositoryProtocol(Protocol):
+    async def save_config_snapshot(
+        self,
+        *,
+        service: str,
+        payload: Mapping[str, Any],
+        rules_count: int,
+        updated_at: str | datetime | None = None,
+        captured_at: datetime | str | None = None,
+    ) -> None:
+        ...
+
+    async def bulk_upsert_rule_snapshots(
+        self,
+        *,
+        service: str,
+        rules: Mapping[str, Mapping[str, Any]],
+        updated_at: str | datetime | None = None,
+        captured_at: datetime | str | None = None,
+    ) -> None:
+        ...
+
+
 @dataclass(slots=True)
 class RiskRuntime:
     """Orchestrate the risk engine and connect it to external services."""
 
     redis_factory: Callable[[], Awaitable[Redis]]
-    write_fn: Callable[[Iterable[Mapping[str, Any]]], Awaitable[int] | int] = write_points
+    risk_snapshot_repository: RiskSnapshotRepositoryProtocol | None = None
     logger_name: str = "risk-service"
     service_name: str = "risk-service"
     market_stream_key: str = "stream:market-service"
@@ -428,6 +450,7 @@ class RiskRuntime:
                 for symbol, payload in rules_payload.items()
             }
             self._config_snapshot.setdefault("updated_at", timestamp)
+            self._config_snapshot["rules_count"] = int(len(self._rules_snapshot))
             for payload in self._rules_snapshot.values():
                 payload.setdefault("updated_at", timestamp)
             self._config_snapshot_timestamp = str(self._config_snapshot.get("updated_at") or timestamp)
@@ -453,6 +476,7 @@ class RiskRuntime:
             config_payload[str(key)] = value
         config_payload.setdefault("updated_at", timestamp)
         rules_payload = self._engine.export_rules()
+        config_payload["rules_count"] = int(len(rules_payload))
         return config_payload, rules_payload, timestamp
 
     async def _publish_snapshots(
@@ -477,10 +501,10 @@ class RiskRuntime:
             logger = self._logger or get_logger(self.logger_name)
             logger.warning("Failed to publish risk rules update", exc_info=True)
         try:
-            await self._write_influx_snapshot(config_payload, rules_snapshot, timestamp)
+            await self._persist_repository_snapshot(config_payload, rules_snapshot, timestamp)
         except Exception:
             logger = self._logger or get_logger(self.logger_name)
-            logger.warning("Failed to persist risk snapshot to InfluxDB", exc_info=True)
+            logger.warning("Failed to persist risk snapshot to repository", exc_info=True)
 
     async def _get_cache_redis(self) -> Redis | None:
         try:
@@ -546,40 +570,44 @@ class RiskRuntime:
             self._dump_json(message),
         )
 
-    async def _write_influx_snapshot(
+    async def _persist_repository_snapshot(
         self,
         config_payload: Mapping[str, Any],
         rules_payload: Mapping[str, Mapping[str, Any]],
         timestamp: str,
     ) -> None:
-        points: list[Mapping[str, Any]] = []
+        repository = self.risk_snapshot_repository
+        if repository is None:
+            return
 
-        config_fields: dict[str, Any] = {
-            "payload": self._dump_json(config_payload),
-            "updated_at": timestamp,
-            "rules_count": int(len(rules_payload)),
-        }
-        points.append(
-            {
-                "measurement": self.config_measurement,
-                "tags": {"service": self.service_name},
-                "fields": config_fields,
-            }
+        config_snapshot = dict(config_payload)
+        config_snapshot.setdefault("updated_at", timestamp)
+        config_snapshot["rules_count"] = int(len(rules_payload))
+
+        await repository.save_config_snapshot(
+            service=self.service_name,
+            payload=config_snapshot,
+            rules_count=int(len(rules_payload)),
+            updated_at=config_snapshot.get("updated_at"),
+            captured_at=timestamp,
         )
 
-        for symbol, rule_payload in rules_payload.items():
-            points.append(
-                {
-                    "measurement": self.rules_measurement,
-                    "tags": {"service": self.service_name, "symbol": str(symbol)},
-                    "fields": {
-                        "payload": self._dump_json(rule_payload),
-                        "updated_at": timestamp,
-                    },
-                }
-            )
+        if not rules_payload:
+            return
 
-        await _maybe_await(self.write_fn(points))
+        normalised_rules: dict[str, dict[str, Any]] = {}
+        for symbol, rule_payload in rules_payload.items():
+            symbol_str = str(symbol)
+            payload = dict(rule_payload)
+            payload.setdefault("symbol", symbol_str)
+            payload.setdefault("updated_at", timestamp)
+            normalised_rules[symbol_str] = payload
+
+        await repository.bulk_upsert_rule_snapshots(
+            service=self.service_name,
+            rules=normalised_rules,
+            captured_at=timestamp,
+        )
 
     @staticmethod
     def _json_default(value: Any) -> Any:
@@ -933,8 +961,6 @@ class RiskRuntime:
         status = str(payload.get("status") or "").lower()
         self._engine.reset_trigger(event.symbol, event.trigger)
         message = f"Received result for {event.symbol}: {status or 'unknown'}"
-        if self._logger:
-            self._logger.info(message)
         await self._write_log_point(
             level="INFO",
             message=message,
@@ -957,8 +983,6 @@ class RiskRuntime:
             return
         self._pending_commands[command_id] = event
         message = f"Triggered {event.trigger} for {event.symbol} at {event.price:.4f}"
-        if self._logger:
-            self._logger.warning(message)
         await self._write_log_point(
             level="WARN",
             message=message,
@@ -968,26 +992,21 @@ class RiskRuntime:
         )
 
     async def _write_log_point(self, **fields: Any) -> None:
-        timestamp = _utc_now()
-        level = str(fields.pop("level", "INFO"))
+        level_name = str(fields.pop("level", "INFO"))
         message = str(fields.pop("message", ""))
-        point = {
-            "measurement": "logs",
-            "tags": {
-                "service": self.service_name,
-                "level": level,
-            },
-            "fields": {
-                "message": message,
-                **{k: v for k, v in fields.items() if isinstance(v, (int, float, str))},
-            },
-            "time": timestamp,
-        }
-        try:
-            await _maybe_await(self.write_fn([point]))
-        except Exception:
-            if self._logger:
-                self._logger.debug("Failed to write log point to Influx", exc_info=True)
+        if not message:
+            return
+        extra = {k: v for k, v in fields.items() if isinstance(v, (int, float, str))}
+        logger = self._logger or get_logger(self.logger_name)
+        level_attr = level_name.lower()
+        if level_attr == "warn":
+            level_attr = "warning"
+        log_method = getattr(logger, level_attr, None)
+        log_kwargs = {"extra": extra} if extra else {}
+        if callable(log_method):
+            log_method(message, **log_kwargs)
+        else:
+            logger.info(message, **log_kwargs)
 
     def get_config_snapshot(self) -> dict[str, Any]:
         """Return the latest cached configuration snapshot."""
