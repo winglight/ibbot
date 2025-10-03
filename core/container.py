@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 from loguru import logger
 
 from src.cache import init_redis
 from src.config import load_project_env
 from src.ibbot.config import ConfigProvider
-from src.db import DatabaseConfigError, get_database_url
+from src.db import DatabaseConfigError, MariaDBConfigurationError, get_database_url
 from src.utils import now_local
 from src.websocket_manager import WebSocketManager, websocket_manager
 
@@ -61,6 +62,28 @@ async def _start_config_provider(provider: ConfigProvider | None) -> ConfigProvi
     return provider
 
 
+def _redact_database_url(url: str | None) -> str | None:
+    if not url:
+        return None
+
+    try:
+        parsed = urlparse(url)
+    except Exception:  # pragma: no cover - defensive parsing guard
+        return url
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        userinfo, host = netloc.rsplit("@", 1)
+        if ":" in userinfo:
+            username = userinfo.split(":", 1)[0]
+            userinfo = f"{username}:***"
+        elif userinfo:
+            userinfo = f"{userinfo}:***"
+        netloc = f"{userinfo}@{host}" if userinfo else host
+
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
 async def initialise(*, force: bool = False) -> CoreContainer:
     """Initialise shared services and return the application container."""
 
@@ -79,10 +102,14 @@ async def initialise(*, force: bool = False) -> CoreContainer:
     database_url: str | None = None
     try:
         database_url = get_database_url()
-    except DatabaseConfigError as exc:
+    except (DatabaseConfigError, MariaDBConfigurationError) as exc:
         logger.warning("Database configuration unavailable: {}", exc)
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Unexpected error while resolving database URL: {}", exc)
+    else:
+        redacted_url = _redact_database_url(database_url)
+        if redacted_url:
+            logger.info("Resolved database configuration: {}", redacted_url)
 
     config_provider: ConfigProvider | None = None
     try:

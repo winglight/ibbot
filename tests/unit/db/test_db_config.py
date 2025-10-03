@@ -25,6 +25,18 @@ def test_get_database_url_uses_fallback(monkeypatch: pytest.MonkeyPatch) -> None
     assert get_database_url() == url
 
 
+def test_get_database_url_accepts_mysql_asyncmy(monkeypatch: pytest.MonkeyPatch) -> None:
+    url = "mysql+asyncmy://user:pass@localhost:3306/ibbot"
+    monkeypatch.setenv("IBBOT_DB_URL", url)
+    assert get_database_url() == url
+
+
+def test_get_database_url_accepts_sqlite_aiosqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    url = "sqlite+aiosqlite:///tmp/test.db"
+    monkeypatch.setenv("IBBOT_DB_URL", url)
+    assert get_database_url() == url
+
+
 def test_get_database_url_raises_when_missing() -> None:
     with pytest.raises(DatabaseConfigError):
         get_database_url()
