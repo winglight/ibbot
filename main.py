@@ -308,42 +308,60 @@ async def _module_auto_connect(context: ModuleRuntimeContext) -> ModuleHandle:
 async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHandle:
     handle = ModuleHandle(name=context.module_name)
 
-    try:
-        get_data_source_manager()
-    except Exception as exc:
-        context.logger.warning(f"Data subscription manager initialisation warning: {exc}")
-    else:
+    async def _initialise_subscriptions() -> None:
+        try:
+            await asyncio.to_thread(get_data_source_manager)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            context.logger.warning(
+                "Data subscription manager initialisation warning: {}",
+                exc,
+            )
+            return
+
         context.logger.info("Data source manager initialised for subscriptions")
 
-    try:
-        dom_service = get_dom_service()
-    except Exception as exc:
-        context.logger.warning(f"DOM service unavailable for auto-start: {exc}")
-        return handle
+        try:
+            dom_service = get_dom_service()
+        except Exception as exc:
+            context.logger.warning(f"DOM service unavailable for auto-start: {exc}")
+            return
 
-    try:
-        scheduled = dom_service.ensure_auto_start_worker()
-    except Exception as exc:
-        context.logger.warning(f"DOM auto-start scheduling warning: {exc}")
-        return handle
+        try:
+            scheduled = await asyncio.to_thread(dom_service.ensure_auto_start_worker)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            context.logger.warning(f"DOM auto-start scheduling warning: {exc}")
+            return
 
-    symbol = dom_service.auto_start_symbol
-    if scheduled:
-        if symbol:
-            context.logger.info(
-                "DOM auto-start worker scheduled for symbol {}",
-                symbol,
-            )
+        symbol = dom_service.auto_start_symbol
+        if scheduled:
+            if symbol:
+                context.logger.info(
+                    "DOM auto-start worker scheduled for symbol {}",
+                    symbol,
+                )
+            else:
+                context.logger.info(
+                    "DOM auto-start worker scheduled (no default symbol configured)"
+                )
         else:
-            context.logger.info("DOM auto-start worker scheduled (no default symbol configured)")
-    else:
-        if symbol:
-            context.logger.info(
-                "DOM auto-start worker already initialised for symbol {}",
-                symbol,
-            )
-        else:
-            context.logger.info("DOM auto-start disabled; no default symbol configured")
+            if symbol:
+                context.logger.info(
+                    "DOM auto-start worker already initialised for symbol {}",
+                    symbol,
+                )
+            else:
+                context.logger.info("DOM auto-start disabled; no default symbol configured")
+
+    handle.tasks.append(
+        asyncio.create_task(
+            _initialise_subscriptions(),
+            name="module-data-subscriptions-init",
+        )
+    )
 
     return handle
 
