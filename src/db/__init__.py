@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .async_support import run_in_thread
+from .config import DatabaseConfigError, resolve_database_url
 from .mariadb import (
     MariaDBConfigurationError,
     connect,
@@ -11,6 +12,7 @@ from .mariadb import (
     run_sql_query,
     set_engine,
 )
+from .schema import REQUIRED_TABLES
 from .repositories import (
     AuditLogRepository,
     AuditLogRepositoryError,
@@ -52,14 +54,14 @@ __all__ = [
     "market_event_writer",
     "market_price_writer",
     "order_repository",
+    "REQUIRED_TABLES",
+    "resolve_database_url",
     "risk_snapshot_repository",
     "run_in_thread",
     "run_sql_query",
     "service_metric_writer",
     "set_engine",
 ]
-
-DatabaseConfigError = MariaDBConfigurationError
 
 
 def order_repository(*, logger_name: str = "db.orders") -> OrderRepository:

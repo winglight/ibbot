@@ -19,12 +19,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from ibbot.db.config import DatabaseConfigError, resolve_database_url  # noqa: E402
-from ibbot.db.schemas import metadata  # noqa: E402
 from sqlalchemy import inspect, text  # noqa: E402
 from sqlalchemy.engine.url import make_url  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
 from src.config import load_project_env  # noqa: E402
+from src.db.config import DatabaseConfigError, resolve_database_url  # noqa: E402
+from src.db.schema import REQUIRED_TABLES  # noqa: E402
 
 try:  # pragma: no cover - utility script, rarely exercised in tests
     from ib_insync import IB
@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - allow diagnostics in stub mode
 
 load_project_env()
 
-REQUIRED_DB_TABLES: Set[str] = {table.name for table in metadata.sorted_tables}
+REQUIRED_DB_TABLES: Set[str] = set(REQUIRED_TABLES)
 
 
 def _redact_db_url(url: str) -> str:

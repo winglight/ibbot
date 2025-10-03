@@ -1,0 +1,18 @@
+"""Schema helpers for the ibbot MariaDB repositories."""
+
+from __future__ import annotations
+
+from typing import FrozenSet
+
+__all__ = ["REQUIRED_TABLES"]
+
+REQUIRED_TABLES: FrozenSet[str] = frozenset(
+    {
+        "orders",
+        "market_prices",
+        "service_metrics",
+        "risk_config_snapshots",
+        "risk_rule_snapshots",
+        "market_events",
+    }
+)

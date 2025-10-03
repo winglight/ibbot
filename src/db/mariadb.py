@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import parse_qs, urlparse
+
+from .config import DatabaseConfigError as _DatabaseConfigError
+from .config import get_database_url as _get_configured_url
 
 __all__ = [
     "MariaDBConfigurationError",
@@ -24,14 +26,6 @@ class MariaDBConfigurationError(RuntimeError):
 
 _connection_factory: Callable[[], Any] | None = None
 _should_close_connection: bool = True
-
-
-def _get_database_url() -> str:
-    for key in ("IBBOT_DB_URL", "DATA_LAYER_DB_URL", "MARIADB_URL", "DATABASE_URL"):
-        value = os.getenv(key)
-        if value:
-            return value
-    raise MariaDBConfigurationError("MariaDB connection URL is not configured")
 
 
 def _connect_sqlite(url: str) -> Any:
@@ -90,7 +84,10 @@ def _create_connection() -> tuple[Any, bool]:
     if _connection_factory is not None:
         return _connection_factory(), _should_close_connection
 
-    url = _get_database_url()
+    try:
+        url = _get_configured_url()
+    except _DatabaseConfigError as exc:  # pragma: no cover - validated by config tests
+        raise MariaDBConfigurationError(str(exc)) from exc
     if url.startswith("sqlite://"):
         connection = _connect_sqlite(url)
         return connection, True
@@ -113,7 +110,10 @@ def connect() -> Iterator[Any]:
 def get_database_url() -> str:
     """Return the configured database URL."""
 
-    return _get_database_url()
+    try:
+        return _get_configured_url()
+    except _DatabaseConfigError as exc:  # pragma: no cover - validated by config tests
+        raise MariaDBConfigurationError(str(exc)) from exc
 
 
 def _extract_mapping(row: Any, index: int, key: str) -> Any:
