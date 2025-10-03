@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from src.ibbot import update_service_health
 from src.ibbot.influx import build_order_point, init_influx_client, write_points
@@ -370,6 +370,33 @@ class OrderSubmission(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class FillMetricsUpdate(BaseModel):
+    filled_quantity: float | None = None
+    remaining_quantity: float | None = None
+    avg_fill_price: float | None = None
+    commission: float | None = None
+    realized_pnl: float | None = None
+    unrealized_pnl: float | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _ensure_any_field(self) -> "FillMetricsUpdate":
+        if not any(
+            value is not None
+            for value in (
+                self.filled_quantity,
+                self.remaining_quantity,
+                self.avg_fill_price,
+                self.commission,
+                self.realized_pnl,
+                self.unrealized_pnl,
+            )
+        ):
+            raise ValueError("at least one fill metric must be provided")
+        return self
+
+
 @dataclass
 class OrdersRuntime:
     redis_factory: Callable[[], Awaitable[Any]] = get_redis_client
@@ -503,6 +530,127 @@ class OrdersRuntime:
         await self._append_history({"event": method, "command_id": command_id, "payload": kwargs})
         await self._publish_health()
         return command_id
+
+    async def update_fill_metrics(
+        self, order_id: str, metrics: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        identifier = str(order_id or "").strip()
+        if not identifier:
+            raise KeyError(order_id)
+
+        numeric_fields = (
+            "filled_quantity",
+            "remaining_quantity",
+            "avg_fill_price",
+            "commission",
+            "realized_pnl",
+            "unrealized_pnl",
+        )
+        updates: dict[str, float] = {}
+        for field in numeric_fields:
+            if field not in metrics:
+                continue
+            value = _coerce_float(metrics.get(field))
+            if value is None:
+                continue
+            updates[field] = value
+
+        if not updates:
+            raise ValueError("no fill metrics provided")
+
+        timestamp_dt = _utc_now()
+        timestamp = _serialise_datetime(timestamp_dt)
+        record_snapshot: dict[str, Any] | None = None
+
+        async with self._lock:
+            record = self._find_order_unlocked(identifier)
+            if record is None:
+                raise KeyError(order_id)
+
+            if not isinstance(record.get("events"), list):
+                record["events"] = list(record.get("events", []))
+
+            in_active = any(entry is record for entry in self._active_orders.values())
+            in_history = any(entry is record for entry in self._history)
+
+            result_mapping: dict[str, Any]
+            existing_result = record.get("result")
+            if isinstance(existing_result, Mapping):
+                result_mapping = dict(existing_result)
+            else:
+                result_mapping = {}
+            result_mapping.update(updates)
+            record["result"] = result_mapping
+
+            for key, value in updates.items():
+                record[key] = value
+
+            record.setdefault("id", identifier)
+            record["updated_at"] = timestamp
+            record.setdefault("events", [])
+            record["events"].append(
+                {
+                    "type": "fill_metrics_updated",
+                    "timestamp": timestamp,
+                    "payload": dict(updates),
+                }
+            )
+
+            record_snapshot = _clone_order_record(record)
+            order_identifier = str(
+                record_snapshot.get("order_id")
+                or record_snapshot.get("command_id")
+                or record_snapshot.get("id")
+                or identifier
+            )
+
+            canonical_identifier = identifier
+            if in_active:
+                for key, entry in self._active_orders.items():
+                    if entry is record:
+                        canonical_identifier = str(key)
+                        break
+            elif record_snapshot.get("id"):
+                canonical_identifier = str(record_snapshot.get("id"))
+            else:
+                canonical_identifier = order_identifier
+
+            self._command_to_order[identifier] = canonical_identifier
+            if record_snapshot.get("order_id"):
+                self._command_to_order[str(record_snapshot["order_id"])] = canonical_identifier
+            if record_snapshot.get("command_id"):
+                self._command_to_order[str(record_snapshot["command_id"])] = canonical_identifier
+
+            if not in_active and not in_history:
+                self._history.appendleft(record_snapshot)
+            elif in_history:
+                retained = [
+                    _clone_order_record(item)
+                    for item in self._history
+                    if not _record_matches(
+                        item,
+                        canonical_identifier,
+                        str(record_snapshot.get("order_id") or ""),
+                        str(record_snapshot.get("command_id") or ""),
+                    )
+                ]
+                retained.insert(0, record_snapshot)
+                self._history = deque(retained, maxlen=self.history_limit)
+
+            self._last_updated_at = timestamp_dt
+            await self._persist_snapshot()
+            await self._append_history(
+                {
+                    "event": "fill_metrics_updated",
+                    "order_id": order_identifier,
+                    "payload": dict(updates),
+                }
+            )
+
+        if record_snapshot is not None:
+            await self._write_order_point(record_snapshot, timestamp=timestamp)
+            return record_snapshot
+        raise RuntimeError("failed to update fill metrics")
 
     async def list_orders(
         self,
@@ -1324,6 +1472,21 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
     ) -> Mapping[str, Any]:
         command_id = await runtime.submit_order(request)
         return {"command_id": command_id, "status": "accepted"}
+
+    @app.patch("/orders/{order_id}/fills", status_code=status.HTTP_200_OK)
+    async def update_order_fills(
+        order_id: str,
+        request: FillMetricsUpdate,
+        runtime: OrdersRuntime = Depends(get_runtime),
+    ) -> Mapping[str, Any]:
+        payload = request.model_dump(exclude_none=True)
+        try:
+            record = await runtime.update_fill_metrics(order_id, payload)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="order not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"success": True, "order": _normalise_order_record(record)}
 
     @app.post("/orders/{order_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
     async def cancel_order(
