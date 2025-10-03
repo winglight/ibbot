@@ -81,7 +81,7 @@ async def test_load_risk_rules_promotes_cached_metadata() -> None:
     runtime = RiskRuntime(redis_factory=factory, write_fn=lambda _: 0)
 
     legacy_payload = {
-        "symbol": "ES",
+        "symbol": "es",
         "stop_loss_price": 10.0,
         "metadata": {
             "rule_type": "trailing",
@@ -90,7 +90,7 @@ async def test_load_risk_rules_promotes_cached_metadata() -> None:
     }
     await redis.hset(
         runtime.rules_hash_key,
-        mapping={"ES": json.dumps(legacy_payload)},
+        mapping={"es": json.dumps(legacy_payload)},
     )
 
     rules = await runtime.load_risk_rules()
@@ -102,6 +102,17 @@ async def test_load_risk_rules_promotes_cached_metadata() -> None:
         "multiplier_tp": 2.2,
     }
     assert "rule_type" not in (es_rule.get("metadata") or {})
+
+    stored_mapping = redis.hashes[runtime.rules_hash_key]
+    assert "ES" in stored_mapping
+    assert "es" not in stored_mapping
+    stored_payload = json.loads(stored_mapping["ES"])
+    assert stored_payload["rule_type"] == "trailing"
+    assert stored_payload["atr_params"] == {
+        "multiplier_sl": 1.4,
+        "multiplier_tp": 2.2,
+    }
+    assert "rule_type" not in (stored_payload.get("metadata") or {})
 
 
 async def test_config_saves_merge_and_removal() -> None:
