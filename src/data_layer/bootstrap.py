@@ -13,7 +13,12 @@ from .adapters import DomDepthAdapter, MarketQuoteAdapter
 from .cache import InMemoryCacheBackend, RedisCacheBackend
 from .data_source_manager import DataSourceManager
 from .config import get_candle_intervals
-from .persistence import InfluxPersistenceBackend, NoopPersistenceBackend
+from .persistence import (
+    InfluxPersistenceBackend,
+    NoopPersistenceBackend,
+    ParquetPersistenceBackend,
+)
+from src.ibbot.storage.parquet_writer import MarketDataParquetWriter
 from .quote_feed import QuoteFeed, resolve_default_quote_feed
 from src.ibbot.redis import DEFAULT_REDIS_URL
 
@@ -105,6 +110,21 @@ def _get_persistence_backend():
     if _persistence_backend is not None:
         return _persistence_backend
 
+    storage_path = (
+        os.getenv("DATA_LAYER_PARQUET_PATH")
+        or os.getenv("MARKET_DATA_STORAGE_PATH")
+        or "data/market_data"
+    )
+    compression = os.getenv("MARKET_DATA_PARQUET_COMPRESSION", "snappy")
+
+    try:
+        writer = MarketDataParquetWriter(base_dir=storage_path, compression=compression)
+        _persistence_backend = ParquetPersistenceBackend(writer)
+        logger.info("Using Parquet persistence backend at {}", storage_path)
+        return _persistence_backend
+    except Exception as exc:
+        logger.warning("Failed to initialise Parquet backend: {}", exc)
+
     influx_url = os.getenv("DATA_LAYER_INFLUX_URL")
     influx_bucket = os.getenv("DATA_LAYER_INFLUX_BUCKET")
     influx_org = os.getenv("DATA_LAYER_INFLUX_ORG")
@@ -121,7 +141,6 @@ def _get_persistence_backend():
                     "Invalid DATA_LAYER_INFLUX_TIMEOUT_MS value %r - falling back to default",
                     timeout_raw,
                 )
-                timeout = None
             else:
                 if timeout_candidate > 0:
                     timeout = timeout_candidate
