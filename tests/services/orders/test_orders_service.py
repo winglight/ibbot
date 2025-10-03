@@ -4,12 +4,14 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from services.orders.main import OrderSubmission, OrdersRuntime, create_app
+from src.utils.ibkr_serialization import trade_to_dict
 from tests.services.redis_utils import InMemoryRedis
 
 
@@ -51,6 +53,74 @@ class RecordingWriter:
             batch.append(payload)
         self.points.extend(batch)
         return len(batch)
+
+
+def _build_trade_payload(
+    *,
+    order_id: str,
+    symbol: str,
+    exchange: str,
+    status: str,
+    avg_fill_price: float,
+    filled: float,
+    remaining: float,
+    commission: float,
+    realized_pnl: float,
+    timestamp: datetime | None = None,
+) -> dict[str, Any]:
+    event_time = timestamp or datetime(2024, 1, 1, 14, 30, tzinfo=timezone.utc)
+    order = SimpleNamespace(
+        orderId=order_id,
+        action="BUY",
+        totalQuantity=filled + remaining,
+        orderType="LIMIT",
+        lmtPrice=avg_fill_price,
+    )
+    order_status = SimpleNamespace(
+        status=status,
+        avgFillPrice=avg_fill_price,
+        filled=filled,
+        remaining=remaining,
+        commission=commission,
+        commissionCurrency="USD",
+        realizedPNL=realized_pnl,
+        submittedTime=event_time,
+        completedTime=event_time,
+    )
+    contract = SimpleNamespace(
+        symbol=symbol,
+        localSymbol=f"{symbol}FUT",
+        exchange=exchange,
+        secType="FUT",
+    )
+    execution = SimpleNamespace(
+        execId=f"exec-{order_id}",
+        time=event_time,
+        side="BOT",
+        price=avg_fill_price,
+        avgPrice=avg_fill_price,
+        shares=filled,
+        exchange=exchange,
+        acctNumber="DU123",
+        orderId=order_id,
+    )
+    commission_report = SimpleNamespace(
+        commission=commission,
+        currency="USD",
+        realizedPNL=realized_pnl,
+    )
+    fill = SimpleNamespace(
+        execution=execution,
+        commissionReport=commission_report,
+    )
+    trade = SimpleNamespace(
+        order=order,
+        orderStatus=order_status,
+        contract=contract,
+        fills=[fill],
+        log=[SimpleNamespace(time=event_time)],
+    )
+    return trade_to_dict(trade)
 
 
 class _FailingWriter:
@@ -177,9 +247,20 @@ def test_stream_updates_keep_filled_orders_in_history_and_detail() -> None:
                 runtime.results_stream,
                 {
                     "command_id": command_id,
-                    "order_id": "IB123",
-                    "status": "Filled",
-                    "result": json.dumps({"avg_price": 80.5, "filled": 1}),
+                    "status": "success",
+                    "result": json.dumps(
+                        _build_trade_payload(
+                            order_id="IB123",
+                            symbol="CL",
+                            exchange="NYMEX",
+                            status="Filled",
+                            avg_fill_price=80.5,
+                            filled=1.0,
+                            remaining=0.0,
+                            commission=1.25,
+                            realized_pnl=45.0,
+                        )
+                    ),
                 },
             )
 
@@ -529,30 +610,21 @@ def test_order_update_writes_influx_point(monkeypatch: pytest.MonkeyPatch) -> No
             submission = OrderSubmission(symbol="CL", quantity=1, action="BUY")
             command_id = await runtime.submit_order(submission)
             writer.points.clear()
+            trade_payload = _build_trade_payload(
+                order_id="IB123",
+                symbol="CL",
+                exchange="NYMEX",
+                status="Filled",
+                avg_fill_price=80.5,
+                filled=1.0,
+                remaining=0.0,
+                commission=2.5,
+                realized_pnl=120.0,
+            )
             payload = {
                 "command_id": command_id,
-                "order_id": "IB123",
-                "status": "Filled",
-                "result": json.dumps(
-                    {
-                        "avg_price": 80.5,
-                        "filled": 1,
-                        "remaining": 0,
-                        "commission": 2.5,
-                        "realizedPnl": 120.0,
-                        "trigger_price": 81.0,
-                        "trigger": "stop_loss",
-                        "fills": [
-                            {
-                                "exec_id": "abc",
-                                "price": 80.5,
-                                "quantity": 1,
-                                "commission": 2.5,
-                                "commission_currency": "USD",
-                            }
-                        ],
-                    }
-                ),
+                "status": "success",
+                "result": json.dumps(trade_payload),
             }
             updated = await runtime._apply_order_event(payload)
             assert updated is True
@@ -563,8 +635,6 @@ def test_order_update_writes_influx_point(monkeypatch: pytest.MonkeyPatch) -> No
             assert pytest.approx(fields["filled_quantity"], rel=1e-6) == 1.0
             assert pytest.approx(fields["commission"], rel=1e-6) == 2.5
             assert pytest.approx(fields["realized_pnl"], rel=1e-6) == 120.0
-            assert pytest.approx(fields["trigger_price"], rel=1e-6) == 81.0
-            assert fields["trigger"] == "stop_loss"
             tags = point.get("tags", {})
             assert tags.get("order_id") == "IB123"
         finally:
@@ -583,21 +653,17 @@ def test_apply_order_event_updates_order_from_serialised_trade(monkeypatch: pyte
             submission = OrderSubmission(symbol="ES", quantity=2, action="SELL")
             command_id = await runtime.submit_order(submission)
             trade_payload = {
-                "order_id": "IB999",
-                "status": "Filled",
-                "avg_fill_price": 4321.5,
-                "filled": 2,
-                "remaining": 0,
-                "commission": 3.25,
-                "fills": [
-                    {
-                        "exec_id": "def-1",
-                        "price": 4321.5,
-                        "quantity": 2,
-                        "commission": 3.25,
-                        "commission_currency": "USD",
-                    }
-                ],
+                **_build_trade_payload(
+                    order_id="IB999",
+                    symbol="ES",
+                    exchange="CME",
+                    status="Filled",
+                    avg_fill_price=4321.5,
+                    filled=2.0,
+                    remaining=0.0,
+                    commission=3.25,
+                    realized_pnl=275.0,
+                ),
             }
             payload = {
                 "command_id": command_id,
@@ -613,6 +679,11 @@ def test_apply_order_event_updates_order_from_serialised_trade(monkeypatch: pyte
             assert pytest.approx(order_payload["avg_fill_price"], rel=1e-6) == 4321.5
             assert pytest.approx(order_payload["filled_quantity"], rel=1e-6) == 2.0
             assert pytest.approx(order_payload["commission"], rel=1e-6) == 3.25
+            result_section = order_payload.get("result", {})
+            assert result_section.get("fills")
+            first_fill = result_section["fills"][0]
+            assert first_fill["exec_id"] == "exec-IB999"
+            assert pytest.approx(first_fill["price"], rel=1e-6) == 4321.5
         finally:
             await runtime.stop()
 

@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Mapping, MutableMapping
 
 from src.ibbot.logging import get_logger
@@ -14,7 +15,13 @@ from src.ibbot.redis import (
     DEFAULT_COMMAND_QUEUE,
     get_queue_length,
 )
-from src.utils.ibkr_serialization import coerce_ibkr_value
+from src.utils.ibkr_serialization import (
+    coerce_ibkr_value,
+    fill_to_dict,
+    is_fill_like,
+    is_trade_like,
+    trade_to_dict,
+)
 
 try:  # redis is optional in some test environments
     from redis.asyncio import Redis
@@ -227,11 +234,52 @@ class ResultPublisher:
         return message
 
     def _serialize(self, value: Any) -> str:
-        value = coerce_ibkr_value(value)
+        normalised = self._normalise_result_value(value)
         try:
-            return json.dumps(value, ensure_ascii=False)
+            return json.dumps(normalised, ensure_ascii=False)
         except TypeError:
-            return json.dumps(str(value), ensure_ascii=False)
+            safe_value = self._ensure_json_safe(normalised)
+            return json.dumps(safe_value, ensure_ascii=False)
+
+    def _normalise_result_value(self, value: Any) -> Any:
+        if is_trade_like(value):
+            return trade_to_dict(value)
+        if is_fill_like(value):
+            return fill_to_dict(value)
+        if is_dataclass(value):
+            return self._normalise_result_value(asdict(value))
+        if isinstance(value, SimpleNamespace):
+            return {
+                key: self._normalise_result_value(val)
+                for key, val in vars(value).items()
+            }
+        coerced = coerce_ibkr_value(value)
+        if coerced is not value:
+            return self._normalise_result_value(coerced)
+        if isinstance(value, Mapping):
+            return {
+                str(key): self._normalise_result_value(val)
+                for key, val in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [self._normalise_result_value(item) for item in value]
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return value.decode("utf-8")
+            except Exception:
+                return value.hex()
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    def _ensure_json_safe(self, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): self._ensure_json_safe(val) for key, val in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [self._ensure_json_safe(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
 
 
 class CommandConsumer:
