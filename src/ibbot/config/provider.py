@@ -7,7 +7,7 @@ import json
 import os
 from collections import defaultdict
 from copy import deepcopy
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 
 from loguru import logger
 
@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover - redis might be missing in certain CI set
 
 from src.config.env import PROJECT_ROOT, load_project_env
 
-Listener = Callable[[str, Mapping[str, str]], Awaitable[None] | None]
+Listener = Callable[[str, Mapping[str, str]], Optional[Awaitable[None]]]
 
 
 class ConfigProvider:
@@ -340,4 +340,3 @@ class ConfigProvider:
         if type_ is float:
             return float(value)
         return type_(value)
-

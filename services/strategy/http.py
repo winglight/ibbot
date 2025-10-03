@@ -1640,12 +1640,24 @@ def create_app(
         except StrategyNotRegistered as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    @app.delete("/strategy/{name}", status_code=status.HTTP_204_NO_CONTENT)
-    @app.delete("/strategies/{name}", status_code=status.HTTP_204_NO_CONTENT)
-    async def delete_strategy(name: str, runtime: StrategyRuntime = Depends(_get_runtime)) -> None:
+    @app.delete(
+        "/strategy/{name}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
+    @app.delete(
+        "/strategies/{name}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
+    async def delete_strategy(
+        name: str,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> Response:
         deleted = await runtime.delete_strategy(name)
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post("/strategy/{name}/toggle")
     @app.post("/strategies/{name}/toggle")

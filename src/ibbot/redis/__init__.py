@@ -15,9 +15,10 @@ import json
 import logging
 import os
 import uuid
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Optional
 
 try:  # redis is optional for a subset of test environments
     from redis.asyncio import Redis
@@ -73,10 +74,18 @@ _pool: ConnectionPool | None = None
 _client_lock = asyncio.Lock()
 _client: Redis | None = None
 
-Callback = Callable[[str, str], Awaitable[None] | None]
+Callback = Callable[[str, str], Optional[Awaitable[None]]]
 
 
-@dataclass(slots=True)
+if sys.version_info < (3, 10):
+    def _compat_dataclass(*args, **kwargs):
+        kwargs.pop("slots", None)
+        return dataclass(*args, **kwargs)
+else:
+    _compat_dataclass = dataclass
+
+
+@_compat_dataclass(slots=True)
 class StreamMessage:
     """Structured representation of a Redis stream message."""
 

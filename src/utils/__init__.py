@@ -14,13 +14,7 @@ import sys
 from datetime import datetime
 from typing import Any, Optional, Tuple
 
-import pandas as pd
 from zoneinfo import ZoneInfo
-
-try:  # Optional dependency for accurate US market calendars
-    import pandas_market_calendars as mcal
-except ImportError:  # pragma: no cover - fallback when dependency missing
-    mcal = None
 
 
 # Timezone helpers -----------------------------------------------------------
@@ -33,7 +27,14 @@ except ImportError:  # pragma: no cover - fallback when dependency missing
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 NY_TZ = ZoneInfo("America/New_York")
 
+_PANDAS_ENABLED = (os.getenv("IBBOT_ENABLE_PANDAS") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 _NYSE_CALENDAR = None
+_PANDAS_CALENDARS_PROBED = False
 
 
 def now_local() -> datetime:
@@ -78,18 +79,58 @@ def to_local_iso(dt: Optional[datetime]) -> Optional[str]:
     return ensure_local_timezone(dt).isoformat()
 
 
+def _coerce_to_datetime(value: Any) -> Optional[datetime]:
+    """Best-effort conversion of assorted inputs to aware datetimes."""
+
+    candidate = value
+    if hasattr(candidate, "to_pydatetime"):
+        try:
+            candidate = candidate.to_pydatetime()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    if isinstance(candidate, datetime):
+        return candidate
+
+    if isinstance(candidate, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(candidate), tz=NY_TZ)
+        except Exception:
+            return None
+
+    if isinstance(candidate, str):
+        text = candidate.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            try:
+                numeric = float(text)
+            except ValueError:
+                return None
+            try:
+                return datetime.fromtimestamp(numeric, tz=NY_TZ)
+            except Exception:
+                return None
+
+    return None
+
+
 def to_local_time(value: Any) -> str:
     """Convert IBKR timestamps (US/Eastern) to local timezone ISO strings."""
+
+    dt = _coerce_to_datetime(value)
+    if dt is None:
+        return str(value)
+
     try:
-        if hasattr(value, "to_pydatetime"):
-            value = value.to_pydatetime()
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                dt = pd.Timestamp(value, tz=NY_TZ).to_pydatetime()
-            else:
-                dt = value.astimezone(NY_TZ)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=NY_TZ)
         else:
-            dt = pd.Timestamp(value, tz=NY_TZ).to_pydatetime()
+            dt = dt.astimezone(NY_TZ)
         return ensure_local_timezone(dt).isoformat()
     except Exception:
         return str(value)
@@ -100,14 +141,25 @@ def to_local_time(value: Any) -> str:
 def _ensure_nyse_calendar():
     """Return a cached pandas-market-calendars instance for XNYS."""
 
-    global _NYSE_CALENDAR
-    if _NYSE_CALENDAR is not None or mcal is None:
+    global _NYSE_CALENDAR, _PANDAS_CALENDARS_PROBED
+
+    if not _PANDAS_ENABLED:
         return _NYSE_CALENDAR
 
-    try:
-        _NYSE_CALENDAR = mcal.get_calendar("XNYS")
-    except Exception:  # pragma: no cover - defensive guard for missing data files
-        _NYSE_CALENDAR = None
+    if _NYSE_CALENDAR is not None:
+        return _NYSE_CALENDAR
+
+    if not _PANDAS_CALENDARS_PROBED:
+        _PANDAS_CALENDARS_PROBED = True
+        try:
+            import pandas_market_calendars as _mcal  # type: ignore
+        except Exception:
+            _NYSE_CALENDAR = None
+        else:
+            try:
+                _NYSE_CALENDAR = _mcal.get_calendar("XNYS")
+            except Exception:  # pragma: no cover - defensive guard for missing data files
+                _NYSE_CALENDAR = None
     return _NYSE_CALENDAR
 
 
@@ -218,4 +270,3 @@ def is_trading_disabled() -> bool:
         return True
 
     return is_running_tests()
-

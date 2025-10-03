@@ -1,11 +1,20 @@
+from __future__ import annotations
+
 import asyncio
+import concurrent.futures
+import csv
 import itertools
+import math
+import os
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
-
-import pandas as pd
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 try:  # pragma: no cover - fallback used when ib_insync is unavailable
     from ib_insync import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
@@ -14,8 +23,6 @@ except ImportError:  # pragma: no cover - exercised only in minimal environments
 from loguru import logger
 from zoneinfo import ZoneInfo
 
-from src.utils import is_trading_disabled, now_local, to_local_time
-from src.utils.ibkr_serialization import trade_to_dict
 from src.data_layer import (
     DataSubscriptionRequest,
     DataSubscriptionToken,
@@ -25,19 +32,6 @@ from src.data_layer import (
     is_dual_mode,
     is_legacy_mode,
 )
-
-# Module-specific logger for ibkr_client
-ibkr_logger = logger.bind(module="ibkr_client", request_id="-")
-import time
-import threading
-import os
-import csv
-import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor
-import math
-import subprocess
-from .connection_manager import connection_manager, connection_logger
-from .restart_utils import restart_program
 from src.routes.service_clients import (
     MarketDataServiceClient,
     OrdersServiceClient,
@@ -45,6 +39,59 @@ from src.routes.service_clients import (
     ServiceResponseError,
     ServiceUnavailableError,
 )
+from src.utils import is_trading_disabled, now_local, to_local_time
+from src.utils.ibkr_serialization import trade_to_dict
+
+# Module-specific logger for ibkr_client
+ibkr_logger = logger.bind(module="ibkr_client", request_id="-")
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import pandas as pd  # type: ignore
+else:
+    _pandas_env = (os.getenv("IBBOT_ENABLE_PANDAS") or "auto").strip().lower()
+    _PANDAS_AVAILABLE = False
+    _PANDAS_REASON: str | None = None
+
+    if _pandas_env in {"0", "false", "no", "off"}:
+        _PANDAS_REASON = "disabled via IBBOT_ENABLE_PANDAS"
+    else:
+        try:
+            probe = subprocess.run(
+                [sys.executable, "-c", "import pandas"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+        except Exception as exc:  # pragma: no cover - probe failures fall back to stub
+            _PANDAS_REASON = f"probe failure: {exc}"
+        else:
+            if probe.returncode == 0:
+                try:
+                    import pandas as pd  # type: ignore  # pragma: no cover - heavy dependency
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    _PANDAS_REASON = str(exc)
+                else:
+                    _PANDAS_AVAILABLE = True
+                    _PANDAS_REASON = None
+            else:
+                stderr = probe.stderr.decode(errors="ignore").strip()
+                _PANDAS_REASON = stderr or f"exit code {probe.returncode}"
+
+    if not _PANDAS_AVAILABLE:
+        class _PandasStub:
+            """Raising proxy used when pandas cannot be imported."""
+
+            def __init__(self, reason: str | None) -> None:
+                self._reason = reason or "pandas unavailable"
+
+            def __getattr__(self, name: str) -> Any:  # pragma: no cover - trivial
+                raise RuntimeError(
+                    "pandas support unavailable ({}); set IBBOT_ENABLE_PANDAS=1 and "
+                    "ensure pandas is installed if this functionality is required.".format(self._reason)
+                )
+
+        pd = _PandasStub(_PANDAS_REASON)
 
 _MARKET_DATA_SERVICE_CLIENT: Optional[MarketDataServiceClient] = None
 _ORDERS_SERVICE_CLIENT: Optional[OrdersServiceClient] = None
