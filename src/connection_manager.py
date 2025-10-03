@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Awaitable
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -76,6 +76,15 @@ def _get_env_bool(key: str, default: bool) -> bool:
         return bool(default)
 
     return cleaned in {"1", "true", "yes", "y", "on"}
+
+@dataclass
+class BridgeTaskResult:
+    result: Any = None
+    queue_wait: float = 0.0
+    execution_time: float = 0.0
+    timed_out: bool = False
+    error: Optional[BaseException] = None
+
 
 @dataclass
 class ConnectionConfig:
@@ -1311,6 +1320,207 @@ class ConnectionManager:
         except Exception as e:
             connection_logger.error(f"Failed to execute coroutine in connection thread: {e}")
             return None
+
+    async def schedule_async(
+        self,
+        coro: Awaitable[Any],
+        *,
+        queue_timeout: Optional[float] = None,
+        execution_timeout: Optional[float] = None,
+        warn_queue_threshold: Optional[float] = None,
+        warn_execution_threshold: Optional[float] = None,
+        queue_poll_interval: float = 0.01,
+    ) -> BridgeTaskResult:
+        """Schedule ``coro`` on the connection loop and await its completion.
+
+        Provides fine-grained timing metrics for queueing and execution, with
+        optional queue/execution timeouts and warning thresholds.
+        """
+
+        # 短路：如果已经在连接线程上，直接执行协程
+        if threading.current_thread() == self._connection_thread:
+            started_at = time.perf_counter()
+            try:
+                result = await coro
+                error: Optional[BaseException] = None
+            except Exception as exc:
+                result = None
+                error = exc
+            execution_time = time.perf_counter() - started_at
+            if warn_execution_threshold is not None and execution_time > warn_execution_threshold:
+                connection_logger.warning(
+                    "Inline connection task exceeded execution warning threshold",
+                    execution_time=f"{execution_time:.6f}",
+                    threshold=f"{warn_execution_threshold:.6f}",
+                )
+            return BridgeTaskResult(
+                result=result,
+                queue_wait=0.0,
+                execution_time=execution_time,
+                timed_out=False,
+                error=error,
+            )
+
+        loop = self._loop
+        if not loop or loop.is_closed():
+            error = RuntimeError("Connection event loop not available")
+            connection_logger.warning(str(error))
+            return BridgeTaskResult(error=error)
+
+        if not loop.is_running():
+            error = RuntimeError("Connection event loop is not running")
+            connection_logger.warning(str(error))
+            return BridgeTaskResult(error=error)
+
+        if not self.ib or not self.ib.isConnected():
+            error = RuntimeError("IBKR connection not available")
+            connection_logger.warning(str(error))
+            return BridgeTaskResult(error=error)
+
+        submitted_at = time.perf_counter()
+        state: Dict[str, Any] = {
+            "queue_wait": 0.0,
+            "execution_time": 0.0,
+            "result": None,
+            "error": None,
+            "started_at": None,
+        }
+        started_event = threading.Event()
+
+        async def wrapped() -> Any:
+            started = time.perf_counter()
+            state["started_at"] = started
+            state["queue_wait"] = started - submitted_at
+            started_event.set()
+            try:
+                res = await coro
+            except Exception as exc:
+                state["execution_time"] = time.perf_counter() - started
+                state["error"] = exc
+                raise
+            else:
+                state["execution_time"] = time.perf_counter() - started
+                state["result"] = res
+                return res
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(wrapped(), loop)
+        except Exception as exc:
+            connection_logger.error(
+                "Failed to submit coroutine to connection loop",
+                error=str(exc),
+            )
+            return BridgeTaskResult(error=exc)
+
+        def _consume_future(fut) -> None:
+            try:
+                fut.result(timeout=0)
+            except Exception:
+                # result() is only used to drain/cancel – suppress errors here
+                pass
+
+        try:
+            # 等待协程在连接线程上开始执行
+            queue_timeout = None if queue_timeout is None else max(0.0, queue_timeout)
+            while not started_event.is_set():
+                if queue_timeout is not None and time.perf_counter() - submitted_at >= queue_timeout:
+                    break
+                await asyncio.sleep(queue_poll_interval)
+
+            if not started_event.is_set():
+                future.cancel()
+                _consume_future(future)
+                queue_wait = time.perf_counter() - submitted_at
+                error = asyncio.TimeoutError(
+                    f"Connection loop queue wait exceeded {queue_timeout:.6f} seconds"
+                )
+                connection_logger.warning(
+                    "Connection loop queue wait timed out",
+                    queue_wait=f"{queue_wait:.6f}",
+                    timeout=f"{(queue_timeout or 0.0):.6f}",
+                )
+                return BridgeTaskResult(
+                    result=None,
+                    queue_wait=queue_wait,
+                    execution_time=0.0,
+                    timed_out=True,
+                    error=error,
+                )
+
+            queue_wait = state.get("queue_wait", time.perf_counter() - submitted_at)
+            if warn_queue_threshold is not None and queue_wait > warn_queue_threshold:
+                connection_logger.warning(
+                    "Connection loop queue wait exceeded warning threshold",
+                    queue_wait=f"{queue_wait:.6f}",
+                    threshold=f"{warn_queue_threshold:.6f}",
+                )
+
+            awaitable = asyncio.wrap_future(future)
+            try:
+                if execution_timeout is not None:
+                    result = await asyncio.wait_for(awaitable, timeout=max(0.0, execution_timeout))
+                else:
+                    result = await awaitable
+            except asyncio.TimeoutError as exc:
+                future.cancel()
+                _consume_future(future)
+                started_at = state.get("started_at")
+                execution_time = (
+                    0.0 if started_at is None else time.perf_counter() - started_at
+                )
+                connection_logger.warning(
+                    "Connection loop task execution timed out",
+                    execution_time=f"{execution_time:.6f}",
+                    timeout=f"{(execution_timeout or 0.0):.6f}",
+                )
+                return BridgeTaskResult(
+                    result=None,
+                    queue_wait=queue_wait,
+                    execution_time=execution_time,
+                    timed_out=True,
+                    error=exc,
+                )
+            except Exception as exc:
+                execution_time = state.get("execution_time", 0.0)
+                if (
+                    warn_execution_threshold is not None
+                    and execution_time > warn_execution_threshold
+                ):
+                    connection_logger.warning(
+                        "Connection loop task execution exceeded warning threshold",
+                        execution_time=f"{execution_time:.6f}",
+                        threshold=f"{warn_execution_threshold:.6f}",
+                    )
+                return BridgeTaskResult(
+                    result=None,
+                    queue_wait=queue_wait,
+                    execution_time=execution_time,
+                    timed_out=False,
+                    error=exc,
+                )
+
+            execution_time = state.get("execution_time", 0.0)
+            if (
+                warn_execution_threshold is not None
+                and execution_time > warn_execution_threshold
+            ):
+                connection_logger.warning(
+                    "Connection loop task execution exceeded warning threshold",
+                    execution_time=f"{execution_time:.6f}",
+                    threshold=f"{warn_execution_threshold:.6f}",
+                )
+
+            return BridgeTaskResult(
+                result=result,
+                queue_wait=queue_wait,
+                execution_time=execution_time,
+                timed_out=False,
+                error=None,
+            )
+        except asyncio.CancelledError:
+            future.cancel()
+            _consume_future(future)
+            raise
 
 
 connection_manager = ConnectionManager()
