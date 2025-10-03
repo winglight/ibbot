@@ -16,6 +16,7 @@ from services.ib_command import (
     ResultPublisher,
     RetryableIBCommandError,
 )
+from services.ib_command.components import RedisError
 from src.ibkr_client import IBKRClient
 
 
@@ -192,6 +193,61 @@ async def _run_flow_test(redis_client: "fakeredis.aioredis.FakeRedis") -> None: 
     assert health["queue_depth"] == "0"
     assert "boom" in health["last_error"]
     assert health.get("last_error_code") == "9001"
+
+
+def test_consumer_recovers_from_publish_failures(redis_client) -> None:
+    asyncio.run(_run_publish_failure_test(redis_client))
+
+
+async def _run_publish_failure_test(redis_client: "fakeredis.aioredis.FakeRedis") -> None:  # type: ignore[name-defined]
+    class FlakyPublisher(ResultPublisher):
+        def __init__(self, redis: Any) -> None:
+            super().__init__(
+                redis,
+                stream_key="stream:test:results",
+                hash_prefix="hash:test:result",
+                logger_name="tests.ib_command.flaky_publisher",
+            )
+            self._failures_remaining = 1
+
+        async def publish(self, payload: ExecutionResult) -> None:  # type: ignore[override]
+            if self._failures_remaining > 0:
+                self._failures_remaining -= 1
+                raise RedisError("simulated publish failure")
+            await super().publish(payload)
+
+    ib = MockIB()
+    executor = IBCommandExecutor(ib, logger_name="tests.ib_command.executor")
+    publisher = FlakyPublisher(redis_client)
+    consumer = CommandConsumer(
+        redis_client,
+        executor,
+        publisher,
+        queue_key="queue:test:commands",
+        poll_timeout=0.05,
+        default_max_retries=0,
+        retry_delay=0.01,
+        health_key="hash:service:health:test",
+        logger_name="tests.ib_command.consumer",
+        publish_retry_attempts=3,
+    )
+
+    command = {"command_id": "cmd-flaky", "method": "stable", "args": ["payload"]}
+    await redis_client.rpush("queue:test:commands", json.dumps(command))
+
+    ib.expect(1)
+    task = asyncio.create_task(consumer.consume_forever())
+    await ib.wait()
+
+    result_key = "hash:test:result:cmd-flaky"
+    await _wait_for_hash(redis_client, result_key, timeout=2.0)
+
+    consumer.stop()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    payload = await redis_client.hgetall(result_key)
+    assert payload.get("status") == "success"
+    assert payload.get("command_id") == "cmd-flaky"
 
 
 async def _wait_for_hash(redis_client: Any, key: str, timeout: float = 2.0) -> dict[str, str]:

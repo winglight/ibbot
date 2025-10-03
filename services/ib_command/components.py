@@ -25,8 +25,13 @@ from src.utils.ibkr_serialization import (
 
 try:  # redis is optional in some test environments
     from redis.asyncio import Redis
+    from redis.exceptions import RedisError
 except Exception:  # pragma: no cover - fallback when redis is unavailable
     Redis = Any  # type: ignore[misc, assignment]
+
+    class RedisError(Exception):
+        """Fallback RedisError used when redis is unavailable."""
+
 
 
 class IBCommandError(Exception):
@@ -253,9 +258,6 @@ class ResultPublisher:
                 key: self._normalise_result_value(val)
                 for key, val in vars(value).items()
             }
-        coerced = coerce_ibkr_value(value)
-        if coerced is not value:
-            return self._normalise_result_value(coerced)
         if isinstance(value, Mapping):
             return {
                 str(key): self._normalise_result_value(val)
@@ -263,6 +265,9 @@ class ResultPublisher:
             }
         if isinstance(value, (list, tuple, set)):
             return [self._normalise_result_value(item) for item in value]
+        coerced = coerce_ibkr_value(value)
+        if coerced is not value:
+            return self._normalise_result_value(coerced)
         if isinstance(value, (bytes, bytearray)):
             try:
                 return value.decode("utf-8")
@@ -297,6 +302,7 @@ class CommandConsumer:
         retry_delay: float = 1.0,
         health_key: str = "hash:service:health:ib-command",
         logger_name: str = "ibbot.services.ib_command.consumer",
+        publish_retry_attempts: int = 3,
     ) -> None:
         self._redis = redis
         self._executor = executor
@@ -312,6 +318,7 @@ class CommandConsumer:
         self._last_error_code: int | None = None
         self._ib_connected: bool | None = None
         self._ib_connection_error: str = ""
+        self._publish_retry_attempts = max(1, int(publish_retry_attempts))
 
     async def consume_forever(self) -> None:
         self._stopping.clear()
@@ -385,10 +392,14 @@ class CommandConsumer:
                 )
                 break
             else:
-                await self._publisher.publish(result)
-                self._last_error = ""
-                self._last_error_code = None
-                await self._update_health()
+                published = await self._publish_with_retries(
+                    result,
+                    command_id,
+                )
+                if published:
+                    self._last_error = ""
+                    self._last_error_code = None
+                    await self._update_health()
                 return
 
         await self._update_health(
@@ -411,7 +422,7 @@ class CommandConsumer:
             error=error,
             error_code=error_code,
         )
-        await self._publisher.publish(payload)
+        await self._publish_with_retries(payload, command_id)
 
     async def _update_health(
         self,
@@ -469,3 +480,62 @@ class CommandConsumer:
             return await get_queue_length(self._queue_key, redis=self._redis)
         except Exception:  # pragma: no cover - redis failure path
             return -1
+
+    async def _publish_with_retries(
+        self,
+        payload: ExecutionResult,
+        command_id: str,
+    ) -> bool:
+        """Attempt to publish a result, retrying on transient Redis errors."""
+
+        attempts = 0
+        while attempts < self._publish_retry_attempts and not self._stopping.is_set():
+            attempts += 1
+            try:
+                await self._publisher.publish(payload)
+            except asyncio.CancelledError:
+                raise
+            except RedisError as exc:
+                self._logger.warning(
+                    "Failed to publish IB command result",
+                    extra={
+                        "command_id": command_id,
+                        "publish_attempt": attempts,
+                        "error": str(exc),
+                    },
+                )
+                await self._update_health(last_error=str(exc))
+                if attempts >= self._publish_retry_attempts:
+                    self._logger.error(
+                        "Giving up publishing IB command result",
+                        extra={
+                            "command_id": command_id,
+                            "attempts": attempts,
+                            "error": str(exc),
+                        },
+                    )
+                    return False
+                await asyncio.sleep(self._retry_delay)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.error(
+                    "Unexpected error publishing IB command result",
+                    extra={
+                        "command_id": command_id,
+                        "attempts": attempts,
+                        "error": str(exc),
+                    },
+                )
+                await self._update_health(last_error=str(exc))
+                return False
+            else:
+                if attempts > 1:
+                    self._logger.info(
+                        "Recovered after retrying result publication",
+                        extra={
+                            "command_id": command_id,
+                            "attempts": attempts,
+                        },
+                    )
+                return True
+
+        return False
