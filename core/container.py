@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 from loguru import logger
 
@@ -13,6 +14,27 @@ from src.ibbot.config import ConfigProvider
 from src.db import DatabaseConfigError, get_database_url
 from src.utils import now_local
 from src.websocket_manager import WebSocketManager, websocket_manager
+
+
+def _redact_database_url(url: str) -> str:
+    """Return *url* with credentials removed for logging."""
+
+    try:
+        parsed = urlparse(url)
+    except Exception:  # pragma: no cover - defensive parsing guard
+        return url
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        userinfo, host = netloc.rsplit("@", 1)
+        if ":" in userinfo:
+            username = userinfo.split(":", 1)[0]
+            userinfo = f"{username}:***"
+        elif userinfo:
+            userinfo = f"{userinfo}:***"
+        netloc = f"{userinfo}@{host}" if userinfo else host
+
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
 @dataclass(slots=True)
@@ -83,6 +105,11 @@ async def initialise(*, force: bool = False) -> CoreContainer:
         logger.warning("Database configuration unavailable: {}", exc)
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Unexpected error while resolving database URL: {}", exc)
+    else:
+        logger.info(
+            "Database connection configured: {}",
+            _redact_database_url(database_url),
+        )
 
     config_provider: ConfigProvider | None = None
     try:

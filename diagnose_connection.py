@@ -11,20 +11,20 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Set
+from typing import Any, Set
+from urllib.parse import urlparse, urlunparse
 
 from loguru import logger
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+SRC_PATH = PROJECT_ROOT / "src"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
 
-from ibbot.db.config import DatabaseConfigError, resolve_database_url  # noqa: E402
-from ibbot.db.schemas import metadata  # noqa: E402
-from sqlalchemy import inspect, text  # noqa: E402
-from sqlalchemy.engine.url import make_url  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
 from src.config import load_project_env  # noqa: E402
+from src.db import DatabaseConfigError, get_database_url, run_sql_query  # noqa: E402
 
 try:  # pragma: no cover - utility script, rarely exercised in tests
     from ib_insync import IB
@@ -33,20 +33,89 @@ except ImportError:  # pragma: no cover - allow diagnostics in stub mode
 
 load_project_env()
 
-REQUIRED_DB_TABLES: Set[str] = {table.name for table in metadata.sorted_tables}
+REQUIRED_DB_TABLES: Set[str] = {
+    "orders",
+    "market_prices",
+    "market_events",
+    "service_metrics",
+    "risk_config_snapshots",
+    "risk_rule_snapshots",
+}
 
 
 def _redact_db_url(url: str) -> str:
-    parsed = make_url(url)
-    redacted = parsed
-    if parsed.password:
-        redacted = redacted.set(password="***")
-    return str(redacted)
+    try:
+        parsed = urlparse(url)
+    except Exception:  # pragma: no cover - defensive parsing guard
+        return url
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        userinfo, host = netloc.rsplit("@", 1)
+        if ":" in userinfo:
+            username = userinfo.split(":", 1)[0]
+            userinfo = f"{username}:***"
+        elif userinfo:
+            userinfo = f"{userinfo}:***"
+        netloc = f"{userinfo}@{host}" if userinfo else host
+
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
-def _inspect_tables(sync_connection) -> set[str]:
-    inspector = inspect(sync_connection)
-    return set(inspector.get_table_names())
+def _extract_scalar(rows: list[dict[str, Any]]) -> Any | None:
+    if not rows:
+        return None
+    row = rows[0]
+    if not row:
+        return None
+    return next(iter(row.values()), None)
+
+
+async def _fetch_existing_tables() -> set[str]:
+    queries: list[tuple[str, tuple[str, ...] | None]] = [
+        ("SELECT name FROM sqlite_master WHERE type='table'", ("name", "NAME")),
+        ("SHOW TABLES", None),
+        (
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = DATABASE()",
+            ("table_name", "TABLE_NAME"),
+        ),
+    ]
+
+    last_error: Exception | None = None
+    executed_successfully = False
+    for statement, columns in queries:
+        try:
+            rows = await asyncio.to_thread(run_sql_query, statement)
+        except Exception as exc:  # pragma: no cover - depends on environment
+            last_error = exc
+            continue
+
+        table_names: set[str] = set()
+        for row in rows:
+            if not row:
+                continue
+            value: Any | None = None
+            if columns is None:
+                value = next(iter(row.values()), None)
+            else:
+                for key in columns:
+                    value = row.get(key)
+                    if value:
+                        break
+            if value:
+                table_names.add(str(value))
+
+        executed_successfully = True
+        if table_names:
+            return table_names
+
+    if executed_successfully:
+        return set()
+
+    if last_error is not None:
+        raise last_error
+    return set()
 
 
 def check_port_connectivity(host: str, port: int) -> bool:
@@ -93,62 +162,54 @@ async def test_ibkr_connection(host: str, port: int, client_id: int) -> bool:
 async def test_mariadb_connection() -> bool:
     print("3. 检查MariaDB数据库...")
     try:
-        db_url = resolve_database_url(os.environ)
+        db_url = get_database_url()
     except DatabaseConfigError as exc:
         print(f"   ✗ 数据库配置错误: {exc}")
         print("   解决方案:")
         print("     - 设置 IBBOT_DB_URL 或 DATA_LAYER_DB_URL 环境变量")
-        print("     - 确保连接字符串使用 mysql+asyncmy 驱动")
+        print("     - 确保连接字符串使用 mysql、mariadb 或 mysql+pymysql 协议")
         return False
 
     print(f"   数据库URL: {_redact_db_url(db_url)}")
 
     try:
-        engine: AsyncEngine = create_async_engine(db_url, pool_pre_ping=True)
-    except Exception as exc:  # pragma: no cover - optional driver handling
-        print(f"   ✗ 无法创建数据库引擎: {exc}")
+        rows = await asyncio.to_thread(run_sql_query, "SELECT 1 AS result")
+        value = _extract_scalar(rows)
+        print(f"   ✓ 连接成功 (SELECT 1 -> {value})")
+    except DatabaseConfigError as exc:
+        print(f"   ✗ 无法建立数据库连接: {exc}")
         print("   解决方案:")
-        print("     - 安装依赖: pip install 'sqlalchemy[asyncio]' asyncmy")
+        print("     - 安装依赖: pip install pymysql")
+        print("     - 确认数据库URL配置正确并可访问")
+        return False
+    except Exception as exc:  # pragma: no cover - driver/environment specific
+        print(f"   ✗ 数据库查询失败: {exc}")
+        print("   解决方案:")
+        print("     - 检查MariaDB服务是否正在运行")
+        print("     - 确认网络与安全组允许数据库端口访问")
+        print("     - 验证数据库用户权限")
         return False
 
     try:
-        async with engine.connect() as connection:
-            try:
-                result = await connection.execute(text("SELECT 1"))
-                value = result.scalar_one()
-                print(f"   ✓ 连接成功 (SELECT 1 -> {value})")
-            except Exception as exc:
-                print(f"   ✗ 数据库查询失败: {exc}")
-                print("   解决方案:")
-                print("     - 检查MariaDB服务是否正在运行")
-                print("     - 确认网络与安全组允许数据库端口访问")
-                print("     - 验证数据库用户权限")
-                return False
-
-            tables = await connection.run_sync(_inspect_tables)
-            missing = sorted(REQUIRED_DB_TABLES - tables)
-            if missing:
-                print("   ✗ 数据库缺少必要表:")
-                for table in missing:
-                    print(f"     - {table}")
-                print("   解决方案:")
-                print("     - 运行 scripts/sql/20240522_init_mariadb.sql 初始化表结构")
-                print("     - 或执行最新的数据库迁移脚本")
-                return False
-
-            print("   ✓ 所有必需表均已存在")
-    except Exception as exc:  # pragma: no cover - driver/environment specific
-        print(f"   ✗ 数据库连接异常: {exc}")
+        tables = await _fetch_existing_tables()
+    except Exception as exc:  # pragma: no cover - depends on DB permissions
+        print(f"   ✗ 无法获取表信息: {exc}")
         print("   解决方案:")
-        print("     - 检查数据库主机与端口配置")
-        print("     - 确认凭据是否正确")
-        print("     - 查看数据库日志获取更多信息")
+        print("     - 检查数据库用户是否具有 SHOW TABLES 权限")
+        print("     - 确认数据库实例状态正常")
         return False
-    finally:
-        try:
-            await engine.dispose()
-        except Exception:  # pragma: no cover - defensive cleanup
-            pass
+
+    missing = sorted(REQUIRED_DB_TABLES - tables)
+    if missing:
+        print("   ✗ 数据库缺少必要表:")
+        for table in missing:
+            print(f"     - {table}")
+        print("   解决方案:")
+        print("     - 运行 scripts/sql/20240522_init_mariadb.sql 初始化表结构")
+        print("     - 或执行最新的数据库迁移脚本")
+        return False
+
+    print("   ✓ 所有必需表均已存在")
 
     return True
 
