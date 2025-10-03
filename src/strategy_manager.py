@@ -393,10 +393,16 @@ class StrategyManager:
         )
         self.rebuild_strategy_cache(to_schedule, block=False)
 
-    def rebuild_strategy_cache(
-        self, strategy_names: Optional[Sequence[str]] = None, *, block: bool = False
+    async def rebuild_strategy_cache_async(
+        self, strategy_names: Optional[Sequence[str]] = None
     ) -> None:
-        """Rebuild cached strategy statistics from the database."""
+        """Rebuild cached strategy statistics from the database.
+
+        The coroutine awaits the shared ``AsyncExecutor`` database pool via
+        :meth:`DatabaseManager.load_strategy_orders_async`, so callers must
+        ``await`` it when running inside an event loop (see
+        ``docs/async_executor.md``).
+        """
 
         if strategy_names is None:
             names = list(self.strategies.keys())
@@ -406,26 +412,31 @@ class StrategyManager:
         if not names:
             return
 
-        async def _rebuild() -> None:
-            for name in names:
-                try:
-                    orders = await self.db_manager.load_strategy_orders_async(
-                        name,
-                        'strategy',
-                        None,
-                    )
-                except Exception as exc:  # pragma: no cover - defensive guard
-                    strategy_logger.warning(
-                        "Failed to load strategy orders for cache rebuild",
-                        strategy=name,
-                        error=str(exc),
-                    )
-                    await clear_strategy_cache(name)
-                    continue
+        for name in names:
+            try:
+                orders = await self.db_manager.load_strategy_orders_async(
+                    name,
+                    "strategy",
+                    None,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    "Failed to load strategy orders for cache rebuild",
+                    strategy=name,
+                    error=str(exc),
+                )
+                await clear_strategy_cache(name)
+                continue
 
-                await cache_rebuild_strategy_cache(name, orders)
+            await cache_rebuild_strategy_cache(name, orders)
 
-        self._schedule_cache_coroutine(_rebuild(), block=block)
+    def rebuild_strategy_cache(
+        self, strategy_names: Optional[Sequence[str]] = None, *, block: bool = False
+    ) -> None:
+        """Schedule :meth:`rebuild_strategy_cache_async` on the background loop."""
+
+        coroutine = self.rebuild_strategy_cache_async(strategy_names)
+        self._schedule_cache_coroutine(coroutine, block=block)
 
     def _get_cached_stats(self, strategy_names: Sequence[str]) -> Dict[str, Dict[str, Any]]:
         if not strategy_names:

@@ -2,6 +2,11 @@
 
 本测试集用于人工在真实 IBKR 数据环境下进行端到端验证，覆盖下单（不同来源、不同资产、买多/卖空、平仓、反转）、风险规则（不同触发条件）、策略（不同类型），并聚焦异常与边界条件处理。每个用例提供操作步骤、预期结果与多通道验证方法（界面、日志、数据库、环境变量）。
 
+## CI 自动化冒烟测试
+
+- [Async Executor Overview](async_executor.md)：解释异步执行器线程池、环境变量覆盖以及测试/清理注意事项。
+- 新增 `pytest test/test_async_executor.py` 冒烟用例，验证 `DatabaseManager` 与 `StrategyManager` 的异步接口可在事件循环中工作且不会遗留线程。
+
 ## 一、准备与通用说明
 - 环境与账户
   - 建议使用 Paper 账户；确保 IB Gateway/TWS 已登录并启用 API（见 README）

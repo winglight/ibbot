@@ -93,7 +93,12 @@ def _normalise_iso_timestamp(value: Optional[Any]) -> Optional[str]:
 
 
 class DatabaseManager:
-    """数据库管理器"""
+    """数据库管理器。
+
+    异步接口（名称以 ``_async`` 结尾）会把实际的数据库操作委托给共享
+    ``AsyncExecutor`` 的数据库线程池，因此**必须**在事件循环中通过 ``await``
+    调用，详见 ``docs/async_executor.md``。
+    """
 
     def __init__(
         self,
@@ -138,6 +143,7 @@ class DatabaseManager:
         return self._db_executor
 
     async def _run_in_db_executor(self, func, *args, **kwargs):
+        """调度阻塞函数到共享数据库线程池。"""
         loop = asyncio.get_running_loop()
         executor = self._ensure_db_executor()
         callable_obj = functools.partial(func, *args, **kwargs)
