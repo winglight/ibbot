@@ -3,7 +3,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Awaitable, Union
+from typing import Dict, Any, Optional, List, Awaitable, Union, Callable
 from concurrent.futures import Future as ConcurrentFuture, CancelledError as ConcurrentCancelledError
 from dataclasses import dataclass, asdict
 from loguru import logger
@@ -61,6 +61,7 @@ class QueueManager:
         self.websocket_manager = None
         self.order_manager = None
         self.notification_manager = None
+        self._metrics_callbacks: List[Callable[[Dict[str, Any]], None]] = []
 
         # 确保数据目录存在
         self.data_dir = Path("data")
@@ -456,16 +457,30 @@ class QueueManager:
         self._last_deferral_notice.pop(task.task_id, None)
         task.status = "processing"
         task.started_at = now_local()
+        queue_wait_seconds: Optional[float] = None
+        if task.created_at and task.started_at:
+            try:
+                queue_wait_seconds = max(
+                    0.0, (task.started_at - task.created_at).total_seconds()
+                )
+            except Exception:
+                queue_wait_seconds = None
         await self._save_tasks_async()
 
-        queue_logger.bind(payload=task.payload).info(
+        queue_logger.bind(
+            payload=task.payload,
+            queue_wait=f"{queue_wait_seconds:.6f}" if queue_wait_seconds is not None else None,
+        ).info(
             f"Processing task {task.task_id}, type: {task.task_type}"
         )
 
         try:
             # 根据任务类型调用相应的处理器
             if task.task_type == "strategy_order":
-                await self._process_strategy_order(task)
+                await self._process_strategy_order(
+                    task,
+                    queue_wait_seconds=queue_wait_seconds,
+                )
             else:
                 raise ValueError(f"Unknown task type: {task.task_type}")
 
@@ -551,6 +566,9 @@ class QueueManager:
                 task_type=task.task_type,
                 status=task.status,
                 retries=task.retry_count,
+                queue_wait=f"{queue_wait_seconds:.6f}s"
+                if queue_wait_seconds is not None
+                else None,
             )
             queue_logger.bind(
                 task_id=task.task_id,
@@ -558,6 +576,9 @@ class QueueManager:
                 status=task.status,
                 retries=task.retry_count,
                 duration=f"{total_elapsed:.3f}s",
+                queue_wait=f"{queue_wait_seconds:.6f}s"
+                if queue_wait_seconds is not None
+                else None,
             ).debug("Queue task processing finished")
             await self._save_tasks_async()
 
@@ -612,6 +633,128 @@ class QueueManager:
             return
 
         task.add_done_callback(_log_result)
+
+    def register_metrics_callback(self, callback: Callable[[Dict[str, Any]], Any]) -> None:
+        """Register a callback that receives bridge timing metrics."""
+
+        if callback not in self._metrics_callbacks:
+            self._metrics_callbacks.append(callback)
+
+    @staticmethod
+    def _invoke_metrics_callback_sync(
+        callback: Callable[[Dict[str, Any]], Any],
+        payload: Dict[str, Any],
+    ) -> None:
+        try:
+            result = callback(payload)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            queue_logger.bind(event="bridge_metrics_callback", error=str(exc)).debug(
+                "Metrics callback execution failed"
+            )
+            return
+
+        if asyncio.iscoroutine(result):  # pragma: no branch - rare
+            try:
+                asyncio.run(result)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                queue_logger.bind(
+                    event="bridge_metrics_callback",
+                    error=str(exc),
+                ).debug("Async metrics callback execution failed")
+
+    def _dispatch_metrics_callbacks(
+        self,
+        payload: Dict[str, Any],
+        extra_callbacks: Optional[List[Callable[[Dict[str, Any]], Any]]] = None,
+    ) -> None:
+        callbacks = list(self._metrics_callbacks)
+        if extra_callbacks:
+            callbacks.extend(extra_callbacks)
+
+        if not callbacks:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            for callback in callbacks:
+                threading.Thread(
+                    target=self._invoke_metrics_callback_sync,
+                    args=(callback, payload),
+                    daemon=True,
+                ).start()
+            return
+
+        for callback in callbacks:
+            loop.run_in_executor(
+                None,
+                self._invoke_metrics_callback_sync,
+                callback,
+                payload,
+            )
+
+    def _publish_bridge_metrics(
+        self,
+        *,
+        task: QueueTask,
+        strategy_name: str,
+        payload: Dict[str, Any],
+        queue_wait_seconds: Optional[float],
+        metrics: Dict[str, float],
+        action: str,
+        order_type: str,
+        exchange: str,
+        sec_type: str,
+    ) -> None:
+        bridge_queue_wait = float(metrics.get("queue_wait", 0.0) or 0.0)
+        bridge_execution_time = float(metrics.get("execution_time", 0.0) or 0.0)
+        task_queue_wait = (
+            None if queue_wait_seconds is None else float(queue_wait_seconds)
+        )
+        formatted_task_queue_wait = (
+            f"{task_queue_wait:.6f}" if task_queue_wait is not None else None
+        )
+
+        formatted_payload = {
+            "task_id": task.task_id,
+            "strategy": strategy_name,
+            "symbol": payload.get("symbol"),
+            "action": action,
+            "order_type": order_type,
+            "exchange": exchange,
+            "sec_type": sec_type,
+            "task_queue_wait": formatted_task_queue_wait,
+            "bridge_queue_wait": f"{bridge_queue_wait:.6f}",
+            "bridge_execution_time": f"{bridge_execution_time:.6f}",
+            "quantity": payload.get("qty"),
+        }
+
+        queue_logger.bind(event="ib_bridge_metrics", **formatted_payload).info(
+            "IBKR bridge metrics captured"
+        )
+
+        metrics_payload = {
+            "task_id": task.task_id,
+            "strategy": strategy_name,
+            "symbol": payload.get("symbol"),
+            "action": action,
+            "order_type": order_type,
+            "exchange": exchange,
+            "sec_type": sec_type,
+            "quantity": payload.get("qty"),
+            "task_queue_wait": task_queue_wait,
+            "bridge_queue_wait": bridge_queue_wait,
+            "bridge_execution_time": bridge_execution_time,
+        }
+
+        manager = self._resolve_notification_manager()
+        emit_callback = []
+        if manager:
+            emit_fn = getattr(manager, "emit_metrics", None)
+            if callable(emit_fn):
+                emit_callback.append(emit_fn)
+
+        self._dispatch_metrics_callbacks(metrics_payload, extra_callbacks=emit_callback)
 
     async def _notify_queue_state(self, state: str) -> None:
         manager = self._resolve_notification_manager()
@@ -726,7 +869,12 @@ class QueueManager:
             processing=status["processing_count"],
         )
 
-    async def _process_strategy_order(self, task: QueueTask):
+    async def _process_strategy_order(
+        self,
+        task: QueueTask,
+        *,
+        queue_wait_seconds: Optional[float] = None,
+    ):
         """处理策略订单任务"""
         strategy_start = time.monotonic()
         from datetime import datetime
@@ -736,9 +884,13 @@ class QueueManager:
             raise Exception("Dependencies not properly set")
         
         payload = task.payload
-        queue_logger.bind(task_id=task.task_id, payload=payload).debug(
-            "Start processing strategy order payload"
-        )
+        queue_logger.bind(
+            task_id=task.task_id,
+            payload=payload,
+            queue_wait=f"{queue_wait_seconds:.6f}"
+            if queue_wait_seconds is not None
+            else None,
+        ).debug("Start processing strategy order payload")
         
         # 检查连接状态（无需 ibkr_client）
         import core
@@ -856,14 +1008,17 @@ class QueueManager:
             )
             raise
 
-        queue_logger.bind(
-            task_id=task.task_id,
-            symbol=payload['symbol'],
+        self._publish_bridge_metrics(
+            task=task,
+            strategy_name=strategy['name'],
+            payload=payload,
+            queue_wait_seconds=queue_wait_seconds,
+            metrics=metrics,
             action=action,
             order_type=order_type,
-            queue_wait=f"{metrics['queue_wait']:.6f}",
-            execution_time=f"{metrics['execution_time']:.6f}",
-        ).debug("IBKR bridge timings for strategy order")
+            exchange=exchange,
+            sec_type=sec_type,
+        )
 
         if not trade:
             raise Exception("Failed to place strategy order")
@@ -982,6 +1137,9 @@ class QueueManager:
             symbol=payload['symbol'],
             action=action,
             quantity=payload['qty'],
+            queue_wait=f"{queue_wait_seconds:.6f}"
+            if queue_wait_seconds is not None
+            else None,
         ).info(f"Strategy order placed successfully: {order_id}")
         self._log_operation_duration(
             event="process_strategy_order",
@@ -992,6 +1150,11 @@ class QueueManager:
             strategy=strategy['name'],
             symbol=payload['symbol'],
             action=action,
+            task_queue_wait=f"{queue_wait_seconds:.6f}s"
+            if queue_wait_seconds is not None
+            else None,
+            bridge_queue_wait=f"{metrics['queue_wait']:.6f}s",
+            bridge_execution_time=f"{metrics['execution_time']:.6f}s",
         )
 
     def _handle_persistence_future(self, future: Union[asyncio.Future, ConcurrentFuture]) -> None:

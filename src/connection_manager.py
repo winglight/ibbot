@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any, Callable, TypeVar, Awaitable
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 try:  # pragma: no cover - exercised indirectly when ib_insync is missing
     from ib_insync import IB, util, ExecutionFilter
@@ -84,6 +84,36 @@ class BridgeTaskResult:
     execution_time: float = 0.0
     timed_out: bool = False
     error: Optional[BaseException] = None
+    queue_wait_formatted: str = field(init=False)
+    execution_time_formatted: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        try:
+            self.queue_wait = float(self.queue_wait or 0.0)
+        except Exception:
+            self.queue_wait = 0.0
+        try:
+            self.execution_time = float(self.execution_time or 0.0)
+        except Exception:
+            self.execution_time = 0.0
+        self.queue_wait_formatted = f"{self.queue_wait:.6f}"
+        self.execution_time_formatted = f"{self.execution_time:.6f}"
+
+    def metrics(self) -> Dict[str, float]:
+        """Return raw timing metrics for downstream consumers."""
+
+        return {
+            "queue_wait": self.queue_wait,
+            "execution_time": self.execution_time,
+        }
+
+    def formatted_metrics(self) -> Dict[str, str]:
+        """Return string-formatted metrics suitable for structured logs."""
+
+        return {
+            "queue_wait": self.queue_wait_formatted,
+            "execution_time": self.execution_time_formatted,
+        }
 
 
 @dataclass

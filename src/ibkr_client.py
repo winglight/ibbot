@@ -842,17 +842,11 @@ class IBKRClient:
             warn_execution_threshold=30.0,
         )
 
-        queue_wait = result.queue_wait or 0.0
-        execution_time = result.execution_time or 0.0
-        metrics = {
-            "queue_wait": queue_wait,
-            "execution_time": execution_time,
-        }
-
+        metrics = result.metrics()
+        formatted_metrics = result.formatted_metrics()
         log_context_with_metrics = {
             **log_context,
-            "queue_wait": f"{queue_wait:.6f}",
-            "execution_time": f"{execution_time:.6f}",
+            **formatted_metrics,
         }
 
         if result.timed_out:
