@@ -217,8 +217,11 @@ def test_stream_updates_keep_filled_orders_in_history_and_detail() -> None:
     asyncio.run(_scenario())
 
 
-def test_patch_fill_metrics_updates_runtime_and_influx() -> None:
+def test_patch_fill_metrics_updates_runtime_and_influx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def _scenario() -> None:
+        monkeypatch.setattr("services.orders.main.init_influx_client", lambda **_: None)
         writer = RecordingWriter()
         runtime, redis = await _create_runtime(write_fn=writer)
         try:
@@ -255,6 +258,14 @@ def test_patch_fill_metrics_updates_runtime_and_influx() -> None:
             assert patched_order["unrealized_pnl"] == pytest.approx(5.5)
             assert patched_order["filled_quantity"] == pytest.approx(1.0)
             assert any(evt["type"] == "fill_metrics_updated" for evt in patched_order["events"])
+
+            async with runtime._lock:
+                active = runtime._active_orders.get(order_id)
+            assert active is not None
+            assert active["result"]["commission"] == pytest.approx(12.5)
+            assert active["result"]["realized_pnl"] == pytest.approx(45.0)
+            assert active["result"]["unrealized_pnl"] == pytest.approx(5.5)
+            assert active["commission"] == pytest.approx(12.5)
 
             detail_payload = detail.json()
             assert detail_payload["order"]["commission"] == pytest.approx(12.5)

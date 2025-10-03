@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -11,9 +12,9 @@ class _OrdersClientStub:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, float]]] = []
 
-    async def update_order_fill_metrics(self, order_id: str, payload: dict[str, float]) -> dict[str, bool]:
+    async def update_order_fill_metrics(self, order_id: str, payload: dict[str, float]) -> dict[str, Any]:
         self.calls.append((order_id, dict(payload)))
-        return {"success": True}
+        return {"success": True, "order": {"id": order_id, **payload}}
 
 
 def test_order_fill_cache_cleared_on_success(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -502,6 +502,7 @@ class OrdersServiceClient(ServiceClient):
             "PATCH",
             f"/orders/{order_id}/fills",
             json=dict(payload),
+            expected_status=200,
         )
 
 
