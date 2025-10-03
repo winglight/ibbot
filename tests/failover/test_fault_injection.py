@@ -8,6 +8,8 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from typing import Any
+
 import pytest
 
 from src.ibbot.influx import (
@@ -41,14 +43,14 @@ def _capture_logs(logger_name: str, level: int) -> Iterator[list[logging.LogReco
         logger.removeHandler(handler)
 
 
-class _FlakyInfluxClient:
-    """A minimal Influx client that simulates a transient outage."""
+class _RecordingInfluxClient:
+    """A minimal Influx client that records write payloads and simulates a transient outage."""
 
     def __init__(self) -> None:
-        self.calls = 0
+        self.write_calls: list[dict[str, Any]] = []
         self.fail_next = True
 
-    def write_api(self, *, write_options: object | None = None) -> "_FlakyInfluxClient":
+    def write_api(self, *, write_options: object | None = None) -> "_RecordingInfluxClient":
         return self
 
     def write(
@@ -59,7 +61,13 @@ class _FlakyInfluxClient:
         record: Iterable[Mapping[str, object]],
         write_precision: str,
     ) -> None:
-        self.calls += 1
+        payload = {
+            "bucket": bucket,
+            "org": org,
+            "write_precision": write_precision,
+            "record": [dict(entry) for entry in record],
+        }
+        self.write_calls.append(payload)
         if self.fail_next:
             self.fail_next = False
             raise RuntimeError("simulated influx outage")
@@ -156,7 +164,7 @@ async def _wait_for(predicate: callable, *, timeout: float = 1.0) -> None:
 def test_influx_write_failure_updates_statistics() -> None:
     configure_influx(url="http://localhost", token="token", org="org", bucket="bucket")
     reset_write_statistics()
-    client = _FlakyInfluxClient()
+    client = _RecordingInfluxClient()
 
     with pytest.raises(RuntimeError, match="simulated influx outage"):
         write_points([InfluxPoint("m", fields={"value": 1})], client=client)
@@ -165,6 +173,14 @@ def test_influx_write_failure_updates_statistics() -> None:
     assert stats.batches == 1
     assert stats.points == 1
     assert stats.last_error == "simulated influx outage"
+    assert client.write_calls
+    first_call = client.write_calls[0]
+    assert first_call["bucket"] == "bucket"
+    assert first_call["org"] == "org"
+    assert first_call["write_precision"] == "ns"
+    assert first_call["record"] == [
+        {"measurement": "m", "fields": {"value": 1}},
+    ]
 
     result = write_points([InfluxPoint("m", fields={"value": 2})], client=client)
     assert result == 1
@@ -173,7 +189,11 @@ def test_influx_write_failure_updates_statistics() -> None:
     assert stats.batches == 2
     assert stats.points == 2
     assert stats.last_error is None
-    assert client.calls == 2
+    assert len(client.write_calls) == 2
+    second_call = client.write_calls[-1]
+    assert second_call["record"] == [
+        {"measurement": "m", "fields": {"value": 2}},
+    ]
 
 
 def test_redis_pubsub_listener_recovers_from_disconnect() -> None:
@@ -199,19 +219,16 @@ def test_redis_pubsub_listener_recovers_from_disconnect() -> None:
 
 
 def test_ib_feed_reconnects_after_disconnect() -> None:
-    async def _run() -> list[logging.LogRecord]:
+    async def _run() -> tuple[list[logging.LogRecord], RecordingPriceRepository]:
         ib_client = _FakeIBClient()
         redis = _RecordingRedis()
 
-        class _StubRepository:
-            async def insert_price(self, **_: object) -> None:
-                return None
-
+        repository = RecordingPriceRepository()
         service = MarketDataFeedService(
             ib_client=ib_client,
             redis=redis,
             subscriptions=["AAPL"],
-            price_repository=_StubRepository(),
+            price_repository=repository,
             reconnect_delay=0.01,
         )
 
@@ -220,13 +237,28 @@ def test_ib_feed_reconnects_after_disconnect() -> None:
             assert ib_client.connect_calls == 1
             assert ib_client.subscriptions == ["AAPL"]
 
+            await service.process_price_update("AAPL", {"bid": 100.0, "ask": 101.0})
+
             ib_client.trigger_disconnect()
             await _wait_for(lambda: ib_client.connect_calls >= 2)
 
             await service.stop()
-        return records
+        return records, repository
 
-    records = asyncio.run(_run())
+    records, repository = asyncio.run(_run())
     messages = " ".join(record.message for record in records)
     assert "IB client disconnected; scheduling reconnect" in messages
     assert "Reconnected to IB and restored subscriptions" in messages
+    assert repository.calls
+    payload = repository.calls[-1]
+    assert payload["symbol"] == "AAPL"
+
+
+class RecordingPriceRepository:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def insert_price(self, **payload: Any) -> None:
+        self.calls.append(dict(payload))
+
+

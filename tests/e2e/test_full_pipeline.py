@@ -4,7 +4,7 @@ import inspect
 import json
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Mapping, MutableMapping
 
 import pytest
 from fastapi import FastAPI, Request
@@ -186,21 +186,12 @@ def test_websocket_handshake_with_mock_manager(monkeypatch: pytest.MonkeyPatch) 
         assert initial.get("error_code") is None
 
 
-class FakeInflux:
-    def __init__(self) -> None:
-        self.points: list[tuple[str, dict[str, Any]]] = []
-
-    async def write_point(self, measurement: str, fields: dict[str, Any]) -> None:
-        self.points.append((measurement, dict(fields)))
-
-
-class ObservedResultPublisher(ResultPublisher):
+class RecordingResultPublisher(ResultPublisher):
     def __init__(
         self,
         redis: InMemoryRedis,
         *,
         websocket_manager: DummyWebSocketManager,
-        influx: FakeInflux,
         stream_key: str,
         hash_prefix: str,
     ) -> None:
@@ -211,26 +202,29 @@ class ObservedResultPublisher(ResultPublisher):
             logger_name="tests.ib_command.results",
         )
         self._websocket_manager = websocket_manager
-        self._influx = influx
+        self.records: list[MutableMapping[str, str]] = []
+        self.publications: list[ExecutionResult] = []
+        self.broadcasts: list[dict[str, Any]] = []
+        self._last_message: MutableMapping[str, str] | None = None
+
+    def _to_message(self, payload: ExecutionResult) -> MutableMapping[str, str]:  # type: ignore[override]
+        message = super()._to_message(payload)
+        self._last_message = dict(message)
+        return message
 
     async def publish(self, payload: ExecutionResult) -> None:  # type: ignore[override]
         await super().publish(payload)
-        await self._influx.write_point(
-            "order_results",
-            {
-                "command_id": payload.command_id,
-                "status": payload.status,
-                "attempts": payload.attempts,
-            },
-        )
-        await self._websocket_manager.broadcast(
-            {
-                "type": "order_command_result",
-                "command_id": payload.command_id,
-                "status": payload.status,
-                "attempts": payload.attempts,
-            }
-        )
+        if self._last_message is not None:
+            self.records.append(dict(self._last_message))
+        self.publications.append(payload)
+        broadcast_payload = {
+            "type": "order_command_result",
+            "command_id": payload.command_id,
+            "status": payload.status,
+            "attempts": payload.attempts,
+        }
+        self.broadcasts.append(broadcast_payload)
+        await self._websocket_manager.broadcast(broadcast_payload)
 
 
 class FakeIB:
@@ -484,7 +478,6 @@ def test_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> None:
 async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     redis = InMemoryRedis()
     websocket_manager = DummyWebSocketManager()
-    influx = FakeInflux()
     fake_ib = FakeIB()
     pubsub = DummyPubSubListener()
     metrics_repo = RecordingMetricsRepository()
@@ -611,10 +604,9 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
     await risk_runtime.update_config(risk_config)
 
     executor = IBCommandExecutor(fake_ib, logger_name="tests.ib_command.executor")
-    publisher = ObservedResultPublisher(
+    publisher = RecordingResultPublisher(
         redis,
         websocket_manager=websocket_manager,
-        influx=influx,
         stream_key=result_stream,
         hash_prefix=result_hash_prefix,
     )
@@ -675,6 +667,14 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
         assert any(call.get("reason") == "risk_stop_loss" for call in fake_ib.calls)
 
         assert len(result_entries) == 2
+        await _wait_for_messages(websocket_manager, 2)
+        assert publisher.records
+        statuses = {record["status"] for record in publisher.records}
+        assert statuses == {"success"}
+        published_ids = [record["command_id"] for record in publisher.records]
+        assert {"job-1-order", risk_command_id} <= set(published_ids)
+        broadcast_ids = {message["command_id"] for message in publisher.broadcasts}
+        assert broadcast_ids == set(published_ids)
     finally:
         command_consumer.stop()
         strategy_consumer.stop()
@@ -684,6 +684,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
         await market_runtime.stop()
         assert metrics_repo.closed
         assert metrics_repo.records
+        assert publisher.publications
 
 
 def test_optimizer_flow(monkeypatch: pytest.MonkeyPatch) -> None:
