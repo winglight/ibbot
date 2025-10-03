@@ -130,6 +130,8 @@
 - **恢复**：检查 `.env.local` 中的 `TELEGRAM_TOKEN/CHAT_ID`、浏览器通知配置；修复后重启通知服务。
   - 若在裸机或自定义网络中运行，请确保 `NOTIFICATION_SERVICE_URL` 指向实际可访问的地址（Docker 默认 `http://notification:8055`，独立部署可改为 `http://127.0.0.1:8055`），必要时同步更新 `NOTIFICATION_SERVICE_TIMEOUT`。
 
+此外，`/api/services/status` 的 `startup_checks` 字段会列出关键启动自检结果。主应用在 FastAPI 生命周期钩子中会扫描当前进程的文件描述符（必要时调用 `lsof`）并记录 `sqlite_handles` 检测结果；一旦存在遗留的 SQLite 句柄，启动将失败。CI 仅需断言该字段为健康即可自动监控数据库连接清理回归。
+
 ### 3.5 性能阈值不达标
 
 - **现象**：性能测试失败或 `service_metrics` 中 throughput/latency 超限。

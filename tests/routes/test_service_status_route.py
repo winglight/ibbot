@@ -11,6 +11,7 @@ from src.account_service_readiness import AccountServiceReadiness
 from src.routes import service as service_module
 from src.routes.service_registry import SERVICE_REGISTRY
 from src import service_status as service_status_module
+from src.startup_checks import record_sqlite_handle_check, reset_startup_checks
 
 
 class StubRedis:
@@ -80,6 +81,8 @@ def service_status_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     monkeypatch.setattr(service_module, "build_service_status_payload", fake_build)
     monkeypatch.setattr(service_status_module, "refresh_account_service_status", fake_readiness)
 
+    reset_startup_checks()
+    record_sqlite_handle_check([])
     app.state.service_status_captured = captured
     return app
 
@@ -137,6 +140,12 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     assert notification_entry.get("health_key") == "hash:service:health:notification"
     assert notification_entry.get("status") == "running"
     assert notification_entry.get("last_reported") == captured_state.get("now")
+
+    startup_checks = payload.get("startup_checks") or []
+    assert any(
+        check.get("name") == "sqlite_handles" and check.get("healthy") is True
+        for check in startup_checks
+    )
 
     account_entry = next(
         (item for item in services if item.get("service") == "account"),
