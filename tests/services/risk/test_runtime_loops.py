@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -118,3 +119,47 @@ async def test_idle_iteration_records_idle_metrics() -> None:
 
     logger: CapturingLogger = runtime._logger  # type: ignore[assignment]
     assert any("loop idle" in record["message"] for record in logger.records)
+
+
+async def test_dispatch_event_logs_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis = FakeRedis()
+    runtime = await _create_runtime(redis)
+
+    recorded: list[dict[str, Any]] = []
+
+    async def _fake_enqueue(command: dict[str, Any], *, redis: Any, queue_key: str) -> int:
+        recorded.append(command)
+        return 1
+
+    monkeypatch.setattr("services.risk.runtime.enqueue_ib_command", _fake_enqueue)
+
+    rule = RiskRule(symbol="ES")
+    event = RiskEvent(symbol="ES", trigger="stop_loss", price=4000.0, rule=rule, context={})
+
+    await runtime._dispatch_event(event)
+
+    logger: CapturingLogger = runtime._logger  # type: ignore[assignment]
+    assert any("Triggered stop_loss" in record["message"] for record in logger.records)
+    assert recorded
+    payload = recorded[0]
+    assert payload["kwargs"]["symbol"] == "ES"
+    assert payload["kwargs"]["reason"] == "risk_stop_loss"
+
+
+async def test_handle_result_message_logs_info() -> None:
+    redis = FakeRedis()
+    runtime = await _create_runtime(redis)
+
+    rule = RiskRule(symbol="ES")
+    event = RiskEvent(symbol="ES", trigger="stop_loss", price=4000.0, rule=rule, context={})
+    event.command_id = "cmd-123"
+    runtime._pending_commands[event.command_id] = event
+
+    handled = await runtime._handle_result_message({"command_id": "cmd-123", "status": "SUCCESS"})
+    assert handled is True
+
+    logger: CapturingLogger = runtime._logger  # type: ignore[assignment]
+    assert any("Received result" in record["message"] for record in logger.records)
+    extras = [record["extra"] for record in logger.records if "Received result" in record["message"]]
+    assert extras and extras[0]["status"] == "success"
+    assert event.command_id not in runtime._pending_commands
