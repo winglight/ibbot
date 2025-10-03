@@ -112,12 +112,47 @@ async def test_account_service_positions_handles_list(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.anyio("asyncio")
-async def test_account_service_omits_false_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_account_service_preserves_enriched_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ACCOUNT_SERVICE_URL", raising=False)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "account_info": {"balance": 456},
+                "metadata": {
+                    "source": "service",
+                    "force_refresh": False,
+                    "fast": True,
+                    "requested_force_refresh": True,
+                    "requested_fast": True,
+                },
+            },
+        )
+
+    client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
+
+    result = await client.fetch_info(force_refresh=True, fast=True)
+
+    assert isinstance(result, AccountServiceResult)
+    assert result.data == {"balance": 456}
+    assert result.metadata.get("source") == "service"
+    assert result.metadata.get("fast") is True
+    assert result.metadata.get("force_refresh") is False
+    assert result.metadata.get("requested_force_refresh") is True
+
+
+@pytest.mark.anyio("asyncio")
+async def test_account_service_includes_explicit_false_force_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("ACCOUNT_SERVICE_URL", raising=False)
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert "fast" not in request.url.params
-        assert "force_refresh" not in request.url.params
+        assert request.url.params["force_refresh"] == "false"
         return httpx.Response(200, json={"data": {"ok": True}})
 
     client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
@@ -126,6 +161,26 @@ async def test_account_service_omits_false_flags(monkeypatch: pytest.MonkeyPatch
 
     assert isinstance(result, AccountServiceResult)
     assert result.data == {"ok": True}
+
+
+@pytest.mark.anyio("asyncio")
+async def test_account_service_includes_false_fast_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ACCOUNT_SERVICE_URL", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        assert params["fast"] == "false"
+        assert params["force_refresh"] == "false"
+        return httpx.Response(200, json={"positions": []})
+
+    client = AccountServiceClient(transport=httpx.MockTransport(handler), base_url="http://svc")
+
+    result = await client.fetch_positions(fast=False, force_refresh=False)
+
+    assert isinstance(result, AccountServiceResult)
+    assert result.data == []
 
 
 @pytest.mark.anyio("asyncio")

@@ -227,7 +227,25 @@ class AccountServiceClient(ServiceClient):
         "stale_reason",
         "stale_at",
         "from_cache",
+        "fast",
+        "force_refresh",
+        "requested_fast",
+        "requested_force_refresh",
     )
+
+    _METADATA_EXCLUDE_KEYS = {
+        "account_info",
+        "positions",
+        "orders",
+        "order",
+        "data",
+        "result",
+        "success",
+        "metadata",
+        "meta",
+        "snapshot",
+        "snapshot_metadata",
+    }
 
     @staticmethod
     def is_metadata_stale(metadata: Mapping[str, Any] | None) -> bool:
@@ -252,12 +270,18 @@ class AccountServiceClient(ServiceClient):
         metadata: Dict[str, Any] = {}
 
         def _merge(source: Mapping[str, Any]) -> None:
-            for key in cls._METADATA_KEYS:
+            for key, value in source.items():
                 if key in metadata:
                     continue
-                value = source.get(key)
-                if value is not None:
-                    metadata[key] = value
+                if key in cls._METADATA_EXCLUDE_KEYS and not isinstance(value, Mapping):
+                    continue
+                if value is None:
+                    continue
+                if isinstance(value, Mapping) and key in cls._METADATA_EXCLUDE_KEYS:
+                    continue
+                if isinstance(value, Mapping):
+                    continue
+                metadata[key] = value
 
         _merge(payload)
         for key in ("metadata", "meta", "snapshot", "snapshot_metadata"):
@@ -307,15 +331,15 @@ class AccountServiceClient(ServiceClient):
     async def fetch_info(
         self,
         *,
-        force_refresh: bool = False,
-        fast: bool = False,
+        force_refresh: bool | None = None,
+        fast: bool | None = None,
     ) -> AccountServiceResult | None:
         params: Dict[str, str] = {}
-        force_refresh_param = self._bool_param(True if force_refresh else None)
-        fast_param = self._bool_param(True if fast else None)
-        if fast_param:
+        force_refresh_param = self._bool_param(force_refresh)
+        fast_param = self._bool_param(fast)
+        if fast_param is not None:
             params["fast"] = fast_param
-        if force_refresh_param:
+        if force_refresh_param is not None:
             params["force_refresh"] = force_refresh_param
 
         payload = await self.request(
@@ -332,15 +356,15 @@ class AccountServiceClient(ServiceClient):
     async def fetch_positions(
         self,
         *,
-        fast: bool = False,
-        force_refresh: bool = False,
+        fast: bool | None = None,
+        force_refresh: bool | None = None,
     ) -> AccountServiceResult | None:
         params: Dict[str, str] = {}
-        fast_param = self._bool_param(True if fast else None)
-        force_refresh_param = self._bool_param(True if force_refresh else None)
-        if fast_param:
+        fast_param = self._bool_param(fast)
+        force_refresh_param = self._bool_param(force_refresh)
+        if fast_param is not None:
             params["fast"] = fast_param
-        if force_refresh_param:
+        if force_refresh_param is not None:
             params["force_refresh"] = force_refresh_param
 
         payload = await self.request(
@@ -368,17 +392,17 @@ class AccountServiceClient(ServiceClient):
         limit: int,
         offset: int,
         start_date: str | None = None,
-        fast: bool = False,
-        force_refresh: bool = False,
+        fast: bool | None = None,
+        force_refresh: bool | None = None,
     ) -> Mapping[str, Any] | list[Any] | None:
         params: Dict[str, Any] = {"limit": int(limit), "offset": int(offset)}
         if start_date:
             params["start_date"] = start_date
-        fast_param = self._bool_param(True if fast else None)
-        force_refresh_param = self._bool_param(True if force_refresh else None)
-        if fast_param:
+        fast_param = self._bool_param(fast)
+        force_refresh_param = self._bool_param(force_refresh)
+        if fast_param is not None:
             params["fast"] = fast_param
-        if force_refresh_param:
+        if force_refresh_param is not None:
             params["force_refresh"] = force_refresh_param
 
         return await self.request(
@@ -391,15 +415,15 @@ class AccountServiceClient(ServiceClient):
         self,
         *,
         days: int,
-        fast: bool = False,
-        force_refresh: bool = False,
+        fast: bool | None = None,
+        force_refresh: bool | None = None,
     ) -> AccountServiceResult | None:
         params: Dict[str, Any] = {"days": int(days)}
-        fast_param = self._bool_param(True if fast else None)
-        force_refresh_param = self._bool_param(True if force_refresh else None)
-        if fast_param:
+        fast_param = self._bool_param(fast)
+        force_refresh_param = self._bool_param(force_refresh)
+        if fast_param is not None:
             params["fast"] = fast_param
-        if force_refresh_param:
+        if force_refresh_param is not None:
             params["force_refresh"] = force_refresh_param
 
         payload = await self.request(
