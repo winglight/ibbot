@@ -763,6 +763,11 @@ app.add_api_route("/", index_page)
 app.add_api_route("/api-docs.json", get_api_docs_main, include_in_schema=False)
 app.add_api_route("/rapidoc", rapidoc_html_main, include_in_schema=False)
 
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
 # Register routers
 app.include_router(auth_router)
 app.include_router(connection_router)
@@ -961,6 +966,7 @@ async def _pnl_broadcast_loop():
 
 def main():
     """Main application entry point"""
+    print("DEBUG: main() function called")
     print_banner()
     
     # Setup
@@ -969,30 +975,38 @@ def main():
     
     main_logger = get_module_logger("main")
     main_logger.info("Starting IBKR Trading Bot...")
+    print("DEBUG: After logger setup")
     
     # Check environment
     if not check_environment():
         main_logger.error("Environment check failed. Please configure .env file.")
+        print("DEBUG: Environment check failed")
         return
+    
+    print("DEBUG: Environment check passed")
     
     # Auto-connect is now handled in FastAPI lifespan event
     
     # Start web server
+    print("DEBUG: About to start web server")
     main_logger.info("Starting web server...")
     web_host = os.getenv('WEB_HOST', '0.0.0.0')
     web_port = int(os.getenv('WEB_PORT', '8000'))
     display_host = 'localhost' if web_host in ('0.0.0.0', '::') else web_host
     main_logger.info(f"Web UI available at: http://{display_host}:{web_port}")
     main_logger.info("Press Ctrl+C to stop the application")
+    print(f"DEBUG: About to call uvicorn.run with host={web_host}, port={web_port}")
     
     try:
         import uvicorn
+        print("DEBUG: uvicorn imported successfully")
         uvicorn.run(
             app,
             host=web_host,
             port=web_port,
             log_level="warning"  # 减少HTTP请求日志显示
         )
+        print("DEBUG: uvicorn.run completed")
         
     except KeyboardInterrupt:
         main_logger.info("Shutting down...")
