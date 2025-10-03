@@ -137,6 +137,7 @@ _REQUEST_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "source": ("source",),
     "strategy": ("strategy", "strategy_id"),
     "time_in_force": ("time_in_force", "tif", "tif_code"),
+    "notes": ("notes", "note", "comment"),
 }
 
 
@@ -202,6 +203,7 @@ def _initial_order_record(command_id: str, request_data: Mapping[str, Any]) -> d
     record.setdefault("symbol", request_data.get("symbol"))
     record.setdefault("action", request_data.get("action"))
     record.setdefault("quantity", request_data.get("quantity"))
+    record.setdefault("notes", request_data.get("notes"))
     submission_event = {
         "type": "submission",
         "timestamp": timestamp,
@@ -284,7 +286,7 @@ def _normalise_cached_record(record: Mapping[str, Any]) -> dict[str, Any]:
         _apply_field_aliases(payload, source, aliases=_REQUEST_FIELD_ALIASES)
         _apply_field_aliases(payload, source, aliases=_RESULT_FIELD_ALIASES)
 
-    for key in ("symbol", "action", "source", "strategy", "order_type"):
+    for key in ("symbol", "action", "source", "strategy", "order_type", "notes"):
         if key in payload:
             coerced = _coerce_str(payload.get(key))
             if coerced is not None:
@@ -1122,6 +1124,7 @@ class OrdersRuntime:
             "trigger": ("trigger",),
             "trigger_type": ("trigger_type",),
             "trigger_status": ("trigger_status", "triggerStatus"),
+            "notes": ("notes", "note", "comment"),
         }
         for field_name, keys in string_fields.items():
             value = None

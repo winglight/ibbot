@@ -72,7 +72,12 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
         def __init__(self) -> None:
             self.orders_calls: list[tuple[int, int, Any]] = []
 
-        async def fetch_info(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        async def fetch_info(
+            self,
+            *,
+            force_refresh: bool = False,
+            fast: bool = False,
+        ) -> dict[str, Any]:
             return {"equity": 1000, "currency": "USD"}
 
         async def fetch_positions(
@@ -95,7 +100,10 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
             start_date: str | None = None,
         ) -> dict[str, Any]:
             account_client.orders_calls.append((limit, offset, start_date))
-            payload: dict[str, Any] = {"orders": [{"order_id": "1", "symbol": "ES"}], "total": 1}
+            payload: dict[str, Any] = {
+                "orders": [{"order_id": "1", "symbol": "ES", "notes": "Review setup"}],
+                "total": 1,
+            }
             if start_date:
                 payload["start_date"] = start_date
             elif self.default_start_date:
@@ -235,6 +243,7 @@ def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any]
             assert messages[0].get("error_code") is None
             assert messages[1]["account_info"]["equity"] == 1000
             assert messages[2]["orders"][0]["order_id"] == "1"
+            assert messages[2]["orders"][0]["notes"] == "Review setup"
             assert messages[3]["positions"][0]["symbol"] == "ES"
 
             ws.send_json({"type": "request_orders_snapshot", "limit": 5, "force": True})
@@ -242,6 +251,7 @@ def test_websocket_initial_and_orders_request(websocket_app: tuple[FastAPI, Any]
             assert orders_payload["type"] == "orders_snapshot"
             assert orders_payload["success"] is True
             assert account_client.orders_calls[-1][:2] == (5, 0)
+            assert orders_payload["orders"][0]["notes"] == "Review setup"
 
             ws.send_json({"type": "request_risk_rules", "force": True})
             risk_payload = _receive_until_type(ws, "risk_rules")
