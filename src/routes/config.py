@@ -126,7 +126,11 @@ async def _ensure_modules_entry(redis: Any, module: str) -> None:
         logger.warning("Failed to register config module", module=module, error=str(exc))
 
 
+# Backwards compatibility routes for legacy frontends that call the configuration
+# API without the `/api` prefix. Keeping these aliases avoids client timeouts
+# while the canonical paths remain under `/api`.
 @router.get("/api/config/modules")
+@router.get("/config/modules", include_in_schema=False)
 async def list_modules(user: str | None = Depends(get_current_user)) -> dict[str, list[str]]:
     redis = await ensure_redis()
     if redis is None:
@@ -156,6 +160,7 @@ async def list_modules(user: str | None = Depends(get_current_user)) -> dict[str
 
 
 @router.get("/api/config/{module}")
+@router.get("/config/{module}", include_in_schema=False)
 async def read_module(module: str, user: str | None = Depends(get_current_user)) -> dict[str, Any]:
     redis = await ensure_redis()
     if redis is None:
@@ -176,6 +181,7 @@ async def read_module(module: str, user: str | None = Depends(get_current_user))
 
 
 @router.get("/api/config/{module}/history")
+@router.get("/config/{module}/history", include_in_schema=False)
 async def read_history(module: str, user: str | None = Depends(get_current_user)) -> dict[str, Any]:
     redis = await ensure_redis()
     if redis is None:
@@ -190,6 +196,7 @@ async def read_history(module: str, user: str | None = Depends(get_current_user)
 
 
 @router.put("/api/config/{module}")
+@router.put("/config/{module}", include_in_schema=False)
 async def update_module(
     module: str,
     payload: ConfigUpdatePayload,
@@ -261,6 +268,7 @@ async def update_module(
 
 
 @router.post("/api/config/{module}/rollback")
+@router.post("/config/{module}/rollback", include_in_schema=False)
 async def rollback_module(
     module: str,
     payload: RollbackPayload,
