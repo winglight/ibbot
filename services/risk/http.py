@@ -13,7 +13,10 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 
 from services.risk import RiskRuntime
-from services.risk.runtime import RiskSnapshotRepositoryFactory
+from services.risk.runtime import (
+    RiskSnapshotRepositoryFactory,
+    create_risk_snapshot_repository_factory,
+)
 from services.risk.engine import RiskRule
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
@@ -146,16 +149,7 @@ async def _lifespan(
         provider = ConfigProvider(redis_client=redis, hash_prefix="hash:config")
         await provider.start()
 
-    snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None
-    try:
-        from src.db import risk_snapshot_repository
-    except ModuleNotFoundError:
-        pass
-    else:
-        def _snapshot_repository_factory() -> Any:
-            return risk_snapshot_repository()
-
-        snapshot_repository_factory = _snapshot_repository_factory
+    snapshot_repository_factory = snapshot_repository_factory or create_risk_snapshot_repository_factory()
 
     try:
         config_payload = dict(initial_config or {})

@@ -8,7 +8,8 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, MutableMapping, Protocol
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 from services.risk.engine import RiskEngine, RiskEvent, RiskRule
 from src.ibbot import update_service_health
@@ -63,10 +64,37 @@ class RiskSnapshotRepositoryProtocol(Protocol):
         ...
 
 
+RiskSnapshotRepositoryFactoryResult = (
+    RiskSnapshotRepositoryProtocol | Mapping[str, Any] | Sequence[Any] | None
+)
+
+
 RiskSnapshotRepositoryFactory = Callable[
     [],
-    Awaitable[RiskSnapshotRepositoryProtocol] | RiskSnapshotRepositoryProtocol,
+    Awaitable[RiskSnapshotRepositoryFactoryResult] | RiskSnapshotRepositoryFactoryResult,
 ]
+
+
+def create_risk_snapshot_repository_factory(
+    *, logger_name: str = "db.risk"
+) -> RiskSnapshotRepositoryFactory | None:
+    """Return a factory that constructs the DB-API risk snapshot repository.
+
+    The repository implementation lives in :mod:`src.db.repositories.risk` and
+    performs blocking DB-API work in threads. Importing it lazily keeps the
+    runtime optional when database dependencies are unavailable (for example in
+    lightweight CI runs).
+    """
+
+    try:
+        from src.db.repositories.risk import RiskSnapshotRepository
+    except ModuleNotFoundError:  # pragma: no cover - optional dependency
+        return None
+
+    def _factory() -> RiskSnapshotRepositoryProtocol:
+        return RiskSnapshotRepository(logger_name=logger_name)
+
+    return _factory
 
 
 @dataclass(slots=True)
@@ -648,15 +676,63 @@ class RiskRuntime:
         if factory is None:
             return
         repository_candidate = factory()
-        repository = await _maybe_await(repository_candidate)
+        result = await _maybe_await(repository_candidate)
+
+        repository: RiskSnapshotRepositoryProtocol | None = None
+        extra_resources: list[Any] = []
+
+        if isinstance(result, Mapping):
+            keys_preference = (
+                "repository",
+                "instance",
+                "value",
+                "repo",
+                "object",
+            )
+            for key in keys_preference:
+                candidate = result.get(key)
+                if candidate is not None:
+                    repository = candidate  # type: ignore[assignment]
+                    break
+            for key in ("close", "closer", "shutdown", "cleanup", "teardown"):
+                closer_candidate = result.get(key)
+                if closer_candidate is not None:
+                    extra_resources.append(closer_candidate)
+
+            for key in ("connection", "session", "resource"):
+                resource_candidate = result.get(key)
+                if resource_candidate is not None:
+                    extra_resources.append(resource_candidate)
+
+            for key in ("resources", "connections", "extras", "closers"):
+                resource_candidate = result.get(key)
+                if resource_candidate is None:
+                    continue
+                if isinstance(resource_candidate, Sequence) and not isinstance(
+                    resource_candidate, (str, bytes, bytearray)
+                ):
+                    extra_resources.extend(resource_candidate)
+                else:
+                    extra_resources.append(resource_candidate)
+
+        elif isinstance(result, Sequence) and not isinstance(
+            result, (str, bytes, bytearray)
+        ):
+            if result:
+                repository = result[0]  # type: ignore[assignment]
+                extra_resources.extend(result[1:])
+        else:
+            repository = result  # type: ignore[assignment]
+
         if repository is None:
             self._risk_snapshot_repository_created = False
             self._risk_snapshot_repository_close = None
             return
+
         self.risk_snapshot_repository = repository
         self._risk_snapshot_repository_created = True
         self._risk_snapshot_repository_close = self._resolve_repository_close(
-            repository
+            repository, *extra_resources
         )
 
     async def _shutdown_risk_snapshot_repository(self) -> None:
@@ -675,29 +751,67 @@ class RiskRuntime:
             self._risk_snapshot_repository_created = False
 
     def _resolve_repository_close(
-        self, repository: RiskSnapshotRepositoryProtocol
+        self,
+        repository: RiskSnapshotRepositoryProtocol | None,
+        *resources: Any,
     ) -> Callable[[], Awaitable[None]] | None:
-        for attr in ("aclose", "close"):
-            closer = getattr(repository, attr, None)
-            if callable(closer):
-                async def _close(
-                    closer: Callable[[], Awaitable[Any] | Any] = closer,
-                ) -> None:
-                    await _maybe_await(closer())
+        closers: list[Callable[[], Awaitable[Any] | Any]] = []
 
-                return _close
+        def _append(resource: Any) -> None:
+            if resource is None:
+                return
+            if callable(resource):
+                closers.append(resource)
+                return
+            for attr in ("aclose", "close"):
+                candidate = getattr(resource, attr, None)
+                if callable(candidate):
+                    closers.append(candidate)
+                    return
 
-        session = getattr(repository, "_session", None)
-        if session is not None:
-            close = getattr(session, "close", None)
-            if callable(close):
-                async def _close_session(
-                    close: Callable[[], Awaitable[Any] | Any] = close,
-                ) -> None:
-                    await _maybe_await(close())
+        _append(repository)
 
-                return _close_session
-        return None
+        for item in resources:
+            if isinstance(item, Mapping):
+                for key in (
+                    "close",
+                    "closer",
+                    "shutdown",
+                    "cleanup",
+                    "teardown",
+                ):
+                    _append(item.get(key))
+                for key in ("connection", "session", "resource"):
+                    _append(item.get(key))
+                for key in ("resources", "connections", "extras", "closers"):
+                    value = item.get(key)
+                    if isinstance(value, Sequence) and not isinstance(
+                        value, (str, bytes, bytearray)
+                    ):
+                        for nested in value:
+                            _append(nested)
+                    else:
+                        _append(value)
+            elif isinstance(item, Sequence) and not isinstance(
+                item, (str, bytes, bytearray)
+            ):
+                for nested in item:
+                    _append(nested)
+            else:
+                _append(item)
+
+        if not closers and repository is not None:
+            session = getattr(repository, "_session", None)
+            _append(session)
+
+        if not closers:
+            return None
+
+        async def _close_all() -> None:
+            for closer in closers:
+                await _maybe_await(closer())
+
+        return _close_all
 
     @staticmethod
     def _json_default(value: Any) -> Any:
