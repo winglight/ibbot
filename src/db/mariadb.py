@@ -29,6 +29,11 @@ _should_close_connection: bool = True
 
 
 def _connect_sqlite(url: str) -> Any:
+    if url.startswith("sqlite+aiosqlite://"):
+        url = "sqlite://" + url[len("sqlite+aiosqlite://") :]
+    elif url.startswith("sqlite+aiosqlite:"):
+        url = "sqlite:" + url[len("sqlite+aiosqlite:") :]
+
     path = url.replace("sqlite:///", "", 1) if url.startswith("sqlite:///") else url
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
@@ -44,7 +49,11 @@ def _connect_mysql(url: str) -> Any:
         ) from exc
 
     parsed = urlparse(url)
-    if parsed.scheme not in {"mysql", "mariadb", "mysql+pymysql"}:
+    scheme = parsed.scheme.lower()
+    if scheme == "mysql+asyncmy":
+        scheme = "mysql"
+
+    if scheme not in {"mysql", "mariadb", "mysql+pymysql"}:
         raise MariaDBConfigurationError(f"Unsupported database URL scheme: {parsed.scheme}")
 
     query_params = parse_qs(parsed.query)
