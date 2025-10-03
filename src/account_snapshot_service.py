@@ -48,9 +48,35 @@ class AccountSnapshotService:
         self._poll_interval_seconds = _read_interval_env(
             "ACCOUNT_SNAPSHOT_CHECK_INTERVAL_SECONDS", default_poll
         ) or default_poll
-        self._request_timeout_seconds = _read_interval_env(
-            "ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SECONDS", 15
-        ) or 15
+
+        command_timeout_env = os.getenv("ACCOUNT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS")
+        refresh_timeout_env = os.getenv("ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SECONDS")
+
+        default_command_timeout = 30
+        if command_timeout_env is not None:
+            self._request_timeout_seconds = _read_interval_env(
+                "ACCOUNT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS",
+                default_command_timeout,
+            ) or default_command_timeout
+        elif refresh_timeout_env is not None:
+            self._request_timeout_seconds = _read_interval_env(
+                "ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SECONDS",
+                default_command_timeout,
+            ) or default_command_timeout
+        else:
+            self._request_timeout_seconds = default_command_timeout
+
+        refresh_default = max(self._request_timeout_seconds * 2, 60)
+        self._refresh_timeout_seconds = (
+            _read_interval_env(
+                "ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SECONDS",
+                refresh_default,
+            )
+            or refresh_default
+        )
+
+        if command_timeout_env is None and refresh_timeout_env is not None:
+            self._request_timeout_seconds = self._refresh_timeout_seconds
 
         self._task: Optional[asyncio.Task] = None
         self._stop_event: Optional[asyncio.Event] = None
@@ -129,7 +155,7 @@ class AccountSnapshotService:
         try:
             await asyncio.wait_for(
                 self.refresh_both(reason="startup", fast_positions=True),
-                timeout=self._request_timeout_seconds,
+                timeout=self._refresh_timeout_seconds,
             )
         except asyncio.TimeoutError:
             snapshot_service_logger.warning(
@@ -152,9 +178,11 @@ class AccountSnapshotService:
 
         self._task = loop.create_task(self._run_loop())
         snapshot_service_logger.info(
-            "Account snapshot service started (refresh_interval={}s, poll={}s)",
+            "Account snapshot service started (refresh_interval={}s, poll={}s, command_timeout={}s, refresh_timeout={}s)",
             self.refresh_interval_seconds,
             self._poll_interval_seconds,
+            self._request_timeout_seconds,
+            self._refresh_timeout_seconds,
         )
 
     async def stop(self) -> None:
@@ -499,7 +527,7 @@ class AccountSnapshotService:
             try:
                 await asyncio.wait_for(
                     self.refresh_both(reason="scheduled", fast_positions=True),
-                    timeout=self._request_timeout_seconds,
+                    timeout=self._refresh_timeout_seconds,
                 )
             except asyncio.TimeoutError:
                 snapshot_service_logger.warning(
