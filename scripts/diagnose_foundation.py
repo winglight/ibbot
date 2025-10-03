@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlparse, urlunparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = PROJECT_ROOT / "src"
@@ -128,89 +129,103 @@ async def _diagnose_redis(config: Mapping[str, str], *, dry_run: bool) -> Diagno
     )
 
 
-def _influx_available() -> bool:
-    return importlib.util.find_spec("influxdb_client") is not None
+def _redact_db_url(url: str | None) -> str:
+    if not url:
+        return "<not configured>"
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        userinfo, host = netloc.rsplit("@", 1)
+        if ":" in userinfo:
+            username = userinfo.split(":", 1)[0]
+            userinfo = f"{username}:***"
+        elif userinfo:
+            userinfo = f"{userinfo}:***"
+        netloc = f"{userinfo}@{host}" if userinfo else host
+
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
-def _diagnose_influx_sync(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
-    if not _influx_available():
-        return DiagnosticResult(
-            name="InfluxDB",
-            success=False,
-            message=(
-                "SQLAlchemy with the asyncio extra (and asyncmy) is required for MariaDB diagnostics. "
-                "Install SQLAlchemy[asyncio] and asyncmy to enable database checks."
-            ),
-        )
-
-    influx_module = importlib.import_module("influxdb_client")
-    influx_url = _first_non_empty(config, "INFLUX_URL", "IBBOT_INFLUX_URL", "DATA_LAYER_INFLUX_URL")
-    token = _first_non_empty(config, "INFLUX_TOKEN", "IBBOT_INFLUX_TOKEN", "DATA_LAYER_INFLUX_TOKEN")
-    org = _first_non_empty(config, "INFLUX_ORG", "IBBOT_INFLUX_ORG", "DATA_LAYER_INFLUX_ORG")
-    bucket = _first_non_empty(config, "INFLUX_BUCKET", "IBBOT_INFLUX_BUCKET", "DATA_LAYER_INFLUX_BUCKET")
-    timeout_ms = config.get("INFLUX_TIMEOUT_MS") or config.get("DATA_LAYER_INFLUX_TIMEOUT_MS")
-    timeout = float(timeout_ms) / 1000 if timeout_ms else None
+def _diagnose_mariadb_sync(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
+    url = _first_non_empty(config, "IBBOT_DB_URL", "DATA_LAYER_DB_URL", "MARIADB_URL", "DATABASE_URL")
+    user = _first_non_empty(config, "IBBOT_DB_USER", "MARIADB_USER", "DB_USER")
+    database = _first_non_empty(config, "IBBOT_DB_NAME", "MARIADB_DATABASE", "DB_NAME")
 
     details: dict[str, Any] = {
-        "url": influx_url or "<not configured>",
-        "org": org or "<not configured>",
-        "bucket": bucket or "<not configured>",
+        "url": _redact_db_url(url),
+        "user": user or "<not configured>",
+        "database": database or "<not configured>",
     }
 
     if dry_run:
         return DiagnosticResult(
-            name="InfluxDB",
+            name="MariaDB",
             success=True,
-            message="Dry-run: skipped health check.",
+            message="Dry-run: skipped database check.",
             details=details,
         )
 
-    if influx_url is None:
+    if url is None:
         return DiagnosticResult(
-            name="InfluxDB",
+            name="MariaDB",
             success=False,
-            message="INFLUX_URL is not configured.",
-        )
-
-    client_kwargs: dict[str, Any] = {"url": influx_url, "token": token, "org": org}
-    if timeout is not None:
-        client_kwargs["timeout"] = timeout
-
-    try:
-        client = influx_module.InfluxDBClient(**client_kwargs)
-    except Exception as exc:  # pragma: no cover - constructor failure depends on environment
-        return DiagnosticResult(
-            name="InfluxDB",
-            success=False,
-            message=f"Failed to initialise client: {exc}",
+            message="IBBOT_DB_URL is not configured.",
             details=details,
         )
 
     try:
-        health = client.health()
-        status = getattr(health, "status", None)
-        if status and str(status).lower() == "pass":
-            message = "Health check returned PASS."
-            success = True
-        else:
-            message = f"Health check returned {status or 'unknown'}"
-            success = str(status).lower() == "pass" if status else False
-        details["status"] = status
-    except Exception as exc:  # pragma: no cover - network failures vary
-        client.close()
+        from src.db import MariaDBConfigurationError, connect
+    except ImportError as exc:  # pragma: no cover - optional dependency resolution
         return DiagnosticResult(
-            name="InfluxDB",
+            name="MariaDB",
             success=False,
-            message=f"Health check failed: {exc}",
+            message=f"Failed to import database helpers: {exc}",
             details=details,
         )
 
-    client.close()
-    return DiagnosticResult(name="InfluxDB", success=success, message=message, details=details)
+    try:
+        with connect() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute("SELECT 1")
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            try:
+                version = getattr(connection, "get_server_info", lambda: None)()
+            except Exception:  # pragma: no cover - server_info availability varies
+                version = None
+            select_value: Any | None = None
+            if isinstance(row, Mapping):
+                select_value = next(iter(row.values()), None)
+            elif row:
+                select_value = row[0]
+            details["server_version"] = version or "<unknown>"
+            details["select_result"] = select_value
+    except MariaDBConfigurationError as exc:
+        return DiagnosticResult(name="MariaDB", success=False, message=str(exc), details=details)
+    except Exception as exc:  # pragma: no cover - network/database failures vary
+        return DiagnosticResult(
+            name="MariaDB",
+            success=False,
+            message=f"Database query failed: {exc}",
+            details=details,
+        )
+
+    return DiagnosticResult(
+        name="MariaDB",
+        success=True,
+        message="Connectivity check succeeded.",
+        details=details,
+    )
 
 
-async def _diagnose_influx(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
-    return await asyncio.to_thread(_diagnose_influx_sync, config, dry_run=dry_run)
+async def _diagnose_mariadb(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
+    return await asyncio.to_thread(_diagnose_mariadb_sync, config, dry_run=dry_run)
 
 
 def _diagnose_logging(config: Mapping[str, str], *, dry_run: bool) -> DiagnosticResult:
@@ -275,7 +290,7 @@ async def run(args: argparse.Namespace) -> int:
 
     results: list[DiagnosticResult] = []
     results.append(await _diagnose_redis(config, dry_run=args.dry_run))
-    results.append(await _diagnose_influx(config, dry_run=args.dry_run))
+    results.append(await _diagnose_mariadb(config, dry_run=args.dry_run))
     results.append(_diagnose_logging(config, dry_run=args.dry_run))
 
     print("=== Foundation Diagnostics ===")

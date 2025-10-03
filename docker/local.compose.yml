@@ -8,11 +8,11 @@ x-app-env: &app-environment
     REDIS_PORT: 6379
     REDIS_URL: redis://redis:6379/0
     DATA_LAYER_REDIS_URL: redis://redis:6379/0
-    INFLUX_URL: http://influxdb:8086
-    DATA_LAYER_INFLUX_URL: http://influxdb:8086
-    INFLUX_BUCKET: ${INFLUX_BUCKET:-ibbot}
-    INFLUX_ORG: ${INFLUX_ORG:-ibbot}
-    INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
+    IBBOT_DB_URL: ${IBBOT_DB_URL:-mysql+pymysql://${IBBOT_DB_USER:-ibbot}:${IBBOT_DB_PASSWORD:-ibbot-password}@mariadb:3306/${IBBOT_DB_NAME:-ibbot}?charset=utf8mb4}
+    DATA_LAYER_DB_URL: ${DATA_LAYER_DB_URL:-mysql+pymysql://${IBBOT_DB_USER:-ibbot}:${IBBOT_DB_PASSWORD:-ibbot-password}@mariadb:3306/${IBBOT_DB_NAME:-ibbot}?charset=utf8mb4}
+    IBBOT_DB_USER: ${IBBOT_DB_USER:-ibbot}
+    IBBOT_DB_PASSWORD: ${IBBOT_DB_PASSWORD:-ibbot-password}
+    IBBOT_DB_NAME: ${IBBOT_DB_NAME:-ibbot}
     MARKET_DATA_SERVICE_URL: http://market-data:8010
     MARKET_DATA_SERVICE_WS_URL: ws://market-data:8010/ws/market
     ACCOUNT_SERVICE_URL: http://account:8020
@@ -40,30 +40,25 @@ services:
     networks:
       - ibbot-network
 
-  influxdb:
-    image: influxdb:2.7
-    container_name: ibbot-influx
+  mariadb:
+    image: mariadb:11.3
+    container_name: ibbot-mariadb
     ports:
-      - "8086:8086"
-    volumes:
-      - ./data/influxdb:/var/lib/influxdb2
-      - ./data/influxdb-config:/etc/influxdb2
-    env_file:
-      - ./.env
+      - "3306:3306"
     environment:
-      DOCKER_INFLUXDB_INIT_MODE: ${INFLUX_INIT_MODE:-setup}
-      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_INIT_USERNAME:-ibbot}
-      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_INIT_PASSWORD:-ibbot-influx}
-      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_INIT_ORG:-ibbot}
-      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_INIT_BUCKET:-ibbot}
-      DOCKER_INFLUXDB_INIT_RETENTION: ${INFLUX_INIT_RETENTION:-0}
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
+      MARIADB_DATABASE: ${IBBOT_DB_NAME:-ibbot}
+      MARIADB_USER: ${IBBOT_DB_USER:-ibbot}
+      MARIADB_PASSWORD: ${IBBOT_DB_PASSWORD:-ibbot-password}
+      MARIADB_ROOT_PASSWORD: ${IBBOT_DB_ROOT_PASSWORD:-ibbot-root-password}
+    volumes:
+      - ./data/mariadb:/var/lib/mysql
+      - ./scripts/sql/20240522_init_mariadb.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
     healthcheck:
-      test: ["CMD", "influx", "ping"]
-      interval: 15s
-      timeout: 10s
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 30s
     networks:
       - ibbot-network
 
@@ -91,7 +86,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      influxdb:
+      mariadb:
         condition: service_started
     networks:
       - ibbot-network
@@ -130,7 +125,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      influxdb:
+      mariadb:
         condition: service_healthy
       ib-gateway:
         condition: service_started
@@ -190,7 +185,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      influxdb:
+      mariadb:
         condition: service_healthy
     networks:
       - ibbot-network
@@ -215,7 +210,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      influxdb:
+      mariadb:
         condition: service_healthy
     networks:
       - ibbot-network
@@ -302,7 +297,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      influxdb:
+      mariadb:
         condition: service_healthy
     networks:
       - ibbot-network
@@ -368,7 +363,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      influxdb:
+      mariadb:
         condition: service_healthy
       account:
         condition: service_started
@@ -408,7 +403,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      influxdb:
+      mariadb:
         condition: service_healthy
       ibbot:
         condition: service_healthy

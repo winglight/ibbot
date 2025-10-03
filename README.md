@@ -166,7 +166,7 @@ python scripts/run_all.py --dry-run ib_command
 | `strategy` | `uvicorn services.strategy.http:app --port 8045` | Redis（策略调度/事件流） | 提供策略管理 REST 接口并维护任务队列。 |
 | `risk` | `uvicorn services.risk.http:app --port 8030` | Redis（风险配置） | 提供风险配置 REST 接口并刷新风控运行时。 |
 | `notification` | `python scripts/run_service.py notification` | Redis（事件队列） | 推送通知到浏览器/Telegram。 |
-| `optimizer` | `python scripts/run_service.py optimizer` | Redis、InfluxDB | 需要历史数据（InfluxDB）与事件流（Redis）。 |
+| `optimizer` | `python scripts/run_service.py optimizer` | Redis、MariaDB | 需要历史数据（MariaDB）与事件流（Redis）。 |
 
 ### Redis 健康键约定
 
@@ -183,10 +183,10 @@ python scripts/run_all.py --dry-run ib_command
 
 这些健康键由 `src/service_status.py` 汇总，前端“Service Health”与连接状态接口均依赖其结构。新增的 `last_error_code` 字段会出现在 ib-command 健康记录与 `/api/connection_status` 响应中，用于暴露最新的 IBKR 错误码。
 
-若本地尚未安装 Redis/InfluxDB，可使用最小化的 docker compose 组合快速拉起：
+若本地尚未安装 Redis/MariaDB，可使用最小化的 docker compose 组合快速拉起：
 
 ```bash
-docker compose up redis influxdb
+docker compose up redis mariadb
 ```
 
 完成后，服务脚本会复用 `.env`/`.env.local` 中声明的连接配置。
@@ -245,7 +245,7 @@ npm test
 | --- | --- | --- | --- |
 | `ibbot` | `gunicorn main:app`（容器入口） | _默认_ | Web API 与前端静态资源。 |
 | `ib-command` | `python -m services.ib_command.main` | `ib-services` | 消费指令队列、执行 IBKR 命令、回写执行结果。 |
-| `ib-feed` | `python -m services.ib_feed.main` | `ib-services` | 订阅 IBKR 行情、发布价格/DOM、写入 Influx。 |
+| `ib-feed` | `python -m services.ib_feed.main` | `ib-services` | 订阅 IBKR 行情、发布价格/DOM、写入 MariaDB。 |
 | `market-data` | `python -m uvicorn services.market_data.main:app --host 0.0.0.0 --port 8010` | `market` | 聚合行情快照，暴露 REST/WebSocket（默认端口 8010）。 |
 | `risk` | `python -m services.risk.main` | `risk` | 消费行情/执行结果流，运行风险引擎并触发保护动作。 |
 | `strategy` | `python -m services.strategy.main` | `strategy` | 执行策略任务、写入事件流并下发 IB 指令。 |

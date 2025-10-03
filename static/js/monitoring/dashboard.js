@@ -24,18 +24,18 @@
         constructor(app) {
             this.app = app;
             this.queueRefreshInterval = 15000;
-            this.influxRefreshInterval = 60000;
+            this.dbRefreshInterval = 60000;
             this.queueTimer = null;
-            this.influxTimer = null;
-            this.influxChart = null;
-            this.influxData = [];
-            this.influxPending = null;
+            this.dbTimer = null;
+            this.dbChart = null;
+            this.dbData = [];
+            this.dbPending = null;
             this.queuePending = null;
-            this.influxWsUnsubscribe = null;
+            this.dbWsUnsubscribe = null;
             this.queueWsUnsubscribe = null;
             this.state = {
                 queue: REFRESH_STATE.idle,
-                influx: REFRESH_STATE.idle,
+                db: REFRESH_STATE.idle,
             };
 
             this.elements = {
@@ -46,18 +46,18 @@
                 streamTableBody: document.querySelector('#streamMetricsTable tbody'),
                 dataFieldsContainer: document.getElementById('queueDataFieldsContainer'),
                 dataFieldsStatus: document.getElementById('queueDataFieldsStatus'),
-                influxSummary: document.getElementById('influxSummaryText'),
-                influxWindow: document.getElementById('influxWindowSelect'),
-                influxService: document.getElementById('influxServiceSelect'),
-                influxMetric: document.getElementById('influxMetricSelect'),
+                dbSummary: document.getElementById('dbSummaryText'),
+                dbWindow: document.getElementById('dbWindowSelect'),
+                dbService: document.getElementById('dbServiceSelect'),
+                dbMetric: document.getElementById('dbMetricInput'),
                 queueRefreshBtn: document.getElementById('refreshQueueMetricsBtn'),
-                influxRefreshBtn: document.getElementById('refreshInfluxMetricsBtn'),
+                dbRefreshBtn: document.getElementById('refreshDbMetricsBtn'),
             };
 
             if (this.app && typeof this.app.registerWebSocketHandler === 'function') {
-                this.influxWsUnsubscribe = this.app.registerWebSocketHandler(
+                this.dbWsUnsubscribe = this.app.registerWebSocketHandler(
                     'metrics_write_rate',
-                    (payload) => this.handleInfluxWriteRate(payload)
+                    (payload) => this.handleDbWriteRate(payload)
                 );
                 this.queueWsUnsubscribe = this.app.registerWebSocketHandler(
                     'monitoring_queues',
@@ -69,7 +69,7 @@
         init() {
             this.bindEvents();
             this.refreshQueueMetrics({ immediate: true }).catch(() => {});
-            this.refreshInfluxMetrics({ immediate: true }).catch(() => {});
+            this.refreshDbMetrics({ immediate: true }).catch(() => {});
         }
 
         bindEvents() {
@@ -78,28 +78,28 @@
                     this.refreshQueueMetrics({ manual: true }).catch(() => {});
                 });
             }
-            if (this.elements.influxRefreshBtn) {
-                this.elements.influxRefreshBtn.addEventListener('click', () => {
-                    this.refreshInfluxMetrics({ manual: true }).catch(() => {});
+            if (this.elements.dbRefreshBtn) {
+                this.elements.dbRefreshBtn.addEventListener('click', () => {
+                    this.refreshDbMetrics({ manual: true }).catch(() => {});
                 });
             }
-            if (this.elements.influxWindow) {
-                this.elements.influxWindow.addEventListener('change', () => {
-                    this.refreshInfluxMetrics({ manual: true }).catch(() => {});
+            if (this.elements.dbWindow) {
+                this.elements.dbWindow.addEventListener('change', () => {
+                    this.refreshDbMetrics({ manual: true }).catch(() => {});
                 });
             }
-            if (this.elements.influxService) {
-                this.elements.influxService.addEventListener('change', () => {
-                    this.refreshInfluxMetrics({ manual: true }).catch(() => {});
+            if (this.elements.dbService) {
+                this.elements.dbService.addEventListener('change', () => {
+                    this.refreshDbMetrics({ manual: true }).catch(() => {});
                 });
             }
-            if (this.elements.influxMetric) {
-                this.elements.influxMetric.addEventListener('change', () => {
-                    this.refreshInfluxMetrics({ manual: true }).catch(() => {});
+            if (this.elements.dbMetric) {
+                this.elements.dbMetric.addEventListener('change', () => {
+                    this.refreshDbMetrics({ manual: true }).catch(() => {});
                 });
-                this.elements.influxMetric.addEventListener('keyup', (event) => {
+                this.elements.dbMetric.addEventListener('keyup', (event) => {
                     if (event.key === 'Enter') {
-                        this.refreshInfluxMetrics({ manual: true }).catch(() => {});
+                        this.refreshDbMetrics({ manual: true }).catch(() => {});
                     }
                 });
             }
@@ -108,20 +108,20 @@
                     this.clearTimers();
                 } else {
                     this.refreshQueueMetrics().catch(() => {});
-                    this.refreshInfluxMetrics().catch(() => {});
+                    this.refreshDbMetrics().catch(() => {});
                 }
             });
         }
 
         destroy() {
             this.clearTimers();
-            if (typeof this.influxWsUnsubscribe === 'function') {
+            if (typeof this.dbWsUnsubscribe === 'function') {
                 try {
-                    this.influxWsUnsubscribe();
+                    this.dbWsUnsubscribe();
                 } catch (error) {
                     console.warn('Failed to unsubscribe metrics write rate websocket handler', error);
                 }
-                this.influxWsUnsubscribe = null;
+                this.dbWsUnsubscribe = null;
             }
             if (typeof this.queueWsUnsubscribe === 'function') {
                 try {
@@ -131,7 +131,7 @@
                 }
                 this.queueWsUnsubscribe = null;
             }
-            this.influxPending = null;
+            this.dbPending = null;
             this.queuePending = null;
         }
 
@@ -145,9 +145,9 @@
                 clearTimeout(this.queueTimer);
                 this.queueTimer = null;
             }
-            if (this.influxTimer) {
-                clearTimeout(this.influxTimer);
-                this.influxTimer = null;
+            if (this.dbTimer) {
+                clearTimeout(this.dbTimer);
+                this.dbTimer = null;
             }
         }
 
@@ -159,43 +159,43 @@
             }, this.queueRefreshInterval);
         }
 
-        scheduleInfluxRefresh() {
-            if (this.influxTimer || document.hidden) return;
-            this.influxTimer = setTimeout(() => {
-                this.influxTimer = null;
-                this.refreshInfluxMetrics().catch(() => {});
-            }, this.influxRefreshInterval);
+        scheduleDbRefresh() {
+            if (this.dbTimer || document.hidden) return;
+            this.dbTimer = setTimeout(() => {
+                this.dbTimer = null;
+                this.refreshDbMetrics().catch(() => {});
+            }, this.dbRefreshInterval);
         }
 
-        handleInfluxError(message, { scheduleNext = true } = {}) {
-            const summary = this.elements.influxSummary;
+        handleDbError(message, { scheduleNext = true } = {}) {
+            const summary = this.elements.dbSummary;
             if (summary) {
                 summary.textContent = message || '无法加载写入速率';
             }
-            this.state.influx = REFRESH_STATE.error;
+            this.state.db = REFRESH_STATE.error;
             if (scheduleNext) {
-                this.scheduleInfluxRefresh();
+                this.scheduleDbRefresh();
             }
         }
 
-        handleInfluxWriteRate(payload) {
+        handleDbWriteRate(payload) {
             if (!payload || payload.type !== 'metrics_write_rate') {
                 return false;
             }
 
-            const context = this.influxPending && payload.request_id === this.influxPending.requestId
-                ? this.influxPending
+            const context = this.dbPending && payload.request_id === this.dbPending.requestId
+                ? this.dbPending
                 : null;
             if (context) {
                 if (context.timer) {
                     clearTimeout(context.timer);
                 }
-                this.influxPending = null;
+                this.dbPending = null;
             }
 
             if (!payload.success) {
                 const message = payload?.error || '无法加载写入速率';
-                this.handleInfluxError(message, { scheduleNext: !context?.immediate });
+                this.handleDbError(message, { scheduleNext: !context?.immediate });
                 if (context && typeof context.reject === 'function') {
                     context.reject(new Error(message));
                 }
@@ -203,14 +203,14 @@
             }
 
             try {
-                this.renderInfluxMetrics(payload || {});
-                this.state.influx = REFRESH_STATE.idle;
+                this.renderDbMetrics(payload || {});
+                this.state.db = REFRESH_STATE.idle;
                 if (context && typeof context.resolve === 'function') {
                     context.resolve(payload);
                 }
             } catch (error) {
                 const message = error?.message || '渲染写入速率失败';
-                this.handleInfluxError(message, { scheduleNext: !context?.immediate });
+                this.handleDbError(message, { scheduleNext: !context?.immediate });
                 if (context && typeof context.reject === 'function') {
                     context.reject(error);
                 }
@@ -218,7 +218,7 @@
             }
 
             if (!context?.immediate) {
-                this.scheduleInfluxRefresh();
+                this.scheduleDbRefresh();
             }
             return true;
         }
@@ -582,36 +582,36 @@
                 .replace(/'/g, '&#39;');
         }
 
-        async refreshInfluxMetrics({ manual = false, immediate = false } = {}) {
-            if (this.state.influx === REFRESH_STATE.loading && !manual) {
-                this.scheduleInfluxRefresh();
+        async refreshDbMetrics({ manual = false, immediate = false } = {}) {
+            if (this.state.db === REFRESH_STATE.loading && !manual) {
+                this.scheduleDbRefresh();
                 return;
             }
 
-            this.state.influx = REFRESH_STATE.loading;
-            if (this.elements.influxSummary) {
-                this.elements.influxSummary.textContent = '加载中...';
+            this.state.db = REFRESH_STATE.loading;
+            if (this.elements.dbSummary) {
+                this.elements.dbSummary.textContent = '加载中...';
             }
 
-            const windowValue = this.elements.influxWindow?.value || '1h';
-            const serviceValue = this.elements.influxService?.value || '';
-            const metricValue = this.elements.influxMetric?.value?.trim();
+            const windowValue = this.elements.dbWindow?.value || '1h';
+            const serviceValue = this.elements.dbService?.value || '';
+            const metricValue = this.elements.dbMetric?.value?.trim();
             const useWebSocket = this.shouldUseWebSocket() && this.app?.ibkrManager?.requestMetricsWriteRate;
             if (useWebSocket) {
                 return new Promise((resolve, reject) => {
-                    if (this.influxPending && this.influxPending.timer) {
-                        clearTimeout(this.influxPending.timer);
-                        this.influxPending = null;
+                    if (this.dbPending && this.dbPending.timer) {
+                        clearTimeout(this.dbPending.timer);
+                        this.dbPending = null;
                     }
 
-                    const requestId = `influx:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+                    const requestId = `db:${Date.now()}:${Math.random().toString(16).slice(2)}`;
                     const context = { requestId, resolve, reject, immediate };
-                    this.influxPending = context;
+                    this.dbPending = context;
                     context.timer = setTimeout(() => {
-                        if (this.influxPending === context) {
-                            this.influxPending = null;
+                        if (this.dbPending === context) {
+                            this.dbPending = null;
                             const error = new Error('写入速率请求超时');
-                            this.handleInfluxError(error.message, { scheduleNext: !immediate });
+                            this.handleDbError(error.message, { scheduleNext: !immediate });
                             reject(error);
                         }
                     }, manual ? 20000 : 25000);
@@ -630,11 +630,11 @@
                         if (context.timer) {
                             clearTimeout(context.timer);
                         }
-                        if (this.influxPending === context) {
-                            this.influxPending = null;
+                        if (this.dbPending === context) {
+                            this.dbPending = null;
                         }
                         const error = new Error('写入速率请求发送失败');
-                        this.handleInfluxError(error.message, { scheduleNext: !immediate });
+                        this.handleDbError(error.message, { scheduleNext: !immediate });
                         reject(error);
                     }
                 });
@@ -652,33 +652,33 @@
                 });
                 if (data && data.success === false) {
                     const message = data.error || '无法加载写入速率';
-                    this.handleInfluxError(message, { scheduleNext: !immediate });
+                    this.handleDbError(message, { scheduleNext: !immediate });
                     return data;
                 }
-                this.renderInfluxMetrics(data || {});
-                this.state.influx = REFRESH_STATE.idle;
+                this.renderDbMetrics(data || {});
+                this.state.db = REFRESH_STATE.idle;
             } catch (error) {
                 console.error('Failed to load metrics write rate', error);
-                this.handleInfluxError(error?.message || '无法加载写入速率', { scheduleNext: !immediate });
+                this.handleDbError(error?.message || '无法加载写入速率', { scheduleNext: !immediate });
                 throw error;
             } finally {
                 if (!immediate) {
-                    this.scheduleInfluxRefresh();
+                    this.scheduleDbRefresh();
                 }
             }
         }
 
-        ensureInfluxChart() {
-            if (this.influxChart) {
-                return this.influxChart;
+        ensureDbChart() {
+            if (this.dbChart) {
+                return this.dbChart;
             }
-            const canvas = document.getElementById('influxWriteRateChart');
+            const canvas = document.getElementById('dbWriteRateChart');
             if (!canvas || !canvas.getContext) return null;
             const ctx = canvas.getContext('2d');
             if (!ctx) return null;
             if (!root.Chart || typeof root.Chart !== 'function') return null;
 
-            this.influxChart = new root.Chart(ctx, {
+            this.dbChart = new root.Chart(ctx, {
                 type: 'line',
                 data: { datasets: [] },
                 options: {
@@ -711,21 +711,21 @@
                     },
                 },
             });
-            return this.influxChart;
+            return this.dbChart;
         }
 
-        renderInfluxMetrics(data) {
-            const chart = this.ensureInfluxChart();
+        renderDbMetrics(data) {
+            const chart = this.ensureDbChart();
             if (!chart) {
-                if (this.elements.influxSummary) {
-                    this.elements.influxSummary.textContent = 'Chart.js 未加载，无法显示图表';
+                if (this.elements.dbSummary) {
+                    this.elements.dbSummary.textContent = 'Chart.js 未加载，无法显示图表';
                 }
                 return;
             }
 
             if (data && data.success === false) {
                 const message = data.error || '无法加载写入速率';
-                this.handleInfluxError(message, { scheduleNext: true });
+                this.handleDbError(message, { scheduleNext: true });
                 return;
             }
 
@@ -745,8 +745,8 @@
             if (!datasetEntries.length) {
                 chart.data.datasets = [];
                 chart.update('none');
-                if (this.elements.influxSummary) {
-                    this.elements.influxSummary.textContent = '暂无写入数据';
+                if (this.elements.dbSummary) {
+                    this.elements.dbSummary.textContent = '暂无写入数据';
                 }
                 return;
             }
@@ -765,7 +765,7 @@
             });
             chart.update('none');
 
-            if (this.elements.influxSummary) {
+            if (this.elements.dbSummary) {
                 const summary = data?.summary || {};
                 const text = Object.entries(summary)
                     .map(([label, stats]) => {
@@ -774,7 +774,7 @@
                         return `${label}: 平均 ${this.formatNumber(avg, { maximumFractionDigits: 2 })}/m (${points} 点)`;
                     })
                     .join(' ・ ');
-                this.elements.influxSummary.textContent = text || '暂无统计数据';
+                this.elements.dbSummary.textContent = text || '暂无统计数据';
             }
         }
     }

@@ -2,10 +2,10 @@ services:
   redis:
     volumes:
       - ${IBBOT_REDIS_DATA:-/var/lib/ibbot/redis}:/data
-  influxdb:
+  mariadb:
     volumes:
-      - ${IBBOT_INFLUX_DATA:-/var/lib/ibbot/influxdb}:/var/lib/influxdb2
-      - ${IBBOT_INFLUX_CONFIG:-/var/lib/ibbot/influxdb-config}:/etc/influxdb2
+      - ${IBBOT_DB_DATA:-/var/lib/ibbot/mariadb}:/var/lib/mysql
+      - ${IBBOT_DB_INIT_SQL:-./scripts/sql/20240522_init_mariadb.sql}:/docker-entrypoint-initdb.d/001-init.sql:ro
   ib-gateway:
     environment:
       TRADING_MODE: ${TRADING_MODE:-live}

@@ -26,10 +26,11 @@ _should_close_connection: bool = True
 
 
 def _get_database_url() -> str:
-    url = os.getenv("MARIADB_URL") or os.getenv("DATABASE_URL")
-    if not url:
-        raise MariaDBConfigurationError("MariaDB connection URL is not configured")
-    return url
+    for key in ("IBBOT_DB_URL", "DATA_LAYER_DB_URL", "MARIADB_URL", "DATABASE_URL"):
+        value = os.getenv(key)
+        if value:
+            return value
+    raise MariaDBConfigurationError("MariaDB connection URL is not configured")
 
 
 def _connect_sqlite(url: str) -> Any:

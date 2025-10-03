@@ -7,7 +7,7 @@
 | 阶段 | 交付内容 | 关键目录/组件 |
 | --- | --- | --- |
 | 阶段 0：准备 | `.env` 模板、`data/logs` 结构、基础 README | 根目录 `.env.example`、`data/` |
-| 阶段 1：基础能力库 | Redis/Influx/日志/配置封装、诊断脚本 | `src/ibbot/{config,redis,influx,logging}`、`scripts/diagnose_foundation.py` |
+| 阶段 1：基础能力库 | Redis/MariaDB/日志/配置封装、诊断脚本 | `src/ibbot/{config,redis,db,logging}`、`scripts/diagnose_foundation.py` |
 | 阶段 2：独立服务 | 指令执行、行情采集、行情聚合、风险、策略、通知、队列监控等后台服务 | `services/ib_command`、`services/ib_feed`、`services/market_data`、`services/risk`、`services/strategy`、`services/notification`、`services/queue_monitor` |
 | 阶段 3：主程序改造 | FastAPI 主应用整合新服务接口与监控视图 | `main.py`、`src/routes/monitoring.py`、`static/` |
 | 阶段 4：联调回归 | Docker Compose 全量联调、E2E/性能/故障注入测试 | `docker/*.compose.yml`、`tests/{e2e,perf,failover}` |
@@ -17,21 +17,21 @@
 ## 1. 预备条件
 
 - Docker Engine 20+ 与 docker compose 插件。
-- 宿主机开放端口：`6379` (Redis)、`8086` (InfluxDB)、`8000/8001` (服务)、`4173` (Optimizer UI)、`5800/5900/4001/4002` (IB Gateway)。
+- 宿主机开放端口：`6379` (Redis)、`3306` (MariaDB)、`8000/8001` (服务)、`4173` (Optimizer UI)、`5800/5900/4001/4002` (IB Gateway)。
 - 根目录 `.env` 提供默认值，可通过 `.env.local` 覆盖敏感配置，例如账号、密钥或生产端口。
 
 ## 2. 快速启动
 
 ```bash
-# 按依赖顺序启动 Redis → InfluxDB → IB Gateway → 主服务/优化器 → UI
+# 按依赖顺序启动 Redis → MariaDB → IB Gateway → 主服务/优化器 → UI
 ./scripts/deploy.sh up --env local
 ```
 
 脚本会自动：
 
-1. 依次执行 `docker compose up -d <service>` 以确保依赖先行（顺序：Redis → InfluxDB → IB Gateway → 主服务 → 优化器 → UI → Cloudflare Tunnel）。
+1. 依次执行 `docker compose up -d <service>` 以确保依赖先行（顺序：Redis → MariaDB → IB Gateway → 主服务 → 优化器 → UI → Cloudflare Tunnel）。
 2. 输出 `docker compose ps --format json` 并在 180 秒内等待所有已启动服务进入 `running/healthy` 状态。
-3. 调用 `python scripts/diagnose_foundation.py` 检查 Redis、InfluxDB 与日志写入（阶段 1 交付能力）。
+3. 调用 `python scripts/diagnose_foundation.py` 检查 Redis、MariaDB 与日志写入（阶段 1 交付能力）。
 
 如需重启单个服务：
 
@@ -109,7 +109,7 @@
 ./scripts/deploy.sh diagnose
 ```
 
-`scripts/diagnose_foundation.py` 会基于 `ConfigProvider` 读取 Redis/Influx/日志配置，并给出详细的成功或失败原因（若使用 `--no-diagnose` 可跳过）。
+`scripts/diagnose_foundation.py` 会基于 `ConfigProvider` 读取 Redis/MariaDB/日志配置，并给出详细的成功或失败原因（若使用 `--no-diagnose` 可跳过）。
 
 阶段 2 及以后可进一步核对：
 
@@ -117,7 +117,7 @@
 - `services/queue_monitor` 同步的健康哈希 `hash:service:health:queue`（供 `/api/services/status` 及外部仪表板读取聚合指标）。
 - 主服务 `/api/monitoring/metrics/write-rate` 接口返回的 `service_metrics` 写入速率，用于验证 `services/ib_feed`、`services/market_data` 等服务上报是否正常。
 
-若 InfluxDB 使用全新凭据，请确保 `.env.local` 中的 `INFLUX_TOKEN`、`INFLUX_ORG`、`INFLUX_BUCKET` 与初始化参数一致。
+若 MariaDB 使用全新凭据，请确保 `.env.local` 中的 `IBBOT_DB_URL`、`IBBOT_DB_USER`、`IBBOT_DB_PASSWORD` 与初始化参数一致。
 
 ## 5. CI 基本校验
 
@@ -130,7 +130,7 @@ GitHub Actions `ci.yml` 增加了 Docker Compose 冒烟测试步骤，会在拉�
 | --- | --- |
 | `deploy.sh` 提示缺少 compose 文件 | 确认 `docker/local.compose.yml`、`docker/prod.compose.yml` 位于仓库中，或检查 `--env` 参数是否拼写正确。 |
 | 诊断脚本 Redis 连接失败 | 核实宿主机 `6379` 端口是否被占用，或 `.env.local` 中的 `IBBOT_REDIS_URL`/`REDIS_URL` 是否覆盖为其他地址。 |
-| InfluxDB 健康检查失败 | 检查 `INFLUX_*` 初始化变量是否匹配容器首次启动时设置的值；必要时删除 `data/influxdb*` 重新初始化。 |
+| MariaDB 健康检查失败 | 检查 `IBBOT_DB_*` 或 `DATA_LAYER_DB_URL` 是否与容器初始化参数一致；必要时删除 `data/mariadb` 目录后重新初始化。 |
 | Optimizer UI 无法访问 | 确认 `optimizer_ui/` 目录存在构建产物，并检查宿主机 `4173` 端口是否冲突。 |
 
 如需更深入的依赖说明，请参考 `docs/foundation_libs.md`。

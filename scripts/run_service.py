@@ -5,7 +5,7 @@ This helper mirrors ``python -m services.<module>.main`` while making sure
 ``.env.local`` (and ``.env`` as a fallback) are loaded before the service
 starts.  It also exposes a ``--dry-run`` mode which only performs import
 checks so we can surface helpful diagnostics without touching external
-dependencies such as Redis or InfluxDB.
+dependencies such as Redis or MariaDB.
 """
 
 from __future__ import annotations

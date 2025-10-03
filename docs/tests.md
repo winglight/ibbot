@@ -4,11 +4,11 @@
 
 | 测试类型 | 覆盖阶段 | 说明 | 执行命令 |
 | --- | --- | --- | --- |
-| 单元测试 | 阶段 1-2 | 覆盖配置、Redis/Influx 封装、服务内部逻辑 | `pytest tests/config tests/foundation -q` |
+| 单元测试 | 阶段 1-2 | 覆盖配置、Redis/MariaDB 封装、服务内部逻辑 | `pytest tests/config tests/foundation -q` |
 | 集成测试 | 阶段 2-3 | FastAPI 接口、服务编排、队列/流交互 | `pytest tests/services tests/ui -q` |
 | 端到端 (E2E) | 阶段 3-4 | 模拟下单/风控/策略链路，依赖 Redis/模拟 IB | `pytest tests/e2e -q` |
 | 性能测试 | 阶段 4 | `tests/perf` 使用内置基准校验吞吐/延迟阈值 | `pytest tests/perf -k benchmark` |
-| 故障注入 | 阶段 4 | `tests/failover` 注入 Redis/Influx/IB 断连并验证恢复 | `pytest tests/failover` |
+| 故障注入 | 阶段 4 | `tests/failover` 注入 Redis/MariaDB/IB 断连并验证恢复 | `pytest tests/failover` |
 
 以下章节保留原有的手工测试用例，建议在自动化测试通过后再执行，以覆盖真实 IBKR 数据场景。
 
