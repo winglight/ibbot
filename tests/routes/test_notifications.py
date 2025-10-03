@@ -250,16 +250,29 @@ def test_notification_history_route_calls_service(notifications_app: SimpleNames
 
 def test_clear_notification_history_calls_service(notifications_app: SimpleNamespace) -> None:
     class ClearClient(NotificationServiceClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
         async def clear_history(self) -> Mapping[str, Any]:  # type: ignore[override]
+            self.calls += 1
             return {"success": True, "cleared": 42}
 
-    notifications_module.set_notification_service_client(ClearClient())
+    service_client = ClearClient()
+    notifications_module.set_notification_service_client(service_client)
 
     with TestClient(notifications_app.app) as client:
         response = client.delete("/api/notifications/history")
 
     assert response.status_code == 200
     assert response.json()["cleared"] == 42
+
+    with TestClient(notifications_app.app) as http_client:
+        response = http_client.post("/api/notifications/history/clear")
+
+    assert response.status_code == 200
+    assert response.json()["cleared"] == 42
+    assert service_client.calls == 2
 
 
 def test_notification_history_route_falls_back_to_redis_when_client_missing(

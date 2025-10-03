@@ -663,10 +663,8 @@ async def get_notification_history(
     return dict(payload)
 
 
-@router.delete("/api/notifications/history")
-async def clear_notification_history(
-    user: Optional[str] = Depends(get_current_user),
-    client: NotificationServiceClient | None = Depends(_get_notification_service_client),
+async def _clear_notification_history(
+    client: NotificationServiceClient | None,
 ) -> Dict[str, Any]:
     fallback_reason: str | None = None
 
@@ -727,6 +725,22 @@ async def clear_notification_history(
     if isinstance(payload, Mapping):
         return dict(payload)
     return {"success": True, "cleared": payload}
+
+
+@router.delete("/api/notifications/history")
+async def clear_notification_history(
+    user: Optional[str] = Depends(get_current_user),
+    client: NotificationServiceClient | None = Depends(_get_notification_service_client),
+) -> Dict[str, Any]:
+    return await _clear_notification_history(client)
+
+
+@router.post("/api/notifications/history/clear")
+async def clear_notification_history_legacy(
+    user: Optional[str] = Depends(get_current_user),
+    client: NotificationServiceClient | None = Depends(_get_notification_service_client),
+) -> Dict[str, Any]:
+    return await _clear_notification_history(client)
 
 
 @router.post("/api/notifications/test")
