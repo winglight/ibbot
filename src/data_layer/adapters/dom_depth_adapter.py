@@ -12,6 +12,7 @@ from typing import Any, Deque, Dict, Optional, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+from src.utils import run_in_cpu_executor
 
 from ..data_source_manager import (
     DataSourceAdapter,
@@ -111,7 +112,7 @@ class DomDepthAdapter(DataSourceAdapter):
 
             return start_fn(symbol, _on_update, **kwargs)
 
-        started = await asyncio.to_thread(_start)
+        started = await run_in_cpu_executor(_start)
         if not started:
             last_error, _status = self._depth_subscriber.get_last_error()
             raise DataSourceError(last_error or "Failed to start DOM depth stream")
@@ -124,7 +125,7 @@ class DomDepthAdapter(DataSourceAdapter):
             def _stop() -> bool:
                 return self._depth_subscriber.stop_depth_stream(symbol)
 
-            await asyncio.to_thread(_stop)
+            await run_in_cpu_executor(_stop)
             with self._lock:
                 self._callbacks.pop(symbol, None)
                 self._symbol_options.pop(symbol, None)

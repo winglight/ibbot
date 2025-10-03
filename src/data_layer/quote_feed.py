@@ -13,6 +13,7 @@ from importlib import import_module
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
+from src.utils import run_in_cpu_executor
 
 Callback = Callable[[Dict[str, float]], None]
 
@@ -119,7 +120,7 @@ class IBQuoteFeed(QuoteFeed):
 
                 return _cancel_existing
 
-        await asyncio.to_thread(self._ensure_connection_ready)
+        await run_in_cpu_executor(self._ensure_connection_ready)
 
         try:
             subscription = await self._start_subscription(symbol_key, callback, options or {})
