@@ -12,18 +12,15 @@ from collections import defaultdict
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
-from src.ibbot.influx import write_points
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
 
 SERVICE_NAME = "ib-feed"
-PRICE_MEASUREMENT = "market_price"
-DOM_MEASUREMENT = "market_dom"
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
 SNAPSHOT_KEY_TEMPLATE = "hash:market:snapshot:{symbol}"
 DOM_CHANNEL_TEMPLATE = "pubsub:ib:dom:{symbol}"
@@ -48,7 +45,8 @@ class MarketDataFeedService:
     ib_client: Any
     redis: Any
     subscriptions: Sequence[str]
-    write_fn: Callable[[Iterable[Mapping[str, Any]]], Awaitable[int] | int] = write_points
+    price_repository: Any | None = None
+    price_repository_factory: Callable[[], Awaitable[Any] | Any] | None = None
     dom_writer: MarketDataParquetWriter | None = None
     logger_name: str = "ibbot.services.ib_feed"
     reconnect_delay: float = 1.0
@@ -70,6 +68,10 @@ class MarketDataFeedService:
     _health_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _last_price_updates: int = field(default=0, init=False, repr=False)
     _last_dom_updates: int = field(default=0, init=False, repr=False)
+    _price_repository_created: bool = field(default=False, init=False, repr=False)
+    _price_repository_cleanup: Callable[[], Awaitable[None]] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._logger = get_logger(self.logger_name)
@@ -88,6 +90,7 @@ class MarketDataFeedService:
         self._stop_health.clear()
         self._last_price_updates = self.price_updates
         self._last_dom_updates = self.dom_updates
+        await self._initialise_price_repository()
         await self._publish_health(status="starting", healthy=False)
         self._health_task = asyncio.create_task(self._health_loop(), name="ib-feed-health")
         await self._publish_health(status="running", healthy=True)
@@ -120,6 +123,7 @@ class MarketDataFeedService:
                 await _ensure_awaitable(disconnect())
         self._active = False
         await self._publish_health(status="offline", healthy=False)
+        await self._shutdown_price_repository()
 
     def _bind_client_events(self) -> None:
         price_handler = getattr(self.ib_client, "add_price_listener", None)
@@ -257,21 +261,7 @@ class MarketDataFeedService:
         snapshot = self._build_price_snapshot(symbol, update)
         self._price_cache[symbol] = snapshot
         await self._publish_price_snapshot(symbol, snapshot)
-        await self._write_influx([
-            {
-                "measurement": PRICE_MEASUREMENT,
-                "tags": {"symbol": symbol},
-                "fields": {
-                    "bid": float(snapshot.get("bid", 0.0)),
-                    "ask": float(snapshot.get("ask", 0.0)),
-                    "last": float(snapshot.get("last", 0.0)),
-                    "bid_size": float(snapshot.get("bid_size", 0.0)),
-                    "ask_size": float(snapshot.get("ask_size", 0.0)),
-                    "volume": float(snapshot.get("volume", 0.0)),
-                },
-                "time": snapshot["timestamp"],
-            }
-        ])
+        await self._persist_price_snapshot(symbol, snapshot)
 
     async def process_dom_update(self, symbol: str, levels: Sequence[Mapping[str, Any]]) -> None:
         self.dom_updates += 1
@@ -286,17 +276,6 @@ class MarketDataFeedService:
             except Exception:  # pragma: no cover - defensive guard
                 if self._logger:
                     self._logger.warning("Failed to append DOM snapshot to Parquet", exc_info=True)
-        if self.write_fn is not write_points:
-            await self._write_influx(
-                [
-                    {
-                        "measurement": DOM_MEASUREMENT,
-                        "tags": {"symbol": symbol},
-                        "fields": {"payload": payload},
-                        "time": snapshot["timestamp"],
-                    }
-                ]
-            )
 
     async def _publish_price_snapshot(self, symbol: str, snapshot: Mapping[str, Any]) -> None:
         channel = PRICE_CHANNEL_TEMPLATE.format(symbol=symbol)
@@ -359,9 +338,91 @@ class MarketDataFeedService:
         }
         return snapshot
 
-    async def _write_influx(self, points: Iterable[Mapping[str, Any]]) -> None:
-        result = self.write_fn(points)
-        await _ensure_awaitable(result)
+    async def _initialise_price_repository(self) -> None:
+        if self.price_repository is not None:
+            return
+        factory = self.price_repository_factory
+        if factory is None:
+            return
+        repository = factory()
+        if inspect.isawaitable(repository):
+            repository = await repository
+        self.price_repository = repository
+        self._price_repository_created = True
+        self._price_repository_cleanup = self._resolve_repository_cleanup(repository)
+
+    async def _shutdown_price_repository(self) -> None:
+        if not self._price_repository_created:
+            return
+        cleanup = self._price_repository_cleanup
+        if cleanup is not None:
+            try:
+                await cleanup()
+            except Exception:  # pragma: no cover - defensive guard
+                if self._logger:
+                    self._logger.warning("Failed to close price repository", exc_info=True)
+        self.price_repository = None
+        self._price_repository_created = False
+        self._price_repository_cleanup = None
+
+    def _resolve_repository_cleanup(
+        self, repository: Any
+    ) -> Callable[[], Awaitable[None]] | None:
+        for attr in ("aclose", "close"):
+            closer = getattr(repository, attr, None)
+            if callable(closer):
+                async def _cleanup(closer: Callable[[], Awaitable[Any] | Any] = closer) -> None:
+                    result = closer()
+                    if inspect.isawaitable(result):
+                        await result
+
+                return _cleanup
+        session = getattr(repository, "_session", None)
+        if session is not None:
+            close = getattr(session, "close", None)
+            if callable(close):
+                async def _cleanup_session(
+                    close: Callable[[], Awaitable[Any] | Any] = close,
+                ) -> None:
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+
+                return _cleanup_session
+        return None
+
+    async def _persist_price_snapshot(self, symbol: str, snapshot: Mapping[str, Any]) -> None:
+        repository = self.price_repository
+        if repository is None:
+            return
+        payload = self._convert_snapshot_to_repository_payload(symbol, snapshot)
+        try:
+            await repository.insert_price(**payload)
+        except Exception:  # pragma: no cover - depends on repository implementation
+            if self._logger:
+                self._logger.exception("Failed to persist market price", symbol=symbol)
+
+    def _convert_snapshot_to_repository_payload(
+        self, symbol: str, snapshot: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        extra: dict[str, Any] = {}
+        for key in ("last", "mid", "volume"):
+            value = snapshot.get(key)
+            if value not in (None, ""):
+                extra[key] = value
+        timestamp = snapshot.get("timestamp")
+        payload = {
+            "symbol": symbol,
+            "bid": snapshot.get("bid"),
+            "ask": snapshot.get("ask"),
+            "bid_size": snapshot.get("bid_size"),
+            "ask_size": snapshot.get("ask_size"),
+            "source": self.health_service_name,
+            "observed_at": timestamp,
+            "recorded_at": timestamp,
+            "extra": extra or None,
+        }
+        return payload
 
     @staticmethod
     def _encode_redis_value(value: Any) -> str:
@@ -412,6 +473,8 @@ async def run_service() -> None:
     redis_url = _resolve_redis_url("IB_FEED_REDIS_URL")
     redis = await get_redis_client(redis_url)
 
+    from src.ibbot.db import get_async_session, market_price_repository
+
     provider = ConfigProvider(redis_url=redis_url)
     await provider.start()
     config = await provider.get_module(SERVICE_NAME)
@@ -422,11 +485,16 @@ async def run_service() -> None:
     reconnect_delay = float(config.get("reconnect_delay", 1.0))
 
     ib_client = await _create_ib_client()
+    async def _price_repository_factory() -> Any:
+        session = get_async_session()
+        return market_price_repository(session)
+
     service = MarketDataFeedService(
         ib_client,
         redis,
         subscriptions=subscriptions,
         reconnect_delay=reconnect_delay,
+        price_repository_factory=_price_repository_factory,
     )
 
     stop_event = asyncio.Event()

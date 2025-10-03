@@ -203,14 +203,15 @@ def test_ib_feed_reconnects_after_disconnect() -> None:
         ib_client = _FakeIBClient()
         redis = _RecordingRedis()
 
-        async def fake_write(points: Iterable[Mapping[str, object]]) -> int:
-            return len(list(points))
+        class _StubRepository:
+            async def insert_price(self, **_: object) -> None:
+                return None
 
         service = MarketDataFeedService(
             ib_client=ib_client,
             redis=redis,
             subscriptions=["AAPL"],
-            write_fn=fake_write,
+            price_repository=_StubRepository(),
             reconnect_delay=0.01,
         )
 
