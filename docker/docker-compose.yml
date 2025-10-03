@@ -9,7 +9,7 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - ./.env
+      - ../.env
     environment:
       - USE_LEGACY=1
       # Server Configuration
