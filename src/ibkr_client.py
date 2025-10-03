@@ -39,6 +39,7 @@ from src.routes.service_clients import (
     ServiceResponseError,
     ServiceUnavailableError,
 )
+from src.connection_manager import connection_manager
 from src.utils import is_trading_disabled, now_local, to_local_time
 from src.utils.ibkr_serialization import trade_to_dict
 
