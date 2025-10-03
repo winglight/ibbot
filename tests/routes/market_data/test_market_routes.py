@@ -24,6 +24,17 @@ def market_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     monkeypatch.setattr(market_data_module, "historical_data_cache", {})
     monkeypatch.setattr(market_data_module, "CURRENT_PRICE_CACHE_ONLY", False)
 
+    if hasattr(market_data_module, "_get_data_layer_manager"):
+        def _fail_if_legacy_manager(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("tests must not access the legacy data layer")
+
+        monkeypatch.setattr(
+            market_data_module,
+            "_get_data_layer_manager",
+            _fail_if_legacy_manager,
+            raising=False,
+        )
+
     return app
 
 
