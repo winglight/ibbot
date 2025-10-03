@@ -6,6 +6,7 @@ import logging
 import os
 import uuid
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo as datetime_tzinfo
 from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, Mapping, Protocol, runtime_checkable
@@ -1428,34 +1429,48 @@ class OrdersRuntime:
 
 
 def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = True) -> FastAPI:
-    app = FastAPI(title="Orders Service", version="1.0.0")
+    runtime_instance: OrdersRuntime | None = runtime
 
-    if runtime is None:
+    def _initialise_runtime() -> OrdersRuntime:
+        if runtime is not None:
+            return runtime
         try:
             from src.ibbot.db import get_async_session, order_repository
         except ImportError as exc:  # pragma: no cover - optional dependency
             LOGGER.info("Orders repository unavailable: %s", exc)
-            runtime_instance = OrdersRuntime()
-        else:
-            async def _default_order_repository() -> OrderRepositoryProtocol:
-                session = get_async_session()
-                return order_repository(session)
+            return OrdersRuntime()
 
-            runtime_instance = OrdersRuntime(order_repository_factory=_default_order_repository)
-    else:
-        runtime_instance = runtime
+        async def _default_order_repository() -> OrderRepositoryProtocol:
+            session = get_async_session()
+            return order_repository(session)
 
-    async def get_runtime() -> OrdersRuntime:
+        return OrdersRuntime(order_repository_factory=_default_order_repository)
+
+    def _get_or_create_runtime() -> OrdersRuntime:
+        nonlocal runtime_instance
+        if runtime_instance is None:
+            runtime_instance = _initialise_runtime()
         return runtime_instance
 
-    if enable_events:
-        @app.on_event("startup")
-        async def _startup() -> None:
-            await runtime_instance.start()
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        instance = _get_or_create_runtime()
+        await instance.start()
+        try:
+            yield
+        finally:
+            await instance.stop()
 
-        @app.on_event("shutdown")
-        async def _shutdown() -> None:
-            await runtime_instance.stop()
+    app = FastAPI(
+        title="Orders Service",
+        version="1.0.0",
+        lifespan=_lifespan if enable_events else None,
+    )
+
+    app.state.get_orders_runtime = _get_or_create_runtime
+
+    async def get_runtime() -> OrdersRuntime:
+        return _get_or_create_runtime()
 
     @app.get("/orders", status_code=status.HTTP_200_OK)
     async def list_orders(
